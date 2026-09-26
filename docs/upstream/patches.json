@@ -63,10 +63,10 @@
     {
       "imported_path": "backend/app/services/simulation_ipc.py",
       "original_sha256": "2cd596faed552c29f8e486b6641677787c2c38eeab822a82512be07e9b4088d9",
-      "current_sha256": "3cb18053cf195e7ec1efcc0a154c40de01e54c6d45f6de5dd3bc0265da3f4b6f",
-      "reason": "Independently remove completed IPC command and response paths so a command already removed by the server does not leave a stale response. Real client/server regression initially failed and now passes on Windows.",
-      "phase": "U01b",
-      "review_status": "accepted-PR6"
+      "current_sha256": "929545f1748dd8df28d7a50913720a57509a7eaaf15fed64557162b316183e47",
+      "reason": "U01b fixes independent completed-file cleanup. U02b bounds IPC paths, matches payload identities, checks regular files/byte/depth limits, publishes atomically and uses monotonic deadlines. Script-local handlers remain a separate gate.",
+      "phase": "U01b/U02b",
+      "review_status": "U01b-accepted-PR6; U02b-pending-exact-head-ci"
     }
   ]
 }
