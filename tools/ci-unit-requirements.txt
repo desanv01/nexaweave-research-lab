@@ -1,0 +1,14 @@
+# Direct versions observed in backend/uv.lock; resolver supplies their transitives.
+# Lean fixture/unit profile, not a full OASIS/CAMEL installation.
+Flask==3.1.2
+flask-cors==6.0.2
+openai==1.109.1
+zep-cloud==3.25.0
+httpx==0.28.1
+PyMuPDF==1.26.7
+charset-normalizer==3.4.4
+chardet==5.2.0
+python-dotenv==1.2.1
+pydantic==2.12.5
+pytest==8.2.0
+pytest-asyncio==0.23.6

@@ -12,13 +12,18 @@ Main owns checks and GitHub; fresh GPT-6 Sol/medium workers implement only.
 | Task | State | Evidence / next gate |
 |---|---|---|
 | Plan v3 synchronization | Completed | All active reference docs synchronized; v2 archived |
-| U00 repository bootstrap | In progress | Private remote created; source import and CI still pending |
-| U01 parity and knowledge compatibility | Planned | Offline characterization, real databases with fake models, bounded live models |
+| U00 repository bootstrap | Main review / worker remediation | 128 source files imported and hash-checked; PR2 draft; initial153 passed/3 failed (workflow relocation + Windows symlink privileges); offline launcher/CI review pending |
+| U01 parity and knowledge compatibility | Implementing | Separate runtime and scoped Graphiti/Neo4j compatibility spike; no live paid qualification yet |
 | U02–U14 | Planned | See approved master plan; no gate accepted |
 
 Repository: https://github.com/desanv01/mirofish-research-lab (private).
 Implementation root: `C:\Users\Dv\Desktop\MiroFishResearchLab`.
 Reference archive remains outside the repository, untouched.
+
+Workers are attached to the MiroFish project and use worktrees inside that
+project's `_implementation_worktrees/` directory. See decisions.md for task IDs,
+Fast-mode preference and recurring main supervision. Main is active; changing
+Fast mode is not a user request to pause execution.
 
 No capability, live provider, Neo4j integration or application security gate has
 passed merely because source was imported. Model credentials and spend limits
