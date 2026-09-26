@@ -3,6 +3,20 @@
   "note": "Explicit baseline differences. Entries are unverified candidates until main reviews and accepts the exact revision.",
   "entries": [
     {
+      "imported_path": "backend/app/__init__.py",
+      "original_sha256": "f04d262decf6c11437280c0f0c1353774f642888b2ef3f02dfa0e96e992b3c1c",
+      "current_sha256": "69208522ee6f1f18946f897b262fd4526213ef54fa733996bcae791d8a3072a6",
+      "reason": "Explicit exact API Origin admission/preflight/CORS policy and private method/endpoint/status logging without body parsing.",
+      "phase": "U02d"
+    },
+    {
+      "imported_path": "backend/app/config.py",
+      "original_sha256": "a85580b4551724b3c2fff419565c9aa11f6dba1992f5981ed34037a264c2a2f3",
+      "current_sha256": "5a368775769d3446fbbdffd220f8003f17f9e7fb51c0cacc371f944c394adcc6",
+      "reason": "Explicit default Vite development origins, overridable through validated startup configuration.",
+      "phase": "U02d"
+    },
+    {
       "imported_path": "tests/test_local_star_count_fetch.py",
       "original_sha256": "6c524bc1fbdf521c5f61d5dfa129bec88f8b5f895a55ecdceb775e6d40bb3379",
       "current_sha256": "0a70680fd7b9cbd7cd710df32bd50c9948dcf9d06ac374f40d8af067851f3000",
