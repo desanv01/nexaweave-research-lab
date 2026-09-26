@@ -14,8 +14,8 @@ Main owns checks and GitHub; fresh GPT-6 Sol/medium workers implement only.
 | Plan v3 synchronization | Completed | All active reference docs synchronized; v2 archived |
 | U00 repository bootstrap | Accepted delivery baseline | PR2 merged as 1166188b2d5dafbab178e72ac1b1cc130bb732f1; post-merge CI36214869721 green; Linux167 tests,128-file manifest and frontend build passed; not application qualification |
 | U01 parity and knowledge compatibility | U01a/U01b/U01c bounded slices accepted | PR9/merge5d77aab; post-merge CI36216733446 green;236 Linux tests,17 knowledge and3 native tests; no paid/full capability qualification |
-| U02 security | U02a accepted; U02b implementing | PR7 headc4f890b/mergead4d905; exact-head CI36216100265 green (222 Linux,17 knowledge,3 native tests); IPC boundary next; authentication/upload/rendering gates remain |
-| U03 adapters and operation authority | U03a implementing | Issue10; project worker01a0dbe3-ed5b-7f51-a339-3b09cdd02fe6 in _implementation_worktrees/u03; persistent operation admission before provider cutover; no gate accepted |
+| U02 security | U02a/U02b accepted; U02c candidate | PR11 merged68361ff; post-merge CI36217081968 green (288 Linux,17 knowledge,3 native). Issue13 native handler integration now under Main gates; authentication/upload/rendering remain |
+| U03 adapters and operation authority | U03a accepted; U03b implementing | PR12 exactheadd097843, merge24108c5; all6 gates green, post-merge CI36217434202 green;12 ledger tests. Worker01a0dbe3-ed5b-7f51-a339-3b09cdd02fe6 implementing task/u03-ledger-ingest in _implementation_worktrees/u03. No full provider cutover |
 | U04–U14 | Planned | See approved master plan; no gate accepted |
 
 Repository: https://github.com/desanv01/mirofish-research-lab (private).
