@@ -14,8 +14,8 @@ Main owns checks and GitHub; fresh GPT-6 Sol/medium workers implement only.
 | Plan v3 synchronization | Completed | All active reference docs synchronized; v2 archived |
 | U00 repository bootstrap | Accepted delivery baseline | PR2 merged as 1166188b2d5dafbab178e72ac1b1cc130bb732f1; post-merge CI36214869721 green; Linux167 tests,128-file manifest and frontend build passed; not application qualification |
 | U01 parity and knowledge compatibility | U01a/U01b/U01c bounded slices accepted | PR9/merge5d77aab; post-merge CI36216733446 green;236 Linux tests,17 knowledge and3 native tests; no paid/full capability qualification |
-| U02 security | U02a/U02b/U02c accepted; U02d implementing | PR14 exactheadb99279e/merge9da8b0c, CI36217628059 all6 green (317 Linux,17 knowledge,12 ledger,3 native plus actual script imports). Worker01a0dbc4-d633-7732-a922-e9a7ad5e82b6 on task/u02-browser-boundaries; authentication/upload/rendering remain |
-| U03 adapters and operation authority | U03a accepted; U03b implementing | PR12 exactheadd097843, merge24108c5; all6 gates green, post-merge CI36217434202 green;12 ledger tests. Worker01a0dbe3-ed5b-7f51-a339-3b09cdd02fe6 implementing task/u03-ledger-ingest in _implementation_worktrees/u03. No full provider cutover |
+| U02 security | U02a/U02b/U02c accepted; U02d candidate | PR14 exactheadb99279e/merge9da8b0c, CI36217628059 and post-merge36217784876 all6 green. Issue16 candidate on task/u02-browser-boundaries; Main local342 passed/16 skipped/2 inherited Windows privilege failures. Exact-head CI pending; authentication/upload/rendering remain |
+| U03 adapters and operation authority | U03a/U03b accepted; U03c implementing | PR17 exacthead820e02d/merge577b405, CI36218090900 and post-merge36218295447 all6 green (27 ledger/coordinator,18 knowledge,317 Linux,3 native plus imports). Issue18; worker01a0dbe3-ed5b-7f51-a339-3b09cdd02fe6 on task/u03-scoped-graph-reads. No full provider cutover |
 | U04–U14 | Planned | See approved master plan; no gate accepted |
 
 Repository: https://github.com/desanv01/mirofish-research-lab (private).
