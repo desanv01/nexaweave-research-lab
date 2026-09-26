@@ -3,6 +3,13 @@
   "note": "Explicit baseline differences. Entries are unverified candidates until main reviews and accepts the exact revision.",
   "entries": [
     {
+      "imported_path": "backend/app/utils/file_parser.py",
+      "original_sha256": "f1adfdda1a6674ad7af76dc95a9b76f388470098e4cf514be908440c4167c398",
+      "current_sha256": "327d7f1a6bbcfe434b19990dcb47ba11f3d33699bbf0fe251b1b6b60f2b0a226",
+      "reason": "Bound source bytes/PDF pages/extracted text/multifile results; safe classified errors, BOM decoding and progress-guaranteed bounded chunking. Native parser isolation remains separate.",
+      "phase": "U02e"
+    },
+    {
       "imported_path": "backend/app/__init__.py",
       "original_sha256": "f04d262decf6c11437280c0f0c1353774f642888b2ef3f02dfa0e96e992b3c1c",
       "current_sha256": "69208522ee6f1f18946f897b262fd4526213ef54fa733996bcae791d8a3072a6",

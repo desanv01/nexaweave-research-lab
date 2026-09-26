@@ -1,203 +1,308 @@
-"""
-文件解析工具
-支持PDF、Markdown、TXT文件的文本提取
-"""
+"""Bounded text extraction for locally admitted PDF, Markdown, and TXT files."""
 
+import codecs
 import os
+import stat
+from dataclasses import dataclass
+from itertools import islice
 from pathlib import Path
 from typing import List, Optional
 
 
-def _read_text_with_fallback(file_path: str) -> str:
-    """
-    读取文本文件，UTF-8失败时自动探测编码。
-    
-    采用多级回退策略：
-    1. 首先尝试 UTF-8 解码
-    2. 使用 charset_normalizer 检测编码
-    3. 回退到 chardet 检测编码
-    4. 最终使用 UTF-8 + errors='replace' 兜底
-    
-    Args:
-        file_path: 文件路径
-        
-    Returns:
-        解码后的文本内容
-    """
-    data = Path(file_path).read_bytes()
-    
-    # 首先尝试 UTF-8
+MAX_CHUNK_INPUT_CHARS = 5_000_000
+MAX_EMITTED_CHUNKS = 100_000
+
+
+class ParseError(ValueError):
+    """A safe, classified error with no source path or content."""
+
+    code = "parse_error"
+
+    def __init__(self) -> None:
+        super().__init__(self.code)
+
+
+class ParseLimitError(ParseError):
+    code = "limit_exceeded"
+
+
+class UnsupportedDocumentError(ParseError):
+    code = "unsupported_document"
+
+
+class MalformedDocumentError(ParseError):
+    code = "malformed_document"
+
+
+class InvalidSourceError(ParseError):
+    code = "invalid_source"
+
+
+@dataclass(frozen=True)
+class ParseLimits:
+    max_file_bytes: int = 50 * 1024 * 1024
+    max_text_chars: int = 5_000_000
+    max_pdf_pages: int = 500
+    max_files: int = 20
+    max_aggregate_chars: int = 5_000_000
+
+    def __post_init__(self) -> None:
+        for value in (
+            self.max_file_bytes,
+            self.max_text_chars,
+            self.max_pdf_pages,
+            self.max_files,
+            self.max_aggregate_chars,
+        ):
+            if type(value) is not int or value <= 0:
+                raise ValueError("parse limits must be positive integers")
+
+
+DEFAULT_LIMITS = ParseLimits()
+
+
+def _limits_or_default(limits: Optional[ParseLimits]) -> ParseLimits:
+    if limits is None:
+        return DEFAULT_LIMITS
+    if not isinstance(limits, ParseLimits):
+        raise TypeError("limits must be ParseLimits")
+    return limits
+
+
+def _bounded_source_bytes(file_path: str, limits: ParseLimits) -> bytes:
+    """Reject special files and read at most one byte past the configured cap."""
     try:
-        return data.decode('utf-8')
-    except UnicodeDecodeError:
-        pass
-    
-    # 尝试使用 charset_normalizer 检测编码
-    encoding = None
+        source_stat = os.lstat(file_path)
+    except FileNotFoundError:
+        raise FileNotFoundError("source file not found") from None
+    except OSError:
+        raise InvalidSourceError() from None
+
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    attributes = getattr(source_stat, "st_file_attributes", 0)
+    if not stat.S_ISREG(source_stat.st_mode) or (reparse_flag and attributes & reparse_flag):
+        raise InvalidSourceError()
+    if source_stat.st_size > limits.max_file_bytes:
+        raise ParseLimitError()
+
     try:
-        from charset_normalizer import from_bytes
-        best = from_bytes(data).best()
-        if best and best.encoding:
-            encoding = best.encoding
-    except Exception:
-        pass
-    
-    # 回退到 chardet
-    if not encoding:
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NONBLOCK", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(file_path, flags)
+        with os.fdopen(descriptor, "rb") as source:
+            # A path can change between lstat and open.
+            opened_stat = os.fstat(source.fileno())
+            opened_attributes = getattr(opened_stat, "st_file_attributes", 0)
+            if not stat.S_ISREG(opened_stat.st_mode) or (
+                reparse_flag and opened_attributes & reparse_flag
+            ):
+                raise InvalidSourceError()
+            data = source.read(limits.max_file_bytes + 1)
+    except ParseError:
+        raise
+    except FileNotFoundError:
+        raise FileNotFoundError("source file not found") from None
+    except OSError:
+        raise InvalidSourceError() from None
+
+    if len(data) > limits.max_file_bytes:
+        raise ParseLimitError()
+    return data
+
+
+def _decode_text(data: bytes, limits: ParseLimits) -> str:
+    if data.startswith(codecs.BOM_UTF8):
+        text = data.decode("utf-8-sig", errors="replace")
+    elif data.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
         try:
-            import chardet
-            result = chardet.detect(data)
-            encoding = result.get('encoding') if result else None
-        except Exception:
-            pass
-    
-    # 最终兜底：使用 UTF-8 + replace
-    if not encoding:
-        encoding = 'utf-8'
-    
-    return data.decode(encoding, errors='replace')
+            text = data.decode("utf-16")
+        except UnicodeError:
+            raise MalformedDocumentError() from None
+    else:
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            encoding = None
+            try:
+                from charset_normalizer import from_bytes
+
+                best = from_bytes(data).best()
+                encoding = best.encoding if best else None
+            except Exception:
+                pass
+            if not encoding:
+                try:
+                    import chardet
+
+                    detected = chardet.detect(data)
+                    encoding = detected.get("encoding") if detected else None
+                except Exception:
+                    pass
+            try:
+                text = data.decode(encoding or "utf-8", errors="replace")
+            except (LookupError, UnicodeError):
+                text = data.decode("utf-8", errors="replace")
+
+    if len(text) > limits.max_text_chars:
+        raise ParseLimitError()
+    if any((ord(char) < 32 and char not in "\t\n\r") or ord(char) == 127 for char in text):
+        raise MalformedDocumentError()
+    return text
+
+
+def _read_text_with_fallback(file_path: str, limits: Optional[ParseLimits] = None) -> str:
+    resolved = _limits_or_default(limits)
+    return _decode_text(_bounded_source_bytes(file_path, resolved), resolved)
+
+
+def _safe_basename(file_path: str) -> str:
+    name = str(file_path).replace("\\", "/").rsplit("/", 1)[-1]
+    safe = "".join(char if char.isprintable() and char not in "<>" else "_" for char in name)
+    return safe[:80] or "unnamed"
 
 
 class FileParser:
-    """文件解析器"""
-    
-    SUPPORTED_EXTENSIONS = {'.pdf', '.md', '.markdown', '.txt'}
-    
+    """File parser with bounded source and result sizes."""
+
+    SUPPORTED_EXTENSIONS = {".pdf", ".md", ".markdown", ".txt"}
+
     @classmethod
     def is_supported(cls, file_path: str) -> bool:
-        """
-        检查文件是否为支持的格式
-        
-        Args:
-            file_path: 文件路径
-            
-        Returns:
-            如果文件格式受支持则返回 True
-        """
+        return Path(file_path).suffix.lower() in cls.SUPPORTED_EXTENSIONS
+
+    @classmethod
+    def extract_text(cls, file_path: str, *, limits: Optional[ParseLimits] = None) -> str:
+        resolved = _limits_or_default(limits)
         suffix = Path(file_path).suffix.lower()
-        return suffix in cls.SUPPORTED_EXTENSIONS
-    
-    @classmethod
-    def extract_text(cls, file_path: str) -> str:
-        """
-        从文件中提取文本
-        
-        Args:
-            file_path: 文件路径
-            
-        Returns:
-            提取的文本内容
-        """
-        path = Path(file_path)
-        
-        if not path.exists():
-            raise FileNotFoundError(f"文件不存在: {file_path}")
-        
-        suffix = path.suffix.lower()
-        
         if suffix not in cls.SUPPORTED_EXTENSIONS:
-            raise ValueError(f"不支持的文件格式: {suffix}")
-        
-        if suffix == '.pdf':
-            return cls._extract_from_pdf(file_path)
-        elif suffix in {'.md', '.markdown'}:
-            return cls._extract_from_md(file_path)
-        elif suffix == '.txt':
-            return cls._extract_from_txt(file_path)
-        
-        raise ValueError(f"无法处理的文件格式: {suffix}")
-    
+            raise UnsupportedDocumentError()
+        if suffix == ".pdf":
+            return cls._extract_from_pdf(file_path, limits=resolved)
+        if suffix in {".md", ".markdown"}:
+            return cls._extract_from_md(file_path, limits=resolved)
+        return cls._extract_from_txt(file_path, limits=resolved)
+
     @staticmethod
-    def _extract_from_pdf(file_path: str) -> str:
-        """从PDF提取文本"""
+    def _extract_from_pdf(file_path: str, *, limits: Optional[ParseLimits] = None) -> str:
+        resolved = _limits_or_default(limits)
+        data = _bounded_source_bytes(file_path, resolved)
+        if b"%PDF-" not in data[:1024]:
+            raise MalformedDocumentError()
         try:
-            import fitz  # PyMuPDF
+            import fitz
         except ImportError:
-            raise ImportError("需要安装PyMuPDF: pip install PyMuPDF")
-        
-        text_parts = []
-        with fitz.open(file_path) as doc:
-            for page in doc:
-                text = page.get_text()
-                if text.strip():
-                    text_parts.append(text)
-        
-        return "\n\n".join(text_parts)
-    
+            raise ImportError("PyMuPDF is required") from None
+
+        document = None
+        try:
+            document = fitz.open(stream=data, filetype="pdf")
+            if document.needs_pass or document.is_encrypted:
+                raise MalformedDocumentError()
+            if len(document) > resolved.max_pdf_pages:
+                raise ParseLimitError()
+            text_parts = []
+            char_count = 0
+            for page in document:
+                page_text = page.get_text()
+                if page_text.strip():
+                    added = len(page_text) + (2 if text_parts else 0)
+                    if char_count + added > resolved.max_text_chars:
+                        raise ParseLimitError()
+                    text_parts.append(page_text)
+                    char_count += added
+            return "\n\n".join(text_parts)
+        except ParseError:
+            raise
+        except Exception:
+            raise MalformedDocumentError() from None
+        finally:
+            if document is not None:
+                try:
+                    document.close()
+                except Exception:
+                    # Keep a classified parse/limit failure from being replaced
+                    # by a native close error containing source details.
+                    pass
+
     @staticmethod
-    def _extract_from_md(file_path: str) -> str:
-        """从Markdown提取文本，支持自动编码检测"""
-        return _read_text_with_fallback(file_path)
-    
+    def _extract_from_md(file_path: str, *, limits: Optional[ParseLimits] = None) -> str:
+        return _read_text_with_fallback(file_path, limits)
+
     @staticmethod
-    def _extract_from_txt(file_path: str) -> str:
-        """从TXT提取文本，支持自动编码检测"""
-        return _read_text_with_fallback(file_path)
-    
+    def _extract_from_txt(file_path: str, *, limits: Optional[ParseLimits] = None) -> str:
+        return _read_text_with_fallback(file_path, limits)
+
     @classmethod
-    def extract_from_multiple(cls, file_paths: List[str]) -> str:
-        """
-        从多个文件提取文本并合并
-        
-        Args:
-            file_paths: 文件路径列表
-            
-        Returns:
-            合并后的文本
-        """
-        all_texts = []
-        
-        for i, file_path in enumerate(file_paths, 1):
+    def extract_from_multiple(
+        cls, file_paths: List[str], *, limits: Optional[ParseLimits] = None
+    ) -> str:
+        resolved = _limits_or_default(limits)
+        if isinstance(file_paths, (str, bytes)):
+            raise InvalidSourceError()
+        try:
+            paths = list(islice(iter(file_paths), resolved.max_files + 1))
+        except (TypeError, ValueError):
+            raise InvalidSourceError() from None
+        if len(paths) > resolved.max_files:
+            raise ParseLimitError()
+
+        parts = []
+        aggregate_chars = 0
+        for index, file_path in enumerate(paths, 1):
+            name = _safe_basename(file_path)
             try:
-                text = cls.extract_text(file_path)
-                filename = Path(file_path).name
-                all_texts.append(f"=== 文档 {i}: {filename} ===\n{text}")
-            except Exception as e:
-                all_texts.append(f"=== 文档 {i}: {file_path} (提取失败: {str(e)}) ===")
-        
-        return "\n\n".join(all_texts)
+                extracted = cls.extract_text(file_path, limits=resolved)
+                part = f"=== 文档 {index}: {name} ===\n{extracted}"
+            except ParseLimitError:
+                raise
+            except FileNotFoundError:
+                part = f"=== 文档 {index}: {name} (提取失败: missing_file) ==="
+            except ParseError as error:
+                part = f"=== 文档 {index}: {name} (提取失败: {error.code}) ==="
+            except Exception:
+                part = f"=== 文档 {index}: {name} (提取失败: parse_error) ==="
+            added = len(part) + (2 if parts else 0)
+            if aggregate_chars + added > resolved.max_aggregate_chars:
+                raise ParseLimitError()
+            parts.append(part)
+            aggregate_chars += added
+        return "\n\n".join(parts)
 
 
 def split_text_into_chunks(
-    text: str, 
-    chunk_size: int = 500, 
-    overlap: int = 50
+    text: str, chunk_size: int = 500, overlap: int = 50
 ) -> List[str]:
-    """
-    将文本分割成小块
-    
-    Args:
-        text: 原始文本
-        chunk_size: 每块的字符数
-        overlap: 重叠字符数
-        
-    Returns:
-        文本块列表
-    """
+    """Split bounded text, preferring sentence boundaries without stalling."""
+    if type(chunk_size) is not int or chunk_size <= 0:
+        raise ValueError("chunk_size must be a positive integer")
+    if type(overlap) is not int or overlap < 0 or overlap >= chunk_size:
+        raise ValueError("overlap must be a nonnegative integer smaller than chunk_size")
+    if not isinstance(text, str):
+        raise TypeError("text must be a string")
+    if len(text) > MAX_CHUNK_INPUT_CHARS:
+        raise ParseLimitError()
+    if not text.strip():
+        return []
     if len(text) <= chunk_size:
-        return [text] if text.strip() else []
-    
+        return [text]
+
     chunks = []
     start = 0
-    
+    separators = ("。", "！", "？", ".\n", "!\n", "?\n", "\n\n", ". ", "! ", "? ")
     while start < len(text):
-        end = start + chunk_size
-        
-        # 尝试在句子边界处分割
+        end = min(start + chunk_size, len(text))
         if end < len(text):
-            # 查找最近的句子结束符
-            for sep in ['。', '！', '？', '.\n', '!\n', '?\n', '\n\n', '. ', '! ', '? ']:
-                last_sep = text[start:end].rfind(sep)
-                if last_sep != -1 and last_sep > chunk_size * 0.3:
-                    end = start + last_sep + len(sep)
+            window = text[start:end]
+            for separator in separators:
+                last = window.rfind(separator)
+                candidate = start + last + len(separator)
+                if last > chunk_size * 0.3 and candidate - overlap > start:
+                    end = candidate
                     break
-        
         chunk = text[start:end].strip()
         if chunk:
+            if len(chunks) >= MAX_EMITTED_CHUNKS:
+                raise ParseLimitError()
             chunks.append(chunk)
-        
-        # 下一个块从重叠位置开始
         start = end - overlap if end < len(text) else len(text)
-    
     return chunks
-
