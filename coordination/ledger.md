@@ -12,9 +12,10 @@ Main owns checks and GitHub; fresh GPT-6 Sol/medium workers implement only.
 | Task | State | Evidence / next gate |
 |---|---|---|
 | Plan v3 synchronization | Completed | All active reference docs synchronized; v2 archived |
-| U00 repository bootstrap | Main review / worker remediation | 128 source files imported and hash-checked; PR2 draft; initial153 passed/3 failed (workflow relocation + Windows symlink privileges); offline launcher/CI review pending |
-| U01 parity and knowledge compatibility | Implementing | Separate runtime and scoped Graphiti/Neo4j compatibility spike; no live paid qualification yet |
-| U02–U14 | Planned | See approved master plan; no gate accepted |
+| U00 repository bootstrap | Accepted delivery baseline | PR2 merged as 1166188b2d5dafbab178e72ac1b1cc130bb732f1; post-merge CI36214869721 green; Linux167 tests,128-file manifest and frontend build passed; not application qualification |
+| U01 parity and knowledge compatibility | Main review / integration verification | U01a separate runtime;15 offline contracts pass on Windows; real Neo4j CI pending; no paid or full capability qualification |
+| U02 security | U02a implementing | Issue4; backend filesystem boundaries in disjoint project worktree; authentication/upload/rendering gates remain |
+| U03–U14 | Planned | See approved master plan; no gate accepted |
 
 Repository: https://github.com/desanv01/mirofish-research-lab (private).
 Implementation root: `C:\Users\Dv\Desktop\MiroFishResearchLab`.
