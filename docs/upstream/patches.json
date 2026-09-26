@@ -8,7 +8,7 @@
       "current_sha256": "0a70680fd7b9cbd7cd710df32bd50c9948dcf9d06ac374f40d8af067851f3000",
       "reason": "Workflow-inspection fixture now reads the byte-preserved quarantined workflow reference after the U00 archive import. Assertions are unchanged.",
       "phase": "U00",
-      "review_status": "pending-main-review",
+      "review_status": "accepted-PR2",
       "review_pr": "https://github.com/desanv01/mirofish-research-lab/pull/2"
     },
     {
@@ -63,10 +63,31 @@
     {
       "imported_path": "backend/app/services/simulation_ipc.py",
       "original_sha256": "2cd596faed552c29f8e486b6641677787c2c38eeab822a82512be07e9b4088d9",
-      "current_sha256": "929545f1748dd8df28d7a50913720a57509a7eaaf15fed64557162b316183e47",
-      "reason": "U01b fixes independent completed-file cleanup. U02b bounds IPC paths, matches payload identities, checks regular files/byte/depth limits, publishes atomically and uses monotonic deadlines. Script-local handlers remain a separate gate.",
-      "phase": "U01b/U02b",
-      "review_status": "U01b-accepted-PR6; U02b-pending-exact-head-ci"
+      "current_sha256": "c96ea9bea8f9beac5e5fc925c9af96584bfb3690a7ce4d5bb25e3e8ccb29e16f",
+      "reason": "U01b fixes independent completed-file cleanup. U02b bounds IPC transport and atomic publication. U02c exposes bounded lifecycle status publication shared by native script handlers.",
+      "phase": "U01b/U02b/U02c",
+      "review_status": "U01b-accepted-PR6; U02b-accepted-PR11; U02c-pending-exact-head-ci"
+    },
+    {
+      "imported_path": "backend/scripts/run_parallel_simulation.py",
+      "original_sha256": "e1ee10de9a4599a8b18d01f0678f9f9caf4e0846c2355f302aaf0d56ed95e942",
+      "current_sha256": "d5058ea4b967309e6d5f98a8334a8c32dc26b06f5fdb98d23d69ab8c8e3962de",
+      "reason": "Delegate file IPC to shared bounded transport, preserving parallel platform selection, interview dispatch and availability status flags.",
+      "phase": "U02c"
+    },
+    {
+      "imported_path": "backend/scripts/run_reddit_simulation.py",
+      "original_sha256": "edd537c023f8169d78054ecc261d7dca28b5a83af27bdd5bf5edcf2df68d361a",
+      "current_sha256": "b6dea998657e024556cbf3ca9be48f1a7daf8f953d4c6cba0b1be2d9b767c628",
+      "reason": "Delegate file IPC to shared bounded transport without changing native interview or action dispatch.",
+      "phase": "U02c"
+    },
+    {
+      "imported_path": "backend/scripts/run_twitter_simulation.py",
+      "original_sha256": "cd766f1a55b5cec48a776ce5bb7b072dcfe7a07bd8b0f63f7c1b2b5464b772bf",
+      "current_sha256": "da92019e9b20def43fc48aeda0c22c0d3474e04252d1ccb136859f2c4da4d953",
+      "reason": "Delegate file IPC to shared bounded transport without changing native interview or action dispatch.",
+      "phase": "U02c"
     }
   ]
 }

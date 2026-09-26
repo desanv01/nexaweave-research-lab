@@ -132,6 +132,8 @@ except ImportError as e:
 
 
 # IPC相关常量
+from app.services.simulation_ipc import CommandStatus, IPCResponse, SimulationIPCServer
+
 IPC_COMMANDS_DIR = "ipc_commands"
 IPC_RESPONSES_DIR = "ipc_responses"
 ENV_STATUS_FILE = "env_status.json"
@@ -150,66 +152,29 @@ class IPCHandler:
         self.simulation_dir = simulation_dir
         self.env = env
         self.agent_graph = agent_graph
-        self.commands_dir = os.path.join(simulation_dir, IPC_COMMANDS_DIR)
-        self.responses_dir = os.path.join(simulation_dir, IPC_RESPONSES_DIR)
+        self._ipc_server = SimulationIPCServer(simulation_dir)
+        self.commands_dir = self._ipc_server.commands_dir
+        self.responses_dir = self._ipc_server.responses_dir
         self.status_file = os.path.join(simulation_dir, ENV_STATUS_FILE)
         self._running = True
-        
-        # 确保目录存在
-        os.makedirs(self.commands_dir, exist_ok=True)
-        os.makedirs(self.responses_dir, exist_ok=True)
     
     def update_status(self, status: str):
         """更新环境状态"""
-        with open(self.status_file, 'w', encoding='utf-8') as f:
-            json.dump({
-                "status": status,
-                "timestamp": datetime.now().isoformat()
-            }, f, ensure_ascii=False, indent=2)
+        self._ipc_server.update_status(status)
     
     def poll_command(self) -> Optional[Dict[str, Any]]:
         """轮询获取待处理命令"""
-        if not os.path.exists(self.commands_dir):
-            return None
-        
-        # 获取命令文件（按时间排序）
-        command_files = []
-        for filename in os.listdir(self.commands_dir):
-            if filename.endswith('.json'):
-                filepath = os.path.join(self.commands_dir, filename)
-                command_files.append((filepath, os.path.getmtime(filepath)))
-        
-        command_files.sort(key=lambda x: x[1])
-        
-        for filepath, _ in command_files:
-            try:
-                with open(filepath, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-            except (json.JSONDecodeError, OSError):
-                continue
-        
-        return None
+        command = self._ipc_server.poll_commands()
+        return command.to_dict() if command is not None else None
     
     def send_response(self, command_id: str, status: str, result: Dict = None, error: str = None):
         """发送响应"""
-        response = {
-            "command_id": command_id,
-            "status": status,
-            "result": result,
-            "error": error,
-            "timestamp": datetime.now().isoformat()
-        }
-        
-        response_file = os.path.join(self.responses_dir, f"{command_id}.json")
-        with open(response_file, 'w', encoding='utf-8') as f:
-            json.dump(response, f, ensure_ascii=False, indent=2)
-        
-        # 删除命令文件
-        command_file = os.path.join(self.commands_dir, f"{command_id}.json")
-        try:
-            os.remove(command_file)
-        except OSError:
-            pass
+        self._ipc_server.send_response(IPCResponse(
+            command_id=command_id,
+            status=CommandStatus(status),
+            result=result,
+            error=error,
+        ))
     
     async def handle_interview(self, command_id: str, agent_id: int, prompt: str) -> bool:
         """
@@ -766,4 +731,3 @@ if __name__ == "__main__":
         pass
     finally:
         print("模拟进程已退出")
-

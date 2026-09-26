@@ -357,15 +357,33 @@ class SimulationIPCServer:
 
     def start(self):
         self._running = True
-        self._update_env_status("alive")
+        self.update_status("alive")
 
     def stop(self):
         self._running = False
-        self._update_env_status("stopped")
+        self.update_status("stopped")
+
+    def update_status(
+        self, status: str, *, twitter_available: Optional[bool] = None,
+        reddit_available: Optional[bool] = None,
+    ) -> None:
+        """Write a bounded lifecycle status and optional platform flags."""
+        if (not isinstance(status, str) or not 1 <= len(status) <= 64
+                or any(ord(char) < 32 or ord(char) == 127 for char in status)):
+            raise ValueError("Invalid IPC environment status")
+        if (twitter_available is not None and type(twitter_available) is not bool
+                or reddit_available is not None and type(reddit_available) is not bool):
+            raise ValueError("Invalid IPC environment status")
+        payload = {"status": status, "timestamp": datetime.now().isoformat()}
+        if twitter_available is not None:
+            payload["twitter_available"] = twitter_available
+        if reddit_available is not None:
+            payload["reddit_available"] = reddit_available
+        _atomic_write(self.simulation_dir, ("env_status.json",), _message_bytes(payload))
 
     def _update_env_status(self, status: str):
-        data = _message_bytes({"status": status, "timestamp": datetime.now().isoformat()})
-        _atomic_write(self.simulation_dir, ("env_status.json",), data)
+        """Keep the prior private entry point for local callers."""
+        self.update_status(status)
 
     def poll_commands(self) -> Optional[IPCCommand]:
         try:
