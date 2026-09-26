@@ -1,0 +1,11 @@
+# Archived source import and patch record
+
+The fixed input is `MiroFish-main.zip`, SHA-256 `d3bef0afea92b99626526ffcce0508414feb3f9e88c3edda1f283ce5f447bf53`, from [666ghj/MiroFish](https://github.com/666ghj/MiroFish). Its exact source commit is unknown. The 128-file path, size and SHA-256 inventory is [archive-manifest.json](archive-manifest.json). `tools/import_baseline.ps1` records the import procedure. The source license is the unchanged root [AGPL-3.0 text](../../LICENSE).
+
+As observed on 2026-09-26, upstream HEAD `39d849138ef254f6c737ab4c4705e5545dbe31d4` matched 123 of the 128 archive files. The five differences were `.github/star-history/history.json`, `.github/workflows/update-star-history.yml`, `static/image/star-history-dark.svg`, `static/image/star-history-light.svg`, and `tests/test_local_star_count_fetch.py`. All app code and dependency manifests matched that observed HEAD. This comparison does **not** establish an exact archive commit. Upstream changes are selected and reviewed separately; the archive remains the immutable reference.
+
+The archived English and Chinese READMEs and `.gitignore` are byte-preserved as `README.md.reference`, `README-ZH.md.reference`, and `gitignore.reference` in this directory. The two inherited workflows are byte-preserved under `workflows/*.reference`. They are intentionally inert: the old Docker workflow published upstream images and the star-history workflow ran on a schedule. No inherited scheduled or publishing job is activated in this repository. The active README, ignore rules and CI describe this derived project.
+
+`python tools/check_baseline_manifest.py` checks all 128 imported paths. Any changed imported file requires a per-file entry in [patches.json](patches.json) with the original and current hashes, phase and reason. The checker never silently refreshes archive hashes. One U00 patch candidate changes only the old workflow-inspection test path to the quarantined workflow reference. Its assertions are unchanged and main review is pending. Main owns acceptance and may revise this record after checks.
+
+No upload, environment secret, installed package or runtime database belongs in the import. The inherited application still uses Zep; Graphiti/Neo4j cutover is later work. The observed upstream SHA is a comparison point, not a claim of functional equivalence.

@@ -185,7 +185,7 @@ class FetchStarCountTests(unittest.TestCase):
     def test_workflow_keeps_credentials_out_of_record_and_render_steps(self):
         repository = Path(__file__).resolve().parents[1]
         workflow = (
-            repository / ".github/workflows/update-star-history.yml"
+            repository / "docs/upstream/workflows/update-star-history.yml.reference"
         ).read_text(encoding="utf-8")
         renderer = (repository / "scripts/star_history.py").read_text(
             encoding="utf-8"

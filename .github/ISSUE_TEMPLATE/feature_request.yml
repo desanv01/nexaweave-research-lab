@@ -1,0 +1,19 @@
+name: Capability proposal
+description: Propose a scoped improvement against the roadmap
+title: "capability: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: need
+    attributes:
+      label: Research need and observable outcome
+    validations:
+      required: true
+  - type: input
+    id: capability
+    attributes:
+      label: Capability IDs or phase
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Suggested fixture or acceptance evidence
