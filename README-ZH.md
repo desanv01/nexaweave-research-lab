@@ -2,13 +2,13 @@
 
 **基于 MiroFish 的研究工作台，正在升级为自托管知识图谱和可追溯证据的模拟平台。**
 
-![状态：源码已导入](https://img.shields.io/badge/status-source%20imported-8a6d3b) ![许可证：AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue) ![阶段：U00](https://img.shields.io/badge/phase-U00-lightgrey)
+![状态：开发中](https://img.shields.io/badge/status-implementation-8a6d3b) ![许可证：AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue) ![阶段：U01–U02](https://img.shields.io/badge/phase-U01--U02-lightgrey)
 
 [English](README.md) · [开发说明](docs/development.md) · [路线图](ROADMAP.md)
 
 本项目保留 MiroFish 的 Vue、Flask、OASIS/CAMEL 和调查报告流程作为源码基础。已确定的目标知识系统是 Graphiti + 自托管 Neo4j Community。后续可在明确配置和限额下使用付费模型 API。
 
-> **项目状态：U00 源码导入，尚未验收。** 导入的应用目前仍调用 Zep Cloud。Graphiti/Neo4j 是目标，并非已完成的替代。尚未证明完整的无 Zep 流程、安全加固、发布包或可支持的部署。不要将继承的基线对外开放，也不要导入真实敏感资料。下述 CI 仅涵盖夹具/单元测试和前端构建。
+> **项目状态：U00 已验收，U01–U02 开发中。** 独立 Graphiti/Neo4j 兼容包已通过真实数据库与合成模型测试。导入的应用仍调用 Zep Cloud，尚未完成替换。完整无 Zep 流程、安全验收、发布包及受支持部署仍未完成。请勿对外开放基线或导入敏感资料。[知识系统验证说明](docs/knowledge-compatibility.md)列明测试范围及限制。
 
 ---
 
@@ -112,11 +112,11 @@ tools/                清单检查器、精简 CI 依赖与单元测试启动器
 
 ## Current status / 当前状态
 
-U00 正在基于 `c63c78e1229495894beeec68931bd355084b0da8` 实现仓库交付。ZIP SHA-256 为 `d3bef0afea92b99626526ffcce0508414feb3f9e88c3edda1f283ce5f447bf53`，对应 Git 提交未知。观察到的上游 HEAD `39d849138ef254f6c737ab4c4705e5545dbe31d4` 是独立参考，未被认定为该 ZIP 的提交。此 README 不宣称 U00 检查或能力门槛已通过。主会话在[工作台账](coordination/ledger.md)记录精确版本与证据。
+U00 已通过 [PR2](https://github.com/desanv01/mirofish-research-lab/pull/2) 合并：167 项继承/保护测试、源码清单和前端构建通过。U01a 已通过 [PR5](https://github.com/desanv01/mirofish-research-lab/pull/5) 合并：真实 Neo4j Community 配合合成模型通过17项知识测试，合并后 CI 也通过。模拟特征测试及安全实现继续进行。ZIP SHA-256 为 `d3bef0afea92b99626526ffcce0508414feb3f9e88c3edda1f283ce5f447bf53`，对应 Git 提交仍未知，不等同于观察到的上游 HEAD `39d849138ef254f6c737ab4c4705e5545dbe31d4`。主会话在[工作台账](coordination/ledger.md)记录精确版本及限制。
 
 ## Roadmap / 路线图
 
-- [ ] U00：源码来源、仓库说明和初始 CI 验收。
+- [x] U00：源码来源、仓库说明和初始 CI 验收。
 - [ ] U01–U03：刻画继承行为，验证无 Zep 密钥的 Graphiti/Neo4j 全流程。
 - [ ] U04–U10：持久化、证据、恢复、模拟与实验升级。
 - [ ] U11–U14：多语言、全本地模式、摄取和性能、发布验证。
