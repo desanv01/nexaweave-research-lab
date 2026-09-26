@@ -11,7 +11,7 @@ from graphiti_core.llm_client.client import LLMClient
 from graphiti_core.embedder.client import EmbedderClient
 from graphiti_core.cross_encoder.client import CrossEncoderClient
 
-from mirofish_knowledge.contracts import Layer, KnowledgeScope, OntologySpec, SourceEnvelope, SearchQuery
+from mirofish_knowledge.contracts import GraphPageRequest, Layer, KnowledgeScope, OntologySpec, SourceEnvelope, SearchQuery
 from mirofish_knowledge.provider import CommunityGraphiti, GraphitiKnowledgeProvider, OperationConflict, ReconciliationRequired
 from mirofish_knowledge.operations import request_fingerprint
 
@@ -194,3 +194,103 @@ async def test_read_only_completion_proof_rejects_partial_marker(provider, monke
             await provider.completion_proof(scope, source, ontology)
     finally:
         await marker()
+
+
+@pytest.mark.asyncio
+async def test_real_scoped_graph_enumeration_and_incomplete_episode(provider):
+    first_scope, first_source, first_ontology = fixture_data()
+    _, second_source, second_ontology = fixture_data(content="Lena Moss works for Summit Works.")
+    other_scope, other_source, other_ontology = fixture_data()
+    await provider.ingest(first_scope, first_source, first_ontology)
+    await provider.ingest(first_scope, second_source, second_ontology)
+    await provider.ingest(other_scope, other_source, other_ontology)
+
+    async def all_facts(scope, kind):
+        found, cursor = [], None
+        for _ in range(20):
+            page = await provider.page(scope, GraphPageRequest(kind=kind, limit=1, cursor=cursor))
+            found.extend(page.facts)
+            cursor = page.next_cursor
+            if cursor is None:
+                break
+        else:
+            pytest.fail("scoped page sequence did not terminate")
+        ids = [fact.provider_id for fact in found]
+        assert ids == sorted(ids) and len(ids) == len(set(ids))
+        assert all(fact.scope == scope and fact.episode_ids for fact in found)
+        return found
+
+    first = {kind: await all_facts(first_scope, kind) for kind in ("node", "edge", "episode")}
+    second = {kind: await all_facts(other_scope, kind) for kind in ("node", "edge", "episode")}
+    direct_queries = {
+        "node": "MATCH (n:Entity) WHERE n.group_id = $group_id RETURN n.uuid AS uuid",
+        "edge": "MATCH (a:Entity)-[r:RELATES_TO]->(b:Entity) WHERE r.group_id = $group_id AND a.group_id = $group_id AND b.group_id = $group_id RETURN r.uuid AS uuid",
+        "episode": "MATCH (e:Episodic) WHERE e.group_id = $group_id RETURN e.uuid AS uuid",
+    }
+    for current_scope, collected in ((first_scope, first), (other_scope, second)):
+        for kind, query in direct_queries.items():
+            direct = [row["uuid"] for row in await provider._rows(query, group_id=current_scope.group_id)]
+            paged = [fact.provider_id for fact in collected[kind]]
+            assert len(direct) == len(set(direct)) == len(paged)
+            assert set(direct) == set(paged)
+    assert len(first["episode"]) == 2 and len(second["episode"]) == 1
+    assert len(first["node"]) >= 2 and first["edge"]
+    assert second["node"] and second["edge"]
+    for kind in first:
+        assert not {fact.provider_id for fact in first[kind]} & {fact.provider_id for fact in second[kind]}
+    first_nodes = {fact.provider_id for fact in first["node"]}
+    second_nodes = {fact.provider_id for fact in second["node"]}
+    assert all(fact.source_node_id in first_nodes and fact.target_node_id in first_nodes for fact in first["edge"])
+    assert all(fact.source_node_id in second_nodes and fact.target_node_id in second_nodes for fact in second["edge"])
+
+    episode_id = str(first_scope.episode_uuid(first_source.operation_id))
+    try:
+        await provider._driver.execute_query(
+            "MATCH (o:MiroFishIngest {uuid: $uuid}) SET o.status = 'pending'", params={"uuid": episode_id})
+        with pytest.raises(ReconciliationRequired):
+            await all_facts(first_scope, "episode")
+    finally:
+        await provider._driver.execute_query(
+            "MATCH (o:MiroFishIngest {uuid: $uuid}) SET o.status = 'complete'", params={"uuid": episode_id})
+
+
+@pytest.mark.asyncio
+async def test_scoped_edge_page_excludes_cross_scope_endpoint(provider):
+    first_scope, first_source, first_ontology = fixture_data()
+    other_scope, other_source, other_ontology = fixture_data(content="Lena Moss works for Summit Works.")
+    await provider.ingest(first_scope, first_source, first_ontology)
+    await provider.ingest(other_scope, other_source, other_ontology)
+    first_node = (await provider.page(first_scope, GraphPageRequest(kind="node", limit=1))).facts[0].provider_id
+    other_node = (await provider.page(other_scope, GraphPageRequest(kind="node", limit=1))).facts[0].provider_id
+    cross_uuid = str(uuid4())
+    try:
+        records, _, _ = await provider._driver.execute_query(
+            "MATCH (a:Entity {uuid: $source_id, group_id: $source_group}), "
+            "(b:Entity {uuid: $target_id, group_id: $target_group}) "
+            "CREATE (a)-[r:RELATES_TO {uuid: $uuid, group_id: $source_group, "
+            "episodes: $episodes, name: 'CROSS_SCOPE_FIXTURE', fact: 'synthetic fixture edge'}]->(b) "
+            "RETURN r.uuid AS uuid",
+            params={"source_id": first_node, "source_group": first_scope.group_id,
+                    "target_id": other_node, "target_group": other_scope.group_id,
+                    "uuid": cross_uuid, "episodes": [str(first_scope.episode_uuid(first_source.operation_id))]},
+        )
+        assert [row["uuid"] for row in records] == [cross_uuid]
+        seen, cursor = [], None
+        for _ in range(20):
+            page = await provider.page(first_scope, GraphPageRequest(kind="edge", limit=1, cursor=cursor))
+            seen.extend(fact.provider_id for fact in page.facts)
+            cursor = page.next_cursor
+            if cursor is None:
+                break
+        else:
+            pytest.fail("edge page sequence did not terminate")
+        assert cross_uuid not in seen
+        direct = await provider._rows(
+            "MATCH (a:Entity)-[r:RELATES_TO]->(b:Entity) WHERE r.group_id = $group_id "
+            "AND a.group_id = $group_id AND b.group_id = $group_id RETURN r.uuid AS uuid",
+            group_id=first_scope.group_id,
+        )
+        assert set(seen) == {row["uuid"] for row in direct}
+    finally:
+        await provider._driver.execute_query(
+            "MATCH ()-[r:RELATES_TO {uuid: $uuid}]->() DELETE r", params={"uuid": cross_uuid})
