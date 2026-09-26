@@ -14,7 +14,8 @@
   User requests Fast mode for main and all new workers until revoked. Codex's
   default is already service_tier=priority; preserve it. Task creation has no
   explicit Fast-mode override, so no unsupported per-task assertion is made.
-- Main follow-up `mirofish-main-orchestration` is active every 15 minutes. Respect
+- Main follow-up `mirofish-main-orchestration` is active every 10 minutes (verified
+  from its current saved configuration). Respect
   future user pauses, product availability and usage limits; no 24/7 guarantee.
 - GitHub returned403 for private branch protection under the current plan.
   Keep private visibility. Main-controlled PR/CI/acceptance is procedural, not
@@ -27,6 +28,7 @@
 | U00 | 01a0dbb8-53e4-76e0-911f-14824a764e0f | _implementation_worktrees/u00 |
 | U01 | 01a0dbb8-8cdd-7063-ba8a-14753f6a585c | _implementation_worktrees/u01 |
 | U02 | 01a0dbc4-d633-7732-a922-e9a7ad5e82b6 | _implementation_worktrees/u02 |
+| U03 | 01a0dbe3-ed5b-7f51-a339-3b09cdd02fe6 | _implementation_worktrees/u03 |
 
 U00 PR: https://github.com/desanv01/mirofish-research-lab/pull/2.
 U00 delivery accepted at merge1166188b2d5dafbab178e72ac1b1cc130bb732f1;
