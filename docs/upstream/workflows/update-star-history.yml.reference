@@ -1,0 +1,322 @@
+name: Update Star History
+
+on:
+  schedule:
+    - cron: '17 3 1,16 * *'
+      timezone: 'UTC'
+  workflow_dispatch:
+permissions:
+  contents: read
+
+concurrency:
+  group: repository-star-history-${{ github.repository_id }}
+  cancel-in-progress: false
+
+jobs:
+  update-default-branch:
+    if: >-
+      ${{
+        github.repository == '666ghj/MiroFish' &&
+        github.ref_name == github.event.repository.default_branch &&
+        (
+          github.event_name == 'schedule' ||
+          (
+            github.event_name == 'workflow_dispatch' &&
+            github.actor_id == '110395318' &&
+            github.triggering_actor == '666ghj'
+          )
+        )
+      }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GIT_TERMINAL_PROMPT: '0'
+      EXPECTED_REPOSITORY: '666ghj/MiroFish'
+      EXPECTED_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+    steps:
+      - name: Fetch triggering public commit without credentials
+        shell: bash
+        env:
+          GITHUB_TOKEN: ''
+          GH_TOKEN: ''
+        run: |
+          set -euo pipefail
+          [[ "${GITHUB_REPOSITORY,,}" == "${EXPECTED_REPOSITORY,,}" ]]
+          [[ "$GITHUB_REF" == "refs/heads/$EXPECTED_DEFAULT_BRANCH" ]]
+          git init .
+          git remote add origin 'https://github.com/666ghj/MiroFish.git'
+          git \
+            -c credential.helper= \
+            -c http.followRedirects=false \
+            fetch \
+            --no-tags \
+            --depth=1 \
+            origin \
+            "$GITHUB_REF"
+          [[ "$(git rev-parse FETCH_HEAD)" == "$GITHUB_SHA" ]]
+          git -c core.hooksPath=/dev/null checkout --detach "$GITHUB_SHA"
+          [[ -z "$(git status --porcelain --untracked-files=all)" ]]
+
+      - name: Run Star History tests without tokens
+        env:
+          GITHUB_TOKEN: ''
+          GH_TOKEN: ''
+        run: >-
+          python3 -m unittest
+          tests.test_local_star_history
+          tests.test_local_star_count_fetch
+          -v
+
+      - name: Fetch aggregate Star count only
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          umask 077
+          printf '%s  %s\n' \
+            'dfe9e0060d9abb0b3e1cda61bd73bba77fe878815adcbea14601666dce30e927' \
+            'scripts/fetch_star_count.py' |
+            sha256sum --check --strict -
+          output="$RUNNER_TEMP/repository-star-count.txt"
+          [[ ! -e "$output" && ! -L "$output" ]]
+          python3 scripts/fetch_star_count.py > "$output"
+          [[ -f "$output" && ! -L "$output" ]]
+          (( $(wc -c < "$output") <= 32 ))
+          mapfile -t lines < "$output"
+          (( ${#lines[@]} == 1 ))
+          [[ "${lines[0]}" =~ ^[0-9]+$ ]]
+
+      - name: Record scheduled aggregate Star snapshot offline without tokens
+        shell: bash
+        env:
+          STAR_COUNT_FILE: ${{ runner.temp }}/repository-star-count.txt
+          GITHUB_TOKEN: ''
+          GH_TOKEN: ''
+        run: |
+          set -euo pipefail
+          trap 'rm -f -- "$STAR_COUNT_FILE"' EXIT
+          [[ -z "${GITHUB_TOKEN:-}" && -z "${GH_TOKEN:-}" ]]
+          python3 scripts/star_history.py record \
+            --count-file "$STAR_COUNT_FILE" \
+            --force
+
+      - name: Verify generated outputs without tokens
+        env:
+          GITHUB_TOKEN: ''
+          GH_TOKEN: ''
+        run: |
+          python3 scripts/star_history.py check
+          python3 -m unittest \
+            tests.test_local_star_history \
+            tests.test_local_star_count_fetch \
+            -v
+
+      - name: Commit exact output allowlist
+        id: commit
+        shell: bash
+        env:
+          GITHUB_TOKEN: ''
+          GH_TOKEN: ''
+        run: |
+          set -euo pipefail
+
+          allowed() {
+            case "$1" in
+              .github/star-history/history.json|\
+              static/image/star-history-light.svg|\
+              static/image/star-history-dark.svg) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+
+          bad=0
+          while IFS= read -r -d '' path; do
+            if ! allowed "$path"; then
+              printf '::error::Unexpected changed path: %q\n' "$path"
+              bad=1
+            fi
+          done < <(
+            git diff --name-only -z
+            git diff --cached --name-only -z
+            git ls-files --others --exclude-standard -z
+          )
+          (( bad == 0 )) || exit 1
+
+          for path in \
+            .github/star-history/history.json \
+            static/image/star-history-light.svg \
+            static/image/star-history-dark.svg
+          do
+            [[ -f "$path" && ! -L "$path" && -s "$path" ]] || {
+              printf '::error::Invalid output file: %s\n' "$path"
+              exit 1
+            }
+            [[ "$(realpath -e -- "$path")" == "$GITHUB_WORKSPACE/$path" ]] || {
+              printf '::error::Output escaped workspace: %s\n' "$path"
+              exit 1
+            }
+          done
+
+          git add -- \
+            .github/star-history/history.json \
+            static/image/star-history-light.svg \
+            static/image/star-history-dark.svg
+
+          if git diff --cached --quiet; then
+            printf 'created=false\n' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          count=0
+          while IFS= read -r -d '' path; do
+            allowed "$path" || exit 1
+            ((count += 1))
+          done < <(git diff --cached --name-only -z)
+          (( count > 0 )) || exit 1
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git \
+            -c commit.gpgsign=false \
+            -c core.hooksPath=/dev/null \
+            commit \
+            -m 'chore: update star history [skip ci]'
+          printf 'created=true\n' >> "$GITHUB_OUTPUT"
+
+      - name: Verify one allowlisted commit and unchanged main target
+        if: ${{ steps.commit.outputs.created == 'true' }}
+        shell: bash
+        env:
+          GITHUB_TOKEN: ''
+          GH_TOKEN: ''
+        run: |
+          set -euo pipefail
+
+          allowed() {
+            case "$1" in
+              .github/star-history/history.json|\
+              static/image/star-history-light.svg|\
+              static/image/star-history-dark.svg) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+
+          base="$GITHUB_SHA"
+          target_ref="$GITHUB_REF"
+          [[ "${GITHUB_REPOSITORY,,}" == "${EXPECTED_REPOSITORY,,}" ]]
+          [[ "$GITHUB_REF" == "refs/heads/$EXPECTED_DEFAULT_BRANCH" ]]
+          [[ "$(git rev-parse HEAD^)" == "$base" ]]
+          [[ "$(git rev-list --count "${base}..HEAD")" == 1 ]]
+          [[ -z "$(git status --porcelain --untracked-files=all)" ]]
+
+          origin="$(git remote get-url origin)"
+          case "$origin" in
+            https://github.com/666ghj/MiroFish|\
+            https://github.com/666ghj/MiroFish.git) ;;
+            *)
+              echo "::error::Unexpected origin"
+              exit 1
+              ;;
+          esac
+          mapfile -t push_urls < <(git remote get-url --push --all origin)
+          (( ${#push_urls[@]} == 1 ))
+          [[ "${push_urls[0]}" == "$origin" ]]
+
+          count=0
+          while IFS= read -r -d '' path; do
+            allowed "$path" || {
+              printf '::error::Unexpected committed path: %q\n' "$path"
+              exit 1
+            }
+            ((count += 1))
+          done < <(git diff-tree --no-commit-id --name-only -r -z HEAD)
+          (( count > 0 )) || exit 1
+
+          git \
+            -c credential.helper= \
+            -c http.followRedirects=false \
+            fetch \
+            --no-tags \
+            --depth=1 \
+            origin \
+            "$target_ref"
+          [[ "$(git rev-parse FETCH_HEAD)" == "$base" ]] || {
+            echo "::error::Target advanced; refusing to rebase or overwrite"
+            exit 1
+          }
+
+      - name: Push one allowlisted commit with an ephemeral credential
+        if: ${{ steps.commit.outputs.created == 'true' }}
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GIT_TERMINAL_PROMPT: '0'
+          GIT_TRACE: '0'
+          GIT_TRACE_CURL: '0'
+          GIT_TRACE_PACKET: '0'
+          GIT_CURL_VERBOSE: '0'
+        run: |
+          set -euo pipefail
+
+          allowed() {
+            case "$1" in
+              .github/star-history/history.json|\
+              static/image/star-history-light.svg|\
+              static/image/star-history-dark.svg) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+
+          base="$GITHUB_SHA"
+          [[ "${GITHUB_REPOSITORY,,}" == "${EXPECTED_REPOSITORY,,}" ]]
+          [[ "$GITHUB_REF" == "refs/heads/$EXPECTED_DEFAULT_BRANCH" ]]
+          [[ "$(git rev-parse HEAD^)" == "$base" ]]
+          [[ "$(git rev-list --count "${base}..HEAD")" == 1 ]]
+          [[ -z "$(git status --porcelain --untracked-files=all)" ]]
+
+          origin="$(git remote get-url origin)"
+          case "$origin" in
+            https://github.com/666ghj/MiroFish|\
+            https://github.com/666ghj/MiroFish.git) ;;
+            *)
+              echo "::error::Unexpected origin"
+              exit 1
+              ;;
+          esac
+          mapfile -t push_urls < <(git remote get-url --push --all origin)
+          (( ${#push_urls[@]} == 1 ))
+          [[ "${push_urls[0]}" == "$origin" ]]
+
+          count=0
+          while IFS= read -r -d '' path; do
+            allowed "$path" || {
+              printf '::error::Unexpected committed path: %q\n' "$path"
+              exit 1
+            }
+            ((count += 1))
+          done < <(git diff-tree --no-commit-id --name-only -r -z HEAD)
+          (( count > 0 )) || exit 1
+
+          [[ -n "$GITHUB_TOKEN" ]]
+          [[ "$GITHUB_TOKEN" != *$'\n'* && "$GITHUB_TOKEN" != *$'\r'* ]]
+          encoded="$(
+            printf 'x-access-token:%s' "$GITHUB_TOKEN" |
+              base64 |
+              tr -d '\n'
+          )"
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0="http.${origin}.extraheader"
+          export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $encoded"
+          unset encoded GITHUB_TOKEN
+          trap 'unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0' EXIT
+
+          git \
+            -c core.hooksPath=/dev/null \
+            -c credential.helper= \
+            push \
+            --porcelain \
+            origin \
+            "HEAD:$GITHUB_REF"
