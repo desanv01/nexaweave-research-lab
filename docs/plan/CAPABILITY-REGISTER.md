@@ -100,6 +100,15 @@ A proposal to switch Vue, Flask, OASIS, Graphiti/Neo4j, PyMuPDF or native persis
 
 ## Release interpretation
 
+Bounded accepted evidence (not full-row acceptance): U01a/PR5 demonstrates scoped
+real-Neo4j ingestion/search with synthetic models for portions of C03–C06/C25.
+U01b/PR6 adds actual native SQLite action primitives for C13/C14, application
+schedules for C16, serializers/logs and file interview transport for C09/C20/C21.
+U02a/PR7 adds static filesystem-boundary regressions relevant to C24/C30/C42.
+It does not implement authentication/ownership (C30), autonomous simulations,
+live interviews or complete research quality. Main records exact revisions in
+coordination/reviews and keeps full capability gates open.
+
 Full parity means all P rows are accepted in the primary self-hosted hybrid profile. Full private parity requires the relevant same rows accepted in local mode as well. Only a clearly named restricted preview may ship with a narrower profile; it is not the completed project. Main's acceptance record is tied to a commit and environment, not a percentage of vaguely checked boxes.
 
 

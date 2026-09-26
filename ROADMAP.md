@@ -5,8 +5,8 @@ The [approved master plan](docs/plan/MASTER-PLAN.md) defines all gates. Source-o
 | Phase | Scope and gate | Status |
 | --- | --- | --- |
 | U00 | Traceable source import, attribution, repository delivery and initial CI | Accepted; PR [#2](https://github.com/desanv01/mirofish-research-lab/pull/2), merge1166188 |
-| U01 | Characterization, fixtures, Graphiti/Neo4j compatibility and contract | U01a accepted PR5/merge e4eafb2; characterization and live qualification remain |
-| U02 | Local security patches and access isolation | U02a filesystem boundary implementation; other security gates open |
+| U01 | Characterization, fixtures, Graphiti/Neo4j compatibility and contract | U01a/U01b accepted PR5/PR6; research characterization and live qualification remain |
+| U02 | Local security patches and access isolation | U02a accepted PR7; IPC implementation and other security gates remain open |
 | U03 | Complete Graphiti provider cutover; inherited workflow without Zep credentials | Planned |
 | U04 | Persistence and evidence authority | Planned |
 | U05 | Durable execution, accounting and cancellation | Planned |

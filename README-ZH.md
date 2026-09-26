@@ -112,6 +112,8 @@ tools/                清单检查器、精简 CI 依赖与单元测试启动器
 
 ## Current status / 当前状态
 
+U01b（[PR6](https://github.com/desanv01/mirofish-research-lab/pull/6)）及 U02a 文件路径安全补丁（[PR7](https://github.com/desanv01/mirofish-research-lab/pull/7)）也已合并。集成及合并后 CI 通过222项 Linux 测试、17项真实 Neo4j/合成模型测试、3项 Windows/SQLite 原生动作测试、源码清单与前端构建。这不代表完整模拟、安全或无 Zep 全流程已验收；IPC 加固和调查报告特征测试仍在进行。
+
 U00 已通过 [PR2](https://github.com/desanv01/mirofish-research-lab/pull/2) 合并：167 项继承/保护测试、源码清单和前端构建通过。U01a 已通过 [PR5](https://github.com/desanv01/mirofish-research-lab/pull/5) 合并：真实 Neo4j Community 配合合成模型通过17项知识测试，合并后 CI 也通过。模拟特征测试及安全实现继续进行。ZIP SHA-256 为 `d3bef0afea92b99626526ffcce0508414feb3f9e88c3edda1f283ce5f447bf53`，对应 Git 提交仍未知，不等同于观察到的上游 HEAD `39d849138ef254f6c737ab4c4705e5545dbe31d4`。主会话在[工作台账](coordination/ledger.md)记录精确版本及限制。
 
 ## Roadmap / 路线图
