@@ -84,3 +84,19 @@ jobs:
       - name: Remove only this job's disposable database
         if: always()
         run: docker compose -f infra/compose.knowledge-test.yml down -v
+
+  native-engine-windows:
+    name: native-engine-windows
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          version: '0.11.25'
+      - name: Install inherited locked backend runtime
+        run: uv sync --project backend --frozen --extra dev --python 3.12.13
+      - name: Verify native imports without credentials or downloads
+        run: backend/.venv/Scripts/python.exe tools/check_engine_imports.py
+      - name: Exercise actual native action primitives with temporary SQLite
+        run: backend/.venv/Scripts/python.exe tools/run_engine_tests.py

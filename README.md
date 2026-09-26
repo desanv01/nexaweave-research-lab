@@ -2,13 +2,13 @@
 
 **An attributed MiroFish research workbench being upgraded for self-hosted knowledge and evidence-aware simulation.**
 
-![Status: source imported](https://img.shields.io/badge/status-source%20imported-8a6d3b) ![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue) ![Phase: U00](https://img.shields.io/badge/phase-U00-lightgrey)
+![Status: implementation](https://img.shields.io/badge/status-implementation-8a6d3b) ![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue) ![Phase: U01–U02](https://img.shields.io/badge/phase-U01--U02-lightgrey)
 
 [简体中文](README-ZH.md) · [Development notes](docs/development.md) · [Roadmap](ROADMAP.md)
 
 This repository retains MiroFish's Vue, Flask, OASIS/CAMEL and investigative workflow as the source base. The approved target uses Graphiti with self-hosted Neo4j Community for the knowledge graph. Paid model APIs may be used later with explicit configuration and limits.
 
-> **Project status — U00 source import, unqualified.** The imported application still calls Zep Cloud. Graphiti/Neo4j is the implementation target, not an already working replacement. No complete Zep-free run, security hardening, release package or supported deployment is claimed. Do not expose the inherited baseline to a network or real research data. The CI profile below exercises fixture/unit code and a frontend build only.
+> **Project status — U00 accepted; U01–U02 in progress.** The isolated Graphiti/Neo4j compatibility package passes real-database tests with synthetic models. The imported application still calls Zep Cloud; its provider cutover is not complete. No complete Zep-free run, security qualification, release package or supported deployment is claimed. Do not expose the inherited baseline to a network or real research data. See [knowledge qualification](docs/knowledge-compatibility.md) for the bounded database test profile.
 
 ---
 
@@ -112,11 +112,11 @@ The manifest checker reports missing or changed imported files; reviewed changes
 
 ## Current status
 
-U00 is implementing repository delivery against import base `c63c78e1229495894beeec68931bd355084b0da8`. The ZIP SHA-256 is `d3bef0afea92b99626526ffcce0508414feb3f9e88c3edda1f283ce5f447bf53`; its Git commit is unknown. The observed upstream head `39d849138ef254f6c737ab4c4705e5545dbe31d4` is a separate reference and has **not** been equated to the ZIP. No U00 checks or capability gates are declared accepted in this README. Main records exact revision and verification evidence in the [ledger](coordination/ledger.md).
+U00 merged in [PR2](https://github.com/desanv01/mirofish-research-lab/pull/2): 167 inherited/guard tests, source manifest and frontend build passed. U01a merged in [PR5](https://github.com/desanv01/mirofish-research-lab/pull/5): 17 knowledge tests passed against real Neo4j Community with synthetic model clients; post-merge CI also passed. Simulation characterization and security implementation continue. The ZIP SHA-256 is `d3bef0afea92b99626526ffcce0508414feb3f9e88c3edda1f283ce5f447bf53`; its Git commit remains unknown and is not equated with observed upstream HEAD `39d849138ef254f6c737ab4c4705e5545dbe31d4`. Main records exact revisions and limitations in the [ledger](coordination/ledger.md).
 
 ## Roadmap
 
-- [ ] U00: source provenance, repository presentation and initial CI accepted.
+- [x] U00: source provenance, repository presentation and initial CI accepted.
 - [ ] U01–U03: characterize inherited behavior and qualify full Graphiti/Neo4j operation without a Zep key.
 - [ ] U04–U10: persistence, evidence, recovery, simulation and experiment upgrades.
 - [ ] U11–U14: languages, local mode, ingestion/performance and release qualification.

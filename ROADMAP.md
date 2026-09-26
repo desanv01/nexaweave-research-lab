@@ -1,12 +1,12 @@
 # Roadmap
 
-The [approved master plan](docs/plan/MASTER-PLAN.md) defines all gates. No phase below is marked accepted by this document. Source-observed behavior, implementation and accepted evidence are distinct states in the [capability register](docs/plan/CAPABILITY-REGISTER.md) and main ledger.
+The [approved master plan](docs/plan/MASTER-PLAN.md) defines all gates. Source-observed behavior, implementation and accepted evidence are distinct states in the [capability register](docs/plan/CAPABILITY-REGISTER.md) and main ledger.
 
 | Phase | Scope and gate | Status |
 | --- | --- | --- |
-| U00 | Traceable source import, attribution, repository delivery and initial CI | In progress; PR [#2](https://github.com/desanv01/mirofish-research-lab/pull/2) |
-| U01 | Characterization, fixtures, Graphiti/Neo4j compatibility and contract | Planned |
-| U02 | Local security patches and access isolation | Planned |
+| U00 | Traceable source import, attribution, repository delivery and initial CI | Accepted; PR [#2](https://github.com/desanv01/mirofish-research-lab/pull/2), merge1166188 |
+| U01 | Characterization, fixtures, Graphiti/Neo4j compatibility and contract | U01a accepted PR5/merge e4eafb2; characterization and live qualification remain |
+| U02 | Local security patches and access isolation | U02a filesystem boundary implementation; other security gates open |
 | U03 | Complete Graphiti provider cutover; inherited workflow without Zep credentials | Planned |
 | U04 | Persistence and evidence authority | Planned |
 | U05 | Durable execution, accounting and cancellation | Planned |
