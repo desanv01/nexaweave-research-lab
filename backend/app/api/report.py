@@ -7,8 +7,43 @@ import os
 import traceback
 import threading
 from flask import request, jsonify, send_file
-
 from . import report_bp
+from ..utils.safe_paths import InvalidResourcePath, validate_resource_id, safe_flat_report_path, safe_path
+
+
+@report_bp.before_request
+def _validate_storage_ids():
+    route_values = request.view_args or {}
+    values = [(key, value) for key, value in route_values.items()
+              if key in {'report_id', 'simulation_id'}]
+    body = request.get_json(silent=True)
+    if isinstance(body, dict):
+        values.extend((key, value) for key, value in body.items()
+                      if key in {'report_id', 'simulation_id'})
+    values.extend((key, value) for key, value in request.args.items()
+                  if key in {'report_id', 'simulation_id'})
+    try:
+        if 'section_index' in route_values and not 1 <= route_values['section_index'] <= 999:
+            raise InvalidResourcePath('Invalid resource path')
+        for key, value in values:
+            validate_resource_id(value)
+            if key == 'report_id':
+                for parts in ((), ('meta.json',), ('full_report.md',),
+                              ('outline.json',), ('progress.json',),
+                              ('agent_log.jsonl',), ('console_log.txt',)):
+                    safe_path(ReportManager.REPORTS_DIR, value, *parts)
+                safe_flat_report_path(ReportManager.REPORTS_DIR, value, '.json')
+                safe_flat_report_path(ReportManager.REPORTS_DIR, value, '.md')
+                if 'section_index' in route_values:
+                    ReportManager._get_section_path(value, route_values['section_index'])
+    except InvalidResourcePath:
+        return jsonify({'success': False, 'error': 'Invalid resource path'}), 400
+
+
+@report_bp.errorhandler(InvalidResourcePath)
+def _invalid_storage_path(_error):
+    return jsonify({'success': False, 'error': 'Invalid resource path'}), 400
+
 from ..config import Config
 from ..services.report_agent import ReportAgent, ReportManager, ReportStatus
 from ..services.simulation_manager import SimulationManager
@@ -285,6 +320,8 @@ def generate_report():
                             task_id,
                             report.error or t('api.reportGenerateFailed')
                         )
+                except InvalidResourcePath:
+                    raise
                 except Exception as e:
                     logger.error(f"报告生成失败: {str(e)}")
                     task_manager.fail_task(task_id, str(e))
@@ -294,6 +331,8 @@ def generate_report():
             try:
                 thread = threading.Thread(target=run_generate, daemon=True)
                 thread.start()
+            except InvalidResourcePath:
+                raise
             except Exception:
                 unregister_graph_reader(graph_id, report_id)
                 raise
@@ -310,6 +349,8 @@ def generate_report():
             }
         })
         
+    except InvalidResourcePath:
+        raise
     except Exception as e:
         logger.error(f"启动报告生成任务失败: {str(e)}")
         return jsonify({
@@ -383,6 +424,8 @@ def get_generate_status():
             "data": task.to_dict()
         })
         
+    except InvalidResourcePath:
+        raise
     except Exception as e:
         logger.error(f"查询任务状态失败: {str(e)}")
         return jsonify({
@@ -426,6 +469,8 @@ def get_report(report_id: str):
             "data": report.to_dict()
         })
         
+    except InvalidResourcePath:
+        raise
     except Exception as e:
         logger.error(f"获取报告失败: {str(e)}")
         return jsonify({
@@ -465,6 +510,8 @@ def get_report_by_simulation(simulation_id: str):
             "has_report": True
         })
         
+    except InvalidResourcePath:
+        raise
     except Exception as e:
         logger.error(f"获取报告失败: {str(e)}")
         return jsonify({
@@ -505,6 +552,8 @@ def list_reports():
             "count": len(reports)
         })
         
+    except InvalidResourcePath:
+        raise
     except Exception as e:
         logger.error(f"列出报告失败: {str(e)}")
         return jsonify({
@@ -551,6 +600,8 @@ def download_report(report_id: str):
             download_name=f"{report_id}.md"
         )
         
+    except InvalidResourcePath:
+        raise
     except Exception as e:
         logger.error(f"下载报告失败: {str(e)}")
         return jsonify({
@@ -577,6 +628,8 @@ def delete_report(report_id: str):
             "message": t('api.reportDeleted', id=report_id)
         })
         
+    except InvalidResourcePath:
+        raise
     except Exception as e:
         logger.error(f"删除报告失败: {str(e)}")
         return jsonify({
@@ -674,6 +727,8 @@ def chat_with_report_agent():
             "data": result
         })
         
+    except InvalidResourcePath:
+        raise
     except Exception as e:
         logger.error(f"对话失败: {str(e)}")
         return jsonify({
@@ -717,6 +772,8 @@ def get_report_progress(report_id: str):
             "data": progress
         })
         
+    except InvalidResourcePath:
+        raise
     except Exception as e:
         logger.error(f"获取报告进度失败: {str(e)}")
         return jsonify({
@@ -768,6 +825,8 @@ def get_report_sections(report_id: str):
             }
         })
         
+    except InvalidResourcePath:
+        raise
     except Exception as e:
         logger.error(f"获取章节列表失败: {str(e)}")
         return jsonify({
@@ -812,6 +871,8 @@ def get_single_section(report_id: str, section_index: int):
             }
         })
         
+    except InvalidResourcePath:
+        raise
     except Exception as e:
         logger.error(f"获取章节内容失败: {str(e)}")
         return jsonify({
@@ -863,6 +924,8 @@ def check_report_status(simulation_id: str):
             }
         })
         
+    except InvalidResourcePath:
+        raise
     except Exception as e:
         logger.error(f"检查报告状态失败: {str(e)}")
         return jsonify({
@@ -924,6 +987,8 @@ def get_agent_log(report_id: str):
             "data": log_data
         })
         
+    except InvalidResourcePath:
+        raise
     except Exception as e:
         logger.error(f"获取Agent日志失败: {str(e)}")
         return jsonify({
@@ -958,6 +1023,8 @@ def stream_agent_log(report_id: str):
             }
         })
         
+    except InvalidResourcePath:
+        raise
     except Exception as e:
         logger.error(f"获取Agent日志失败: {str(e)}")
         return jsonify({
@@ -1006,6 +1073,8 @@ def get_console_log(report_id: str):
             "data": log_data
         })
         
+    except InvalidResourcePath:
+        raise
     except Exception as e:
         logger.error(f"获取控制台日志失败: {str(e)}")
         return jsonify({
@@ -1040,6 +1109,8 @@ def stream_console_log(report_id: str):
             }
         })
         
+    except InvalidResourcePath:
+        raise
     except Exception as e:
         logger.error(f"获取控制台日志失败: {str(e)}")
         return jsonify({
@@ -1090,6 +1161,8 @@ def search_graph_tool():
             "data": result.to_dict()
         })
         
+    except InvalidResourcePath:
+        raise
     except Exception as e:
         logger.error(f"图谱搜索失败: {str(e)}")
         return jsonify({
@@ -1130,6 +1203,8 @@ def get_graph_statistics_tool():
             "data": result
         })
         
+    except InvalidResourcePath:
+        raise
     except Exception as e:
         logger.error(f"获取图谱统计失败: {str(e)}")
         return jsonify({

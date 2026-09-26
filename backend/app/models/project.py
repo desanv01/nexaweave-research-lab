@@ -12,6 +12,7 @@ from typing import Dict, Any, List, Optional
 from enum import Enum
 from dataclasses import dataclass, field, asdict
 from ..config import Config
+from ..utils.safe_paths import InvalidResourcePath, ensure_directory, safe_path, validate_tree
 
 
 class ProjectStatus(str, Enum):
@@ -118,22 +119,22 @@ class ProjectManager:
     @classmethod
     def _get_project_dir(cls, project_id: str) -> str:
         """获取项目目录路径"""
-        return os.path.join(cls.PROJECTS_DIR, project_id)
+        return safe_path(cls.PROJECTS_DIR, project_id)
     
     @classmethod
     def _get_project_meta_path(cls, project_id: str) -> str:
         """获取项目元数据文件路径"""
-        return os.path.join(cls._get_project_dir(project_id), 'project.json')
+        return safe_path(cls.PROJECTS_DIR, project_id, 'project.json')
     
     @classmethod
     def _get_project_files_dir(cls, project_id: str) -> str:
         """获取项目文件存储目录"""
-        return os.path.join(cls._get_project_dir(project_id), 'files')
+        return safe_path(cls.PROJECTS_DIR, project_id, 'files')
     
     @classmethod
     def _get_project_text_path(cls, project_id: str) -> str:
         """获取项目提取文本存储路径"""
-        return os.path.join(cls._get_project_dir(project_id), 'extracted_text.txt')
+        return safe_path(cls.PROJECTS_DIR, project_id, 'extracted_text.txt')
     
     @classmethod
     def create_project(cls, name: str = "Unnamed Project") -> Project:
@@ -162,8 +163,8 @@ class ProjectManager:
         # 创建项目目录结构
         project_dir = cls._get_project_dir(project_id)
         files_dir = cls._get_project_files_dir(project_id)
-        os.makedirs(project_dir, exist_ok=True)
-        os.makedirs(files_dir, exist_ok=True)
+        ensure_directory(cls.PROJECTS_DIR, project_id)
+        ensure_directory(cls.PROJECTS_DIR, project_id, 'files')
         
         # 保存项目元数据
         cls.save_project(project)
@@ -174,6 +175,8 @@ class ProjectManager:
     def save_project(cls, project: Project) -> None:
         """保存项目元数据"""
         project.updated_at = datetime.now().isoformat()
+        meta_path = cls._get_project_meta_path(project.project_id)
+        ensure_directory(cls.PROJECTS_DIR, project.project_id)
         meta_path = cls._get_project_meta_path(project.project_id)
         
         with open(meta_path, 'w', encoding='utf-8') as f:
@@ -215,7 +218,10 @@ class ProjectManager:
         
         projects = []
         for project_id in os.listdir(cls.PROJECTS_DIR):
-            project = cls.get_project(project_id)
+            try:
+                project = cls.get_project(project_id)
+            except InvalidResourcePath:
+                continue
             if project:
                 projects.append(project)
         
@@ -245,7 +251,7 @@ class ProjectManager:
         Returns:
             是否删除成功
         """
-        project_dir = cls._get_project_dir(project_id)
+        project_dir = validate_tree(cls.PROJECTS_DIR, project_id)
         
         if not os.path.exists(project_dir):
             return False
@@ -267,12 +273,15 @@ class ProjectManager:
             文件信息字典 {filename, path, size}
         """
         files_dir = cls._get_project_files_dir(project_id)
-        os.makedirs(files_dir, exist_ok=True)
         
         # 生成安全的文件名
         ext = os.path.splitext(original_filename)[1].lower()
+        if ext.lstrip('.') not in Config.ALLOWED_EXTENSIONS:
+            raise InvalidResourcePath("Invalid resource path")
         safe_filename = f"{uuid.uuid4().hex[:8]}{ext}"
-        file_path = os.path.join(files_dir, safe_filename)
+        file_path = safe_path(cls.PROJECTS_DIR, project_id, 'files', safe_filename)
+        ensure_directory(cls.PROJECTS_DIR, project_id, 'files')
+        file_path = safe_path(cls.PROJECTS_DIR, project_id, 'files', safe_filename)
         
         # 保存文件
         file_storage.save(file_path)
@@ -290,6 +299,8 @@ class ProjectManager:
     @classmethod
     def save_extracted_text(cls, project_id: str, text: str) -> None:
         """保存提取的文本"""
+        text_path = cls._get_project_text_path(project_id)
+        ensure_directory(cls.PROJECTS_DIR, project_id)
         text_path = cls._get_project_text_path(project_id)
         with open(text_path, 'w', encoding='utf-8') as f:
             f.write(text)
@@ -313,8 +324,12 @@ class ProjectManager:
         if not os.path.exists(files_dir):
             return []
         
-        return [
-            os.path.join(files_dir, f) 
-            for f in os.listdir(files_dir) 
-            if os.path.isfile(os.path.join(files_dir, f))
-        ]
+        paths = []
+        for filename in os.listdir(files_dir):
+            try:
+                path = safe_path(cls.PROJECTS_DIR, project_id, 'files', filename)
+            except InvalidResourcePath:
+                continue
+            if os.path.isfile(path):
+                paths.append(path)
+        return paths

@@ -22,6 +22,7 @@ from ..config import Config
 from ..utils.llm_client import LLMClient
 from ..utils.logger import get_logger
 from ..utils.locale import get_language_instruction, t
+from ..utils.safe_paths import InvalidResourcePath, ensure_directory, safe_flat_report_path, safe_path, validate_resource_id, validate_tree
 from .zep_tools import (
     ZepToolsService, 
     SearchResult, 
@@ -49,16 +50,14 @@ class ReportLogger:
             report_id: 报告ID，用于确定日志文件路径
         """
         self.report_id = report_id
-        self.log_file_path = os.path.join(
-            Config.UPLOAD_FOLDER, 'reports', report_id, 'agent_log.jsonl'
-        )
+        self.log_file_path = ReportManager._get_agent_log_path(report_id)
         self.start_time = datetime.now()
         self._ensure_log_file()
     
     def _ensure_log_file(self):
         """确保日志文件所在目录存在"""
-        log_dir = os.path.dirname(self.log_file_path)
-        os.makedirs(log_dir, exist_ok=True)
+        ReportManager._ensure_report_folder(self.report_id)
+        self.log_file_path = ReportManager._get_agent_log_path(self.report_id)
     
     def _get_elapsed_time(self) -> float:
         """获取从开始到现在的耗时（秒）"""
@@ -320,17 +319,15 @@ class ReportConsoleLogger:
             report_id: 报告ID，用于确定日志文件路径
         """
         self.report_id = report_id
-        self.log_file_path = os.path.join(
-            Config.UPLOAD_FOLDER, 'reports', report_id, 'console_log.txt'
-        )
+        self.log_file_path = ReportManager._get_console_log_path(report_id)
         self._ensure_log_file()
         self._file_handler = None
         self._setup_file_handler()
     
     def _ensure_log_file(self):
         """确保日志文件所在目录存在"""
-        log_dir = os.path.dirname(self.log_file_path)
-        os.makedirs(log_dir, exist_ok=True)
+        ReportManager._ensure_report_folder(self.report_id)
+        self.log_file_path = ReportManager._get_console_log_path(self.report_id)
     
     def _setup_file_handler(self):
         """设置文件处理器，将日志同时写入文件"""
@@ -1957,49 +1954,50 @@ class ReportManager:
     @classmethod
     def _get_report_folder(cls, report_id: str) -> str:
         """获取报告文件夹路径"""
-        return os.path.join(cls.REPORTS_DIR, report_id)
+        return safe_path(cls.REPORTS_DIR, report_id)
     
     @classmethod
     def _ensure_report_folder(cls, report_id: str) -> str:
         """确保报告文件夹存在并返回路径"""
         folder = cls._get_report_folder(report_id)
-        os.makedirs(folder, exist_ok=True)
-        return folder
+        return ensure_directory(cls.REPORTS_DIR, report_id)
     
     @classmethod
     def _get_report_path(cls, report_id: str) -> str:
         """获取报告元信息文件路径"""
-        return os.path.join(cls._get_report_folder(report_id), "meta.json")
+        return safe_path(cls.REPORTS_DIR, report_id, "meta.json")
     
     @classmethod
     def _get_report_markdown_path(cls, report_id: str) -> str:
         """获取完整报告Markdown文件路径"""
-        return os.path.join(cls._get_report_folder(report_id), "full_report.md")
+        return safe_path(cls.REPORTS_DIR, report_id, "full_report.md")
     
     @classmethod
     def _get_outline_path(cls, report_id: str) -> str:
         """获取大纲文件路径"""
-        return os.path.join(cls._get_report_folder(report_id), "outline.json")
+        return safe_path(cls.REPORTS_DIR, report_id, "outline.json")
     
     @classmethod
     def _get_progress_path(cls, report_id: str) -> str:
         """获取进度文件路径"""
-        return os.path.join(cls._get_report_folder(report_id), "progress.json")
+        return safe_path(cls.REPORTS_DIR, report_id, "progress.json")
     
     @classmethod
     def _get_section_path(cls, report_id: str, section_index: int) -> str:
         """获取章节Markdown文件路径"""
-        return os.path.join(cls._get_report_folder(report_id), f"section_{section_index:02d}.md")
+        if type(section_index) is not int or not 1 <= section_index <= 999:
+            raise InvalidResourcePath("Invalid resource path")
+        return safe_path(cls.REPORTS_DIR, report_id, f"section_{section_index:02d}.md")
     
     @classmethod
     def _get_agent_log_path(cls, report_id: str) -> str:
         """获取 Agent 日志文件路径"""
-        return os.path.join(cls._get_report_folder(report_id), "agent_log.jsonl")
+        return safe_path(cls.REPORTS_DIR, report_id, "agent_log.jsonl")
     
     @classmethod
     def _get_console_log_path(cls, report_id: str) -> str:
         """获取控制台日志文件路径"""
-        return os.path.join(cls._get_report_folder(report_id), "console_log.txt")
+        return safe_path(cls.REPORTS_DIR, report_id, "console_log.txt")
     
     @classmethod
     def get_console_log(cls, report_id: str, from_line: int = 0) -> Dict[str, Any]:
@@ -2158,7 +2156,9 @@ class ReportManager:
         Returns:
             保存的文件路径
         """
+        file_path = cls._get_section_path(report_id, section_index)
         cls._ensure_report_folder(report_id)
+        file_path = cls._get_section_path(report_id, section_index)
 
         # 构建章节Markdown内容 - 清理可能存在的重复标题
         cleaned_content = cls._clean_section_content(section.content, section.title)
@@ -2168,7 +2168,6 @@ class ReportManager:
 
         # 保存文件
         file_suffix = f"section_{section_index:02d}.md"
-        file_path = os.path.join(cls._get_report_folder(report_id), file_suffix)
         with open(file_path, 'w', encoding='utf-8') as f:
             f.write(md_content)
 
@@ -2298,7 +2297,13 @@ class ReportManager:
         sections = []
         for filename in sorted(os.listdir(folder)):
             if filename.startswith('section_') and filename.endswith('.md'):
-                file_path = os.path.join(folder, filename)
+                try:
+                    section_index = int(filename.removeprefix('section_').removesuffix('.md'))
+                    file_path = cls._get_section_path(report_id, section_index)
+                    if os.path.basename(file_path) != filename:
+                        continue
+                except (InvalidResourcePath, ValueError):
+                    continue
                 with open(file_path, 'r', encoding='utf-8') as f:
                     content = f.read()
 
@@ -2497,7 +2502,7 @@ class ReportManager:
         
         if not os.path.exists(path):
             # 兼容旧格式：检查直接存储在reports目录下的文件
-            old_path = os.path.join(cls.REPORTS_DIR, f"{report_id}.json")
+            old_path = safe_flat_report_path(cls.REPORTS_DIR, report_id, ".json")
             if os.path.exists(old_path):
                 path = old_path
             else:
@@ -2546,19 +2551,30 @@ class ReportManager:
     @classmethod
     def get_report_by_simulation(cls, simulation_id: str) -> Optional[Report]:
         """根据模拟ID获取报告"""
+        validate_resource_id(simulation_id)
         cls._ensure_reports_dir()
         
         for item in os.listdir(cls.REPORTS_DIR):
-            item_path = os.path.join(cls.REPORTS_DIR, item)
+            try:
+                item_path = (safe_flat_report_path(cls.REPORTS_DIR, item[:-5], ".json")
+                             if item.endswith('.json') else safe_path(cls.REPORTS_DIR, item))
+            except InvalidResourcePath:
+                continue
             # 新格式：文件夹
             if os.path.isdir(item_path):
-                report = cls.get_report(item)
+                try:
+                    report = cls.get_report(item)
+                except InvalidResourcePath:
+                    continue
                 if report and report.simulation_id == simulation_id:
                     return report
             # 兼容旧格式：JSON文件
             elif item.endswith('.json'):
                 report_id = item[:-5]
-                report = cls.get_report(report_id)
+                try:
+                    report = cls.get_report(report_id)
+                except InvalidResourcePath:
+                    continue
                 if report and report.simulation_id == simulation_id:
                     return report
         
@@ -2567,21 +2583,33 @@ class ReportManager:
     @classmethod
     def list_reports(cls, simulation_id: Optional[str] = None, limit: int = 50) -> List[Report]:
         """列出报告"""
+        if simulation_id is not None:
+            validate_resource_id(simulation_id)
         cls._ensure_reports_dir()
         
         reports = []
         for item in os.listdir(cls.REPORTS_DIR):
-            item_path = os.path.join(cls.REPORTS_DIR, item)
+            try:
+                item_path = (safe_flat_report_path(cls.REPORTS_DIR, item[:-5], ".json")
+                             if item.endswith('.json') else safe_path(cls.REPORTS_DIR, item))
+            except InvalidResourcePath:
+                continue
             # 新格式：文件夹
             if os.path.isdir(item_path):
-                report = cls.get_report(item)
+                try:
+                    report = cls.get_report(item)
+                except InvalidResourcePath:
+                    continue
                 if report:
                     if simulation_id is None or report.simulation_id == simulation_id:
                         reports.append(report)
             # 兼容旧格式：JSON文件
             elif item.endswith('.json'):
                 report_id = item[:-5]
-                report = cls.get_report(report_id)
+                try:
+                    report = cls.get_report(report_id)
+                except InvalidResourcePath:
+                    continue
                 if report:
                     if simulation_id is None or report.simulation_id == simulation_id:
                         reports.append(report)
@@ -2596,7 +2624,7 @@ class ReportManager:
         """删除报告（整个文件夹）"""
         import shutil
         
-        folder_path = cls._get_report_folder(report_id)
+        folder_path = validate_tree(cls.REPORTS_DIR, report_id)
         
         # 新格式：删除整个文件夹
         if os.path.exists(folder_path) and os.path.isdir(folder_path):
@@ -2606,8 +2634,8 @@ class ReportManager:
         
         # 兼容旧格式：删除单独的文件
         deleted = False
-        old_json_path = os.path.join(cls.REPORTS_DIR, f"{report_id}.json")
-        old_md_path = os.path.join(cls.REPORTS_DIR, f"{report_id}.md")
+        old_json_path = safe_flat_report_path(cls.REPORTS_DIR, report_id, ".json")
+        old_md_path = safe_flat_report_path(cls.REPORTS_DIR, report_id, ".md")
         
         if os.path.exists(old_json_path):
             os.remove(old_json_path)

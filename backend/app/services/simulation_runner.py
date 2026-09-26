@@ -19,6 +19,7 @@ from enum import Enum
 from queue import Queue
 
 from ..config import Config
+from ..utils.safe_paths import ensure_directory, safe_path
 from ..utils.logger import get_logger
 from ..utils.locale import get_locale, set_locale
 from ..utils.zep import (
@@ -227,6 +228,10 @@ class SimulationRunner:
     # 内存中的运行状态
     _run_states: Dict[str, SimulationRunState] = {}
     _processes: Dict[str, subprocess.Popen] = {}
+
+    @classmethod
+    def _run_path(cls, simulation_id: str, *parts: str) -> str:
+        return safe_path(cls.RUN_STATE_DIR, simulation_id, *parts)
     _action_queues: Dict[str, Queue] = {}
     _monitor_threads: Dict[str, threading.Thread] = {}
     _stdout_files: Dict[str, Any] = {}  # 存储 stdout 文件句柄
@@ -288,6 +293,7 @@ class SimulationRunner:
     @classmethod
     def get_run_state(cls, simulation_id: str) -> Optional[SimulationRunState]:
         """获取运行状态"""
+        cls._run_path(simulation_id, "run_state.json")
         if simulation_id in cls._run_states:
             return cls._run_states[simulation_id]
         
@@ -300,7 +306,7 @@ class SimulationRunner:
     @classmethod
     def _load_run_state(cls, simulation_id: str) -> Optional[SimulationRunState]:
         """从文件加载运行状态"""
-        state_file = os.path.join(cls.RUN_STATE_DIR, simulation_id, "run_state.json")
+        state_file = cls._run_path(simulation_id, "run_state.json")
         if not os.path.exists(state_file):
             return None
         
@@ -356,9 +362,8 @@ class SimulationRunner:
     @classmethod
     def _save_run_state(cls, state: SimulationRunState):
         """保存运行状态到文件"""
-        sim_dir = os.path.join(cls.RUN_STATE_DIR, state.simulation_id)
-        os.makedirs(sim_dir, exist_ok=True)
-        state_file = os.path.join(sim_dir, "run_state.json")
+        sim_dir = ensure_directory(cls.RUN_STATE_DIR, state.simulation_id)
+        state_file = cls._run_path(state.simulation_id, "run_state.json")
         
         data = state.to_detail_dict()
         
@@ -390,8 +395,12 @@ class SimulationRunner:
             SimulationRunState
         """
         # 加载模拟配置
-        sim_dir = os.path.join(cls.RUN_STATE_DIR, simulation_id)
-        config_path = os.path.join(sim_dir, "simulation_config.json")
+        sim_dir = cls._run_path(simulation_id)
+        config_path = cls._run_path(simulation_id, "simulation_config.json")
+        for parts in (("simulation.log",), ("twitter_simulation.db",),
+                      ("reddit_simulation.db",), ("twitter", "actions.jsonl"),
+                      ("reddit", "actions.jsonl")):
+            cls._run_path(simulation_id, *parts)
         
         if not os.path.exists(config_path):
             raise ValueError(f"模拟配置不存在，请先调用 /prepare 接口")
@@ -525,7 +534,7 @@ class SimulationRunner:
                 cmd.extend(["--max-rounds", str(max_rounds)])
             
             # 创建主日志文件，避免 stdout/stderr 管道缓冲区满导致进程阻塞
-            main_log_path = os.path.join(sim_dir, "simulation.log")
+            main_log_path = cls._run_path(simulation_id, "simulation.log")
             main_log_file = open(main_log_path, 'w', encoding='utf-8')
             
             # 设置子进程环境变量，确保 Windows 上使用 UTF-8 编码
@@ -620,11 +629,11 @@ class SimulationRunner:
     def _monitor_simulation(cls, simulation_id: str, locale: str = 'zh'):
         """监控模拟进程，解析动作日志"""
         set_locale(locale)
-        sim_dir = os.path.join(cls.RUN_STATE_DIR, simulation_id)
+        sim_dir = cls._run_path(simulation_id)
         
         # 新的日志结构：分平台的动作日志
-        twitter_actions_log = os.path.join(sim_dir, "twitter", "actions.jsonl")
-        reddit_actions_log = os.path.join(sim_dir, "reddit", "actions.jsonl")
+        twitter_actions_log = cls._run_path(simulation_id, "twitter", "actions.jsonl")
+        reddit_actions_log = cls._run_path(simulation_id, "reddit", "actions.jsonl")
         
         process = cls._processes.get(simulation_id)
         state = cls.get_run_state(simulation_id)
@@ -692,7 +701,7 @@ class SimulationRunner:
                         error_message = str(monitor_error)
                     elif not manual_stop and exit_code != 0:
                         desired_status = RunnerStatus.FAILED
-                        main_log_path = os.path.join(sim_dir, "simulation.log")
+                        main_log_path = cls._run_path(simulation_id, "simulation.log")
                         error_info = ""
                         try:
                             if os.path.exists(main_log_path):
@@ -888,9 +897,9 @@ class SimulationRunner:
         Returns:
             True 如果所有启用的平台都已完成
         """
-        sim_dir = os.path.join(cls.RUN_STATE_DIR, state.simulation_id)
-        twitter_log = os.path.join(sim_dir, "twitter", "actions.jsonl")
-        reddit_log = os.path.join(sim_dir, "reddit", "actions.jsonl")
+        sim_dir = cls._run_path(state.simulation_id)
+        twitter_log = cls._run_path(state.simulation_id, "twitter", "actions.jsonl")
+        reddit_log = cls._run_path(state.simulation_id, "reddit", "actions.jsonl")
         
         # 检查哪些平台被启用（通过文件是否存在判断）
         twitter_enabled = os.path.exists(twitter_log)
@@ -1172,11 +1181,11 @@ class SimulationRunner:
         Returns:
             完整的动作列表（按时间戳排序，新的在前）
         """
-        sim_dir = os.path.join(cls.RUN_STATE_DIR, simulation_id)
+        sim_dir = cls._run_path(simulation_id)
         actions = []
         
         # 读取 Twitter 动作文件（根据文件路径自动设置 platform 为 twitter）
-        twitter_actions_log = os.path.join(sim_dir, "twitter", "actions.jsonl")
+        twitter_actions_log = cls._run_path(simulation_id, "twitter", "actions.jsonl")
         if not platform or platform == "twitter":
             actions.extend(cls._read_actions_from_file(
                 twitter_actions_log,
@@ -1187,7 +1196,7 @@ class SimulationRunner:
             ))
         
         # 读取 Reddit 动作文件（根据文件路径自动设置 platform 为 reddit）
-        reddit_actions_log = os.path.join(sim_dir, "reddit", "actions.jsonl")
+        reddit_actions_log = cls._run_path(simulation_id, "reddit", "actions.jsonl")
         if not platform or platform == "reddit":
             actions.extend(cls._read_actions_from_file(
                 reddit_actions_log,
@@ -1199,7 +1208,7 @@ class SimulationRunner:
         
         # 如果分平台文件不存在，尝试读取旧的单一文件格式
         if not actions:
-            actions_log = os.path.join(sim_dir, "actions.jsonl")
+            actions_log = cls._run_path(simulation_id, "actions.jsonl")
             actions = cls._read_actions_from_file(
                 actions_log,
                 default_platform=None,  # 旧格式文件中应该有 platform 字段
@@ -1386,7 +1395,7 @@ class SimulationRunner:
         """
         import shutil
         
-        sim_dir = os.path.join(cls.RUN_STATE_DIR, simulation_id)
+        sim_dir = cls._run_path(simulation_id)
         
         if not os.path.exists(sim_dir):
             return {"success": True, "message": "模拟目录不存在，无需清理"}
@@ -1410,7 +1419,7 @@ class SimulationRunner:
         
         # 删除文件
         for filename in files_to_delete:
-            file_path = os.path.join(sim_dir, filename)
+            file_path = cls._run_path(simulation_id, filename)
             if os.path.exists(file_path):
                 try:
                     os.remove(file_path)
@@ -1420,9 +1429,9 @@ class SimulationRunner:
         
         # 清理平台目录中的动作日志
         for dir_name in dirs_to_clean:
-            dir_path = os.path.join(sim_dir, dir_name)
+            dir_path = cls._run_path(simulation_id, dir_name)
             if os.path.exists(dir_path):
-                actions_file = os.path.join(dir_path, "actions.jsonl")
+                actions_file = cls._run_path(simulation_id, dir_name, "actions.jsonl")
                 if os.path.exists(actions_file):
                     try:
                         os.remove(actions_file)
@@ -1647,7 +1656,7 @@ class SimulationRunner:
         Returns:
             True 表示环境存活，False 表示环境已关闭
         """
-        sim_dir = os.path.join(cls.RUN_STATE_DIR, simulation_id)
+        sim_dir = cls._run_path(simulation_id)
         if not os.path.exists(sim_dir):
             return False
 
@@ -1665,8 +1674,8 @@ class SimulationRunner:
         Returns:
             状态详情字典，包含 status, twitter_available, reddit_available, timestamp
         """
-        sim_dir = os.path.join(cls.RUN_STATE_DIR, simulation_id)
-        status_file = os.path.join(sim_dir, "env_status.json")
+        sim_dir = cls._run_path(simulation_id)
+        status_file = cls._run_path(simulation_id, "env_status.json")
         
         default_status = {
             "status": "stopped",
@@ -1719,7 +1728,7 @@ class SimulationRunner:
             ValueError: 模拟不存在或环境未运行
             TimeoutError: 等待响应超时
         """
-        sim_dir = os.path.join(cls.RUN_STATE_DIR, simulation_id)
+        sim_dir = cls._run_path(simulation_id)
         if not os.path.exists(sim_dir):
             raise ValueError(f"模拟不存在: {simulation_id}")
 
@@ -1781,7 +1790,7 @@ class SimulationRunner:
             ValueError: 模拟不存在或环境未运行
             TimeoutError: 等待响应超时
         """
-        sim_dir = os.path.join(cls.RUN_STATE_DIR, simulation_id)
+        sim_dir = cls._run_path(simulation_id)
         if not os.path.exists(sim_dir):
             raise ValueError(f"模拟不存在: {simulation_id}")
 
@@ -1838,12 +1847,12 @@ class SimulationRunner:
         Returns:
             全局采访结果字典
         """
-        sim_dir = os.path.join(cls.RUN_STATE_DIR, simulation_id)
+        sim_dir = cls._run_path(simulation_id)
         if not os.path.exists(sim_dir):
             raise ValueError(f"模拟不存在: {simulation_id}")
 
         # 从配置文件获取所有Agent信息
-        config_path = os.path.join(sim_dir, "simulation_config.json")
+        config_path = cls._run_path(simulation_id, "simulation_config.json")
         if not os.path.exists(config_path):
             raise ValueError(f"模拟配置不存在: {simulation_id}")
 
@@ -1891,7 +1900,7 @@ class SimulationRunner:
         Returns:
             操作结果字典
         """
-        sim_dir = os.path.join(cls.RUN_STATE_DIR, simulation_id)
+        sim_dir = cls._run_path(simulation_id)
         if not os.path.exists(sim_dir):
             raise ValueError(f"模拟不存在: {simulation_id}")
         
@@ -2002,7 +2011,7 @@ class SimulationRunner:
         Returns:
             Interview历史记录列表
         """
-        sim_dir = os.path.join(cls.RUN_STATE_DIR, simulation_id)
+        sim_dir = cls._run_path(simulation_id)
         
         results = []
         
@@ -2014,7 +2023,7 @@ class SimulationRunner:
             platforms = ["twitter", "reddit"]
         
         for p in platforms:
-            db_path = os.path.join(sim_dir, f"{p}_simulation.db")
+            db_path = cls._run_path(simulation_id, f"{p}_simulation.db")
             platform_results = cls._get_interview_history_from_db(
                 db_path=db_path,
                 platform_name=p,

@@ -7,8 +7,43 @@ import os
 import traceback
 from contextlib import nullcontext
 from flask import request, jsonify, send_file
-
 from . import simulation_bp
+from ..utils.safe_paths import InvalidResourcePath, validate_resource_id, safe_path
+
+
+@simulation_bp.before_request
+def _validate_storage_ids():
+    values = [(key, value) for key, value in (request.view_args or {}).items()
+              if key in {'simulation_id', 'project_id'}]
+    body = request.get_json(silent=True)
+    if isinstance(body, dict):
+        values.extend((key, value) for key, value in body.items()
+                      if key in {'simulation_id', 'project_id'})
+    values.extend((key, value) for key, value in request.args.items()
+                  if key in {'simulation_id', 'project_id'})
+    try:
+        for key, value in values:
+            validate_resource_id(value)
+            if key == 'simulation_id':
+                for parts in ((), ('state.json',), ('run_state.json',),
+                              ('simulation_config.json',), ('reddit_profiles.json',),
+                              ('twitter_profiles.csv',), ('simulation.log',),
+                              ('env_status.json',), ('twitter_simulation.db',),
+                              ('reddit_simulation.db',), ('twitter', 'actions.jsonl'),
+                              ('reddit', 'actions.jsonl')):
+                    safe_path(Config.OASIS_SIMULATION_DATA_DIR, value, *parts)
+        if request.endpoint in {'simulation.get_simulation_posts', 'simulation.get_simulation_comments'}:
+            platform = request.args.get('platform')
+            if platform is not None and platform not in {'twitter', 'reddit'}:
+                raise InvalidResourcePath('Invalid resource path')
+    except InvalidResourcePath:
+        return jsonify({'success': False, 'error': 'Invalid resource path'}), 400
+
+
+@simulation_bp.errorhandler(InvalidResourcePath)
+def _invalid_storage_path(_error):
+    return jsonify({'success': False, 'error': 'Invalid resource path'}), 400
+
 from ..config import Config
 from ..services.zep_entity_reader import ZepEntityReader
 from ..services.oasis_profile_generator import OasisProfileGenerator
@@ -23,6 +58,7 @@ from ..utils.logger import get_logger
 from ..utils.locale import t, get_locale, set_locale
 from ..utils.zep_lifecycle import get_graph_readers, graph_lifecycle_lock
 from ..models.project import ProjectManager
+from ..services.report_agent import ReportManager
 
 logger = get_logger('mirofish.api.simulation')
 
@@ -45,6 +81,8 @@ def _get_default_platform(simulation_id: str) -> str:
         state = manager._load_simulation_state(simulation_id)
         if state:
             return state.get_default_platform()
+    except InvalidResourcePath:
+        raise
     except Exception:
         pass
     return "reddit"
@@ -111,6 +149,8 @@ def get_graph_entities(graph_id: str):
             "data": result.to_dict()
         })
         
+    except InvalidResourcePath:
+        raise
     except Exception as e:
         logger.error(f"获取图谱实体失败: {str(e)}")
         return jsonify({
@@ -144,6 +184,8 @@ def get_entity_detail(graph_id: str, entity_uuid: str):
             "data": entity.to_dict()
         })
         
+    except InvalidResourcePath:
+        raise
     except Exception as e:
         logger.error(f"获取实体详情失败: {str(e)}")
         return jsonify({
@@ -181,6 +223,8 @@ def get_entities_by_type(graph_id: str, entity_type: str):
             }
         })
         
+    except InvalidResourcePath:
+        raise
     except Exception as e:
         logger.error(f"获取实体失败: {str(e)}")
         return jsonify({
@@ -258,6 +302,8 @@ def create_simulation():
             "data": state.to_dict()
         })
         
+    except InvalidResourcePath:
+        raise
     except Exception as e:
         logger.error(f"创建模拟失败: {str(e)}")
         return jsonify({
@@ -286,7 +332,7 @@ def _check_simulation_prepared(simulation_id: str) -> tuple:
     import os
     from ..config import Config
     
-    simulation_dir = os.path.join(Config.OASIS_SIMULATION_DATA_DIR, simulation_id)
+    simulation_dir = safe_path(Config.OASIS_SIMULATION_DATA_DIR, simulation_id)
     
     # 检查目录是否存在
     if not os.path.exists(simulation_dir):
@@ -304,7 +350,7 @@ def _check_simulation_prepared(simulation_id: str) -> tuple:
     existing_files = []
     missing_files = []
     for f in required_files:
-        file_path = os.path.join(simulation_dir, f)
+        file_path = safe_path(Config.OASIS_SIMULATION_DATA_DIR, simulation_id, f)
         if os.path.exists(file_path):
             existing_files.append(f)
         else:
@@ -318,7 +364,7 @@ def _check_simulation_prepared(simulation_id: str) -> tuple:
         }
     
     # 检查state.json中的状态
-    state_file = os.path.join(simulation_dir, "state.json")
+    state_file = safe_path(Config.OASIS_SIMULATION_DATA_DIR, simulation_id, "state.json")
     try:
         import json
         with open(state_file, 'r', encoding='utf-8') as f:
@@ -341,8 +387,8 @@ def _check_simulation_prepared(simulation_id: str) -> tuple:
         prepared_statuses = ["ready", "preparing", "running", "completed", "stopped", "failed"]
         if status in prepared_statuses and config_generated:
             # 获取文件统计信息
-            profiles_file = os.path.join(simulation_dir, "reddit_profiles.json")
-            config_file = os.path.join(simulation_dir, "simulation_config.json")
+            profiles_file = safe_path(Config.OASIS_SIMULATION_DATA_DIR, simulation_id, "reddit_profiles.json")
+            config_file = safe_path(Config.OASIS_SIMULATION_DATA_DIR, simulation_id, "simulation_config.json")
             
             profiles_count = 0
             if os.path.exists(profiles_file):
@@ -360,6 +406,8 @@ def _check_simulation_prepared(simulation_id: str) -> tuple:
                         json.dump(state_data, f, ensure_ascii=False, indent=2)
                     logger.info(f"自动更新模拟状态: {simulation_id} preparing -> ready")
                     status = "ready"
+                except InvalidResourcePath:
+                    raise
                 except Exception as e:
                     logger.warning(f"自动更新状态失败: {e}")
             
@@ -382,6 +430,8 @@ def _check_simulation_prepared(simulation_id: str) -> tuple:
                 "config_generated": config_generated
             }
             
+    except InvalidResourcePath:
+        raise
     except Exception as e:
         return False, {"reason": f"读取状态文件失败: {str(e)}"}
 
@@ -513,6 +563,8 @@ def prepare_simulation():
             state.entities_count = filtered_preview.filtered_count
             state.entity_types = list(filtered_preview.entity_types)
             logger.info(f"预期实体数量: {filtered_preview.filtered_count}, 类型: {filtered_preview.entity_types}")
+        except InvalidResourcePath:
+            raise
         except Exception as e:
             logger.warning(f"同步获取实体数量失败（将在后台任务中重试）: {e}")
             # 失败不影响后续流程，后台任务会重新获取
@@ -631,6 +683,8 @@ def prepare_simulation():
                         result=result_state.to_simple_dict()
                     )
                 
+            except InvalidResourcePath:
+                raise
             except Exception as e:
                 logger.error(f"准备模拟失败: {str(e)}")
                 task_manager.fail_task(task_id, str(e))
@@ -665,6 +719,8 @@ def prepare_simulation():
             "error": str(e)
         }), 404
         
+    except InvalidResourcePath:
+        raise
     except Exception as e:
         logger.error(f"启动准备任务失败: {str(e)}")
         return jsonify({
@@ -779,6 +835,8 @@ def get_prepare_status():
             "data": task_dict
         })
         
+    except InvalidResourcePath:
+        raise
     except Exception as e:
         logger.error(f"查询任务状态失败: {str(e)}")
         return jsonify({
@@ -811,6 +869,8 @@ def get_simulation(simulation_id: str):
             "data": result
         })
         
+    except InvalidResourcePath:
+        raise
     except Exception as e:
         logger.error(f"获取模拟状态失败: {str(e)}")
         return jsonify({
@@ -840,6 +900,8 @@ def list_simulations():
             "count": len(simulations)
         })
         
+    except InvalidResourcePath:
+        raise
     except Exception as e:
         logger.error(f"列出模拟失败: {str(e)}")
         return jsonify({
@@ -867,7 +929,7 @@ def _get_report_id_for_simulation(simulation_id: str) -> str:
     
     # reports 目录路径：backend/uploads/reports
     # __file__ 是 app/api/simulation.py，需要向上两级到 backend/
-    reports_dir = os.path.join(os.path.dirname(__file__), '../../uploads/reports')
+    reports_dir = ReportManager.REPORTS_DIR
     if not os.path.exists(reports_dir):
         return None
     
@@ -875,11 +937,17 @@ def _get_report_id_for_simulation(simulation_id: str) -> str:
     
     try:
         for report_folder in os.listdir(reports_dir):
-            report_path = os.path.join(reports_dir, report_folder)
+            try:
+                report_path = safe_path(reports_dir, report_folder)
+            except InvalidResourcePath:
+                continue
             if not os.path.isdir(report_path):
                 continue
             
-            meta_file = os.path.join(report_path, "meta.json")
+            try:
+                meta_file = safe_path(reports_dir, report_folder, "meta.json")
+            except InvalidResourcePath:
+                continue
             if not os.path.exists(meta_file):
                 continue
             
@@ -893,6 +961,8 @@ def _get_report_id_for_simulation(simulation_id: str) -> str:
                         "created_at": meta.get("created_at", ""),
                         "status": meta.get("status", "")
                     })
+            except InvalidResourcePath:
+                raise
             except Exception:
                 continue
         
@@ -903,6 +973,8 @@ def _get_report_id_for_simulation(simulation_id: str) -> str:
         matching_reports.sort(key=lambda x: x.get("created_at", ""), reverse=True)
         return matching_reports[0].get("report_id")
         
+    except InvalidResourcePath:
+        raise
     except Exception as e:
         logger.warning(f"查找 simulation {simulation_id} 的 report 失败: {e}")
         return None
@@ -1013,6 +1085,8 @@ def get_simulation_history():
             "count": len(enriched_simulations)
         })
         
+    except InvalidResourcePath:
+        raise
     except Exception as e:
         logger.error(f"获取历史模拟失败: {str(e)}")
         return jsonify({
@@ -1051,6 +1125,8 @@ def get_simulation_profiles(simulation_id: str):
             "error": str(e)
         }), 404
         
+    except InvalidResourcePath:
+        raise
     except Exception as e:
         logger.error(f"获取Profile失败: {str(e)}")
         return jsonify({
@@ -1096,7 +1172,7 @@ def get_simulation_profiles_realtime(simulation_id: str):
         platform = request.args.get('platform') or _get_default_platform(simulation_id)
 
         # 获取模拟目录
-        sim_dir = os.path.join(Config.OASIS_SIMULATION_DATA_DIR, simulation_id)
+        sim_dir = safe_path(Config.OASIS_SIMULATION_DATA_DIR, simulation_id)
         
         if not os.path.exists(sim_dir):
             return jsonify({
@@ -1106,9 +1182,9 @@ def get_simulation_profiles_realtime(simulation_id: str):
         
         # 确定文件路径
         if platform == "reddit":
-            profiles_file = os.path.join(sim_dir, "reddit_profiles.json")
+            profiles_file = safe_path(Config.OASIS_SIMULATION_DATA_DIR, simulation_id, "reddit_profiles.json")
         else:
-            profiles_file = os.path.join(sim_dir, "twitter_profiles.csv")
+            profiles_file = safe_path(Config.OASIS_SIMULATION_DATA_DIR, simulation_id, "twitter_profiles.csv")
         
         # 检查文件是否存在
         file_exists = os.path.exists(profiles_file)
@@ -1138,7 +1214,7 @@ def get_simulation_profiles_realtime(simulation_id: str):
         status = None
         error = None
         
-        state_file = os.path.join(sim_dir, "state.json")
+        state_file = safe_path(Config.OASIS_SIMULATION_DATA_DIR, simulation_id, "state.json")
         if os.path.exists(state_file):
             try:
                 with open(state_file, 'r', encoding='utf-8') as f:
@@ -1147,6 +1223,8 @@ def get_simulation_profiles_realtime(simulation_id: str):
                     is_generating = status == "preparing"
                     total_expected = state_data.get("entities_count")
                     error = state_data.get("error")
+            except InvalidResourcePath:
+                raise
             except Exception:
                 pass
         
@@ -1166,6 +1244,8 @@ def get_simulation_profiles_realtime(simulation_id: str):
             }
         })
         
+    except InvalidResourcePath:
+        raise
     except Exception as e:
         logger.error(f"实时获取Profile失败: {str(e)}")
         return jsonify({
@@ -1204,7 +1284,7 @@ def get_simulation_config_realtime(simulation_id: str):
     
     try:
         # 获取模拟目录
-        sim_dir = os.path.join(Config.OASIS_SIMULATION_DATA_DIR, simulation_id)
+        sim_dir = safe_path(Config.OASIS_SIMULATION_DATA_DIR, simulation_id)
         
         if not os.path.exists(sim_dir):
             return jsonify({
@@ -1213,7 +1293,7 @@ def get_simulation_config_realtime(simulation_id: str):
             }), 404
         
         # 配置文件路径
-        config_file = os.path.join(sim_dir, "simulation_config.json")
+        config_file = safe_path(Config.OASIS_SIMULATION_DATA_DIR, simulation_id, "simulation_config.json")
         
         # 检查文件是否存在
         file_exists = os.path.exists(config_file)
@@ -1240,7 +1320,7 @@ def get_simulation_config_realtime(simulation_id: str):
         profiles_generated = False
         config_generated = False
         
-        state_file = os.path.join(sim_dir, "state.json")
+        state_file = safe_path(Config.OASIS_SIMULATION_DATA_DIR, simulation_id, "state.json")
         if os.path.exists(state_file):
             try:
                 with open(state_file, 'r', encoding='utf-8') as f:
@@ -1261,6 +1341,8 @@ def get_simulation_config_realtime(simulation_id: str):
                         generation_stage = "completed"
                     elif status == "failed":
                         generation_stage = "failed"
+            except InvalidResourcePath:
+                raise
             except Exception:
                 pass
         
@@ -1296,6 +1378,8 @@ def get_simulation_config_realtime(simulation_id: str):
             "data": response_data
         })
         
+    except InvalidResourcePath:
+        raise
     except Exception as e:
         logger.error(f"实时获取Config失败: {str(e)}")
         return jsonify({
@@ -1332,6 +1416,8 @@ def get_simulation_config(simulation_id: str):
             "data": config
         })
         
+    except InvalidResourcePath:
+        raise
     except Exception as e:
         logger.error(f"获取配置失败: {str(e)}")
         return jsonify({
@@ -1347,7 +1433,7 @@ def download_simulation_config(simulation_id: str):
     try:
         manager = SimulationManager()
         sim_dir = manager._get_simulation_dir(simulation_id)
-        config_path = os.path.join(sim_dir, "simulation_config.json")
+        config_path = safe_path(Config.OASIS_SIMULATION_DATA_DIR, simulation_id, "simulation_config.json")
         
         if not os.path.exists(config_path):
             return jsonify({
@@ -1361,6 +1447,8 @@ def download_simulation_config(simulation_id: str):
             download_name="simulation_config.json"
         )
         
+    except InvalidResourcePath:
+        raise
     except Exception as e:
         logger.error(f"下载配置失败: {str(e)}")
         return jsonify({
@@ -1413,6 +1501,8 @@ def download_simulation_script(script_name: str):
             download_name=script_name
         )
         
+    except InvalidResourcePath:
+        raise
     except Exception as e:
         logger.error(f"下载脚本失败: {str(e)}")
         return jsonify({
@@ -1487,6 +1577,8 @@ def generate_profiles():
             }
         })
         
+    except InvalidResourcePath:
+        raise
     except Exception as e:
         logger.error(f"生成Profile失败: {str(e)}")
         return jsonify({
@@ -1638,6 +1730,8 @@ def start_simulation():
                             "pending": True,
                             "error": str(error),
                         }), 409
+                    except InvalidResourcePath:
+                        raise
                     except Exception as error:
                         return jsonify({
                             "success": False,
@@ -1776,6 +1870,8 @@ def start_simulation():
             "error": str(e)
         }), 400
         
+    except InvalidResourcePath:
+        raise
     except Exception as e:
         logger.error(f"启动模拟失败: {str(e)}")
         return jsonify({
@@ -1843,6 +1939,8 @@ def stop_simulation():
             "error": str(e)
         }), 400
         
+    except InvalidResourcePath:
+        raise
     except Exception as e:
         logger.error(f"停止模拟失败: {str(e)}")
         simulation_id = (request.get_json(silent=True) or {}).get('simulation_id')
@@ -1911,6 +2009,8 @@ def get_run_status(simulation_id: str):
             "data": run_state.to_dict()
         })
         
+    except InvalidResourcePath:
+        raise
     except Exception as e:
         logger.error(f"获取运行状态失败: {str(e)}")
         return jsonify({
@@ -2012,6 +2112,8 @@ def get_run_status_detail(simulation_id: str):
             "data": result
         })
         
+    except InvalidResourcePath:
+        raise
     except Exception as e:
         logger.error(f"获取详细状态失败: {str(e)}")
         return jsonify({
@@ -2066,6 +2168,8 @@ def get_simulation_actions(simulation_id: str):
             }
         })
         
+    except InvalidResourcePath:
+        raise
     except Exception as e:
         logger.error(f"获取动作历史失败: {str(e)}")
         return jsonify({
@@ -2106,6 +2210,8 @@ def get_simulation_timeline(simulation_id: str):
             }
         })
         
+    except InvalidResourcePath:
+        raise
     except Exception as e:
         logger.error(f"获取时间线失败: {str(e)}")
         return jsonify({
@@ -2133,6 +2239,8 @@ def get_agent_stats(simulation_id: str):
             }
         })
         
+    except InvalidResourcePath:
+        raise
     except Exception as e:
         logger.error(f"获取Agent统计失败: {str(e)}")
         return jsonify({
@@ -2161,13 +2269,13 @@ def get_simulation_posts(simulation_id: str):
         limit = request.args.get('limit', 50, type=int)
         offset = request.args.get('offset', 0, type=int)
 
-        sim_dir = os.path.join(
-            os.path.dirname(__file__),
-            f'../../uploads/simulations/{simulation_id}'
-        )
+        sim_dir = safe_path(Config.OASIS_SIMULATION_DATA_DIR, simulation_id)
+
+        if platform not in ('twitter', 'reddit'):
+            raise InvalidResourcePath('Invalid resource path')
 
         db_file = f"{platform}_simulation.db"
-        db_path = os.path.join(sim_dir, db_file)
+        db_path = safe_path(Config.OASIS_SIMULATION_DATA_DIR, simulation_id, db_file)
         
         if not os.path.exists(db_path):
             return jsonify({
@@ -2213,6 +2321,8 @@ def get_simulation_posts(simulation_id: str):
             }
         })
         
+    except InvalidResourcePath:
+        raise
     except Exception as e:
         logger.error(f"获取帖子失败: {str(e)}")
         return jsonify({
@@ -2239,12 +2349,12 @@ def get_simulation_comments(simulation_id: str):
         limit = request.args.get('limit', 50, type=int)
         offset = request.args.get('offset', 0, type=int)
 
-        sim_dir = os.path.join(
-            os.path.dirname(__file__),
-            f'../../uploads/simulations/{simulation_id}'
-        )
+        sim_dir = safe_path(Config.OASIS_SIMULATION_DATA_DIR, simulation_id)
+
+        if platform not in ('twitter', 'reddit'):
+            raise InvalidResourcePath('Invalid resource path')
         
-        db_path = os.path.join(sim_dir, f"{platform}_simulation.db")
+        db_path = safe_path(Config.OASIS_SIMULATION_DATA_DIR, simulation_id, f"{platform}_simulation.db")
         
         if not os.path.exists(db_path):
             return jsonify({
@@ -2290,6 +2400,8 @@ def get_simulation_comments(simulation_id: str):
             }
         })
         
+    except InvalidResourcePath:
+        raise
     except Exception as e:
         logger.error(f"获取评论失败: {str(e)}")
         return jsonify({
@@ -2421,6 +2533,8 @@ def interview_agent():
             "error": t('api.interviewTimeout', error=str(e))
         }), 504
         
+    except InvalidResourcePath:
+        raise
     except Exception as e:
         logger.error(f"Interview失败: {str(e)}")
         return jsonify({
@@ -2559,6 +2673,8 @@ def interview_agents_batch():
             "error": t('api.batchInterviewTimeout', error=str(e))
         }), 504
 
+    except InvalidResourcePath:
+        raise
     except Exception as e:
         logger.error(f"批量Interview失败: {str(e)}")
         return jsonify({
@@ -2662,6 +2778,8 @@ def interview_all_agents():
             "error": t('api.globalInterviewTimeout', error=str(e))
         }), 504
 
+    except InvalidResourcePath:
+        raise
     except Exception as e:
         logger.error(f"全局Interview失败: {str(e)}")
         return jsonify({
@@ -2734,6 +2852,8 @@ def get_interview_history():
             }
         })
 
+    except InvalidResourcePath:
+        raise
     except Exception as e:
         logger.error(f"获取Interview历史失败: {str(e)}")
         return jsonify({
@@ -2799,6 +2919,8 @@ def get_env_status():
             }
         })
 
+    except InvalidResourcePath:
+        raise
     except Exception as e:
         logger.error(f"获取环境状态失败: {str(e)}")
         return jsonify({
@@ -2869,6 +2991,8 @@ def close_simulation_env():
             "error": str(e)
         }), 400
         
+    except InvalidResourcePath:
+        raise
     except Exception as e:
         logger.error(f"关闭环境失败: {str(e)}")
         return jsonify({
