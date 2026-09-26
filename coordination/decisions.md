@@ -26,6 +26,13 @@
 |---|---|---|
 | U00 | 01a0dbb8-53e4-76e0-911f-14824a764e0f | _implementation_worktrees/u00 |
 | U01 | 01a0dbb8-8cdd-7063-ba8a-14753f6a585c | _implementation_worktrees/u01 |
+| U02 | 01a0dbc4-d633-7732-a922-e9a7ad5e82b6 | _implementation_worktrees/u02 |
 
 U00 PR: https://github.com/desanv01/mirofish-research-lab/pull/2.
-No phase is accepted by this decision record.
+U00 delivery accepted at merge1166188b2d5dafbab178e72ac1b1cc130bb732f1;
+post-merge CI36214869721 passed. No inherited application capability is accepted
+on that basis. U01 issue3 and U02a issue4 track the next bounded implementation.
+
+Local disposable Neo4j startup stalled at Docker network creation. Main stopped
+only its own compose CLI, without restarting Docker or changing other projects'
+containers. The real database qualification is routed to an isolated CI job.

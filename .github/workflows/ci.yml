@@ -58,3 +58,29 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci --ignore-scripts
       - run: npm run build
+
+  knowledge-compatibility:
+    name: knowledge-compatibility
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      KNOWLEDGE_TEST_PASSWORD: mirofish-ci-disposable-fixture-only
+      GRAPHITI_TELEMETRY_ENABLED: 'false'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          version: '0.11.25'
+      - name: Install locked isolated knowledge runtime
+        working-directory: services/knowledge
+        run: uv sync --locked --extra test --python 3.12.13
+      - name: Start disposable real Neo4j Community
+        run: docker compose -f infra/compose.knowledge-test.yml up -d --wait --wait-timeout 180
+      - name: Run contracts and real database tests with fake models
+        run: services/knowledge/.venv/bin/python tools/run_knowledge_tests.py --neo4j
+      - name: Test database diagnostics on failure
+        if: failure()
+        run: docker compose -f infra/compose.knowledge-test.yml logs --tail 100 neo4j
+      - name: Remove only this job's disposable database
+        if: always()
+        run: docker compose -f infra/compose.knowledge-test.yml down -v

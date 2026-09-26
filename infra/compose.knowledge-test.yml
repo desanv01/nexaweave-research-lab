@@ -1,0 +1,19 @@
+name: mirofish-knowledge-u01-test
+services:
+  neo4j:
+    image: neo4j:5.26.31-community@sha256:5eb12ad77fa46ab73e23df9ea1f43f5c0f2a79523435577648e046be042b9b93
+    environment:
+      NEO4J_AUTH: neo4j/${KNOWLEDGE_TEST_PASSWORD:?Set a non-default disposable test password}
+      NEO4J_PLUGINS: '[]'
+    ports:
+      - "127.0.0.1:17687:7687"
+      - "127.0.0.1:17474:7474"
+    volumes:
+      - knowledge_u01_test_data:/data
+    healthcheck:
+      test: ["CMD", "cypher-shell", "-u", "neo4j", "-p", "${KNOWLEDGE_TEST_PASSWORD}", "RETURN 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+volumes:
+  knowledge_u01_test_data:
