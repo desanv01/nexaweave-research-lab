@@ -1554,10 +1554,12 @@ class ReportAgent:
         if response is None:
             logger.error(t('report.sectionForceFailed', title=section.title))
             final_answer = t('report.sectionGenFailedContent')
-        elif "Final Answer:" in response:
-            final_answer = response.split("Final Answer:")[-1].strip()
         else:
-            final_answer = response
+            cleaned_response = ReportAgent._strip_fake_tool_results(response)
+            if "Final Answer:" in cleaned_response:
+                final_answer = cleaned_response.split("Final Answer:")[-1].strip()
+            else:
+                final_answer = cleaned_response
         
         # 记录章节内容生成完成日志
         if self.report_logger:

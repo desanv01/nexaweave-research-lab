@@ -42,9 +42,9 @@
     {
       "imported_path": "backend/app/services/report_agent.py",
       "original_sha256": "b1211efa900e2fe73875b6acbf690550ee21a40b76c5170eee4e6ec404a4be47",
-      "current_sha256": "a910e467a756bdc4bb0af08cd416df8c371616767719b7488f442643753a5454",
-      "reason": "Bound report storage, logger targets, sections and legacy flat paths; reject links before recursive deletion.",
-      "phase": "U02a"
+      "current_sha256": "6a6313ff968946809c97b7bae3b4871d3dfd38964c77a53a7cc614fc2bd6411d",
+      "reason": "U02a bounds report storage/loggers/legacy paths. U01c also strips fabricated tool results in forced-final section responses, matching normal-final behavior.",
+      "phase": "U02a/U01c"
     },
     {
       "imported_path": "backend/app/services/simulation_manager.py",
@@ -66,7 +66,7 @@
       "current_sha256": "3cb18053cf195e7ec1efcc0a154c40de01e54c6d45f6de5dd3bc0265da3f4b6f",
       "reason": "Independently remove completed IPC command and response paths so a command already removed by the server does not leave a stale response. Real client/server regression initially failed and now passes on Windows.",
       "phase": "U01b",
-      "review_status": "pending-exact-head-ci"
+      "review_status": "accepted-PR6"
     }
   ]
 }
