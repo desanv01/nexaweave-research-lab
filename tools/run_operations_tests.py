@@ -23,23 +23,24 @@ def child(integration: bool) -> int:
     guard.install()
     try:
         import pytest
-        targets = ["tests/test_operations.py"]
+        targets = ["tests/test_operations.py", "tests/test_ingestion.py"]
         if integration:
-            targets.append("tests/test_operations_postgres.py")
+            targets.extend(["tests/test_operations_postgres.py", "tests/test_ingestion_postgres.py"])
         class Qualification:
-            postgres_passed = 0
+            postgres_passed = {"test_operations_postgres.py": 0, "test_ingestion_postgres.py": 0}
             postgres_skipped = 0
 
             def pytest_runtest_logreport(self, report):
-                if "test_operations_postgres.py::" in report.nodeid:
-                    if report.skipped:
-                        self.postgres_skipped += 1
-                    if report.when == "call" and report.passed:
-                        self.postgres_passed += 1
+                for filename in self.postgres_passed:
+                    if filename + "::" in report.nodeid:
+                        if report.skipped:
+                            self.postgres_skipped += 1
+                        if report.when == "call" and report.passed:
+                            self.postgres_passed[filename] += 1
 
         qualification = Qualification()
         result = int(pytest.main(["-q", "-p", "pytest_asyncio.plugin", *targets], plugins=[qualification]))
-        if integration and (qualification.postgres_skipped or not qualification.postgres_passed):
+        if integration and (qualification.postgres_skipped or not all(qualification.postgres_passed.values())):
             print("Requested PostgreSQL qualification was skipped or empty", file=sys.stderr)
             result = 1
     finally:

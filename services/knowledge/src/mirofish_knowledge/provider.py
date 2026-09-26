@@ -18,6 +18,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
 from .contracts import FactResult, IngestResult, KnowledgeScope, OntologySpec, SearchQuery, SearchResult, SourceEnvelope
+from .operations import CompletionReceipt, request_fingerprint
 
 os.environ["GRAPHITI_TELEMETRY_ENABLED"] = "false"  # before any graphiti_core import
 
@@ -355,6 +356,44 @@ class GraphitiKnowledgeProvider:
             return IngestResult(episode_id=episode_id, already_exists=False, facts=facts)
         except Exception as exc:
             raise ReconciliationRequired(f"ingestion outcome uncertain for {episode_id}") from exc
+
+    async def completion_proof(self, scope: KnowledgeScope, source: SourceEnvelope,
+                               ontology: OntologySpec) -> CompletionReceipt:
+        """Read back the exact completed episode and marker; never dispatch work."""
+        try:
+            scope = KnowledgeScope.model_validate(scope.model_dump())
+            source = SourceEnvelope.model_validate(source.model_dump())
+            ontology = OntologySpec.model_validate(ontology.model_dump())
+            fingerprint = request_fingerprint(scope, source, ontology)
+            if len(set(source.evidence_ids)) != len(source.evidence_ids):
+                raise ValueError
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ValueError("invalid knowledge proof request") from None
+        episode_id = str(scope.episode_uuid(source.operation_id))
+        rows = await self._rows(
+            "MATCH (e:Episodic {uuid: $uuid}), (o:MiroFishIngest {uuid: $uuid}) "
+            "RETURN e.group_id AS episode_group, e.content AS content, "
+            "e.source_description AS episode_sha256, o.group_id AS marker_group, "
+            "o.sha256 AS marker_sha256, o.fingerprint AS fingerprint, "
+            "o.status AS status, o.evidence_ids AS evidence_ids",
+            uuid=episode_id,
+        )
+        if len(rows) != 1:
+            raise ReconciliationRequired("knowledge completion proof missing or ambiguous")
+        row = rows[0]
+        evidence = row["evidence_ids"]
+        if (row["episode_group"] != scope.group_id or row["marker_group"] != scope.group_id
+                or row["content"] != source.content
+                or not isinstance(row["content"], str)
+                or hashlib.sha256(row["content"].encode("utf-8")).hexdigest() != source.source_sha256
+                or row["episode_sha256"] != source.source_sha256
+                or row["marker_sha256"] != source.source_sha256
+                or row["fingerprint"] != fingerprint or row["status"] != "complete"
+                or not isinstance(evidence, list)
+                or evidence != [str(item) for item in source.evidence_ids]):
+            raise ReconciliationRequired("knowledge completion proof does not match request")
+        return CompletionReceipt(scope.group_id, scope.episode_uuid(source.operation_id),
+                                 fingerprint, source.evidence_ids)
 
     async def search(self, scope: KnowledgeScope, query: SearchQuery) -> SearchResult:
         if query.valid_at is not None or query.recorded_before is not None:

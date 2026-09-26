@@ -13,6 +13,7 @@ from graphiti_core.cross_encoder.client import CrossEncoderClient
 
 from mirofish_knowledge.contracts import Layer, KnowledgeScope, OntologySpec, SourceEnvelope, SearchQuery
 from mirofish_knowledge.provider import CommunityGraphiti, GraphitiKnowledgeProvider, OperationConflict, ReconciliationRequired
+from mirofish_knowledge.operations import request_fingerprint
 
 
 pytestmark = pytest.mark.neo4j
@@ -154,3 +155,42 @@ async def test_ambiguous_mutation_is_not_replayed(provider, monkeypatch):
         await provider.ingest(scope, source, ontology)
     with pytest.raises(ReconciliationRequired):
         await provider.ingest(scope, source, ontology)
+
+
+@pytest.mark.asyncio
+async def test_read_only_completion_proof_rejects_partial_marker(provider, monkeypatch):
+    scope, source, ontology = fixture_data()
+    await provider.ingest(scope, source, ontology)
+
+    async def forbidden_dispatch(**kwargs):
+        raise AssertionError("completion proof must not extract")
+
+    monkeypatch.setattr(provider.graphiti, "add_episode", forbidden_dispatch)
+    proof = await provider.completion_proof(scope, source, ontology)
+    assert proof.group_id == scope.group_id
+    assert proof.episode_id == scope.episode_uuid(source.operation_id)
+    assert proof.evidence_ids == source.evidence_ids
+    episode_id = str(scope.episode_uuid(source.operation_id))
+    fingerprint = request_fingerprint(scope, source, ontology)
+
+    async def marker(*, status="complete", evidence=None, request_hash=None):
+        await provider._driver.execute_query(
+            "MATCH (o:MiroFishIngest {uuid: $uuid}) "
+            "SET o.status = $status, o.evidence_ids = $evidence_ids, o.fingerprint = $fingerprint",
+            params={"uuid": episode_id, "status": status,
+                    "evidence_ids": evidence if evidence is not None else [str(item) for item in source.evidence_ids],
+                    "fingerprint": request_hash if request_hash is not None else fingerprint},
+        )
+
+    try:
+        await marker(status="pending")
+        with pytest.raises(ReconciliationRequired):
+            await provider.completion_proof(scope, source, ontology)
+        await marker(evidence=[str(uuid4())])
+        with pytest.raises(ReconciliationRequired):
+            await provider.completion_proof(scope, source, ontology)
+        await marker(request_hash="0" * 64)
+        with pytest.raises(ReconciliationRequired):
+            await provider.completion_proof(scope, source, ontology)
+    finally:
+        await marker()
