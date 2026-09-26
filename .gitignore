@@ -1,0 +1,18 @@
+# Bootstrap governance; inherited exclusions will be merged during source import.
+.env
+.env.*
+!.env.example
+node_modules/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+dist/
+*.db
+*.sqlite
+*.sqlite3
+uploads/
+logs/
+backend/data/
+test-results/
+.DS_Store
