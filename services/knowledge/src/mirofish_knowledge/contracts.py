@@ -205,3 +205,24 @@ class IngestResult(StrictModel):
     episode_id: str
     already_exists: bool
     facts: tuple[FactResult, ...]
+
+
+class GraphPageRequest(StrictModel):
+    schema_version: Literal[1] = 1
+    kind: Literal["node", "edge", "episode"]
+    limit: int = Field(default=25, ge=1, le=100)
+    cursor: str | None = Field(default=None, min_length=1, max_length=1024)
+    entity_type: str | None = None
+
+    @model_validator(mode="after")
+    def valid_filter(self):
+        if self.entity_type is not None:
+            if self.kind != "node" or not IDENTIFIER.fullmatch(self.entity_type):
+                raise ValueError("entity_type requires a node page and valid identifier")
+        return self
+
+
+class GraphPage(StrictModel):
+    schema_version: Literal[1] = 1
+    facts: tuple[FactResult, ...] = Field(max_length=100)
+    next_cursor: str | None = Field(default=None, min_length=1, max_length=1024)

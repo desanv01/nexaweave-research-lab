@@ -17,7 +17,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
-from .contracts import FactResult, IngestResult, KnowledgeScope, OntologySpec, SearchQuery, SearchResult, SourceEnvelope
+from .contracts import FactResult, GraphPage, GraphPageRequest, IngestResult, KnowledgeScope, OntologySpec, SearchQuery, SearchResult, SourceEnvelope
 from .operations import CompletionReceipt, request_fingerprint
 
 os.environ["GRAPHITI_TELEMETRY_ENABLED"] = "false"  # before any graphiti_core import
@@ -411,6 +411,11 @@ class GraphitiKnowledgeProvider:
                 fact = _fact(scope, kind, value, score=scores[index] if index < len(scores) else None)
                 facts.append(await self._decorate_fact(scope, fact))
         return SearchResult(facts=tuple(facts))
+
+    async def page(self, scope: KnowledgeScope, request: GraphPageRequest) -> GraphPage:
+        from .graph_reads import page_graph
+
+        return await page_graph(self, scope, request, native=_native)
 
     async def entity(self, scope: KnowledgeScope, provider_id: str) -> SearchResult:
         UUID(provider_id)  # reject arbitrary values before database access

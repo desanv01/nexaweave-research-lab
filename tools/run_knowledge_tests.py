@@ -22,7 +22,7 @@ def child(integration: bool) -> int:
     guard.install()
     try:
         import pytest
-        files = ["tests/test_contracts.py"]
+        files = ["tests/test_contracts.py", "tests/test_graph_reads.py"]
         if integration:
             files.append("tests/test_integration_neo4j.py")
         result = int(pytest.main(["-q", "-p", "pytest_asyncio.plugin", *files]))
