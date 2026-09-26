@@ -2,6 +2,20 @@
 
 All notable accepted project changes will be recorded here. Entries that are still in a draft PR are explicitly unverified.
 
+## Unreleased — U01b and U02a bounded slices accepted
+
+- PR6 / merge83e7edf: executable simulation schedule, profile, action-log and
+  interview-transport contracts; real installed OASIS/SQLite action primitives;
+  fixed stale IPC responses after server-side command cleanup. No autonomous
+  behavior, memory or complete simulation qualification is claimed.
+- PR7 / mergead4d905: portable bounded project/simulation/report resource paths,
+  static link/reparse-point refusal, stable invalid-path API errors, and safe
+  legacy report handling while preserving runner cleanup and finalization.
+- Combined exact-head and post-merge CI passed222 Linux unit tests,17 real-Neo4j
+  tests with synthetic model clients,3 Windows native-engine tests, source
+  provenance and frontend build. Authentication and remaining security gates
+  are not complete; keep the baseline private and unexposed.
+
 ## Unreleased — U01a compatibility spike accepted
 
 - PR5 / merge `e4eafb2024dbe246e93b9973e0dbd90b09ca9b40`: isolated locked Graphiti0.30.2 / Neo4j5.26.31 Community adapter, scoped contracts, provenance and uncertain-write guards, configurable model routes and bounded calls.

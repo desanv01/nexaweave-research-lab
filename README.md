@@ -112,6 +112,8 @@ The manifest checker reports missing or changed imported files; reviewed changes
 
 ## Current status
 
+U01b ([PR6](https://github.com/desanv01/mirofish-research-lab/pull/6)) and the bounded U02a filesystem patch ([PR7](https://github.com/desanv01/mirofish-research-lab/pull/7)) are also merged. Combined CI and post-merge verification passed 222 Linux tests, 17 real-Neo4j tests with synthetic models, three native Windows/SQLite action tests, source provenance and the frontend build. This is not complete simulation, security or Zep-free application qualification. IPC hardening and investigative-report characterization are in progress.
+
 U00 merged in [PR2](https://github.com/desanv01/mirofish-research-lab/pull/2): 167 inherited/guard tests, source manifest and frontend build passed. U01a merged in [PR5](https://github.com/desanv01/mirofish-research-lab/pull/5): 17 knowledge tests passed against real Neo4j Community with synthetic model clients; post-merge CI also passed. Simulation characterization and security implementation continue. The ZIP SHA-256 is `d3bef0afea92b99626526ffcce0508414feb3f9e88c3edda1f283ce5f447bf53`; its Git commit remains unknown and is not equated with observed upstream HEAD `39d849138ef254f6c737ab4c4705e5545dbe31d4`. Main records exact revisions and limitations in the [ledger](coordination/ledger.md).
 
 ## Roadmap
