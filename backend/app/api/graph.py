@@ -26,6 +26,29 @@ from ..services.simulation_manager import SimulationManager
 from ..services.simulation_runner import SimulationRunner, RunnerStatus
 from ..services.zep_graph_memory_updater import ZepGraphMemoryManager
 from ..utils.llm_client import LLMResponseError
+from ..utils.safe_paths import InvalidResourcePath, validate_resource_id, safe_path
+
+
+@graph_bp.before_request
+def _validate_storage_ids():
+    values = []
+    if 'project_id' in (request.view_args or {}):
+        values.append(request.view_args['project_id'])
+    body = request.get_json(silent=True)
+    if isinstance(body, dict) and 'project_id' in body:
+        values.append(body['project_id'])
+    try:
+        for project_id in values:
+            validate_resource_id(project_id)
+            for parts in ((), ('project.json',), ('extracted_text.txt',), ('files',)):
+                safe_path(ProjectManager.PROJECTS_DIR, project_id, *parts)
+    except InvalidResourcePath:
+        return jsonify({'success': False, 'error': 'Invalid resource path'}), 400
+
+
+@graph_bp.errorhandler(InvalidResourcePath)
+def _invalid_storage_path(_error):
+    return jsonify({'success': False, 'error': 'Invalid resource path'}), 400
 
 # 获取日志器
 logger = get_logger('mirofish.api')
@@ -391,6 +414,8 @@ def generate_ontology():
             }
         })
         
+    except InvalidResourcePath:
+        raise
     except Exception as error:
         provider_status = getattr(error, "status_code", None)
         request_id = getattr(error, "request_id", None)
@@ -427,6 +452,8 @@ def generate_ontology():
             project.error = public_error
             try:
                 ProjectManager.save_project(project)
+            except InvalidResourcePath:
+                raise
             except Exception:
                 logger.exception(
                     "Failed to persist ontology failure for project %s",
@@ -798,6 +825,8 @@ def _build_graph_impl():
                         }
                     )
                 
+            except InvalidResourcePath:
+                raise
             except Exception as e:
                 # 更新项目状态为失败
                 build_logger.error(f"[{task_id}] 图谱构建失败: {str(e)}")
@@ -831,6 +860,8 @@ def _build_graph_impl():
         
     except GraphInUseError as e:
         return jsonify({"success": False, "error": str(e)}), 409
+    except InvalidResourcePath:
+        raise
     except Exception as e:
         return jsonify({
             "success": False,
@@ -896,6 +927,8 @@ def get_graph_data(graph_id: str):
             "data": graph_data
         })
         
+    except InvalidResourcePath:
+        raise
     except Exception as e:
         return jsonify({
             "success": False,
@@ -955,6 +988,8 @@ def delete_graph(graph_id: str):
         
     except GraphInUseError as e:
         return jsonify({"success": False, "error": str(e)}), 409
+    except InvalidResourcePath:
+        raise
     except Exception as e:
         return jsonify({
             "success": False,
