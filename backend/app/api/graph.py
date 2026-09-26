@@ -7,8 +7,10 @@ import os
 import re
 import traceback
 import threading
+import time
 from contextlib import ExitStack, nullcontext
 from flask import request, jsonify
+from werkzeug.exceptions import RequestEntityTooLarge
 from zep_cloud import NotFoundError
 
 from . import graph_bp
@@ -16,7 +18,18 @@ from ..config import Config
 from ..services.ontology_generator import OntologyGenerator
 from ..services.graph_builder import BatchSubmission, GraphBuilderService
 from ..services.text_processor import TextProcessor
-from ..utils.file_parser import FileParser
+from ..utils.file_parser import (
+    InvalidSourceError, MalformedDocumentError, ParseLimitError, ParseLimits,
+    UnsupportedDocumentError,
+)
+from ..utils.parser_process import (
+    ParserFailedError, ParserProtocolError, ParserTimeoutError,
+    extract_text_isolated,
+)
+from ..utils.upload_admission import (
+    DEFAULT_UPLOAD_POLICY, UploadAdmissionError, UploadLimitError,
+    UploadWriteError, admit_ontology_upload,
+)
 from ..utils.logger import get_logger
 from ..utils.locale import t, get_locale, set_locale
 from ..utils.zep_lifecycle import get_graph_readers, graph_lifecycle_lock
@@ -54,6 +67,8 @@ def _invalid_storage_path(_error):
 logger = get_logger('mirofish.api')
 _build_locks: dict[str, threading.Lock] = {}
 _build_locks_guard = threading.Lock()
+_ontology_upload_slots = threading.BoundedSemaphore(2)
+UPLOAD_POLICY = DEFAULT_UPLOAD_POLICY
 
 
 class GraphInUseError(RuntimeError):
@@ -285,6 +300,94 @@ def _reset_project_impl(project_id: str):
 
 # ============== 接口1：上传文件并生成本体 ==============
 
+
+def _mark_failed_upload(project, code, message):
+    project.status = ProjectStatus.FAILED
+    project.error = f"{code}: {message}"
+    try:
+        ProjectManager.save_project(project)
+    except Exception:
+        logger.error("Failed to persist failed ontology upload project")
+
+
+def _upload_failure(code, message, status, project=None):
+    payload = {"success": False, "error": message, "error_code": code}
+    if project is not None:
+        _mark_failed_upload(project, code, message)
+        payload["data"] = {"project_id": project.project_id}
+    return jsonify(payload), status
+
+
+def _upload_failure_for_error(error, project):
+    if isinstance(error, (UploadLimitError, ParseLimitError)):
+        return _upload_failure("upload_limit_exceeded", "Upload limit exceeded", 413, project)
+    if isinstance(error, ParserTimeoutError):
+        return _upload_failure("parser_timeout", "Document extraction timed out", 504, project)
+    if isinstance(error, (MalformedDocumentError, UnsupportedDocumentError, InvalidSourceError)):
+        return _upload_failure("invalid_document", "Document could not be extracted", 422, project)
+    if isinstance(error, (ParserFailedError, ParserProtocolError, FileNotFoundError)):
+        return _upload_failure("parser_unavailable", "Document extraction unavailable", 503, project)
+    return _upload_failure("upload_storage_failed", "Upload processing unavailable", 503, project)
+
+
+def _phase_remaining(deadline):
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise ParserTimeoutError()
+    return remaining
+
+
+def _save_and_extract_ontology_sources(project, uploads, policy, deadline):
+    limits = ParseLimits(
+        max_file_bytes=policy.max_file_bytes,
+        max_text_chars=policy.max_text_chars,
+        max_pdf_pages=policy.max_pdf_pages,
+        max_files=policy.max_files,
+        max_aggregate_chars=policy.max_aggregate_chars,
+    )
+    document_texts = []
+    combined_parts = []
+    total_file_bytes = 0
+    total_chars = 0
+    for upload in uploads:
+        _phase_remaining(deadline)
+        remaining_bytes = policy.max_total_bytes - total_file_bytes
+        if remaining_bytes <= 0:
+            raise UploadLimitError()
+        file_info = ProjectManager.save_file_to_project(
+            project.project_id,
+            upload,
+            upload.filename,
+            max_bytes=min(policy.max_file_bytes, remaining_bytes),
+        )
+        total_file_bytes += file_info["size"]
+        project.files.append({
+            "filename": file_info["original_filename"],
+            "size": file_info["size"],
+        })
+        remaining = _phase_remaining(deadline)
+        text = extract_text_isolated(
+            file_info["path"],
+            limits=limits,
+            timeout_seconds=min(policy.child_seconds, remaining),
+        )
+        text = TextProcessor.preprocess_text(text)
+        part = f"\n\n=== {file_info['original_filename']} ===\n{text}"
+        if total_chars + len(part) > policy.max_aggregate_chars:
+            raise ParseLimitError()
+        total_chars += len(part)
+        document_texts.append(text)
+        combined_parts.append(part)
+    _phase_remaining(deadline)
+    if not any(text.strip() for text in document_texts):
+        return None, None
+    combined = "".join(combined_parts)
+    project.total_text_length = total_chars
+    ProjectManager.save_extracted_text(project.project_id, combined)
+    _phase_remaining(deadline)
+    return document_texts, combined
+
+
 @graph_bp.route('/ontology/generate', methods=['POST'])
 def generate_ontology():
     """
@@ -316,68 +419,42 @@ def generate_ontology():
     project = None
     try:
         logger.info("=== 开始生成本体定义 ===")
-        
-        # 获取参数
-        simulation_requirement = request.form.get('simulation_requirement', '')
-        project_name = request.form.get('project_name', 'Unnamed Project')
-        additional_context = request.form.get('additional_context', '')
-        
-        logger.debug(f"项目名称: {project_name}")
-        logger.debug(f"模拟需求: {simulation_requirement[:100]}...")
-        
-        if not simulation_requirement:
-            return jsonify({
-                "success": False,
-                "error": t('api.requireSimulationRequirement')
-            }), 400
-        
-        # 获取上传的文件
-        uploaded_files = request.files.getlist('files')
-        if not uploaded_files or all(not f.filename for f in uploaded_files):
-            return jsonify({
-                "success": False,
-                "error": t('api.requireFileUpload')
-            }), 400
-        
-        # 创建项目
-        project = ProjectManager.create_project(name=project_name)
-        project.simulation_requirement = simulation_requirement
-        logger.info(f"创建项目: {project.project_id}")
-        
-        # 保存文件并提取文本
-        document_texts = []
-        all_text = ""
-        
-        for file in uploaded_files:
-            if file and file.filename and allowed_file(file.filename):
-                # 保存文件到项目目录
-                file_info = ProjectManager.save_file_to_project(
-                    project.project_id, 
-                    file, 
-                    file.filename
+        try:
+            simulation_requirement, project_name, additional_context, uploaded_files = (
+                admit_ontology_upload(request.form, request.files, UPLOAD_POLICY)
+            )
+        except RequestEntityTooLarge:
+            return _upload_failure("request_too_large", "Request too large", 413)
+        except UploadAdmissionError as error:
+            return _upload_failure(error.code, error.message, error.status)
+        except Exception:
+            return _upload_failure("invalid_upload_fields", "Invalid upload fields", 400)
+
+        if not _ontology_upload_slots.acquire(blocking=False):
+            return _upload_failure("parser_busy", "Upload processing busy", 503)
+        try:
+            deadline = time.monotonic() + UPLOAD_POLICY.phase_seconds
+            project = ProjectManager.create_project(name=project_name)
+            project.simulation_requirement = simulation_requirement
+            document_texts, all_text = _save_and_extract_ontology_sources(
+                project, uploaded_files, UPLOAD_POLICY, deadline
+            )
+            if document_texts is None:
+                return _upload_failure(
+                    "no_extractable_text", "No extractable text", 422, project
                 )
-                project.files.append({
-                    "filename": file_info["original_filename"],
-                    "size": file_info["size"]
-                })
-                
-                # 提取文本
-                text = FileParser.extract_text(file_info["path"])
-                text = TextProcessor.preprocess_text(text)
-                document_texts.append(text)
-                all_text += f"\n\n=== {file_info['original_filename']} ===\n{text}"
-        
-        if not document_texts:
-            ProjectManager.delete_project(project.project_id)
-            return jsonify({
-                "success": False,
-                "error": t('api.noDocProcessed')
-            }), 400
-        
-        # 保存提取的文本
-        project.total_text_length = len(all_text)
-        ProjectManager.save_extracted_text(project.project_id, all_text)
-        logger.info(f"文本提取完成，共 {len(all_text)} 字符")
+        except (KeyboardInterrupt, SystemExit, GeneratorExit):
+            if project is not None:
+                _mark_failed_upload(
+                    project, "upload_cancelled", "Upload processing cancelled"
+                )
+            raise
+        except Exception as error:
+            return _upload_failure_for_error(error, project)
+        finally:
+            _ontology_upload_slots.release()
+
+        logger.info("文本提取完成，共 %s 字符", len(all_text))
         
         # 生成本体
         logger.info("调用 LLM 生成本体定义...")
