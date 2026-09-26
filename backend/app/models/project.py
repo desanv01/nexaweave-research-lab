@@ -13,6 +13,7 @@ from enum import Enum
 from dataclasses import dataclass, field, asdict
 from ..config import Config
 from ..utils.safe_paths import InvalidResourcePath, ensure_directory, safe_path, validate_tree
+from ..utils.upload_admission import UploadLimitError, UploadWriteError
 
 
 class ProjectStatus(str, Enum):
@@ -260,7 +261,10 @@ class ProjectManager:
         return True
     
     @classmethod
-    def save_file_to_project(cls, project_id: str, file_storage, original_filename: str) -> Dict[str, str]:
+    def save_file_to_project(
+        cls, project_id: str, file_storage, original_filename: str, *,
+        max_bytes: int = 50 * 1024 * 1024,
+    ) -> Dict[str, str]:
         """
         保存上传的文件到项目目录
         
@@ -272,6 +276,9 @@ class ProjectManager:
         Returns:
             文件信息字典 {filename, path, size}
         """
+        if type(max_bytes) is not int or max_bytes <= 0:
+            raise ValueError("max_bytes must be a positive integer")
+
         files_dir = cls._get_project_files_dir(project_id)
         
         # 生成安全的文件名
@@ -283,11 +290,34 @@ class ProjectManager:
         ensure_directory(cls.PROJECTS_DIR, project_id, 'files')
         file_path = safe_path(cls.PROJECTS_DIR, project_id, 'files', safe_filename)
         
-        # 保存文件
-        file_storage.save(file_path)
-        
-        # 获取文件大小
-        file_size = os.path.getsize(file_path)
+        # Stream no more than max_bytes + 1, regardless of MIME or length headers.
+        file_size = 0
+        created = False
+        try:
+            with open(file_path, 'xb') as target:
+                created = True
+                while True:
+                    chunk = file_storage.stream.read(min(64 * 1024, max_bytes - file_size + 1))
+                    if not chunk:
+                        break
+                    if not isinstance(chunk, bytes):
+                        raise UploadWriteError()
+                    if len(chunk) > max_bytes - file_size:
+                        raise UploadLimitError()
+                    if target.write(chunk) != len(chunk):
+                        raise UploadWriteError()
+                    file_size += len(chunk)
+        except BaseException as error:
+            if created:
+                try:
+                    os.unlink(file_path)
+                except OSError:
+                    pass
+            if isinstance(error, UploadLimitError):
+                raise
+            if isinstance(error, (KeyboardInterrupt, SystemExit, GeneratorExit)):
+                raise
+            raise UploadWriteError() from None
         
         return {
             "original_filename": original_filename,

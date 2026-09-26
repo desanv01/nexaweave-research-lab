@@ -35,9 +35,9 @@
     {
       "imported_path": "backend/app/api/graph.py",
       "original_sha256": "096f8b54a1a81430678a4082067be000d05e9b0ebbbe047ba05ce4abde5ba56b",
-      "current_sha256": "1167b4d251bde696604da08af870b59bbcac88877ed64e7a6cbece4df0c12ef9",
-      "reason": "Validate all supplied project ID occurrences and map invalid storage paths to stable client-safe400 responses.",
-      "phase": "U02a"
+      "current_sha256": "5a38d0774b195fa9d1bc1461d24e9386df6688b55453d76327842f269455b205",
+      "reason": "U02a validates supplied project IDs/storage paths. U02g bounds ontology admission/save/extraction, uses isolated parsing, rejects mixed multipart field confusion and prevents model work after parsing/phase failure with safe retained FAILED state.",
+      "phase": "U02a/U02g"
     },
     {
       "imported_path": "backend/app/api/report.py",
@@ -56,9 +56,9 @@
     {
       "imported_path": "backend/app/models/project.py",
       "original_sha256": "cc6ee30be35f5bfe2db51ce694b1dc5c51c77ab2da134df0fc24bfeb054bd212",
-      "current_sha256": "2848180df8b773dd428a8c4352723c515675f188b17c9274ed8784c098ca81ef",
-      "reason": "Bound persisted project metadata, text, upload, enumeration and deletion paths under trusted storage.",
-      "phase": "U02a"
+      "current_sha256": "c0be6de706d6c66a4805fbfd598e09a5574d898ffa7042c8153baecbcd997e18",
+      "reason": "U02a bounds trusted project storage paths. U02g uses bounded chunked upload copying, exclusive creation, actual byte accounting and cleanup of only the owned new partial file.",
+      "phase": "U02a/U02g"
     },
     {
       "imported_path": "backend/app/services/report_agent.py",
