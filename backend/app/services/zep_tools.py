@@ -8,23 +8,17 @@ Zep检索工具服务
 3. QuickSearch（简单搜索）- 快速检索
 """
 
+from __future__ import annotations
+
 import time
 import json
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, field
-from zep_cloud import NotFoundError
 
 from ..config import Config
 from ..utils.logger import get_logger
 from ..utils.llm_client import LLMClient
 from ..utils.locale import get_locale, t
-from ..utils.zep_paging import fetch_all_nodes, fetch_all_edges
-from ..utils.zep import (
-    call_zep_read_with_retry,
-    get_zep_client,
-    normalize_zep_search_limit,
-    normalize_zep_search_query,
-)
 
 logger = get_logger('mirofish.zep_tools')
 
@@ -159,6 +153,7 @@ class InsightForgeResult:
     total_facts: int = 0
     total_entities: int = 0
     total_relationships: int = 0
+    source_graph_only: bool = False
     
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -176,11 +171,12 @@ class InsightForgeResult:
     def to_text(self) -> str:
         """转换为详细的文本格式，供LLM理解"""
         text_parts = [
-            f"## 未来预测深度分析",
+            "## 来源图谱洞察（非模拟观察）" if self.source_graph_only else f"## 未来预测深度分析",
             f"分析问题: {self.query}",
-            f"预测场景: {self.simulation_requirement}",
+            (f"研究背景: {self.simulation_requirement}" if self.source_graph_only else
+             f"预测场景: {self.simulation_requirement}"),
             f"\n### 预测数据统计",
-            f"- 相关预测事实: {self.total_facts}条",
+            f"- 相关来源事实: {self.total_facts}条" if self.source_graph_only else f"- 相关预测事实: {self.total_facts}条",
             f"- 涉及实体: {self.total_entities}个",
             f"- 关系链: {self.total_relationships}条"
         ]
@@ -238,6 +234,7 @@ class PanoramaResult:
     total_edges: int = 0
     active_count: int = 0
     historical_count: int = 0
+    source_graph_only: bool = False
     
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -255,7 +252,7 @@ class PanoramaResult:
     def to_text(self) -> str:
         """转换为文本格式（完整版本，不截断）"""
         text_parts = [
-            f"## 广度搜索结果（未来全景视图）",
+            "## 来源图谱全景（非模拟观察）" if self.source_graph_only else f"## 广度搜索结果（未来全景视图）",
             f"查询: {self.query}",
             f"\n### 统计信息",
             f"- 总节点数: {self.total_nodes}",
@@ -266,7 +263,8 @@ class PanoramaResult:
         
         # 当前有效的事实（完整输出，不截断）
         if self.active_facts:
-            text_parts.append(f"\n### 【当前有效事实】(模拟结果原文)")
+            text_parts.append("\n### 【当前有效来源事实】" if self.source_graph_only else
+                              f"\n### 【当前有效事实】(模拟结果原文)")
             for i, fact in enumerate(self.active_facts, 1):
                 text_parts.append(f"{i}. \"{fact}\"")
         
@@ -432,6 +430,7 @@ class ZepToolsService:
         if not self.api_key:
             raise ValueError("ZEP_API_KEY 未配置")
         
+        from ..utils.zep import get_zep_client
         self.client = get_zep_client(self.api_key)
         # LLM客户端用于InsightForge生成子问题
         self._llm_client = llm_client
@@ -447,6 +446,7 @@ class ZepToolsService:
     def _call_with_retry(self, func, operation_name: str, max_retries: int = None):
         """Retry one safe read using typed Zep/HTTPX error classification."""
 
+        from ..utils.zep import call_zep_read_with_retry
         return call_zep_read_with_retry(
             func,
             operation_name=operation_name,
@@ -478,6 +478,7 @@ class ZepToolsService:
         """
         logger.info(t("console.graphSearch", graphId=graph_id, query=query[:50]))
         
+        from ..utils.zep import normalize_zep_search_limit, normalize_zep_search_query
         zep_query = normalize_zep_search_query(query)
         zep_limit = normalize_zep_search_limit(limit)
 
@@ -655,6 +656,7 @@ class ZepToolsService:
         """
         logger.info(t("console.fetchingAllNodes", graphId=graph_id))
 
+        from ..utils.zep_paging import fetch_all_nodes
         nodes = fetch_all_nodes(self.client, graph_id)
 
         result = []
@@ -684,6 +686,7 @@ class ZepToolsService:
         """
         logger.info(t("console.fetchingAllEdges", graphId=graph_id))
 
+        from ..utils.zep_paging import fetch_all_edges
         edges = fetch_all_edges(self.client, graph_id)
 
         result = []
@@ -721,6 +724,7 @@ class ZepToolsService:
         """
         logger.info(t("console.fetchingNodeDetail", uuid=node_uuid[:8]))
         
+        from zep_cloud import NotFoundError
         try:
             node = self._call_with_retry(
                 func=lambda: self.client.graph.node.get(uuid_=node_uuid),
@@ -968,12 +972,16 @@ class ZepToolsService:
         Returns:
             InsightForgeResult: 深度洞察检索结果
         """
+        if getattr(self, "strict_neutral", False) and (
+                type(max_sub_queries) is not int or not 1 <= max_sub_queries <= 5):
+            raise ValueError("invalid_request")
         logger.info(t("console.insightForgeStart", query=query[:50]))
         
         result = InsightForgeResult(
             query=query,
             simulation_requirement=simulation_requirement,
-            sub_queries=[]
+            sub_queries=[],
+            source_graph_only=getattr(self, "strict_neutral", False),
         )
         
         # Step 1: 使用LLM生成子问题
@@ -1060,6 +1068,8 @@ class ZepToolsService:
                         "related_facts": related_facts  # 完整输出，不截断
                     })
             except Exception as e:
+                if getattr(self, "strict_neutral", False):
+                    raise
                 logger.debug(f"获取节点 {uuid} 失败: {e}")
                 continue
         
@@ -1127,10 +1137,18 @@ class ZepToolsService:
             )
             
             sub_queries = response.get("sub_queries", [])
+            if getattr(self, "strict_neutral", False):
+                if (type(sub_queries) is not list or not 1 <= len(sub_queries) <= max_queries
+                        or any(type(item) is not str or not 1 <= len(item.strip()) <= 400
+                               for item in sub_queries) or len(set(sub_queries)) != len(sub_queries)):
+                    raise ValueError("invalid subquery response")
+                return sub_queries
             # 确保是字符串列表
             return [str(sq) for sq in sub_queries[:max_queries]]
             
         except Exception as e:
+            if getattr(self, "strict_neutral", False):
+                raise
             logger.warning(t("console.generateSubQueriesFailed", error=str(e)))
             # 降级：返回基于原问题的变体
             return [
@@ -1166,9 +1184,14 @@ class ZepToolsService:
         Returns:
             PanoramaResult: 广度搜索结果
         """
+        if getattr(self, "strict_neutral", False) and (
+                type(query) is not str or not 1 <= len(query.strip()) <= 400
+                or type(limit) is not int or not 1 <= limit <= 50
+                or type(include_expired) is not bool):
+            raise ValueError("invalid_request")
         logger.info(t("console.panoramaSearchStart", query=query[:50]))
         
-        result = PanoramaResult(query=query)
+        result = PanoramaResult(query=query, source_graph_only=getattr(self, "strict_neutral", False))
         
         # 获取所有节点
         all_nodes = self.get_all_nodes(graph_id)
