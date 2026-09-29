@@ -19,21 +19,22 @@ def child(postgres: bool) -> int:
     guard.install()
     try:
         import pytest
-        targets = ["tests/test_project_store.py"]
+        targets = ["tests/test_project_store.py", "tests/test_source_store.py"]
         if postgres:
-            targets.append("tests/test_project_store_postgres.py")
+            targets.extend(["tests/test_project_store_postgres.py", "tests/test_source_store_postgres.py"])
         class Qualification:
-            passed = 0
+            passed = {"test_project_store_postgres.py": 0, "test_source_store_postgres.py": 0}
             skipped = 0
             def pytest_runtest_logreport(self, report):
-                if "test_project_store_postgres.py::" in report.nodeid:
-                    if report.skipped:
-                        self.skipped += 1
-                    if report.when == "call" and report.passed:
-                        self.passed += 1
+                for filename in self.passed:
+                    if filename + "::" in report.nodeid:
+                        if report.skipped:
+                            self.skipped += 1
+                        if report.when == "call" and report.passed:
+                            self.passed[filename] += 1
         qualification = Qualification()
         result = int(pytest.main(["-q", "-p", "pytest_asyncio.plugin", *targets], plugins=[qualification]))
-        if postgres and (qualification.skipped or qualification.passed == 0):
+        if postgres and (qualification.skipped or not all(qualification.passed.values())):
             print("postgres_qualification_incomplete", file=sys.stderr)
             result = 1
     finally:

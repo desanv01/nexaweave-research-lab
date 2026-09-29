@@ -21,6 +21,17 @@ PR46 exact aefceab passed all7CI36512005613 and prior Main local68; merged cfe4f
 postmerge36574548166 success. Accepted basic population exports/cold SDK isolation,
 not full U03. U04b exact6f0a719 is PR47 under CI36574673021; no acceptance yet.
 
+### Historical integration checkpoint (superseded by heartbeat above)
+## Latest resume and integration — 2026-09-29
+
+User explicitly resumed again after the second short pause. Existing workers
+GPT-6 Sol/medium, requested Fast ON; Main requested Astra/high Fast OFF.
+Main accepted PR46 exact aefceab74ddfddc1187e0f5ee1ba523b21797d4e after all7
+CI36512005613 gates and local68 passes; merge cfe4fde94b3307c320a2902a7da4a5760638623b.
+Graph-to-basic-population preview/platform downloads and cold SDK isolation are
+accepted as bounded functionality, not complete U03. U04b source text/passage
+retention candidate reviewed with local34 passes; realPG/CI still required.
+
 ## RESUMED — 2026-09-29
 
 User explicitly resumed full orchestration. Main GPT6 Astra/high Fast OFF;

@@ -5,8 +5,11 @@ Importing this package never connects to PostgreSQL or runs migrations.
 
 from .store import (Conflict, MigrationMismatch, NotFound, ProjectRecord,
                     ProjectStore, StorageError, migrate)
+from .source import (PassageRecord, ResolvedEvidence, SourceMetadata, SourceRecord,
+                     SourceStore)
 from .validation import InvalidProject, canonical_payload, validate_evidence, validate_snapshot
 
 __all__ = ["Conflict", "InvalidProject", "MigrationMismatch", "NotFound",
            "ProjectRecord", "ProjectStore", "StorageError", "canonical_payload",
-           "migrate", "validate_evidence", "validate_snapshot"]
+           "migrate", "validate_evidence", "validate_snapshot", "PassageRecord",
+           "ResolvedEvidence", "SourceMetadata", "SourceRecord", "SourceStore"]
