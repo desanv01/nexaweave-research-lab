@@ -1,5 +1,14 @@
 # Execution ledger
 
+## Heartbeat13:50 — bridge accepted, preparation combined-base CI pending
+
+Main accepted PR49 exact165fc263 after all7CI36577468639,56store/realPG+CLI;
+merge22f6573. U03k original b77929a also passed all7CI36577324314,575backend
+including cold preparation,44store,110knowledge,51operations,3native/imports,
+8frontend/build,128/24manifest. Updating only accepted base and preserving both
+ledger histories; require final combined exact-head CI before U03k acceptance.
+
+### Historical checkpoints below
 ## Heartbeat13:40 — U03k corrected candidate
 
 U03k now retains one accepted bounded projection for filtering/context/grounding,
@@ -22,6 +31,23 @@ postmerge36574548166 success. Accepted basic population exports/cold SDK isolati
 not full U03. U04b exact6f0a719 is PR47 under CI36574673021; no acceptance yet.
 
 ### Historical integration checkpoint (superseded by heartbeat above)
+## Heartbeat13:40 — both workflow candidates move to CI
+
+U04c retained-source to ingestion bridge reviewed;44offline passes after async
+planning/cancellation correction. RealPG/exact-head CI pending, not accepted.
+U03k provider-neutral preparation corrected and locally65passed; PR48 exact
+b77929a28bc33b3eb7fbd8ae724fc0215e713c5a pending CI. Inherited behavior preserved;
+no full U03/U04 or paid/live model qualification claimed.
+
+## Heartbeat13:30 — U04b accepted, U04c active
+
+PR47 exact6f0a719 all7CI36574673021 passed, including44store cases/realPG/CLI;
+Main accepted comment5891329074, merge9f37fdb. Retained source revisions/passages
+accepted, not binary migration or full U04. Existing U04 worker now implements
+packetU04c on task/u04-source-ingestion-bridge at9f37fdb; retained source and
+authorized binding into ingestion plan and existing coordinator. No paid calls.
+U03k continues in parallel in u03; no overlapping worker production files.
+
 ## Latest resume and integration — 2026-09-29
 
 User explicitly resumed again after the second short pause. Existing workers
