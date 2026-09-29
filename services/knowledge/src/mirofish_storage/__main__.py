@@ -81,6 +81,19 @@ def _citation_data(item) -> dict:
             "original_document_verified": False}
 
 
+def _ingestion_data(plan) -> dict:
+    return {"schema_version": 1, "principal": plan.principal,
+            "display_graph_id": plan.display_graph_id,
+            "scope": plan.scope.model_dump(mode="json"),
+            "source": plan.source.model_dump(mode="json"),
+            "ontology": plan.ontology.model_dump(mode="json"),
+            "request_fingerprint": plan.request_fingerprint,
+            "source_byte_length": plan.source_byte_length,
+            "source_codepoint_length": plan.source_codepoint_length,
+            "source_provenance": plan.source_provenance,
+            "ingestion_executed": False}
+
+
 def _export_data(record):
     return {
         "schema_version": 1,
@@ -145,15 +158,38 @@ def _parser():
     src.add_argument("--input", required=True)
     src.add_argument("--passages", help="JSON list of declared codepoint ranges")
     cite.add_argument("--evidence-id", required=True)
+    plan = commands.add_parser("export-ingestion", help="offline plan from retained owned source")
+    plan.add_argument("--principal", required=True)
+    plan.add_argument("--display-graph-id", required=True)
+    plan.add_argument("--source-revision", required=True)
+    plan.add_argument("--operation-id", required=True)
+    plan.add_argument("--ontology", required=True, help="bounded local ontology JSON file")
+    plan.add_argument("--output", help="new file only; default stdout")
     return parser
 
 
 def main(argv=None) -> int:
     args = _parser().parse_args(argv)
     try:
-        if args.command != "migrate":
+        if args.command not in ("migrate", "export-ingestion"):
             principal_id(args.principal)
             uuid_value(args.project_id)
+        if args.command == "export-ingestion":
+            from mirofish_knowledge.bindings import _identity
+            from mirofish_knowledge.contracts import OntologySpec
+            from mirofish_knowledge.source_bridge import BridgeError, SourceIngestionBridge
+            try:
+                _identity(args.principal, args.display_graph_id)
+            except ValueError:
+                raise InvalidProject() from None
+            uuid_value(args.source_revision)
+            uuid_value(args.operation_id)
+            ontology_raw = _regular_bytes(args.ontology, 65536)
+            strict_json(ontology_raw)
+            try:
+                ontology = OntologySpec.model_validate_json(ontology_raw)
+            except (ValueError, TypeError):
+                raise InvalidProject() from None
         if args.command in ("import-project", "export-project"):
             uuid_value(args.workspace_id)
             display_id(args.display_id)
@@ -191,10 +227,18 @@ def main(argv=None) -> int:
             record = SourceStore(connect).ingest_text(args.principal, args.project_id,
                 args.source_revision, args.name, retained_text, declared)
             _output(_source_data(record), args.output)
-        else:
+        elif args.command == "resolve-evidence":
             citation = SourceStore(connect).resolve_evidence(args.principal,
                 args.project_id, args.evidence_id)
             _output(_citation_data(citation), args.output)
+        else:
+            try:
+                plan = SourceIngestionBridge(connect).plan(args.principal, args.display_graph_id,
+                    args.source_revision, args.operation_id, ontology)
+            except BridgeError as exc:
+                print(str(exc), file=sys.stderr)
+                return 2
+            _output(_ingestion_data(plan), args.output)
         return 0
     except (InvalidProject, StoreError) as exc:
         print(str(exc), file=sys.stderr)

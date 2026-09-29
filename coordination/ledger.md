@@ -1,5 +1,22 @@
 # Execution ledger
 
+## Heartbeat13:40 — both workflow candidates move to CI
+
+U04c retained-source to ingestion bridge reviewed;44offline passes after async
+planning/cancellation correction. RealPG/exact-head CI pending, not accepted.
+U03k provider-neutral preparation corrected and locally65passed; PR48 exact
+b77929a28bc33b3eb7fbd8ae724fc0215e713c5a pending CI. Inherited behavior preserved;
+no full U03/U04 or paid/live model qualification claimed.
+
+## Heartbeat13:30 — U04b accepted, U04c active
+
+PR47 exact6f0a719 all7CI36574673021 passed, including44store cases/realPG/CLI;
+Main accepted comment5891329074, merge9f37fdb. Retained source revisions/passages
+accepted, not binary migration or full U04. Existing U04 worker now implements
+packetU04c on task/u04-source-ingestion-bridge at9f37fdb; retained source and
+authorized binding into ingestion plan and existing coordinator. No paid calls.
+U03k continues in parallel in u03; no overlapping worker production files.
+
 ## Latest resume and integration — 2026-09-29
 
 User explicitly resumed again after the second short pause. Existing workers
