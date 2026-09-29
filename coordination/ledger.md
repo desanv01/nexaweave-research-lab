@@ -28,9 +28,9 @@ Main owns checks and GitHub; fresh GPT-6 Sol/medium workers implement only.
 |---|---|---|
 | Plan v3 synchronization | Completed | All active reference docs synchronized; v2 archived |
 | U00 repository bootstrap | Accepted delivery baseline | PR2 merged as 1166188b2d5dafbab178e72ac1b1cc130bb732f1; post-merge CI36214869721 green; Linux167 tests,128-file manifest and frontend build passed; not application qualification |
-| U01 parity and knowledge compatibility | U01a/U01b/U01c bounded slices accepted | PR9/merge5d77aab; post-merge CI36216733446 green;236 Linux tests,17 knowledge and3 native tests; no paid/full capability qualification |
-| U02 security | U02a–U02g accepted; U02h CI preparation | Issue30: Main8 DOM tests/build/128-19 manifest passed. Actual Step5 synthetic report/chat and collapse/expand repeated Sept29 after fixture lifecycle fix. Step4 source sinks reviewed; no full live/backend qualification. Exact-head CI pending |
-| U03 adapters and operation authority | U03a–U03e bounded slices accepted; postmerge regression under correction | PR31 exacthead76cc513 all6 CI36222171376 passed; merged60fc7e8. Postmerge36502731553 other5green but Linux502pass1fail after Werkzeug3.1.9 changed multipart test encoding behavior. U01d separate fixture correction under Main review. No bootstrap/cutover/paid qualification |
+| U01 parity and knowledge compatibility | U01a–U01d bounded slices accepted | PR32 head43cb6b8 all6 CI36504019341 green, mergea34da3c. Multipart fixture compatibility51 tests passed on Werkzeug3.1.8/3.1.9; production policy unchanged. No paid/full capability qualification |
+| U02 security | U02a–U02h bounded slices accepted | PR33 head0940090 all6 CI36504074280 green, merge7894b6a. Main8 DOM tests/build and actual Step5 synthetic browser report/chat/collapse-expand; seven HTML sinks reviewed. No full live/backend/security qualification |
+| U03 adapters and operation authority | U03a–U03e accepted; U03f CI candidate | Issue34 metadata preserved after Main-requested container and private-warning corrections. Main101passed1POSIXskip/18.45s,128/19manifest; needs six exact-head gates including real Neo4j metadata fixture. Main7894b6a postmerge36504418321 all6 green. No bootstrap/cutover/paid qualification |
 | U04–U14 | Planned | See approved master plan; no gate accepted |
 
 Repository: https://github.com/desanv01/mirofish-research-lab (private).

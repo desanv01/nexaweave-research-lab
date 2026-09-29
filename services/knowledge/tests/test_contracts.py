@@ -5,8 +5,8 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 
-from mirofish_knowledge.contracts import KnowledgeScope, Layer, SourceEnvelope, OntologySpec, SearchQuery
-from mirofish_knowledge.provider import ProviderConfig, Endpoint, UnsupportedCapability, GraphitiKnowledgeProvider, BoundedGenericClient, OperationConflict, ReconciliationRequired, _request_fingerprint
+from mirofish_knowledge.contracts import FactResult, KnowledgeScope, Layer, SourceEnvelope, OntologySpec, SearchQuery
+from mirofish_knowledge.provider import ProviderConfig, Endpoint, UnsupportedCapability, GraphitiKnowledgeProvider, BoundedGenericClient, OperationConflict, ReconciliationRequired, _fact, _request_fingerprint
 from graphiti_core.llm_client import LLMConfig
 from graphiti_core.prompts.models import Message
 from pydantic import BaseModel
@@ -28,6 +28,68 @@ def test_scope_partition_includes_every_field():
     assert one.episode_uuid(uuid4()) != one.episode_uuid(uuid4())
     with pytest.raises(ValidationError):
         KnowledgeScope(**one.model_dump(), group_id="attacker")
+
+
+def test_fact_metadata_defaults_roundtrip_bounds_and_timestamps():
+    one = scope()
+    minimal = {"provider_id": str(uuid4()), "scope": one.model_dump(mode="json"), "kind": "node"}
+    old_wire = FactResult.model_validate_json(__import__("json").dumps(minimal))
+    assert old_wire.labels == () and old_wire.summary is None and old_wire.expired_at is None
+    expiry = datetime.now(timezone.utc)
+    populated = FactResult(**minimal | {"scope": one, "labels": ("Entity", "人物"),
+                                      "summary": "研究摘要", "expired_at": expiry})
+    assert FactResult.model_validate_json(populated.model_dump_json()) == populated
+    assert len(FactResult(**minimal | {"scope": one, "labels": ("x" * 128,),
+                                      "summary": "文" * 32768}).summary) == 32768
+    assert len(FactResult(**minimal | {"scope": one, "labels": tuple(f"L{i}" for i in range(64))}).labels) == 64
+    for labels in (("",), ("x" * 129,), ("bad\nlabel",), ("bad\x7flabel",),
+                   ("Person", "Person"), tuple(f"L{i}" for i in range(65)), (123,), "Person"):
+        with pytest.raises(ValidationError):
+            FactResult(**minimal | {"scope": one, "labels": labels})
+    for summary in ("x" * 32769, 123):
+        with pytest.raises(ValidationError):
+            FactResult(**minimal | {"scope": one, "summary": summary})
+    with pytest.raises(ValidationError):
+        FactResult(**minimal | {"scope": one, "expired_at": datetime.now()})
+
+
+def test_graphiti_fact_metadata_normalization_keeps_expiry_distinct():
+    one = scope()
+    valid = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    invalid = datetime(2024, 2, 1, tzinfo=timezone.utc)
+    expired = datetime(2024, 3, 1, tzinfo=timezone.utc)
+
+    class NeoDate:
+        def __init__(self, value):
+            self.value = value
+
+        def to_native(self):
+            return self.value
+
+    node = SimpleNamespace(uuid=str(uuid4()), group_id=one.group_id, name="Mira",
+                           labels=["Entity", "Person"], summary="研究摘要",
+                           attributes={"role": "analyst", "summary": "shadow", "labels": ["Shadow"],
+                                       "name_embedding": [0.1]})
+    node_fact = _fact(one, "node", node)
+    assert node_fact.labels == ("Entity", "Person") and node_fact.summary == "研究摘要"
+    assert node_fact.attributes == {"role": "analyst"}
+    edge = SimpleNamespace(uuid=str(uuid4()), group_id=one.group_id, name="WORKS_FOR",
+                           source_node_uuid=str(uuid4()), target_node_uuid=str(uuid4()),
+                           valid_at=NeoDate(valid), invalid_at=NeoDate(invalid), expired_at=NeoDate(expired),
+                           attributes={"confidence": 0.9, "expired_at": "shadow", "fact_embedding": [0.1]})
+    edge_fact = _fact(one, "edge", edge)
+    assert (edge_fact.valid_at, edge_fact.invalid_at, edge_fact.expired_at) == (valid, invalid, expired)
+    assert edge_fact.attributes == {"confidence": 0.9}
+
+
+@pytest.mark.parametrize("labels", ["Person", {"Person": True}, None, False, ["Person"] * 65])
+def test_graphiti_object_rejects_malformed_label_containers(labels):
+    one = scope()
+    value = SimpleNamespace(uuid=str(uuid4()), group_id=one.group_id, labels=labels)
+    with pytest.raises(ValueError):
+        _fact(one, "node", value)
+    del value.labels
+    assert _fact(one, "node", value).labels == ()
 
 
 def test_source_bounds_hash_and_unknown_time():
@@ -252,7 +314,11 @@ async def test_entity_normalizes_neo4j_datetime(monkeypatch):
 
     async def rows(query, **params):
         if "MATCH (n:Entity" in query:
-            return [{"properties": {"uuid": str(uuid4()), "name": "Mira", "created_at": NeoDate(), "group_id": one.group_id}}]
+            assert "labels(n) AS labels" in query
+            return [{"properties": {"uuid": str(uuid4()), "name": "Mira", "created_at": NeoDate(),
+                                    "summary": "研究摘要", "labels": ["Shadow"], "role": "analyst",
+                                    "name_embedding": [0.1], "group_id": one.group_id},
+                     "labels": ["Entity", "Person"]}]
         return []
 
     async def passthrough(scope, fact):
@@ -262,6 +328,137 @@ async def test_entity_normalizes_neo4j_datetime(monkeypatch):
     monkeypatch.setattr(provider, "_decorate_fact", passthrough)
     result = await provider.entity(one, str(uuid4()))
     assert result.facts[0].created_at == now
+    assert result.facts[0].labels == ("Entity", "Person")
+    assert result.facts[0].summary == "研究摘要"
+    assert result.facts[0].attributes == {"role": "analyst"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("labels", ["Person", {"Person": True}, None, False, ["Person"] * 65])
+async def test_entity_rejects_malformed_neo4j_label_containers(monkeypatch, labels):
+    one = scope()
+    provider = GraphitiKnowledgeProvider(graphiti=SimpleNamespace(driver=object()))
+
+    async def rows(query, **params):
+        return [{"properties": {"uuid": str(uuid4()), "group_id": one.group_id}, "labels": labels}]
+
+    monkeypatch.setattr(provider, "_rows", rows)
+    with pytest.raises(ValueError):
+        await provider.entity(one, str(uuid4()))
+
+
+@pytest.mark.asyncio
+async def test_entity_edge_expiry_and_search_object_metadata(monkeypatch):
+    one = scope()
+    valid = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    invalid = datetime(2024, 2, 1, tzinfo=timezone.utc)
+    expired = datetime(2024, 3, 1, tzinfo=timezone.utc)
+
+    class NeoDate:
+        def __init__(self, value):
+            self.value = value
+
+        def to_native(self):
+            return self.value
+
+    node_id, edge_id, episode_id = str(uuid4()), str(uuid4()), str(uuid4())
+    provider = GraphitiKnowledgeProvider(graphiti=object())
+
+    async def rows(query, **params):
+        if "MATCH (n:Entity" in query:
+            return [{"properties": {"uuid": node_id, "group_id": one.group_id, "name": "Mira",
+                                    "summary": "研究摘要"}, "labels": ["Entity", "Person"]}]
+        if "MATCH (a:Entity)" in query:
+            return [{"properties": {"uuid": edge_id, "group_id": one.group_id,
+                                    "episodes": [episode_id], "valid_at": NeoDate(valid),
+                                    "invalid_at": NeoDate(invalid), "expired_at": NeoDate(expired),
+                                    "confidence": 0.9, "fact_embedding": [0.1]},
+                     "source_id": node_id, "target_id": str(uuid4())}]
+        return []
+
+    async def passthrough(scope, fact):
+        return fact
+
+    monkeypatch.setattr(provider, "_rows", rows)
+    monkeypatch.setattr(provider, "_decorate_fact", passthrough)
+    entity = await provider.entity(one, node_id)
+    edge = next(fact for fact in entity.facts if fact.kind == "edge")
+    assert (edge.valid_at, edge.invalid_at, edge.expired_at) == (valid, invalid, expired)
+    assert edge.attributes == {"confidence": 0.9}
+
+    class FakeGraph:
+        async def search_(self, text, *, config, group_ids):
+            assert group_ids == [one.group_id]
+            node = SimpleNamespace(uuid=node_id, group_id=one.group_id, name="Mira",
+                                   labels=["Entity", "Person"], summary="研究摘要")
+            relation = SimpleNamespace(uuid=edge_id, group_id=one.group_id, name="WORKS_FOR",
+                                       source_node_uuid=node_id, target_node_uuid=str(uuid4()),
+                                       episodes=[episode_id], valid_at=NeoDate(valid),
+                                       invalid_at=NeoDate(invalid), expired_at=NeoDate(expired))
+            return SimpleNamespace(edges=[relation], nodes=[node], episodes=[],
+                                   edge_reranker_scores=[], node_reranker_scores=[], episode_reranker_scores=[])
+
+    search_provider = GraphitiKnowledgeProvider(graphiti=FakeGraph())
+    monkeypatch.setattr(search_provider, "_decorate_fact", passthrough)
+    found = await search_provider.search(one, SearchQuery(text="Mira"))
+    assert next(fact for fact in found.facts if fact.kind == "node").labels == ("Entity", "Person")
+    assert next(fact for fact in found.facts if fact.kind == "node").summary == "研究摘要"
+    searched_edge = next(fact for fact in found.facts if fact.kind == "edge")
+    assert (searched_edge.valid_at, searched_edge.invalid_at, searched_edge.expired_at) == (valid, invalid, expired)
+
+
+@pytest.mark.asyncio
+async def test_fake_graphiti_ingest_preserves_node_metadata_and_edge_expiry(monkeypatch):
+    from graphiti_core.nodes import EpisodicNode
+
+    one = scope()
+    content = "Mira works for Harbor Labs."
+    ontology = OntologySpec(revision=uuid4(), entity_types=({"name": "Person", "description": "A person"},), edge_types=())
+    source = SourceEnvelope(source_revision=uuid4(), source_sha256=hashlib.sha256(content.encode()).hexdigest(),
+                            ontology_revision=ontology.revision, operation_id=uuid4(), source_kind="document",
+                            content=content, source_name="synthetic", recorded_at=datetime.now(timezone.utc))
+    expiry = datetime(2024, 3, 1, tzinfo=timezone.utc)
+
+    class NeoDate:
+        def to_native(self):
+            return expiry
+
+    class FakeDriver:
+        async def execute_query(self, query, **kwargs):
+            return None
+
+    class FakeGraph:
+        driver = FakeDriver()
+
+        async def add_episode(self, **kwargs):
+            episode_id = kwargs["uuid"]
+            node_id = str(uuid4())
+            node = SimpleNamespace(uuid=node_id, group_id=one.group_id, name="Mira",
+                                   labels=["Entity", "Person"], summary="研究摘要")
+            edge = SimpleNamespace(uuid=str(uuid4()), group_id=one.group_id, name="WORKS_FOR",
+                                   source_node_uuid=node_id, target_node_uuid=str(uuid4()),
+                                   episodes=[episode_id], expired_at=NeoDate())
+            episode = SimpleNamespace(uuid=episode_id, group_id=one.group_id, name="synthetic")
+            return SimpleNamespace(episode=episode, nodes=[node], edges=[edge])
+
+    async def no_save(self, driver):
+        return None
+
+    async def no_rows(query, **params):
+        return []
+
+    async def passthrough(scope, fact, **kwargs):
+        return fact
+
+    subject = GraphitiKnowledgeProvider(graphiti=FakeGraph())
+    monkeypatch.setattr(EpisodicNode, "save", no_save)
+    monkeypatch.setattr(subject, "_rows", no_rows)
+    monkeypatch.setattr(subject, "_decorate_fact", passthrough)
+    result = await subject.ingest(one, source, ontology)
+    node = next(fact for fact in result.facts if fact.kind == "node")
+    edge = next(fact for fact in result.facts if fact.kind == "edge")
+    assert node.labels == ("Entity", "Person") and node.summary == "研究摘要"
+    assert edge.expired_at == expiry
 
 
 @pytest.mark.asyncio

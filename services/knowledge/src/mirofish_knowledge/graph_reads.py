@@ -24,7 +24,7 @@ _CURSOR_FIELDS = {"v", "group_id", "kind", "entity_type", "last_uuid"}
 _MAX_DECODED_CURSOR = 768
 _MAX_PAGE_BYTES = 1024 * 1024
 _INTERNAL_FIELDS = frozenset({
-    "uuid", "group_id", "labels", "name", "fact", "content", "source_description",
+    "uuid", "group_id", "labels", "summary", "name", "fact", "content", "source_description",
     "source", "episodes", "created_at", "valid_at", "invalid_at", "expired_at",
     "source_node_uuid", "target_node_uuid", "entity_edges", "community_uuid",
 })
@@ -121,6 +121,12 @@ def _clean_attributes(data: dict) -> dict:
     return result
 
 
+def _node_labels(value: object) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)) or len(value) > 64:
+        raise GraphReadViolation("invalid graph node labels")
+    return tuple(value)
+
+
 def _row_fact(row, kind: str, scope: KnowledgeScope, entity_type: str | None, native) -> FactResult:
     try:
         data = native(dict(row["properties"]))
@@ -132,7 +138,9 @@ def _row_fact(row, kind: str, scope: KnowledgeScope, entity_type: str | None, na
                       invalid_at=data.get("invalid_at"), created_at=data.get("created_at"),
                       attributes=_clean_attributes(data))
         if kind == "node":
-            if entity_type is not None and entity_type not in row["labels"]:
+            common["labels"] = _node_labels(row["labels"])
+            common["summary"] = data.get("summary")
+            if entity_type is not None and entity_type not in common["labels"]:
                 raise GraphReadViolation("graph node type mismatch")
         elif kind == "edge":
             if row["source_group"] != scope.group_id or row["target_group"] != scope.group_id:
@@ -140,6 +148,7 @@ def _row_fact(row, kind: str, scope: KnowledgeScope, entity_type: str | None, na
             common["source_node_id"] = _uuid(row["source_id"])
             common["target_node_id"] = _uuid(row["target_id"])
             common["fact"] = data.get("fact")
+            common["expired_at"] = data.get("expired_at")
             episodes = data.get("episodes")
             if not isinstance(episodes, (list, tuple)):
                 raise GraphReadViolation("graph edge episode references missing")
@@ -177,7 +186,7 @@ async def page_graph(provider, scope: KnowledgeScope, request: GraphPageRequest,
         if index < request.limit:
             decorated = await provider._decorate_fact(scope, fact)
             try:
-                decorated = FactResult.model_validate(decorated.model_dump())
+                decorated = FactResult.model_validate(decorated.model_dump(warnings=False))
             except (AttributeError, TypeError, ValueError):
                 raise GraphReadViolation("invalid decorated graph fact") from None
             if decorated.scope != scope or decorated.kind != request.kind or decorated.provider_id != fact.provider_id:
