@@ -244,11 +244,15 @@ class OasisProfileGenerator:
         zep_api_key: Optional[str] = None,
         graph_id: Optional[str] = None,
         *, basic_only: bool = False,
+        chat_client=None, context_callback=None, strict_generation: bool = False,
         rng: random.Random | None = None,
     ):
         if type(basic_only) is not bool or (rng is not None and not isinstance(rng, random.Random)):
             raise ValueError("invalid profile generator mode")
         self.basic_only = basic_only
+        self.neutral_mode = context_callback is not None
+        self.strict_generation = strict_generation
+        self.context_callback = context_callback
         self._rng = rng if rng is not None else random
         self.graph_id = graph_id
         if basic_only:
@@ -260,26 +264,25 @@ class OasisProfileGenerator:
             self.zep_client = None
             return
 
-        from openai import OpenAI
-        from ..utils.zep import get_zep_client
-        self.api_key = api_key or Config.LLM_API_KEY
+        self.api_key = None if chat_client is not None else api_key or Config.LLM_API_KEY
         self.base_url = base_url or Config.LLM_BASE_URL
         self.model_name = model_name or Config.LLM_MODEL_NAME
         
-        if not self.api_key:
+        if chat_client is not None:
+            self.client = chat_client
+        elif not self.api_key:
             raise ValueError("LLM_API_KEY 未配置")
-        
-        self.client = OpenAI(
-            api_key=self.api_key,
-            base_url=self.base_url
-        )
+        else:
+            from openai import OpenAI
+            self.client = OpenAI(api_key=self.api_key, base_url=self.base_url)
         
         # Zep客户端用于检索丰富上下文
-        self.zep_api_key = zep_api_key or Config.ZEP_API_KEY
+        self.zep_api_key = None if self.neutral_mode else zep_api_key or Config.ZEP_API_KEY
         self.zep_client = None
         
         if self.zep_api_key:
             try:
+                from ..utils.zep import get_zep_client
                 self.zep_client = get_zep_client(self.zep_api_key)
             except Exception as e:
                 logger.warning(f"Zep客户端初始化失败: {e}")
@@ -376,6 +379,8 @@ class OasisProfileGenerator:
         """
         if getattr(self, "basic_only", False):
             return {"facts": [], "node_summaries": [], "context": ""}
+        if getattr(self, "neutral_mode", False):
+            return self.context_callback(entity)
         import concurrent.futures
         from ..utils.zep import (call_zep_read_with_retry, is_retryable_zep_error,
                                  normalize_zep_search_query)
@@ -542,10 +547,12 @@ class OasisProfileGenerator:
             # 去重：排除已存在的事实
             new_facts = [f for f in zep_results["facts"] if f not in existing_facts]
             if new_facts:
-                context_parts.append("### Zep检索到的事实信息\n" + "\n".join(f"- {f}" for f in new_facts[:15]))
+                heading = "### 图谱邻域事实信息" if getattr(self, "neutral_mode", False) else "### Zep检索到的事实信息"
+                context_parts.append(heading + "\n" + "\n".join(f"- {f}" for f in new_facts[:15]))
         
         if zep_results.get("node_summaries"):
-            context_parts.append("### Zep检索到的相关节点\n" + "\n".join(f"- {s}" for s in zep_results["node_summaries"][:10]))
+            heading = "### 图谱邻域相关节点" if getattr(self, "neutral_mode", False) else "### Zep检索到的相关节点"
+            context_parts.append(heading + "\n" + "\n".join(f"- {s}" for s in zep_results["node_summaries"][:10]))
         
         return "\n\n".join(context_parts)
     
@@ -606,6 +613,16 @@ class OasisProfileGenerator:
                 
                 # 检查是否被截断（finish_reason不是'stop'）
                 finish_reason = response.choices[0].finish_reason
+                if getattr(self, "strict_generation", False):
+                    if finish_reason != 'stop':
+                        raise ValueError("incomplete persona response")
+                    result = json.loads(content)
+                    if (type(result) is not dict
+                            or type(result.get("bio")) is not str or not result["bio"].strip()
+                            or type(result.get("persona")) is not str
+                            or not result["persona"].strip()):
+                        raise ValueError("incomplete persona response")
+                    return result
                 if finish_reason == 'length':
                     logger.warning(f"LLM输出被截断 (attempt {attempt+1}), 尝试修复...")
                     content = self._fix_truncated_json(content)
@@ -634,11 +651,15 @@ class OasisProfileGenerator:
                     last_error = je
                     
             except Exception as e:
+                if getattr(self, "strict_generation", False):
+                    raise RuntimeError("persona_generation_failed") from None
                 logger.warning(f"LLM调用失败 (attempt {attempt+1}): {str(e)[:80]}")
                 last_error = e
                 import time
                 time.sleep(1 * (attempt + 1))  # 指数退避
         
+        if getattr(self, "strict_generation", False):
+            raise RuntimeError("persona_generation_failed") from None
         logger.warning(f"LLM生成人设失败（{max_attempts}次尝试）: {last_error}, 使用规则生成")
         return self._generate_profile_rule_based(
             entity_name, entity_type, entity_summary, entity_attributes
@@ -1002,6 +1023,8 @@ class OasisProfileGenerator:
                 return idx, profile, None
                 
             except Exception as e:
+                if getattr(self, "strict_generation", False):
+                    raise
                 logger.error(f"生成实体 {entity.name} 的人设失败: {str(e)}")
                 # 创建一个基础profile
                 fallback_profile = OasisAgentProfile(
@@ -1057,6 +1080,8 @@ class OasisProfileGenerator:
                         logger.info(f"[{current}/{total}] 成功生成人设: {entity.name} ({entity_type})")
                         
                 except Exception as e:
+                    if getattr(self, "strict_generation", False):
+                        raise
                     logger.error(f"处理实体 {entity.name} 时发生异常: {str(e)}")
                     with lock:
                         completed_count[0] += 1

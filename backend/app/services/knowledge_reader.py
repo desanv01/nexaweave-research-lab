@@ -429,6 +429,20 @@ class KnowledgeGraphReader:
     def filter_defined_entities(self, graph_id: str, defined_entity_types=None,
                                 enrich_with_edges: bool = True) -> FilteredEntities:
         budget = self._start(graph_id)
+        allowed = self._filter_types(defined_entity_types, enrich_with_edges)
+        nodes = []
+        for fact in self._scan("node", budget):
+            budget.check()
+            nodes.append(self._node(fact))
+        edges = []
+        if enrich_with_edges:
+            for fact in self._scan("edge", budget):
+                budget.check()
+                edges.append(self._edge(fact))
+        return self._filter_projected(nodes, edges, allowed, enrich_with_edges, budget)
+
+    @staticmethod
+    def _filter_types(defined_entity_types, enrich_with_edges):
         if type(enrich_with_edges) is not bool:
             raise KnowledgeReadError("invalid_request")
         if defined_entity_types is not None:
@@ -436,17 +450,21 @@ class KnowledgeGraphReader:
                     or any(type(item) is not str or not _ENTITY_TYPE.fullmatch(item)
                            for item in defined_entity_types)):
                 raise KnowledgeReadError("invalid_request")
-        allowed = set(defined_entity_types or ())
-        nodes = []
-        for fact in self._scan("node", budget):
-            budget.check()
-            nodes.append(self._node(fact))
+        return set(defined_entity_types or ())
+
+    def _filter_projected_graph(self, graph_id, graph, defined_entity_types=None,
+                                enrich_with_edges=True):
+        """Filter the exact projection previously returned by this bound reader."""
+        budget = self._start(graph_id)
+        if graph.get("graph_id") != self._graph_id:
+            raise KnowledgeReadError("invalid_request")
+        allowed = self._filter_types(defined_entity_types, enrich_with_edges)
+        return self._filter_projected(graph["nodes"], graph["edges"], allowed,
+                                      enrich_with_edges, budget)
+
+    def _filter_projected(self, nodes, edges, allowed, enrich_with_edges, budget):
         node_map, adjacency = ({}, {})
         if enrich_with_edges:
-            edges = []
-            for fact in self._scan("edge", budget):
-                budget.check()
-                edges.append(self._edge(fact))
             node_map, adjacency = self._index(nodes, edges, budget)
         entities = []
         found = set()

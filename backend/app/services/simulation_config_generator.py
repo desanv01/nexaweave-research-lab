@@ -10,19 +10,20 @@
 4. 生成平台配置
 """
 
+from __future__ import annotations
+
 import json
 import math
-from typing import Dict, Any, List, Optional, Callable
+from typing import Dict, Any, List, Optional, Callable, TYPE_CHECKING
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
-
-from openai import OpenAI
 
 from ..config import Config
 from ..utils.logger import get_logger
 from ..utils.locale import get_language_instruction, t
 from ..utils.openai_chat_compat import create_chat_completion, extract_chat_completion_text
-from .zep_entity_reader import EntityNode, ZepEntityReader
+if TYPE_CHECKING:
+    from .knowledge_reader import EntityNode
 
 logger = get_logger('mirofish.simulation_config')
 
@@ -227,19 +228,21 @@ class SimulationConfigGenerator:
         self,
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
-        model_name: Optional[str] = None
+        model_name: Optional[str] = None,
+        *, chat_client=None, strict_generation: bool = False
     ):
-        self.api_key = api_key or Config.LLM_API_KEY
+        self.api_key = None if chat_client is not None else api_key or Config.LLM_API_KEY
         self.base_url = base_url or Config.LLM_BASE_URL
         self.model_name = model_name or Config.LLM_MODEL_NAME
+        self.strict_generation = strict_generation
         
-        if not self.api_key:
+        if chat_client is not None:
+            self.client = chat_client
+        elif not self.api_key:
             raise ValueError("LLM_API_KEY 未配置")
-        
-        self.client = OpenAI(
-            api_key=self.api_key,
-            base_url=self.base_url
-        )
+        else:
+            from openai import OpenAI
+            self.client = OpenAI(api_key=self.api_key, base_url=self.base_url)
     
     def generate_config(
         self,
@@ -297,12 +300,20 @@ class SimulationConfigGenerator:
         report_progress(1, t('progress.generatingTimeConfig'))
         num_entities = len(entities)
         time_config_result = self._generate_time_config(context, num_entities)
+        if getattr(self, "strict_generation", False) and not {
+                "total_simulation_hours", "minutes_per_round", "agents_per_hour_min",
+                "agents_per_hour_max", "peak_hours", "off_peak_hours", "morning_hours",
+                "work_hours"} <= set(time_config_result):
+            raise ValueError("incomplete time configuration")
         time_config = self._parse_time_config(time_config_result, num_entities)
         reasoning_parts.append(f"{t('progress.timeConfigLabel')}: {time_config_result.get('reasoning', t('common.success'))}")
         
         # ========== 步骤2: 生成事件配置 ==========
         report_progress(2, t('progress.generatingEventConfig'))
         event_config_result = self._generate_event_config(context, simulation_requirement, entities)
+        if getattr(self, "strict_generation", False) and not {
+                "hot_topics", "narrative_direction", "initial_posts"} <= set(event_config_result):
+            raise ValueError("incomplete event configuration")
         event_config = self._parse_event_config(event_config_result)
         reasoning_parts.append(f"{t('progress.eventConfigLabel')}: {event_config_result.get('reasoning', t('common.success'))}")
         
@@ -455,6 +466,13 @@ class SimulationConfigGenerator:
                 
                 content = extract_chat_completion_text(response)
                 finish_reason = response.choices[0].finish_reason
+                if getattr(self, "strict_generation", False):
+                    if finish_reason != 'stop':
+                        raise ValueError("incomplete configuration response")
+                    result = json.loads(content)
+                    if type(result) is not dict:
+                        raise ValueError("invalid configuration response")
+                    return result
                 
                 # 检查是否被截断
                 if finish_reason == 'length':
@@ -475,6 +493,8 @@ class SimulationConfigGenerator:
                     last_error = e
                     
             except Exception as e:
+                if getattr(self, "strict_generation", False):
+                    raise RuntimeError("configuration_generation_failed") from None
                 logger.warning(f"LLM调用失败 (attempt {attempt+1}): {str(e)[:80]}")
                 last_error = e
                 import time
@@ -593,6 +613,8 @@ class SimulationConfigGenerator:
         try:
             return self._call_llm_with_retry(prompt, system_prompt)
         except Exception as e:
+            if getattr(self, "strict_generation", False):
+                raise
             logger.warning(f"时间配置LLM生成失败: {e}, 使用默认配置")
             return self._get_default_time_config(num_entities)
     
@@ -710,6 +732,8 @@ class SimulationConfigGenerator:
         try:
             return self._call_llm_with_retry(prompt, system_prompt)
         except Exception as e:
+            if getattr(self, "strict_generation", False):
+                raise
             logger.warning(f"事件配置LLM生成失败: {e}, 使用默认配置")
             return {
                 "hot_topics": [],
@@ -874,7 +898,17 @@ class SimulationConfigGenerator:
         try:
             result = self._call_llm_with_retry(prompt, system_prompt)
             llm_configs = {cfg["agent_id"]: cfg for cfg in result.get("agent_configs", [])}
+            if getattr(self, "strict_generation", False) and (
+                    len(result.get("agent_configs", [])) != len(entities)
+                    or set(llm_configs) != set(range(start_idx, start_idx + len(entities)))
+                    or any(not {"activity_level", "posts_per_hour", "comments_per_hour",
+                                "active_hours", "response_delay_min", "response_delay_max",
+                                "sentiment_bias", "stance", "influence_weight"} <= set(cfg)
+                           for cfg in llm_configs.values())):
+                raise ValueError("incomplete agent configuration")
         except Exception as e:
+            if getattr(self, "strict_generation", False):
+                raise
             logger.warning(f"Agent配置批次LLM生成失败: {e}, 使用规则生成")
             llm_configs = {}
         
@@ -990,4 +1024,3 @@ class SimulationConfigGenerator:
                 "influence_weight": 1.0
             }
     
-

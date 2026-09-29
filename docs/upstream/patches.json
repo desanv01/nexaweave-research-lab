@@ -19,9 +19,9 @@
     {
       "imported_path": "backend/app/services/oasis_profile_generator.py",
       "original_sha256": "ed9cd3416a46b922bc2f9bf0e9623435d9b96bdf0198db27602ca8c4f0dd0e37",
-      "current_sha256": "945dd4514ee8c755e5181fa7c12e7d1a5961029268a03c18926c5c83b18a0205",
-      "reason": "Explicit basic-only generation with local RNG/no SDKs and shared inherited Twitter row formatter; preserve default enriched legacy behavior and prompts.",
-      "phase": "U03j"
+      "current_sha256": "ef026707c0995ba389af101be810dab54e8e16315522145f49b8c4cd2e028e1c",
+      "reason": "U03j basic-only/local RNG and inherited Twitter formatting. U03k explicit injected chat/context, strict neutral parsing without fallback, preserving legacy defaults.",
+      "phase": "U03j/U03k"
     },
     {
       "imported_path": "frontend/package.json",
@@ -126,9 +126,16 @@
     {
       "imported_path": "backend/app/services/simulation_manager.py",
       "original_sha256": "6287937a965a97cea12a0d54ac55e7d1ae98944a96accfd7504a21350cc4e902",
-      "current_sha256": "bf42067f166036d7cdcc127228572db12db47007342476ab02bb282d46b81109",
-      "reason": "Validate simulation/cache/file boundaries and remove directory creation from read-only lookup.",
-      "phase": "U02a"
+      "current_sha256": "6d39c2d8692429c95f655fef85d67e46f157a4e1183131c6e169ef47d776ca03",
+      "reason": "U02a bounded paths; U03k trusted graph-bound preparation dependencies, complete artifact/ID checks before READY and fixed neutral errors, preserving legacy defaults.",
+      "phase": "U02a/U03k"
+    },
+    {
+      "imported_path": "backend/app/services/simulation_config_generator.py",
+      "original_sha256": "3bb128db01398dd344a2a4c12875f424f7b9ae9c2a7b89f99c42e1ac555396d1",
+      "current_sha256": "58ceb4d128507d3c3b62652da197c3dae0ceef1c4b052af278d7d2bfbfff2f68",
+      "reason": "Defer SDK imports and inject trusted chat client; explicit strict neutral configuration rejects incomplete/truncated responses without changing legacy defaults.",
+      "phase": "U03k"
     },
     {
       "imported_path": "backend/app/services/simulation_runner.py",
