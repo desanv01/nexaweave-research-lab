@@ -11,7 +11,7 @@ import pytest
 
 from mirofish_knowledge.contracts import KnowledgeScope, Layer, OntologySpec, SourceEnvelope
 from mirofish_knowledge.bindings import BindingRecord, ScopeBindingStore, _stored
-from mirofish_knowledge.operations import CompletionReceipt, Conflict, Ledger, StorageError, Tombstoned, _error_code, _fingerprint, _receipt, request_fingerprint
+from mirofish_knowledge.operations import CompletionReceipt, Conflict, Ledger, StorageError, Tombstoned, _error_code, _fingerprint, _read_lock_key, _receipt, request_fingerprint
 from mirofish_knowledge.provider import _request_fingerprint
 
 
@@ -143,3 +143,71 @@ def test_binding_database_failure_uses_fixed_private_error():
     with pytest.raises(StorageError) as error:
         ScopeBindingStore(BrokenConnection).resolve("owner!+@", "graph-1")
     assert "private" not in str(error.value)
+
+
+def test_read_lock_key_is_stable_signed_and_scope_distinct():
+    one, _, _ = _request()
+    other, _, _ = _request()
+    key = _read_lock_key(one.group_id)
+    assert key == _read_lock_key(one.group_id)
+    assert -(1 << 63) <= key < (1 << 63)
+    assert key != _read_lock_key(other.group_id)
+
+
+@pytest.mark.parametrize("control", [KeyboardInterrupt, SystemExit], ids=["keyboard", "system_exit"])
+def test_read_scope_cleanup_preserves_process_control(control):
+    one, _, _ = _request()
+
+    class Connection:
+        autocommit = False
+        closed = False
+
+        def transaction(self):
+            return nullcontext()
+
+        def execute(self, query, params=None):
+            if query.startswith("SELECT pg_advisory_unlock_shared"):
+                raise psycopg.Error("private failed connection")
+            answer = (1,) if query == "SELECT 1" else (True,) if query.startswith("SELECT pg_try_advisory_lock_shared") else None
+            return type("Result", (), {"fetchone": lambda self: answer})()
+
+        def close(self):
+            self.closed = True
+
+    connection = Connection()
+    ledger = Ledger(lambda: connection)
+    ledger._scope = lambda conn, scope: None
+    ledger._admission = lambda conn, scope: None
+    with pytest.raises(control):
+        with ledger.read_scope(one):
+            raise control()
+    assert connection.closed
+
+
+def test_read_scope_cleanup_failure_is_fixed_storage_error():
+    one, _, _ = _request()
+
+    class Connection:
+        autocommit = False
+        closed = False
+
+        def transaction(self):
+            return nullcontext()
+
+        def execute(self, query, params=None):
+            if query.startswith("SELECT pg_advisory_unlock_shared"):
+                raise psycopg.Error("private failed connection")
+            answer = (1,) if query == "SELECT 1" else (True,) if query.startswith("SELECT pg_try_advisory_lock_shared") else None
+            return type("Result", (), {"fetchone": lambda self: answer})()
+
+        def close(self):
+            self.closed = True
+
+    connection = Connection()
+    ledger = Ledger(lambda: connection)
+    ledger._scope = lambda conn, scope: None
+    ledger._admission = lambda conn, scope: None
+    with pytest.raises(StorageError) as error:
+        with ledger.read_scope(one):
+            pass
+    assert "private" not in str(error.value) and connection.closed

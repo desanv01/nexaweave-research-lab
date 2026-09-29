@@ -23,7 +23,7 @@ def child(integration: bool) -> int:
     try:
         import pytest
         files = ["tests/test_contracts.py", "tests/test_graph_reads.py", "tests/test_commands.py",
-                 "tests/test_stdio_transport.py"]
+                 "tests/test_stdio_transport.py", "tests/test_read_runtime.py"]
         if integration:
             files.append("tests/test_integration_neo4j.py")
         result = int(pytest.main(["-q", "-p", "pytest_asyncio.plugin", *files]))

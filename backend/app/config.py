@@ -16,6 +16,7 @@ else:
 
 class Config:
     """Flask配置类"""
+    MIROFISH_APP_MODE = 'legacy'
     
     # Flask配置
     SECRET_KEY = os.environ.get('SECRET_KEY', 'mirofish-secret-key')
@@ -77,3 +78,15 @@ class Config:
             import warnings
             warnings.warn("Flask DEBUG mode is enabled. Do not use in production.", RuntimeWarning)
         return errors
+
+    @classmethod
+    def validate_readonly(cls) -> list[str]:
+        """Validate the separate graph-read host without legacy model/Zep keys."""
+        try:
+            from .services.knowledge_read_facade import ReadHostSettings
+            ReadHostSettings.from_config(cls)
+            if cls.DEBUG or os.environ.get('FLASK_HOST', '127.0.0.1') not in {'127.0.0.1', '::1', 'localhost'}:
+                raise ValueError
+        except (ValueError, OSError):
+            return ['Invalid graph-read configuration']
+        return []
