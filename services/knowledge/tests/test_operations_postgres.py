@@ -8,12 +8,15 @@ from uuid import uuid4
 import psycopg
 import pytest
 from psycopg.conninfo import conninfo_to_dict
+from psycopg.types.json import Jsonb
 
 from mirofish_knowledge.contracts import KnowledgeScope, Layer
+from mirofish_knowledge.bindings import ScopeBindingStore, _stored
 from mirofish_knowledge.operations import (
     Busy, CompletionReceipt, Conflict, InvalidTransition, Ledger, MigrationMismatch,
-    OperationState, StaleAttempt, Tombstoned, migrate,
+    NotFound, OperationState, StaleAttempt, StorageError, Tombstoned, migrate,
 )
+from mirofish_knowledge import operations as operations_module
 
 pytestmark = pytest.mark.postgres
 
@@ -205,3 +208,226 @@ def test_migration_schema_drift_rejected(factory):
             with conn.transaction():
                 conn.execute("ALTER TABLE mf_knowledge.scopes ADD COLUMN fixture_drift text")
                 migrate(conn)
+
+
+class _RollbackFixture(Exception):
+    pass
+
+
+def test_migration_v1_upgrade_preserves_data_and_checksum(factory):
+    one = scope()
+    with factory() as conn:
+        with pytest.raises(_RollbackFixture):
+            with conn.transaction():
+                conn.execute("DROP TABLE mf_knowledge.scope_bindings")
+                conn.execute("DELETE FROM mf_knowledge.schema_migrations WHERE version = 2")
+                old = conn.execute("SELECT checksum, schema_checksum FROM mf_knowledge.schema_migrations WHERE version = 1").fetchone()
+                conn.execute("INSERT INTO mf_knowledge.scopes(group_id, canonical_scope) VALUES (%s, %s)",
+                             (one.group_id, Jsonb(one.model_dump(mode="json"))))
+                migrate(conn)
+                assert conn.execute("SELECT checksum, schema_checksum FROM mf_knowledge.schema_migrations WHERE version = 1").fetchone() == old
+                assert conn.execute("SELECT count(*) FROM mf_knowledge.scopes WHERE group_id = %s", (one.group_id,)).fetchone()[0] == 1
+                assert [row[0] for row in conn.execute("SELECT version FROM mf_knowledge.schema_migrations ORDER BY version")] == [1, 2]
+                migrate(conn)
+                raise _RollbackFixture
+
+
+def test_fresh_install_and_idempotence_are_atomic(factory):
+    with factory() as conn:
+        with pytest.raises(_RollbackFixture):
+            with conn.transaction():
+                conn.execute("DROP SCHEMA mf_knowledge CASCADE")
+                migrate(conn)
+                assert [row[0] for row in conn.execute("SELECT version FROM mf_knowledge.schema_migrations ORDER BY version")] == [1, 2]
+                migrate(conn)
+                assert conn.execute("SELECT to_regclass('mf_knowledge.scope_bindings') IS NOT NULL").fetchone()[0]
+                raise _RollbackFixture
+
+
+@pytest.mark.parametrize("change", [
+    "historical_checksum", "latest_checksum", "missing_first", "missing_all", "future", "latest_shape",
+])
+def test_migration_records_and_latest_shape_fail_closed(factory, change):
+    with factory() as conn:
+        with pytest.raises(_RollbackFixture):
+            with conn.transaction():
+                if change == "historical_checksum":
+                    conn.execute("UPDATE mf_knowledge.schema_migrations SET checksum = %s WHERE version = 1", ("0" * 64,))
+                elif change == "latest_checksum":
+                    conn.execute("UPDATE mf_knowledge.schema_migrations SET checksum = %s WHERE version = 2", ("0" * 64,))
+                elif change == "missing_first":
+                    conn.execute("DELETE FROM mf_knowledge.schema_migrations WHERE version = 1")
+                elif change == "missing_all":
+                    conn.execute("DELETE FROM mf_knowledge.schema_migrations")
+                elif change == "future":
+                    conn.execute("INSERT INTO mf_knowledge.schema_migrations(version, checksum, schema_checksum) VALUES (3, %s, %s)",
+                                 ("a" * 64, "b" * 64))
+                else:
+                    conn.execute("ALTER TABLE mf_knowledge.scope_bindings ADD COLUMN fixture_drift text")
+                with pytest.raises(MigrationMismatch):
+                    migrate(conn)
+                raise _RollbackFixture
+
+
+def test_failed_v1_upgrade_rolls_back_pending_version(factory, monkeypatch):
+    one = scope()
+    with factory() as conn:
+        with pytest.raises(_RollbackFixture):
+            with conn.transaction():
+                conn.execute("DROP TABLE mf_knowledge.scope_bindings")
+                conn.execute("DELETE FROM mf_knowledge.schema_migrations WHERE version = 2")
+                old = conn.execute("SELECT checksum, schema_checksum FROM mf_knowledge.schema_migrations WHERE version = 1").fetchone()
+                conn.execute("INSERT INTO mf_knowledge.scopes(group_id, canonical_scope) VALUES (%s, %s)",
+                             (one.group_id, Jsonb(one.model_dump(mode="json"))))
+                original_checksum = operations_module._schema_checksum
+
+                def fail_after_pending_ddl(connection):
+                    if connection.execute("SELECT to_regclass('mf_knowledge.scope_bindings') IS NOT NULL").fetchone()[0]:
+                        raise psycopg.Error("private migration diagnostic")
+                    return original_checksum(connection)
+
+                monkeypatch.setattr(operations_module, "_schema_checksum", fail_after_pending_ddl)
+                with pytest.raises(StorageError) as error:
+                    migrate(conn)
+                assert "private" not in str(error.value)
+                assert [row[0] for row in conn.execute("SELECT version FROM mf_knowledge.schema_migrations ORDER BY version")] == [1]
+                assert conn.execute("SELECT to_regclass('mf_knowledge.scope_bindings') IS NULL").fetchone()[0]
+                assert conn.execute("SELECT checksum, schema_checksum FROM mf_knowledge.schema_migrations WHERE version = 1").fetchone() == old
+                assert conn.execute("SELECT count(*) FROM mf_knowledge.scopes WHERE group_id = %s", (one.group_id,)).fetchone()[0] == 1
+                raise _RollbackFixture
+
+
+def test_v1_shape_drift_prevents_upgrade(factory):
+    with factory() as conn:
+        with pytest.raises(_RollbackFixture):
+            with conn.transaction():
+                conn.execute("DROP TABLE mf_knowledge.scope_bindings")
+                conn.execute("DELETE FROM mf_knowledge.schema_migrations WHERE version = 2")
+                conn.execute("ALTER TABLE mf_knowledge.scopes ADD COLUMN fixture_v1_drift text")
+                with pytest.raises(MigrationMismatch):
+                    migrate(conn)
+                assert [row[0] for row in conn.execute("SELECT version FROM mf_knowledge.schema_migrations ORDER BY version")] == [1]
+                raise _RollbackFixture
+
+
+def test_bindings_idempotence_conflicts_and_principal_isolation(factory):
+    store = ScopeBindingStore(factory)
+    one, two, three, four = scope(), scope(), scope(), scope()
+    display = "graph-" + uuid4().hex
+    first = store.bind("owner!+@", display, one)
+    assert ScopeBindingStore(factory).bind("owner!+@", display, one) == first
+    assert store.resolve("owner!+@", display) == first
+    with pytest.raises(Conflict):
+        store.bind("owner!+@", display, two)
+    with pytest.raises(Conflict):
+        store.bind("owner!+@", "graph-" + uuid4().hex, one)
+    with pytest.raises(Conflict):
+        store.bind("other", display, one)
+    with pytest.raises(Conflict):
+        store.bind("other", "graph-" + uuid4().hex, one)
+    second = store.bind("other", display, three)
+    assert second.scope == three
+    assert store.bind("Owner!+@", display, four).scope == four
+    assert store.resolve("owner!+@", display).scope == one
+    with pytest.raises(NotFound):
+        store.resolve("third", display)
+    with factory() as conn:
+        assert conn.execute("SELECT count(*) FROM mf_knowledge.scope_bindings WHERE group_id = %s", (one.group_id,)).fetchone()[0] == 1
+        assert conn.execute("SELECT count(*) FROM mf_knowledge.scopes WHERE group_id = %s", (two.group_id,)).fetchone()[0] == 0
+    Ledger(factory).tombstone_scope(one)
+    with pytest.raises(Tombstoned):
+        store.resolve("owner!+@", display)
+    with pytest.raises(Tombstoned):
+        store.bind("owner!+@", display, one)
+
+
+def test_binding_sql_checks_id_domains_and_exact_case_in_rollback(factory):
+    valid, invalid, upper, lower = scope(), scope(), scope(), scope()
+    with factory() as conn:
+        with pytest.raises(_RollbackFixture):
+            with conn.transaction():
+                for item in (valid, invalid, upper, lower):
+                    Ledger._scope(conn, item, create=True)
+                conn.execute(
+                    "INSERT INTO mf_knowledge.scope_bindings(principal, display_graph_id, group_id) VALUES (%s, %s, %s)",
+                    ("!" + "A" * 127, "g" * 128, valid.group_id),
+                )
+                for principal in ("", " ", "a\n", "é", "x" * 129):
+                    with pytest.raises(psycopg.errors.CheckViolation):
+                        with conn.transaction():
+                            conn.execute(
+                                "INSERT INTO mf_knowledge.scope_bindings(principal, display_graph_id, group_id) VALUES (%s, %s, %s)",
+                                (principal, "valid", invalid.group_id),
+                            )
+                for display in ("", "a/b", "é", "x" * 129):
+                    with pytest.raises(psycopg.errors.CheckViolation):
+                        with conn.transaction():
+                            conn.execute(
+                                "INSERT INTO mf_knowledge.scope_bindings(principal, display_graph_id, group_id) VALUES (%s, %s, %s)",
+                                ("valid", display, invalid.group_id),
+                            )
+                conn.execute(
+                    "INSERT INTO mf_knowledge.scope_bindings(principal, display_graph_id, group_id) VALUES (%s, %s, %s)",
+                    ("Owner", "same", upper.group_id),
+                )
+                conn.execute(
+                    "INSERT INTO mf_knowledge.scope_bindings(principal, display_graph_id, group_id) VALUES (%s, %s, %s)",
+                    ("owner", "same", lower.group_id),
+                )
+                assert conn.execute("SELECT count(*) FROM mf_knowledge.scope_bindings WHERE display_graph_id = %s",
+                                    ("same",)).fetchone()[0] == 2
+                assert conn.execute("SELECT group_id FROM mf_knowledge.scope_bindings WHERE principal = %s AND display_graph_id = %s",
+                                    ("Owner", "same")).fetchone()[0] == upper.group_id
+                raise _RollbackFixture
+
+
+def test_binding_stored_canonical_tamper_is_rejected_in_rollback(factory):
+    one = scope()
+    store = ScopeBindingStore(factory)
+    display = "graph-" + uuid4().hex
+    store.bind("tamper", display, one)
+    with factory() as conn:
+        with pytest.raises(_RollbackFixture):
+            with conn.transaction():
+                conn.execute("UPDATE mf_knowledge.scopes SET canonical_scope = %s WHERE group_id = %s",
+                             (Jsonb({**one.model_dump(mode="json"), "layer": "analysis"}), one.group_id))
+                row = conn.execute(
+                    "SELECT b.principal, b.display_graph_id, b.group_id, b.created_at, s.canonical_scope, s.tombstoned "
+                    "FROM mf_knowledge.scope_bindings b JOIN mf_knowledge.scopes s ON s.group_id = b.group_id "
+                    "WHERE b.principal = %s AND b.display_graph_id = %s", ("tamper", display),
+                ).fetchone()
+                with pytest.raises(Conflict):
+                    _stored(row)
+                raise _RollbackFixture
+
+
+@pytest.mark.parametrize("same_scope", [True, False], ids=["identical", "competing"])
+def test_concurrent_binding_winner_and_no_orphan_scope(factory, same_scope):
+    one, two = scope(), scope()
+    display = "graph-" + uuid4().hex
+    barrier = Barrier(2)
+
+    def simultaneous(target):
+        barrier.wait(timeout=5)
+        return ScopeBindingStore(factory).bind("race", display, target)
+
+    targets = (one, one if same_scope else two)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(simultaneous, target) for target in targets]
+        wins, conflicts = [], 0
+        for future in futures:
+            try:
+                wins.append(future.result(timeout=8))
+            except Conflict:
+                conflicts += 1
+    assert len(wins) == (2 if same_scope else 1)
+    assert conflicts == (0 if same_scope else 1)
+    persisted = ScopeBindingStore(factory).resolve("race", display)
+    assert all(item == persisted for item in wins)
+    with factory() as conn:
+        assert conn.execute("SELECT count(*) FROM mf_knowledge.scope_bindings WHERE principal = %s AND display_graph_id = %s",
+                            ("race", display)).fetchone()[0] == 1
+        if not same_scope:
+            loser = two if persisted.scope == one else one
+            assert conn.execute("SELECT count(*) FROM mf_knowledge.scopes WHERE group_id = %s",
+                                (loser.group_id,)).fetchone()[0] == 0

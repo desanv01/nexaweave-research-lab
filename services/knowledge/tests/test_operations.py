@@ -1,13 +1,17 @@
 """Pure validation checks; the PostgreSQL behavior lives in the opt-in module."""
 
 import hashlib
+import warnings
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from uuid import uuid4
 
+import psycopg
 import pytest
 
 from mirofish_knowledge.contracts import KnowledgeScope, Layer, OntologySpec, SourceEnvelope
-from mirofish_knowledge.operations import CompletionReceipt, Ledger, _error_code, _fingerprint, _receipt, request_fingerprint
+from mirofish_knowledge.bindings import BindingRecord, ScopeBindingStore, _stored
+from mirofish_knowledge.operations import CompletionReceipt, Conflict, Ledger, StorageError, Tombstoned, _error_code, _fingerprint, _receipt, request_fingerprint
 from mirofish_knowledge.provider import _request_fingerprint
 
 
@@ -68,3 +72,74 @@ def test_input_validation_precedes_connection():
         _fingerprint("A" * 64)
     with pytest.raises(ValueError):
         _error_code("Bad Code")
+
+
+def test_binding_input_domains_and_scope_copies_precede_connection():
+    one, _, _ = _request()
+    called = []
+    store = ScopeBindingStore(lambda: called.append(True))
+    for principal in ("", " ", "a\n", "é", "x" * 129, None):
+        with pytest.raises(ValueError):
+            store.bind(principal, "graph-1", one)
+        with pytest.raises(ValueError):
+            store.resolve(principal, "graph-1")
+    for display in ("", "a/b", "é", "x" * 129, None):
+        with pytest.raises(ValueError):
+            store.bind("owner!+@", display, one)
+        with pytest.raises(ValueError):
+            store.resolve("owner!+@", display)
+    for invalid in (one.model_copy(update={"layer": "private-invalid"}),
+                    one.model_copy(update={"workspace_id": "private-invalid"}),
+                    one.model_copy(update={"schema_version": True}),
+                    "private-invalid"):
+        with warnings.catch_warnings(record=True) as captured:
+            warnings.simplefilter("always")
+            with pytest.raises(ValueError) as error:
+                store.bind("owner!+@", "graph-1", invalid)
+        assert "private-invalid" not in str(error.value)
+        assert all("private-invalid" not in str(item.message) for item in captured)
+        assert not captured
+    assert called == []
+
+
+def test_binding_record_validates_stored_canonical_scope_and_tombstone():
+    one, _, _ = _request()
+    now = datetime.now(timezone.utc)
+    row = ("owner!+@", "graph-1", one.group_id, now, one.model_dump(mode="json"), False)
+    record = _stored(row)
+    assert isinstance(record, BindingRecord) and record.scope == one
+    assert record.created_at == now and record.principal == "owner!+@"
+    assert record.scope is not one
+    with pytest.raises(Tombstoned):
+        _stored((*row[:-1], True))
+    for changed in (
+        ("other", "graph-1", "private-group", now, row[4], False),
+        ("owner!+@", "graph-1", one.group_id, datetime.now(), row[4], False),
+        ("owner!+@", "graph-1", one.group_id, now, {**row[4], "layer": "private-invalid"}, False),
+        ("owner!+@", "graph-1", one.group_id, now, {**row[4], "extra": "private"}, False),
+        ("owner!+@", "private/bad", one.group_id, now, row[4], False),
+    ):
+        with pytest.raises(Conflict) as error:
+            _stored(changed)
+        assert "private" not in str(error.value)
+
+
+def test_binding_database_failure_uses_fixed_private_error():
+    class BrokenConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def transaction(self):
+            return nullcontext()
+
+        def execute(self, query, params=None):
+            if query.startswith("SELECT b.principal"):
+                raise psycopg.errors.UndefinedTable("private database diagnostic")
+            return self
+
+    with pytest.raises(StorageError) as error:
+        ScopeBindingStore(BrokenConnection).resolve("owner!+@", "graph-1")
+    assert "private" not in str(error.value)

@@ -112,7 +112,10 @@ class Claim:
 
 _FINGERPRINT = re.compile(r"[0-9a-f]{64}\Z")
 _ERROR_CODE = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
-_MIGRATION = "migrations/0001_knowledge_operations.sql"
+_MIGRATIONS = (
+    (1, "migrations/0001_knowledge_operations.sql"),
+    (2, "migrations/0002_scope_bindings.sql"),
+)
 
 
 def _validated_scope(scope: KnowledgeScope) -> KnowledgeScope:
@@ -252,13 +255,15 @@ def _schema_checksum(connection: psycopg.Connection) -> str:
 
 
 def migrate(connection: psycopg.Connection) -> None:
-    """Explicitly install migration 1 on an empty disposable schema.
+    """Explicitly install ordered, checksummed knowledge schema migrations.
 
     The caller supplies a migration-owner connection and retains its ownership.
     """
-    sql = files("mirofish_knowledge").joinpath(_MIGRATION).read_text(encoding="utf-8")
-    checksum = hashlib.sha256(sql.encode("utf-8")).hexdigest()
     try:
+        migrations = [(version, files("mirofish_knowledge").joinpath(path).read_text(encoding="utf-8"))
+                      for version, path in _MIGRATIONS]
+        checksums = {version: hashlib.sha256(sql.encode("utf-8")).hexdigest()
+                     for version, sql in migrations}
         with connection.transaction():
             connection.execute("SET LOCAL statement_timeout = '10s'")
             connection.execute("SET LOCAL lock_timeout = '5s'")
@@ -268,15 +273,24 @@ def migrate(connection: psycopg.Connection) -> None:
             if exists:
                 if not connection.execute("SELECT to_regclass('mf_knowledge.schema_migrations') IS NOT NULL").fetchone()[0]:
                     raise MigrationMismatch("knowledge schema exists without migration record")
-                rows = connection.execute("SELECT version, checksum, schema_checksum FROM mf_knowledge.schema_migrations").fetchall()
-                if len(rows) != 1 or rows[0][0:2] != (1, checksum):
+                rows = connection.execute("SELECT version, checksum, schema_checksum FROM mf_knowledge.schema_migrations ORDER BY version").fetchall()
+                versions = [row[0] for row in rows]
+                if not rows or versions != list(range(1, len(rows) + 1)) or len(rows) > len(migrations):
                     raise MigrationMismatch("knowledge migration version or checksum mismatch")
-                if rows[0][2] != _schema_checksum(connection):
+                if any(row[1] != checksums[row[0]] for row in rows):
+                    raise MigrationMismatch("knowledge migration version or checksum mismatch")
+                if rows[-1][2] != _schema_checksum(connection):
                     raise MigrationMismatch("knowledge schema shape mismatch")
-                return
-            connection.execute(sql)
-            shape = _schema_checksum(connection)
-            connection.execute("INSERT INTO mf_knowledge.schema_migrations(version, checksum, schema_checksum) VALUES (1, %s, %s)", (checksum, shape))
+                applied = len(rows)
+            else:
+                applied = 0
+            for version, sql in migrations[applied:]:
+                connection.execute(sql)
+                shape = _schema_checksum(connection)
+                connection.execute("INSERT INTO mf_knowledge.schema_migrations(version, checksum, schema_checksum) VALUES (%s, %s, %s)",
+                                   (version, checksums[version], shape))
+    except OSError:
+        raise StorageError("knowledge migration storage failure") from None
     except psycopg.Error:
         raise StorageError("knowledge migration storage failure") from None
 
