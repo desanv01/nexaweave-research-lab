@@ -3,6 +3,27 @@
   "note": "Explicit baseline differences. Entries are unverified candidates until main reviews and accepts the exact revision.",
   "entries": [
     {
+      "imported_path": "backend/app/services/__init__.py",
+      "original_sha256": "5c78b7c2e902a80197acfeb9493ad81da903002eda04dd9870a2de1e42c12112",
+      "current_sha256": "b276dde6debc8ba84ed1d520993d58099286a3209d6a4dde4d84120ae25014b9",
+      "reason": "Preserve all inherited service exports via lazy imports; avoid loading Zep/model SDKs and simulation runner merely for read-only startup.",
+      "phase": "U03j"
+    },
+    {
+      "imported_path": "backend/app/utils/__init__.py",
+      "original_sha256": "444e75d227f54480da0e3d4edb5b3152666540460e25dfa68c76f16c0563deb3",
+      "current_sha256": "5bc1960674deeb5a3cb666d7d3b0899bed368ed8f8a3bdf1a01831425a8e9cf7",
+      "reason": "Keep utility exports lazy so logger/locale access does not import model or file-parser dependencies.",
+      "phase": "U03j"
+    },
+    {
+      "imported_path": "backend/app/services/oasis_profile_generator.py",
+      "original_sha256": "ed9cd3416a46b922bc2f9bf0e9623435d9b96bdf0198db27602ca8c4f0dd0e37",
+      "current_sha256": "945dd4514ee8c755e5181fa7c12e7d1a5961029268a03c18926c5c83b18a0205",
+      "reason": "Explicit basic-only generation with local RNG/no SDKs and shared inherited Twitter row formatter; preserve default enriched legacy behavior and prompts.",
+      "phase": "U03j"
+    },
+    {
       "imported_path": "frontend/package.json",
       "original_sha256": "f972113d3cca752acc44f7e63d97fec138b2a34388b173f85f847bf7108fe852",
       "current_sha256": "abe2ec6cf0d4676143c13b40eab7cb1b8f52e426e0dc447e6988b8572c54bdac",

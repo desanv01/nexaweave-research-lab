@@ -119,3 +119,13 @@ class KnowledgeReadFacade:
 
     def entity(self, graph_id, entity_uuid):
         return self._reader().get_entity_with_context(graph_id, entity_uuid)
+
+    def population_preview(self, graph_id, *, types=None, max_agents=10, seed=0):
+        from .knowledge_population import KnowledgePopulation
+        return KnowledgePopulation(self.graph_data(graph_id)).build(
+            types=types, max_agents=max_agents, seed=seed).preview
+
+    def population_export(self, graph_id, *, platform, types=None, max_agents=10, seed=0):
+        from .knowledge_population import KnowledgePopulation
+        return KnowledgePopulation(self.graph_data(graph_id)).export(
+            platform=platform, types=types, max_agents=max_agents, seed=seed)
