@@ -2,6 +2,8 @@
 
 import json
 import builtins
+import csv
+import io
 from uuid import UUID
 
 import pytest
@@ -162,3 +164,81 @@ def test_readonly_startup_does_not_import_model_or_zep_modules(read_app, monkeyp
 
     monkeypatch.setattr(builtins, "__import__", guarded)
     assert create_app(read_facade=facade).test_client().get("/health").status_code == 200
+
+
+def test_population_preview_and_both_downloads_use_bounded_reader(read_app):
+    app, transport, token = read_app
+    client = app.test_client()
+    headers = {"Authorization": "Bearer " + token}
+    base = "/api/graph/population/display-1"
+    assert "population_export" in client.get("/health").json["capabilities"]
+    preview = client.post(base + "/preview", json={"types": ["Person"], "seed": 17},
+                          headers=headers)
+    assert preview.status_code == 200
+    data = preview.json["data"]
+    assert data["eligible_count"] == data["selected_count"] == 1
+    assert data["profiles"][0]["source_entity_uuid"] == uid(10)
+    assert data["grounding"][uid(10)]["evidence_ids"] == [uid(900)]
+    assert data["grounding"][uid(10)]["facts"][0]["fact"] == "认识"
+    assert [call["payload"]["kind"] for call in transport.calls] == ["node", "edge"]
+    assert len(preview.data) <= 2 * 1024 * 1024
+
+    twitter = client.post(base + "/export", json={"platform": "twitter", "seed": 17},
+                          headers=headers)
+    assert twitter.status_code == 200 and twitter.mimetype == "text/csv"
+    assert twitter.headers["Content-Disposition"] == 'attachment; filename="oasis-twitter-profiles.csv"'
+    assert twitter.headers["X-Content-Type-Options"] == "nosniff"
+    rows = list(csv.DictReader(io.StringIO(twitter.data.decode("utf-8"), newline="")))
+    assert len(rows) == 2 and rows[0]["name"] == "人物" and rows[1]["name"] == "公司"
+    assert rows[0]["username"] == data["profiles"][0]["user_name"]
+
+    reddit = client.post(base + "/export", json={"platform": "reddit", "seed": 17},
+                         headers=headers)
+    assert reddit.status_code == 200 and reddit.mimetype == "application/json"
+    profiles = json.loads(reddit.data)
+    assert len(profiles) == 2 and profiles[0]["username"] == rows[0]["username"]
+    assert profiles[0]["name"] == "人物"
+    assert [call["payload"]["kind"] for call in transport.calls] == [
+        "node", "edge", "node", "edge", "node", "edge"]
+
+
+def test_population_auth_origin_binding_preflight_and_validation(read_app):
+    app, transport, token = read_app
+    client = app.test_client()
+    base = "/api/graph/population/display-1"
+    headers = {"Authorization": "Bearer " + token}
+    assert client.post(base + "/preview", json={}).status_code == 401
+    assert client.post(base + "/preview", json={}, headers={
+        **headers, "Origin": "http://evil.example"}).status_code == 403
+    assert client.post("/api/graph/population/other/preview", json={}, headers=headers).status_code == 404
+    preflight = client.options(base + "/preview", headers={
+        "Origin": "http://localhost:3000", "Access-Control-Request-Method": "POST",
+        "Access-Control-Request-Headers": "Authorization, Content-Type"})
+    assert preflight.status_code == 204
+    assert "POST" in preflight.headers["Access-Control-Allow-Methods"]
+    assert client.options(base + "/preview", headers={
+        "Origin": "http://localhost:3000", "Access-Control-Request-Method": "PUT"}).status_code == 403
+    assert client.options("/api/graph/data/display-1", headers={
+        "Origin": "http://localhost:3000", "Access-Control-Request-Method": "POST"}).status_code == 403
+    invalid = [
+        (base + "/preview", b'{', "application/json"),
+        (base + "/preview", b'{}', "text/plain"),
+        (base + "/preview", b'{"seed":true}', "application/json"),
+        (base + "/preview", b'{"seed":1,"seed":2}', "application/json"),
+        (base + "/preview", b'{"types":["Person","Person"]}', "application/json"),
+        (base + "/preview", b'{"types":null}', "application/json"),
+        (base + "/preview", b'{"unknown":1}', "application/json"),
+        (base + "/preview", b'{"max_agents":101}', "application/json"),
+        (base + "/preview", b'{"seed":4294967296}', "application/json"),
+        (base + "/preview", b' ' * (16 * 1024 + 1), "application/json"),
+        (base + "/export", b'{}', "application/json"),
+        (base + "/export", b'{"platform":"mastodon"}', "application/json"),
+    ]
+    for path, body, content_type in invalid:
+        response = client.post(path, data=body, content_type=content_type, headers=headers)
+        assert response.status_code == 400
+        assert response.json == {"success": False, "error": {"code": "invalid_request"}}
+    assert transport.calls == []
+    empty = client.post(base + "/preview", json={"types": ["Faculty"]}, headers=headers)
+    assert empty.status_code == 422
+    assert empty.json == {"success": False, "error": {"code": "empty_selection"}}

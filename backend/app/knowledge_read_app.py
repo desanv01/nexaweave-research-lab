@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import hmac
+import json
 import os
+import re
 
-from flask import Flask, jsonify, request
+from flask import Flask, Response, jsonify, request
 
 from .config import Config
 from .services.knowledge_read_facade import KnowledgeReadFacade, ReadHostSettings
@@ -19,8 +21,55 @@ _STATUS = {"invalid_request": 400, "invalid_reply": 502, "not_found": 404,
            "conflict": 409, "timeout": 503, "transport_failure": 503,
            "result_too_large": 413, "limit_exceeded": 413,
            "inconsistent_graph": 409, "unsupported": 501,
+           "empty_selection": 422,
            "internal_error": 500}
 _HEADERS = frozenset({"authorization", "content-type"})
+_TYPE = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,63}\Z")
+_REQUEST_BYTES = 16 * 1024
+_RESPONSE_BYTES = 2 * 1024 * 1024
+
+
+def _unique_pairs(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON key")
+        result[key] = value
+    return result
+
+
+def _population_options(export=False):
+    if (request.mimetype != "application/json" or request.content_length is None
+            or request.content_length > _REQUEST_BYTES):
+        raise KnowledgeReadError("invalid_request")
+    raw = request.get_data(cache=False)
+    if len(raw) > _REQUEST_BYTES:
+        raise KnowledgeReadError("invalid_request")
+    try:
+        value = json.loads(raw, object_pairs_hook=_unique_pairs,
+                           parse_constant=lambda _value: (_ for _ in ()).throw(ValueError()))
+    except (ValueError, TypeError, UnicodeError, RecursionError):
+        raise KnowledgeReadError("invalid_request") from None
+    allowed = {"types", "max_agents", "seed"} | ({"platform"} if export else set())
+    if type(value) is not dict or not set(value) <= allowed:
+        raise KnowledgeReadError("invalid_request")
+    types = value.get("types")
+    if "types" in value and (type(types) is not list or len(types) > 50
+                             or any(type(item) is not str or not _TYPE.fullmatch(item)
+                                    for item in types) or len(set(types)) != len(types)):
+        raise KnowledgeReadError("invalid_request")
+    maximum = value.get("max_agents", 10)
+    seed = value.get("seed", 0)
+    if (type(maximum) is not int or not 1 <= maximum <= 100
+            or type(seed) is not int or not 0 <= seed <= 0xFFFFFFFF):
+        raise KnowledgeReadError("invalid_request")
+    options = {"types": types, "max_agents": maximum, "seed": seed}
+    if export:
+        platform = value.get("platform")
+        if type(platform) is not str or platform not in {"twitter", "reddit"}:
+            raise KnowledgeReadError("invalid_request")
+        options["platform"] = platform
+    return options
 
 
 def _failure(code, status=None):
@@ -55,7 +104,7 @@ def create_read_app(config_class, *, facade=None):
             allowed = request.url_rule.methods if request.url_rule else set()
             requested_headers = request.headers.get("Access-Control-Request-Headers")
             names = [] if requested_headers is None else requested_headers.split(",")
-            if (not origin_values or method != "GET" or method not in allowed
+            if (not origin_values or method not in {"GET", "POST"} or method not in allowed
                     or any(not name.strip() or name.strip().lower() not in _HEADERS for name in names)):
                 return _failure("origin_denied", 403)
             return "", 204
@@ -74,7 +123,9 @@ def create_read_app(config_class, *, facade=None):
             if len(values) == 1 and values[0] in origins:
                 response.headers["Access-Control-Allow-Origin"] = values[0]
                 if request.method == "OPTIONS" and response.status_code == 204:
-                    response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+                    allowed = request.url_rule.methods if request.url_rule else set()
+                    response.headers["Access-Control-Allow-Methods"] = ", ".join(
+                        method for method in ("GET", "POST", "OPTIONS") if method in allowed)
                     response.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type"
         return response
 
@@ -91,7 +142,8 @@ def create_read_app(config_class, *, facade=None):
     @app.get("/health")
     def health():
         return jsonify({"status": "ok", "mode": "graphiti_readonly",
-                        "capabilities": ["graph_data", "entities", "entity_context"]})
+                        "capabilities": ["graph_data", "entities", "entity_context",
+                                         "population_preview", "population_export"]})
 
     @app.get("/api/graph/data/<graph_id>")
     def graph_data(graph_id):
@@ -122,6 +174,46 @@ def create_read_app(config_class, *, facade=None):
                 raise KnowledgeReadError("not_found")
             return result.to_dict()
         return execute(lookup)
+
+    @app.post("/api/graph/population/<graph_id>/preview")
+    def population_preview(graph_id):
+        if graph_id != settings.display_graph_id:
+            return _failure("not_found")
+        try:
+            options = _population_options()
+        except KnowledgeReadError as error:
+            return _failure(error.code)
+        try:
+            response = jsonify({"success": True, "data": reader.population_preview(graph_id, **options)})
+            if len(response.get_data()) > _RESPONSE_BYTES:
+                raise KnowledgeReadError("result_too_large")
+            return response
+        except KnowledgeReadError as error:
+            return _failure(error.code)
+        except KnowledgeTransportError:
+            return _failure("transport_failure")
+        except Exception:
+            return _failure("internal_error")
+
+    @app.post("/api/graph/population/<graph_id>/export")
+    def population_export(graph_id):
+        if graph_id != settings.display_graph_id:
+            return _failure("not_found")
+        try:
+            options = _population_options(export=True)
+            body, content_type, filename = reader.population_export(graph_id, **options)
+            if len(body) > _RESPONSE_BYTES:
+                raise KnowledgeReadError("result_too_large")
+            response = Response(body, content_type=content_type)
+            response.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+            response.headers["X-Content-Type-Options"] = "nosniff"
+            return response
+        except KnowledgeReadError as error:
+            return _failure(error.code)
+        except KnowledgeTransportError:
+            return _failure("transport_failure")
+        except Exception:
+            return _failure("internal_error")
 
     @app.errorhandler(404)
     def missing(_error):
