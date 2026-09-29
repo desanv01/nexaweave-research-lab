@@ -14,13 +14,18 @@ from enum import Enum
 
 from ..config import Config
 from ..utils.logger import get_logger
-from .zep_entity_reader import ZepEntityReader, FilteredEntities
 from .oasis_profile_generator import OasisProfileGenerator, OasisAgentProfile
 from .simulation_config_generator import SimulationConfigGenerator, SimulationParameters
 from ..utils.locale import t
 from ..utils.safe_paths import InvalidResourcePath, ensure_directory, safe_path, validate_resource_id
 
 logger = get_logger('mirofish.simulation')
+
+
+def ZepEntityReader(*args, **kwargs):
+    """Legacy construction seam; defer the SDK import until legacy preparation."""
+    from .zep_entity_reader import ZepEntityReader as Reader
+    return Reader(*args, **kwargs)
 
 
 class SimulationStatus(str, Enum):
@@ -143,9 +148,12 @@ class SimulationManager:
         '../../uploads/simulations'
     )
     
-    def __init__(self):
+    def __init__(self, *, preparation=None, simulation_data_dir=None):
         # 内存中的模拟状态缓存
         self._simulations: Dict[str, SimulationState] = {}
+        self._preparation = preparation
+        if simulation_data_dir is not None:
+            self.SIMULATION_DATA_DIR = os.fspath(simulation_data_dir)
     
     def _get_simulation_dir(self, simulation_id: str) -> str:
         """获取模拟数据目录"""
@@ -278,6 +286,11 @@ class SimulationManager:
         state = self._load_simulation_state(simulation_id)
         if not state:
             raise ValueError(f"模拟不存在: {simulation_id}")
+        neutral = self._preparation is not None
+        if neutral and state.graph_id != self._preparation.graph_id:
+            raise ValueError("graph binding mismatch")
+        if neutral and not use_llm_for_profiles:
+            raise ValueError("neutral preparation requires explicit persona generation")
         
         try:
             state.status = SimulationStatus.PREPARING
@@ -291,9 +304,14 @@ class SimulationManager:
             
             # ========== 阶段1: 读取并过滤实体 ==========
             if progress_callback:
-                progress_callback("reading", 0, t('progress.connectingZepGraph'))
+                progress_callback("reading", 0,
+                                  "Reading bound knowledge graph" if neutral else
+                                  t('progress.connectingZepGraph'))
             
-            reader = ZepEntityReader()
+            if neutral:
+                reader = self._preparation.reader
+            else:
+                reader = ZepEntityReader()
             
             if progress_callback:
                 progress_callback("reading", 30, t('progress.readingNodeData'))
@@ -333,7 +351,8 @@ class SimulationManager:
                 )
             
             # 传入graph_id以启用Zep检索功能，获取更丰富的上下文
-            generator = OasisProfileGenerator(graph_id=state.graph_id)
+            generator = (self._preparation.profile_generator() if neutral else
+                         OasisProfileGenerator(graph_id=state.graph_id))
             
             def profile_progress(current, total, msg):
                 if progress_callback:
@@ -365,6 +384,11 @@ class SimulationManager:
                 realtime_output_path=realtime_output_path,  # 实时保存路径
                 output_platform=realtime_platform  # 输出格式
             )
+            if neutral and (len(profiles) != total_entities
+                            or any(profile is None or profile.user_id != index
+                                   or profile.source_entity_uuid != filtered.entities[index].uuid
+                                   for index, profile in enumerate(profiles))):
+                raise ValueError("incomplete profile generation")
             
             state.profiles_count = len(profiles)
             state.profiles_generated = len(profiles) > 0
@@ -412,7 +436,8 @@ class SimulationManager:
                     total=3
                 )
             
-            config_generator = SimulationConfigGenerator()
+            config_generator = (self._preparation.config_generator() if neutral else
+                                SimulationConfigGenerator())
             
             if progress_callback:
                 progress_callback(
@@ -432,6 +457,16 @@ class SimulationManager:
                 enable_twitter=state.enable_twitter,
                 enable_reddit=state.enable_reddit
             )
+            if neutral and (sim_params.simulation_id != simulation_id
+                            or sim_params.project_id != state.project_id
+                            or sim_params.graph_id != state.graph_id
+                            or len(sim_params.agent_configs) != total_entities
+                            or any(config.agent_id != index
+                                   or config.entity_uuid != filtered.entities[index].uuid
+                                   for index, config in enumerate(sim_params.agent_configs))
+                            or bool(sim_params.twitter_config) != state.enable_twitter
+                            or bool(sim_params.reddit_config) != state.enable_reddit):
+                raise ValueError("incomplete simulation configuration")
             
             if progress_callback:
                 progress_callback(
@@ -445,6 +480,19 @@ class SimulationManager:
             config_path = self._simulation_file(simulation_id, "simulation_config.json")
             with open(config_path, 'w', encoding='utf-8') as f:
                 f.write(sim_params.to_json())
+            if neutral:
+                grounding = {entity.uuid: self._preparation.grounding[entity.uuid]
+                             for entity in filtered.entities}
+                with open(self._simulation_file(simulation_id, "source_grounding.json"),
+                          'w', encoding='utf-8') as f:
+                    json.dump(grounding, f, ensure_ascii=False, indent=2)
+                required = [config_path, self._simulation_file(simulation_id, "source_grounding.json")]
+                if state.enable_reddit:
+                    required.append(self._simulation_file(simulation_id, "reddit_profiles.json"))
+                if state.enable_twitter:
+                    required.append(self._simulation_file(simulation_id, "twitter_profiles.csv"))
+                if any(not os.path.isfile(path) or os.path.getsize(path) == 0 for path in required):
+                    raise ValueError("incomplete preparation artifacts")
             
             state.config_generated = True
             state.config_reasoning = sim_params.generation_reasoning
@@ -470,12 +518,17 @@ class SimulationManager:
             return state
             
         except Exception as e:
-            logger.error(f"模拟准备失败: {simulation_id}, error={str(e)}")
-            import traceback
-            logger.error(traceback.format_exc())
+            if neutral:
+                logger.error("Provider-neutral simulation preparation failed: %s", simulation_id)
+            else:
+                logger.error(f"模拟准备失败: {simulation_id}, error={str(e)}")
+                import traceback
+                logger.error(traceback.format_exc())
             state.status = SimulationStatus.FAILED
-            state.error = str(e)
+            state.error = "preparation_failed" if neutral else str(e)
             self._save_simulation_state(state)
+            if neutral:
+                raise RuntimeError("preparation_failed") from None
             raise
     
     def get_simulation(self, simulation_id: str) -> Optional[SimulationState]:

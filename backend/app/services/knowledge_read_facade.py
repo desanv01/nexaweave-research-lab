@@ -129,3 +129,8 @@ class KnowledgeReadFacade:
         from .knowledge_population import KnowledgePopulation
         return KnowledgePopulation(self.graph_data(graph_id)).export(
             platform=platform, types=types, max_agents=max_agents, seed=seed)
+
+    def preparation_dependencies(self, graph_id, *, chat_client, model_name, base_url):
+        from .preparation_dependencies import create_knowledge_preparation
+        return create_knowledge_preparation(
+            self, graph_id, chat_client=chat_client, model_name=model_name, base_url=base_url)
