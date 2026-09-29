@@ -11,6 +11,8 @@ Report Agent服务
 
 import os
 import json
+import hashlib
+import threading
 import time
 import re
 from typing import Dict, Any, List, Optional, Callable
@@ -30,6 +32,7 @@ from .zep_tools import (
     PanoramaResult,
     InterviewResult
 )
+from .knowledge_report_tools import NeutralCapabilityError
 
 logger = get_logger('mirofish.report_agent')
 
@@ -874,6 +877,10 @@ class ReportAgent:
     2. 生成阶段：逐章节生成内容，每章节可多次调用工具获取信息
     3. 反思阶段：检查内容完整性和准确性
     """
+
+    # Legacy callers and test fixtures may construct an agent without __init__.
+    # Explicit neutral agents set the instance value during __init__.
+    neutral_mode = False
     
     # 最大工具调用次数（每个章节）
     MAX_TOOL_CALLS_PER_SECTION = 5
@@ -890,7 +897,8 @@ class ReportAgent:
         simulation_id: str,
         simulation_requirement: str,
         llm_client: Optional[LLMClient] = None,
-        zep_tools: Optional[ZepToolsService] = None
+        zep_tools: Optional[ZepToolsService] = None,
+        *, neutral_mode: bool = False,
     ):
         """
         初始化Report Agent
@@ -906,8 +914,14 @@ class ReportAgent:
         self.simulation_id = simulation_id
         self.simulation_requirement = simulation_requirement
         
-        self.llm = llm_client or LLMClient()
-        self.zep_tools = zep_tools or ZepToolsService()
+        self.neutral_mode = neutral_mode
+        if neutral_mode and (llm_client is None or zep_tools is None
+                             or getattr(zep_tools, "graph_id", None) != graph_id
+                             or getattr(zep_tools, "simulation_id", None) != simulation_id
+                             or not getattr(zep_tools, "strict_neutral", False)):
+            raise NeutralCapabilityError("binding_mismatch")
+        self.llm = llm_client if llm_client is not None else LLMClient()
+        self.zep_tools = zep_tools if zep_tools is not None else ZepToolsService()
         
         # 工具定义
         self.tools = self._define_tools()
@@ -957,6 +971,15 @@ class ReportAgent:
         }
     
     def _execute_tool(self, tool_name: str, parameters: Dict[str, Any], report_context: str = "") -> str:
+        result = self._execute_tool_impl(tool_name, parameters, report_context)
+        if self.neutral_mode:
+            if type(result) is not str or len(result.encode("utf-8")) > 65536:
+                raise NeutralCapabilityError("result_too_large")
+            if tool_name != "interview_agents":
+                return "[Source graph evidence; not observed simulation behavior]\n" + result
+        return result
+
+    def _execute_tool_impl(self, tool_name: str, parameters: Dict[str, Any], report_context: str = "") -> str:
         """
         执行工具调用
         
@@ -968,6 +991,14 @@ class ReportAgent:
         Returns:
             工具执行结果（文本格式）
         """
+        if self.neutral_mode:
+            try:
+                if (type(parameters) is not dict or type(tool_name) is not str
+                        or tool_name not in self.VALID_TOOL_NAMES
+                        or len(json.dumps(parameters, ensure_ascii=False).encode("utf-8")) > 8192):
+                    raise ValueError
+            except (TypeError, ValueError):
+                raise NeutralCapabilityError("invalid_request") from None
         logger.info(t('report.executingTool', toolName=tool_name, params=parameters))
         
         try:
@@ -1012,6 +1043,8 @@ class ReportAgent:
                 # 深度采访 - 调用真实的OASIS采访API获取模拟Agent的回答（双平台）
                 interview_topic = parameters.get("interview_topic", parameters.get("query", ""))
                 max_agents = parameters.get("max_agents", 5)
+                if self.neutral_mode and (type(max_agents) is not int or not 1 <= max_agents <= 10):
+                    raise NeutralCapabilityError("invalid_request")
                 if isinstance(max_agents, str):
                     max_agents = int(max_agents)
                 max_agents = min(max_agents, 10)
@@ -1028,7 +1061,7 @@ class ReportAgent:
             elif tool_name == "search_graph":
                 # 重定向到 quick_search
                 logger.info(t('report.redirectToQuickSearch'))
-                return self._execute_tool("quick_search", parameters, report_context)
+                return self._execute_tool_impl("quick_search", parameters, report_context)
             
             elif tool_name == "get_graph_statistics":
                 result = self.zep_tools.get_graph_statistics(self.graph_id)
@@ -1046,7 +1079,7 @@ class ReportAgent:
                 # 重定向到 insight_forge，因为它更强大
                 logger.info(t('report.redirectToInsightForge'))
                 query = parameters.get("query", self.simulation_requirement)
-                return self._execute_tool("insight_forge", {"query": query}, report_context)
+                return self._execute_tool_impl("insight_forge", {"query": query}, report_context)
             
             elif tool_name == "get_entities_by_type":
                 entity_type = parameters.get("entity_type", "")
@@ -1060,7 +1093,13 @@ class ReportAgent:
             else:
                 return f"未知工具: {tool_name}。请使用以下工具之一: insight_forge, panorama_search, quick_search"
                 
+        except NeutralCapabilityError as error:
+            if self.neutral_mode:
+                raise NeutralCapabilityError(error.code) from None
+            raise
         except Exception as e:
+            if self.neutral_mode:
+                raise NeutralCapabilityError("tool_failed") from None
             logger.error(t('report.toolExecFailed', toolName=tool_name, error=str(e)))
             return f"工具执行失败: {str(e)}"
     
@@ -1200,6 +1239,9 @@ class ReportAgent:
             progress_callback("planning", 30, t('progress.generatingOutline'))
         
         system_prompt = f"{PLAN_SYSTEM_PROMPT}\n\n{get_language_instruction()}"
+        if self.neutral_mode:
+            system_prompt += ("\nSource graph evidence is not observed simulation behavior. "
+                              "Do not claim simulated interviews or outcomes without the interview tool.")
         user_prompt = PLAN_USER_PROMPT_TEMPLATE.format(
             simulation_requirement=self.simulation_requirement,
             total_nodes=context.get('graph_statistics', {}).get('total_nodes', 0),
@@ -1221,6 +1263,20 @@ class ReportAgent:
             if progress_callback:
                 progress_callback("planning", 80, t('progress.parsingOutline'))
             
+            if self.neutral_mode and (
+                    type(response) is not dict
+                    or type(response.get("title")) is not str or not response["title"].strip()
+                    or len(response["title"]) > 200
+                    or type(response.get("summary")) is not str
+                    or len(response["summary"]) > 4000
+                    or type(response.get("sections")) is not list
+                    or not 1 <= len(response["sections"]) <= 8
+                    or any(type(section) is not dict
+                           or type(section.get("title")) is not str
+                           or not section["title"].strip()
+                           or len(section["title"]) > 200
+                           for section in response["sections"])):
+                raise NeutralCapabilityError("invalid_outline")
             # 解析大纲
             sections = []
             for section_data in response.get("sections", []):
@@ -1241,7 +1297,13 @@ class ReportAgent:
             logger.info(t('report.outlinePlanDone', count=len(sections)))
             return outline
             
+        except NeutralCapabilityError as error:
+            if self.neutral_mode:
+                raise NeutralCapabilityError(error.code) from None
+            raise
         except Exception as e:
+            if self.neutral_mode:
+                raise NeutralCapabilityError("planning_failed") from None
             logger.error(t('report.outlinePlanFailed', error=str(e)))
             # 返回默认大纲（3个章节，作为fallback）
             return ReportOutline(
@@ -1296,6 +1358,10 @@ class ReportAgent:
             tools_description=self._get_tools_description(),
         )
         system_prompt = f"{system_prompt}\n\n{get_language_instruction()}"
+        if self.neutral_mode:
+            system_prompt += ("\nSource graph facts are not simulated observations. "
+                              "Use interview results only when the trusted interview tool succeeds. "
+                              "End a researched section with an explicit Final Answer.")
 
         # 构建用户prompt - 每个已完成章节各传入最大4000字
         if previous_sections:
@@ -1346,6 +1412,8 @@ class ReportAgent:
 
             # 检查 LLM 返回是否为 None（API 异常或内容为空）
             if response is None:
+                if self.neutral_mode:
+                    raise NeutralCapabilityError("section_failed")
                 logger.warning(t('report.sectionIterNone', title=section.title, iteration=iteration + 1))
                 # 如果还有迭代次数，添加消息并重试
                 if iteration < max_iterations - 1:
@@ -1355,7 +1423,11 @@ class ReportAgent:
                 # 最后一次迭代也返回 None，跳出循环进入强制收尾
                 break
 
-            logger.debug(f"LLM响应: {response[:200]}...")
+            if self.neutral_mode and (type(response) is not str or not response.strip()
+                                      or len(response.encode("utf-8")) > 65536):
+                raise NeutralCapabilityError("section_failed")
+            if not self.neutral_mode:
+                logger.debug(f"LLM响应: {response[:200]}...")
 
             # 解析一次，复用结果
             tool_calls = self._parse_tool_calls(response)
@@ -1428,6 +1500,8 @@ class ReportAgent:
 
                 # 正常结束
                 final_answer = cleaned_response.split("Final Answer:")[-1].strip()
+                if self.neutral_mode and not final_answer:
+                    raise NeutralCapabilityError("section_failed")
                 logger.info(t('report.sectionGenDone', title=section.title, count=tool_calls_count))
 
                 if self.report_logger:
@@ -1528,6 +1602,8 @@ class ReportAgent:
 
             # 工具调用已足够，LLM 输出了内容但没带 "Final Answer:" 前缀
             # 直接将这段内容作为最终答案，不再空转
+            if self.neutral_mode:
+                raise NeutralCapabilityError("section_incomplete")
             logger.info(t('report.sectionNoPrefix', title=section.title, count=tool_calls_count))
             final_answer = cleaned_response
 
@@ -1541,6 +1617,8 @@ class ReportAgent:
             return final_answer
         
         # 达到最大迭代次数，强制生成内容
+        if self.neutral_mode:
+            raise NeutralCapabilityError("section_incomplete")
         logger.warning(t('report.sectionMaxIter', title=section.title))
         messages.append({"role": "user", "content": REACT_FORCE_FINAL_MSG})
         
@@ -1637,6 +1715,8 @@ class ReportAgent:
                 completed_sections=[]
             )
             ReportManager.save_report(report)
+            if self.neutral_mode:
+                ReportManager.save_evidence(report_id, self.zep_tools.evidence_metadata())
             
             # 阶段1: 规划大纲
             report.status = ReportStatus.PLANNING
@@ -1748,6 +1828,10 @@ class ReportAgent:
             
             # 使用ReportManager组装完整报告
             report.markdown_content = ReportManager.assemble_full_report(report_id, outline)
+            if self.neutral_mode:
+                if not self.zep_tools.retrieval_ledger:
+                    raise NeutralCapabilityError("insufficient_evidence")
+                ReportManager.save_evidence(report_id, self.zep_tools.evidence_metadata())
             report.status = ReportStatus.COMPLETED
             report.completed_at = datetime.now().isoformat()
             
@@ -1781,19 +1865,26 @@ class ReportAgent:
             return report
             
         except Exception as e:
-            logger.error(t('report.reportGenFailed', error=str(e)))
+            if self.neutral_mode:
+                logger.error("Provider-neutral report failed: %s", report_id)
+            else:
+                logger.error(t('report.reportGenFailed', error=str(e)))
             report.status = ReportStatus.FAILED
-            report.error = str(e)
+            report.error = ((NeutralCapabilityError.safe_code(e.code)
+                             if isinstance(e, NeutralCapabilityError) else "report_failed")
+                            if self.neutral_mode else str(e))
             
             # 记录错误日志
             if self.report_logger:
-                self.report_logger.log_error(str(e), "failed")
+                self.report_logger.log_error(report.error, "failed")
             
             # 保存失败状态
             try:
+                if self.neutral_mode:
+                    ReportManager.save_evidence(report_id, self.zep_tools.evidence_metadata())
                 ReportManager.save_report(report)
                 ReportManager.update_progress(
-                    report_id, "failed", -1, t('progress.reportFailed', error=str(e)),
+                    report_id, "failed", -1, t('progress.reportFailed', error=report.error),
                     completed_sections=completed_section_titles
                 )
             except Exception:
@@ -1807,9 +1898,61 @@ class ReportAgent:
             return report
     
     def chat(
+        self, message: str, chat_history: List[Dict[str, str]] = None
+    ) -> Dict[str, Any]:
+        if self.neutral_mode:
+            if self.zep_tools.search_selector is None:
+                raise NeutralCapabilityError("unsupported")
+            if (type(message) is not str or not 1 <= len(message.strip()) <= 4000
+                    or (chat_history is not None and (
+                        type(chat_history) is not list or len(chat_history) > 10
+                        or any(type(item) is not dict or set(item) != {"role", "content"}
+                               or type(item["role"]) is not str
+                               or item["role"] not in {"user", "assistant"}
+                               or type(item["content"]) is not str
+                               or len(item["content"]) > 4000 for item in chat_history)))):
+                raise NeutralCapabilityError("invalid_request")
+        try:
+            return (self._chat_neutral(message, chat_history) if self.neutral_mode else
+                    self._chat_impl(message, chat_history))
+        except NeutralCapabilityError as error:
+            if self.neutral_mode:
+                raise NeutralCapabilityError(error.code) from None
+            raise
+        except Exception:
+            if self.neutral_mode:
+                raise NeutralCapabilityError("chat_failed") from None
+            raise
+
+    def _chat_neutral(self, message, chat_history):
+        # The supported local host serializes sidecar updates while the model runs.
+        with ReportManager.EVIDENCE_LOCK:
+            report = ReportManager.get_report_by_simulation(self.simulation_id)
+            if (report is None or report.graph_id != self.graph_id
+                    or report.simulation_id != self.simulation_id
+                    or report.status is not ReportStatus.COMPLETED):
+                raise NeutralCapabilityError("report_context_unavailable")
+            metadata, before_digest = ReportManager.read_evidence(report.report_id)
+            self.zep_tools.restore_evidence(metadata)
+            result = self._chat_impl(message, chat_history, _pinned_report=report)
+            if (type(result) is not dict or type(result.get("response")) is not str
+                    or not result["response"].strip()
+                    or len(result["response"].encode("utf-8")) > 16384):
+                raise NeutralCapabilityError("chat_failed")
+            current = ReportManager.get_report(report.report_id)
+            if current is None or current.to_dict() != report.to_dict():
+                raise NeutralCapabilityError("evidence_conflict")
+            _, current_digest = ReportManager.read_evidence(report.report_id)
+            if current_digest != before_digest:
+                raise NeutralCapabilityError("evidence_conflict")
+            ReportManager.save_evidence(report.report_id, self.zep_tools.evidence_metadata())
+            return result
+
+    def _chat_impl(
         self, 
         message: str,
-        chat_history: List[Dict[str, str]] = None
+        chat_history: List[Dict[str, str]] = None,
+        *, _pinned_report=None,
     ) -> Dict[str, Any]:
         """
         与Report Agent对话
@@ -1834,13 +1977,25 @@ class ReportAgent:
         # 获取已生成的报告内容
         report_content = ""
         try:
-            report = ReportManager.get_report_by_simulation(self.simulation_id)
+            if self.neutral_mode and _pinned_report is None:
+                raise NeutralCapabilityError("report_context_unavailable")
+            report = _pinned_report if self.neutral_mode else ReportManager.get_report_by_simulation(self.simulation_id)
+            if self.neutral_mode and report and report.graph_id != self.graph_id:
+                raise NeutralCapabilityError("graph_mismatch")
+            if self.neutral_mode and (report is None or report.status is not ReportStatus.COMPLETED):
+                raise NeutralCapabilityError("report_context_unavailable")
             if report and report.markdown_content:
                 # 限制报告长度，避免上下文过长
                 report_content = report.markdown_content[:15000]
                 if len(report.markdown_content) > 15000:
                     report_content += "\n\n... [报告内容已截断] ..."
+        except NeutralCapabilityError as error:
+            if self.neutral_mode:
+                raise NeutralCapabilityError(error.code) from None
+            raise
         except Exception as e:
+            if self.neutral_mode:
+                raise NeutralCapabilityError("report_context_unavailable") from None
             logger.warning(t('report.fetchReportFailed', error=e))
         
         system_prompt = CHAT_SYSTEM_PROMPT_TEMPLATE.format(
@@ -1849,6 +2004,9 @@ class ReportAgent:
             tools_description=self._get_tools_description(),
         )
         system_prompt = f"{system_prompt}\n\n{get_language_instruction()}"
+        if self.neutral_mode:
+            system_prompt += ("\nThe bound source graph is evidence, not observed simulation behavior. "
+                              "Do not invent interviews or simulated opinions.")
 
         # 构建消息
         messages = [{"role": "system", "content": system_prompt}]
@@ -1947,6 +2105,7 @@ class ReportManager:
     
     # 报告存储目录
     REPORTS_DIR = os.path.join(Config.UPLOAD_FOLDER, 'reports')
+    EVIDENCE_LOCK = threading.RLock()
     
     @classmethod
     def _ensure_reports_dir(cls):
@@ -2000,6 +2159,43 @@ class ReportManager:
     def _get_console_log_path(cls, report_id: str) -> str:
         """获取控制台日志文件路径"""
         return safe_path(cls.REPORTS_DIR, report_id, "console_log.txt")
+
+    @classmethod
+    def save_evidence(cls, report_id: str, evidence: Dict[str, Any]) -> None:
+        """Persist bounded retrieval provenance separately from report prose."""
+        raw = json.dumps(evidence, ensure_ascii=False, allow_nan=False, indent=2)
+        if len(raw.encode("utf-8")) > 2 * 1024 * 1024:
+            raise NeutralCapabilityError("result_too_large")
+        cls._ensure_report_folder(report_id)
+        with cls.EVIDENCE_LOCK:
+            with open(safe_path(cls.REPORTS_DIR, report_id, "retrieval_evidence.json"),
+                      'w', encoding='utf-8') as file:
+                file.write(raw)
+
+    @classmethod
+    def read_evidence(cls, report_id: str):
+        """Read one bounded sidecar with duplicate-key and encoding rejection."""
+        def unique_pairs(pairs):
+            result = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError
+                result[key] = value
+            return result
+
+        try:
+            path = safe_path(cls.REPORTS_DIR, report_id, "retrieval_evidence.json")
+            with cls.EVIDENCE_LOCK:
+                with open(path, 'rb') as file:
+                    raw = file.read(2 * 1024 * 1024 + 1)
+            if not raw or len(raw) > 2 * 1024 * 1024:
+                raise ValueError
+            value = json.loads(raw.decode('utf-8'), object_pairs_hook=unique_pairs,
+                               parse_constant=lambda _value: (_ for _ in ()).throw(ValueError()))
+            return value, hashlib.sha256(raw).hexdigest()
+        except (OSError, ValueError, TypeError, UnicodeError, RecursionError,
+                InvalidResourcePath):
+            raise NeutralCapabilityError("invalid_evidence") from None
     
     @classmethod
     def get_console_log(cls, report_id: str, from_line: int = 0) -> Dict[str, Any]:

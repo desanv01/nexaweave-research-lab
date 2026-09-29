@@ -1,5 +1,25 @@
 # Execution ledger
 
+## Heartbeat14:25 — report candidate qualified; U05a accepted
+
+Main corrected report review72focused tests passed4.87s; manifest128/26 and
+diffcheck passed. Candidate2642883 refreshed with acceptedc64b2af; only this
+ledger conflicted, both histories preserved. Exact-head full CI required before
+acceptance. U05a PR50 accepted48add9c after all7CI36580674646; mergec64b2af,
+postmerge36581481132 SUCCESS. Existing U05 worker now implements Temporal U05b
+in u00/task/u05-temporal-ingestion. Paid calls remain disabled.
+
+### Historical checkpoints
+## Latest — integrated preparation, U03l and U05a proceed
+
+PR48 accepted907e9357, all7CI36578459932; merge73e5146, postmerge36579362173
+SUCCESS. PR49 already accepted22f6573. New U03l packet on
+task/u03-provider-neutral-reports connects inherited report/chat research flow.
+U05 project chat01a0ed73-38a6-7a33-b468-e3ddd7cd5f74 reuses u00 on
+task/u05-budget-admission. Initial handoff reviewed; corrections needed for
+misplaced test assertions and concurrent dispatch/cancellation qualification.
+No paid enablement, full-phase acceptance or invoice-hard-cap claim.
+
 ## Heartbeat14:05 — U05a durable admission candidate qualified
 
 U05 first implementation reviewed/corrected; Main59pure and81combined realPG
