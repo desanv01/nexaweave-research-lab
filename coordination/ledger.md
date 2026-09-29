@@ -1,5 +1,15 @@
 # Execution ledger
 
+## Heartbeat14:05 — U05a durable admission candidate qualified
+
+U05 first implementation reviewed/corrected; Main59pure and81combined realPG
+passed. Guarded retained-source bridge now exercised with durable ceilings,
+concurrent duplicate suppression, start cancellation, uncertain DB writes and
+settlement cancellation. Reviewed candidate68284f2 merged accepted73e5146 cleanly.
+No paid clients enabled or invoice cap claim; no full U05/Temporal completion.
+Exact-head seven CI gates required before acceptance. U03l reports active in u03.
+Main skill review applied short transactions and consistent account lock order.
+
 ## Heartbeat13:50 — bridge accepted, preparation combined-base CI pending
 
 Main accepted PR49 exact165fc263 after all7CI36577468639,56store/realPG+CLI;
