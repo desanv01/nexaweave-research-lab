@@ -3,6 +3,34 @@
   "note": "Explicit baseline differences. Entries are unverified candidates until main reviews and accepts the exact revision.",
   "entries": [
     {
+      "imported_path": "frontend/package.json",
+      "original_sha256": "f972113d3cca752acc44f7e63d97fec138b2a34388b173f85f847bf7108fe852",
+      "current_sha256": "abe2ec6cf0d4676143c13b40eab7cb1b8f52e426e0dc447e6988b8572c54bdac",
+      "reason": "Main pins Markdown-it/DOMPurify runtime and jsdom test dependency; adds node:test script without changing frontend framework versions.",
+      "phase": "U02h"
+    },
+    {
+      "imported_path": "frontend/package-lock.json",
+      "original_sha256": "a4a188daf04a442b8e23c3291d9062b4e00faa5ff49503db759c85e67c4037be",
+      "current_sha256": "4307e35e62fafcf897e4be12977464b67ddbde63ec85ebf90bd360f94a53676b",
+      "reason": "Main locks renderer/test dependency closure and updates PostCSS/nanoid within existing ranges to address current advisories.",
+      "phase": "U02h"
+    },
+    {
+      "imported_path": "frontend/src/components/Step4Report.vue",
+      "original_sha256": "dcac96bdcb6b8df566155b543387cb51034e341f235a83b455608e34abd6bb4c",
+      "current_sha256": "801d28d44092e8aed6e1204d837f69af3bb49d07d4d4b8001ccd7ac5e0361bf5",
+      "reason": "Use bounded shared sanitized Markdown at report/interview HTML sinks and Vue text for placeholders; preserve report heading suppression and expansion controls.",
+      "phase": "U02h"
+    },
+    {
+      "imported_path": "frontend/src/components/Step5Interaction.vue",
+      "original_sha256": "067f165535e5b6583515ed30d9eb97727c273a410b81e0b7e95886bdb37d9541",
+      "current_sha256": "dc83d1d229b8ea15cef26500d8719a237e85fbfbf55343304dec38635d78ea8f",
+      "reason": "Use bounded shared sanitized Markdown at report/chat/interview HTML sinks; preserve chat headings and native ordered-list start/nesting semantics.",
+      "phase": "U02h"
+    },
+    {
       "imported_path": "backend/app/utils/file_parser.py",
       "original_sha256": "f1adfdda1a6674ad7af76dc95a9b76f388470098e4cf514be908440c4167c398",
       "current_sha256": "327d7f1a6bbcfe434b19990dcb47ba11f3d33699bbf0fe251b1b6b60f2b0a226",

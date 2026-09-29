@@ -1,5 +1,20 @@
 # Execution ledger
 
+## RESUMED — 2026-09-29
+
+User explicitly resumed full orchestration. Main GPT6 Astra/high Fast OFF;
+workers GPT6 Sol/medium Fast ON. Task tools have no Fast flag; user notified.
+No global defaults changed. Historical pause note below is superseded.
+
+## Historical pause — 2026-09-26
+
+All work paused until explicit resumption; heartbeat disabled. See reference
+`C:\Users\Dv\Desktop\MiroFish\_upgrade_plan\PAUSED.md`. Resume main GPT6 Astra high,
+workers GPT6 Sol medium, Fast OFF for all (overrides previous Fast preference).
+U03e PR31 CI completed successfully but not accepted/merged. U02h stays dirty:
+initial browser fixture passed, final fixture restart exit0/no listener unresolved.
+Preserve work; do not continue checks/implementation/Git while paused.
+
 ## Authorization and locked decisions
 
 User approved the Graphiti/Neo4j consolidated plan and execution of U00–U14.
@@ -14,8 +29,8 @@ Main owns checks and GitHub; fresh GPT-6 Sol/medium workers implement only.
 | Plan v3 synchronization | Completed | All active reference docs synchronized; v2 archived |
 | U00 repository bootstrap | Accepted delivery baseline | PR2 merged as 1166188b2d5dafbab178e72ac1b1cc130bb732f1; post-merge CI36214869721 green; Linux167 tests,128-file manifest and frontend build passed; not application qualification |
 | U01 parity and knowledge compatibility | U01a/U01b/U01c bounded slices accepted | PR9/merge5d77aab; post-merge CI36216733446 green;236 Linux tests,17 knowledge and3 native tests; no paid/full capability qualification |
-| U02 security | U02a–U02f accepted; U02g candidate | Issue26, task/u02-upload-admission syncedf5f1095. Main reviewed/corrected multipart field confusion, deadline and cancellation cases. Local483 passed18 skipped2 inherited Windows privilege failures. Updated graph/project hashes. Await six exact-head CI gates; auth/rendering/hard resource sandbox remain |
-| U03 adapters and operation authority | U03a–U03d accepted | PR27 head44f74c9/mergef5f1095, CI36220466799 and post36220701974 all6 passed:41 knowledge/Neo4j,27 operations,455 Linux,3 native plus imports,manifest128/15,frontend. Strict internal dispatcher only; no listener, paid execution or full provider cutover. Worker idle, next transport/lifecycle packet not assigned |
+| U02 security | U02a–U02g accepted; U02h CI preparation | Issue30 safe rendering: Main8 DOM tests/build/128-19 manifest passed. Actual Step5 synthetic browser report/chat and collapse/expand checked; no active malicious nodes/external requests. Step4 source sinks reviewed, not full live/backend qualification. Six exact-head gates pending |
+| U03 adapters and operation authority | U03a–U03d accepted; U03e draft PR31 | Head76cc513848766fc4d370f4b1da038c0dff21cfde, basedbf7c641. Main corrected cleanup-path leakage and regression gaps, local78 passed1 POSIX skip; initial10s timeout did not recur, cause unconfirmed. Await six exact-head CI gates. No deployment bootstrap, paid execution or full provider cutover |
 | U04–U14 | Planned | See approved master plan; no gate accepted |
 
 Repository: https://github.com/desanv01/mirofish-research-lab (private).
