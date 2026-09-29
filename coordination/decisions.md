@@ -11,9 +11,10 @@
 - Old projectless tasks were archived after their work was preserved. U00's
   uncommitted worktree was moved with git worktree move, not copied/discarded.
 - Main owns all audits/reviews/tests and GitHub. Workers use GPT-6 Sol/medium.
-  User requests Fast mode for main and all new workers until revoked. Codex's
-  default is already service_tier=priority; preserve it. Task creation has no
-  explicit Fast-mode override, so no unsupported per-task assertion is made.
+  User resumed 2026-09-29: main GPT6 Astra/high Fast OFF, workers GPT6 Sol/medium
+  Fast ON only for workers. This supersedes earlier Fast settings. Task tools
+  expose worker model/reasoning but no Fast flag or main-model setter; user must
+  confirm those UI controls. Do not alter unrelated global defaults.
 - Main follow-up `mirofish-main-orchestration` is active every 10 minutes (verified
   from its current saved configuration). Respect
   future user pauses, product availability and usage limits; no 24/7 guarantee.
