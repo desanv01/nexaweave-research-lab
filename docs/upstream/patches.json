@@ -119,7 +119,7 @@
     {
       "imported_path": "backend/app/services/report_agent.py",
       "original_sha256": "b1211efa900e2fe73875b6acbf690550ee21a40b76c5170eee4e6ec404a4be47",
-      "current_sha256": "36144e4d59ddff317c82cd9033d43cd001d08be85ccc6d4c4ca4fb7283930bae",
+      "current_sha256": "abe20a60de578dbcc43ee25f96d0775ebb26d94be5c43b17f3c90f7d551504fb",
       "reason": "U02a safe paths and U01c forced-final sanitization retained. U03l adds trusted neutral report/chat mode, strict failures, bounded evidence sidecar and scope-bound pinned follow-up context while preserving legacy behavior.",
       "phase": "U02a/U01c/U03l"
     },

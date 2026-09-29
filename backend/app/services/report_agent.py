@@ -877,6 +877,10 @@ class ReportAgent:
     2. 生成阶段：逐章节生成内容，每章节可多次调用工具获取信息
     3. 反思阶段：检查内容完整性和准确性
     """
+
+    # Legacy callers and test fixtures may construct an agent without __init__.
+    # Explicit neutral agents set the instance value during __init__.
+    neutral_mode = False
     
     # 最大工具调用次数（每个章节）
     MAX_TOOL_CALLS_PER_SECTION = 5
