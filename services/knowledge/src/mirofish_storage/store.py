@@ -108,9 +108,12 @@ def _catalog(connection) -> str:
 
 
 def migrate(connection: psycopg.Connection) -> None:
-    """Install once, then reject unknown or drifted mf_app schemas without repair."""
-    sql = files("mirofish_storage").joinpath("migrations/0001_project_revisions.sql").read_text("utf-8")
-    checksum = hashlib.sha256(sql.encode("utf-8")).hexdigest()
+    """Apply sequential owned migrations after checking the current catalog head."""
+    migrations = []
+    for version, filename in ((1, "0001_project_revisions.sql"),
+                              (2, "0002_source_evidence.sql")):
+        sql = files("mirofish_storage").joinpath("migrations", filename).read_text("utf-8")
+        migrations.append((version, sql, hashlib.sha256(sql.encode("utf-8")).hexdigest()))
     try:
         with connection.transaction():
             connection.execute("SET LOCAL statement_timeout = '10s'")
@@ -119,15 +122,24 @@ def migrate(connection: psycopg.Connection) -> None:
             connection.execute("SELECT pg_advisory_xact_lock(%s)", (72196248041404,))
             exists = connection.execute("SELECT 1 FROM pg_namespace WHERE nspname='mf_app'").fetchone()
             if not exists:
-                connection.execute(sql)
-                shape = _catalog(connection)
-                connection.execute("INSERT INTO mf_app.schema_migrations VALUES (1,%s,%s)", (checksum, shape))
+                applied = 0
             else:
                 if connection.execute("SELECT to_regclass('mf_app.schema_migrations')").fetchone()[0] is None:
                     raise MigrationMismatch()
-                rows = connection.execute("SELECT version,sql_sha256,catalog_sha256 FROM mf_app.schema_migrations").fetchall()
-                if len(rows) != 1 or rows[0][0] != 1 or rows[0][1].strip() != checksum or rows[0][2].strip() != _catalog(connection):
+                rows = connection.execute("SELECT version,sql_sha256,catalog_sha256 FROM mf_app.schema_migrations ORDER BY version").fetchall()
+                if not rows or len(rows) > len(migrations):
                     raise MigrationMismatch()
+                for index, row in enumerate(rows):
+                    if row[0] != migrations[index][0] or row[1].strip() != migrations[index][2]:
+                        raise MigrationMismatch()
+                if rows[-1][2].strip() != _catalog(connection):
+                    raise MigrationMismatch()
+                applied = len(rows)
+            for version, sql, checksum in migrations[applied:]:
+                connection.execute(sql)
+                shape = _catalog(connection)
+                connection.execute("INSERT INTO mf_app.schema_migrations VALUES (%s,%s,%s)",
+                                   (version, checksum, shape))
     except psycopg.Error:
         raise MigrationMismatch() from None
 

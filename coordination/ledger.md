@@ -1,5 +1,15 @@
 # Execution ledger
 
+## Latest resume and integration — 2026-09-29
+
+User explicitly resumed again after the second short pause. Existing workers
+GPT-6 Sol/medium, requested Fast ON; Main requested Astra/high Fast OFF.
+Main accepted PR46 exact aefceab74ddfddc1187e0f5ee1ba523b21797d4e after all7
+CI36512005613 gates and local68 passes; merge cfe4fde94b3307c320a2902a7da4a5760638623b.
+Graph-to-basic-population preview/platform downloads and cold SDK isolation are
+accepted as bounded functionality, not complete U03. U04b source text/passage
+retention candidate reviewed with local34 passes; realPG/CI still required.
+
 ## RESUMED — 2026-09-29
 
 User explicitly resumed full orchestration. Main GPT6 Astra/high Fast OFF;
@@ -30,8 +40,8 @@ Main owns checks and GitHub; fresh GPT-6 Sol/medium workers implement only.
 | U00 repository bootstrap | Accepted delivery baseline | PR2 merged as 1166188b2d5dafbab178e72ac1b1cc130bb732f1; post-merge CI36214869721 green; Linux167 tests,128-file manifest and frontend build passed; not application qualification |
 | U01 parity and knowledge compatibility | U01a–U01d bounded slices accepted | PR32 head43cb6b8 all6 CI36504019341 green, mergea34da3c. Multipart fixture compatibility51 tests passed on Werkzeug3.1.8/3.1.9; production policy unchanged. No paid/full capability qualification |
 | U02 security | U02a–U02h bounded slices accepted | PR33 head0940090 all6 CI36504074280 green, merge7894b6a. Main8 DOM tests/build and actual Step5 synthetic browser report/chat/collapse-expand; seven HTML sinks reviewed. No full live/backend/security qualification |
-| U03 adapters and operation authority | U03a–U03h accepted; U03i PR43 under Main review | Read-only Flask/pipe/binding/direct Neo4j wiring, local53Flask103knowledge22ledger pass. PR43 now incorporates accepted U04 base; require all7 exact-head gates. No combined real-store or full workflow/paid qualification |
-| U04 persistence/evidence | U04a accepted | PR42 exact902317088573db717264ae316ab1056920f06778 all7CI36510231708 green;20 project-store cases including4realPG/CLI workflow. Mergeea1200e67b2097c8e92951e054ec35fcf1ffd263, acceptance5882199610. Metadata revisions/import-export only; blobs/spans/routes remain |
+| U03 adapters and operation authority | U03i accepted bounded slice; U03j implementing | PR43 exact24e72bb all7CI36510551662 passed, merge2d2c904, postmerge36510922920 green. Main cold-process diagnostic found eager SDK imports missed by warm fixture; issue44/U03j fixes isolation and adds explicit basic population preview/platform exports. No whole-workflow qualification |
+| U04 persistence/evidence | U04a accepted; U04b implementing | PR42 metadata revisions accepted all7CI. Issue45/U04b now adds retained UTF8 source revisions and exact passage resolution/CLI in mf_app. Existing U04 worker in reused u01 folder. Binary ingestion/routes remain |
 | U05–U14 | Planned | See approved master plan; no gate accepted |
 
 Repository: https://github.com/desanv01/mirofish-research-lab (private).
