@@ -27,9 +27,10 @@
 | Phase | Current project task | Worktree |
 |---|---|---|
 | U00 | 01a0dbb8-53e4-76e0-911f-14824a764e0f | _implementation_worktrees/u00 |
-| U01 | 01a0dbb8-8cdd-7063-ba8a-14753f6a585c | _implementation_worktrees/u01 |
+| U01 (idle, completed slice) | 01a0dbb8-8cdd-7063-ba8a-14753f6a585c | No active ownership; clean u01 transferred to U04 |
 | U02 | 01a0dbc4-d633-7732-a922-e9a7ad5e82b6 | _implementation_worktrees/u02 |
 | U03 | 01a0dbe3-ed5b-7f51-a339-3b09cdd02fe6 | _implementation_worktrees/u03 |
+| U04 | 01a0ead4-c97f-72c0-8d5d-2d1f35b56155 | _implementation_worktrees/u01 (reused; phase/04-project-revisions) |
 
 U00 PR: https://github.com/desanv01/mirofish-research-lab/pull/2.
 U00 delivery accepted at merge1166188b2d5dafbab178e72ac1b1cc130bb732f1;

@@ -431,3 +431,58 @@ def test_concurrent_binding_winner_and_no_orphan_scope(factory, same_scope):
             loser = two if persisted.scope == one else one
             assert conn.execute("SELECT count(*) FROM mf_knowledge.scopes WHERE group_id = %s",
                                 (loser.group_id,)).fetchone()[0] == 0
+
+
+def test_readers_share_and_writer_waits_without_open_transaction(factory):
+    one, other, operation = scope(), scope(), uuid4()
+    ledger = Ledger(factory)
+    ledger.admit(one, operation, "a" * 64)
+    ledger.register_scope(other)
+    captured = []
+
+    def dedicated():
+        connection = factory()
+        captured.append(connection)
+        return connection
+
+    reader_ledger = Ledger(dedicated)
+    with reader_ledger.read_scope(one):
+        assert captured[0].execute("SHOW statement_timeout").fetchone()[0] == "5s"
+        assert captured[0].execute("SHOW lock_timeout").fetchone()[0] == "2s"
+        with Ledger(factory).read_scope(one):
+            with pytest.raises(Busy):
+                ledger.claim(one, operation)
+            with pytest.raises(Busy):
+                ledger.tombstone_scope(one)
+            with Ledger(factory).read_scope(other):
+                pass
+            with factory() as observer:
+                state = observer.execute(
+                    "SELECT state, xact_start FROM pg_stat_activity WHERE pid = %s",
+                    (captured[0].info.backend_pid,),
+                ).fetchone()
+                assert state[0] == "idle" and state[1] is None
+    assert captured[0].closed
+    claimed = ledger.claim(one, operation)
+    with pytest.raises(Busy):
+        with Ledger(factory).read_scope(one):
+            pass
+    ledger.mark_uncertain(one, operation, claimed.attempt_id, "response_lost")
+    with pytest.raises(Busy):
+        with Ledger(factory).read_scope(one):
+            pass
+
+
+def test_read_guard_releases_on_exception_and_tombstone(factory):
+    one = scope()
+    ledger = Ledger(factory)
+    ledger.register_scope(one)
+    with pytest.raises(RuntimeError):
+        with ledger.read_scope(one):
+            raise RuntimeError("synthetic provider failure")
+    with ledger.read_scope(one):
+        pass
+    ledger.tombstone_scope(one)
+    with pytest.raises(Tombstoned):
+        with ledger.read_scope(one):
+            pass

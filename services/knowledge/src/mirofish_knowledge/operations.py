@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import sys
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -123,6 +124,12 @@ def _validated_scope(scope: KnowledgeScope) -> KnowledgeScope:
         raise ValueError("validated KnowledgeScope required")
     # model_copy(update=...) bypasses Pydantic validation.
     return KnowledgeScope.model_validate(scope.model_dump())
+
+
+def _read_lock_key(group_id: str) -> int:
+    """Signed session-lock key; hash collisions conservatively contend."""
+    digest = hashlib.sha256(b"mirofish:knowledge:read:v1:" + group_id.encode("ascii")).digest()
+    return int.from_bytes(digest[:8], "big", signed=True)
 
 
 def _uuid(value: UUID, name: str) -> UUID:
@@ -346,6 +353,47 @@ class Ledger:
         with _transaction(self._connect) as conn:
             return self._scope(conn, scope, create=True)
 
+    @contextmanager
+    def read_scope(self, scope: KnowledgeScope) -> Iterator[None]:
+        """Hold a dedicated session shared lock across one bounded graph read."""
+        scope = _validated_scope(scope)
+        key = _read_lock_key(scope.group_id)
+        conn = None
+        locked = False
+        try:
+            conn = self._connect()
+            conn.autocommit = True
+            conn.execute("SET statement_timeout = '5s'")
+            conn.execute("SET lock_timeout = '2s'")
+            conn.execute("SET idle_in_transaction_session_timeout = '10s'")
+            locked = conn.execute("SELECT pg_try_advisory_lock_shared(%s)", (key,)).fetchone()[0]
+            if locked is not True:
+                raise Busy("knowledge scope read admission busy")
+            with conn.transaction():
+                self._scope(conn, scope)
+                if self._admission(conn, scope) is not None:
+                    raise Busy("knowledge scope write admission busy")
+            yield
+            if conn.execute("SELECT 1").fetchone() != (1,):
+                raise StorageError("knowledge read lock lost")
+        except psycopg.Error:
+            raise StorageError("knowledge ledger storage failure") from None
+        finally:
+            control = isinstance(sys.exc_info()[1], (KeyboardInterrupt, SystemExit))
+            cleanup_failed = False
+            if conn is not None:
+                if locked:
+                    try:
+                        cleanup_failed = conn.execute("SELECT pg_advisory_unlock_shared(%s)", (key,)).fetchone() != (True,)
+                    except (psycopg.Error, OSError):
+                        cleanup_failed = True
+                try:
+                    conn.close()
+                except (psycopg.Error, OSError):
+                    cleanup_failed = True
+            if cleanup_failed and not control:
+                raise StorageError("knowledge read lock lost")
+
     def admit(self, scope: KnowledgeScope, operation_id: UUID, fingerprint: str) -> OperationRecord:
         scope, operation_id, fingerprint = _validated_scope(scope), _uuid(operation_id, "operation_id"), _fingerprint(fingerprint)
         with _transaction(self._connect) as conn:
@@ -366,6 +414,8 @@ class Ledger:
     def claim(self, scope: KnowledgeScope, operation_id: UUID) -> Claim:
         scope, operation_id = _validated_scope(scope), _uuid(operation_id, "operation_id")
         with _transaction(self._connect) as conn:
+            if conn.execute("SELECT pg_try_advisory_xact_lock(%s)", (_read_lock_key(scope.group_id),)).fetchone() != (True,):
+                raise Busy("knowledge scope read admission busy")
             self._scope(conn, scope)
             operation = self._operation(conn, scope, operation_id)
             if self._admission(conn, scope) is not None or operation.state in (OperationState.running, OperationState.uncertain):
@@ -472,6 +522,8 @@ class Ledger:
     def tombstone_scope(self, scope: KnowledgeScope) -> ScopeRecord:
         scope = _validated_scope(scope)
         with _transaction(self._connect) as conn:
+            if conn.execute("SELECT pg_try_advisory_xact_lock(%s)", (_read_lock_key(scope.group_id),)).fetchone() != (True,):
+                raise Busy("knowledge scope read admission busy")
             record = self._scope(conn, scope, allow_tombstone=True)
             if not record.tombstoned:
                 conn.execute("UPDATE mf_knowledge.scopes SET tombstoned = true WHERE group_id = %s", (scope.group_id,))

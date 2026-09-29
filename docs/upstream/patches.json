@@ -40,16 +40,23 @@
     {
       "imported_path": "backend/app/__init__.py",
       "original_sha256": "f04d262decf6c11437280c0f0c1353774f642888b2ef3f02dfa0e96e992b3c1c",
-      "current_sha256": "69208522ee6f1f18946f897b262fd4526213ef54fa733996bcae791d8a3072a6",
-      "reason": "Explicit exact API Origin admission/preflight/CORS policy and private method/endpoint/status logging without body parsing.",
-      "phase": "U02d"
+      "current_sha256": "c9ca5443ff961ce92b0bc61d93147367a6b7537d0e310400c19f2d5789f9033c",
+      "reason": "U02d exact Origin/CORS and private logging retained. U03i selects explicit graphiti_readonly factory before inherited blueprints/runner; default legacy unchanged.",
+      "phase": "U02d/U03i"
     },
     {
       "imported_path": "backend/app/config.py",
       "original_sha256": "a85580b4551724b3c2fff419565c9aa11f6dba1992f5981ed34037a264c2a2f3",
-      "current_sha256": "5a368775769d3446fbbdffd220f8003f17f9e7fb51c0cacc371f944c394adcc6",
-      "reason": "Explicit default Vite development origins, overridable through validated startup configuration.",
-      "phase": "U02d"
+      "current_sha256": "63e968d399cacef851ec2fc4fc609fc83b6219d081a25f4e861c46d64bfe5aa3",
+      "reason": "U02d explicit origins retained. U03i separate read-only host validation without Zep/model credentials; inherited legacy validation unchanged.",
+      "phase": "U02d/U03i"
+    },
+    {
+      "imported_path": "backend/run.py",
+      "original_sha256": "893a01b2e1881e4eb06bdbc4737e444d72eb374f9f326a1249dbc9aa04274483",
+      "current_sha256": "47cfe6e45105fbe34075bf196c8dc907a7e7ca58ed9e4e3940bb89c7067c92a5",
+      "reason": "Select explicit graphiti_readonly startup validation and loopback default; preserve legacy startup behavior.",
+      "phase": "U03i"
     },
     {
       "imported_path": "tests/test_local_star_count_fetch.py",
