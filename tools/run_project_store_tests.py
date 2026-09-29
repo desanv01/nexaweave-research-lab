@@ -20,13 +20,13 @@ def child(postgres: bool) -> int:
     try:
         import pytest
         targets = ["tests/test_project_store.py", "tests/test_source_store.py",
-                   "tests/test_source_bridge.py"]
+                   "tests/test_source_bridge.py", "tests/test_budget.py"]
         if postgres:
             targets.extend(["tests/test_project_store_postgres.py", "tests/test_source_store_postgres.py",
-                            "tests/test_source_bridge_postgres.py"])
+                            "tests/test_source_bridge_postgres.py", "tests/test_budget_postgres.py"])
         class Qualification:
             passed = {"test_project_store_postgres.py": 0, "test_source_store_postgres.py": 0,
-                      "test_source_bridge_postgres.py": 0}
+                      "test_source_bridge_postgres.py": 0, "test_budget_postgres.py": 0}
             skipped = 0
             def pytest_runtest_logreport(self, report):
                 for filename in self.passed:
