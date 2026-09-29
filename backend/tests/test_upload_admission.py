@@ -6,6 +6,7 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
+from flask import request
 from werkzeug.datastructures import FileStorage, MultiDict
 
 from app import create_app
@@ -18,8 +19,9 @@ from app.utils.parser_process import (
     ParserFailedError, ParserProtocolError, ParserTimeoutError,
 )
 from app.utils.upload_admission import (
-    DEFAULT_UPLOAD_POLICY, UploadLimitError, UploadWriteError,
+    DEFAULT_UPLOAD_POLICY, UploadAdmissionError, UploadLimitError, UploadWriteError,
 )
+from app.utils.upload_admission import admit_ontology_upload
 
 
 @pytest.fixture
@@ -198,7 +200,7 @@ def test_nonfile_files_form_field_rejects_mixed_batch(route):
 
 @pytest.mark.parametrize("filename,status", [
     ("", 400), ("source.exe", 400), ("source", 400), (".pdf", 400),
-    ("dir/source.txt", 400), ("dir\\source.txt", 400),
+    ("dir/source.txt", 400),
     ("secret\n.txt", 400), ("secret\x00.txt", 400),
     ("a" * 252 + ".txt", 413),
 ])
@@ -215,6 +217,61 @@ def test_invalid_filename_in_mixed_batch_rejects_whole_batch(route, filename, st
     assert response.json["success"] is False
     assert calls["constructed"] == 0
     assert not root.exists()
+
+
+def _multipart_with_escaped_filename(filename):
+    """Build wire bytes with a quoted-pair backslash in Content-Disposition."""
+    boundary = b"U01dBoundary"
+    escaped = filename.replace("\\", "\\\\").encode("ascii")
+    body = b"".join([
+        b"--" + boundary + b"\r\n",
+        b'Content-Disposition: form-data; name="simulation_requirement"\r\n\r\n',
+        b"Investigate discussion\r\n",
+        b"--" + boundary + b"\r\n",
+        b'Content-Disposition: form-data; name="files"; filename="good.txt"\r\n',
+        b"Content-Type: text/plain\r\n\r\n",
+        b"good\r\n",
+        b"--" + boundary + b"\r\n",
+        b'Content-Disposition: form-data; name="files"; filename="' + escaped + b'"\r\n',
+        b"Content-Type: text/plain\r\n\r\n",
+        b"bad\r\n",
+        b"--" + boundary + b"--\r\n",
+    ])
+    return body, "multipart/form-data; boundary=U01dBoundary"
+
+
+@pytest.mark.parametrize("filename", ["dir\\source.txt", "C:\\folder\\source.txt"])
+def test_escaped_wire_backslash_rejects_entire_mixed_batch(route, filename):
+    client, root, calls = route
+    body, content_type = _multipart_with_escaped_filename(filename)
+    with client.application.test_request_context(
+        "/api/graph/ontology/generate", method="POST",
+        data=body, content_type=content_type,
+    ):
+        parsed = request.files.getlist("files")
+        assert [upload.filename for upload in parsed] == ["good.txt", filename]
+
+    response = client.post(
+        "/api/graph/ontology/generate", data=body, content_type=content_type,
+    )
+    assert response.status_code == 400
+    assert response.json["success"] is False
+    assert response.json["error_code"] == "invalid_upload_file"
+    assert calls["constructed"] == calls["generated"] == 0
+    assert not root.exists()
+
+
+@pytest.mark.parametrize("filename", ["dir\\source.txt", "C:\\folder\\source.txt"])
+def test_admission_rejects_parsed_backslash_filename(filename):
+    form = MultiDict([("simulation_requirement", "Investigate discussion")])
+    files = MultiDict([
+        ("files", FileStorage(stream=io.BytesIO(b"good"), filename="good.txt")),
+        ("files", FileStorage(stream=io.BytesIO(b"bad"), filename=filename)),
+    ])
+    with pytest.raises(UploadAdmissionError) as caught:
+        admit_ontology_upload(form, files)
+    assert caught.value.status == 400
+    assert caught.value.code == "invalid_upload_file"
 
 
 def test_no_files_and_too_many_files_rejected(route):
