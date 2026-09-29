@@ -175,7 +175,7 @@ def _validated_facts(result, scope: KnowledgeScope, *, expected_type, maximum: i
             raise ValueError
     # JSON mode accepts wire UUID/datetime forms without Pydantic's Python-mode
     # coercions. The finite JSON encoder rejects NaN/Infinity anywhere in output.
-    payload = result.model_dump(mode="json")
+    payload = result.model_dump(mode="json", warnings=False)
     encoded = _wire(payload)
     result = type(result).model_validate_json(encoded)
     if len(result.facts) > maximum:

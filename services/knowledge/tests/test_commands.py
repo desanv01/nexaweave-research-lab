@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import json
+import warnings
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -264,6 +265,60 @@ async def test_method_specific_result_dtos_reject_swapped_shapes():
                             ("search", {"text": "query"})):
         outcome = reply(await dispatcher.dispatch(wire(scope, method, payload), principal="reader"))
         assert outcome["error"] == {"code": "internal_error"}
+
+
+@pytest.mark.asyncio
+async def test_metadata_wire_output_and_bypassed_validation_fails_privately():
+    scope, _, _ = fixture_request()
+    expiry = datetime(2024, 3, 1, tzinfo=timezone.utc)
+
+    class MetadataProvider(Provider):
+        def __init__(self):
+            super().__init__()
+            self.bad = None
+            self.inject_bad = False
+
+        async def page(self, scope, request):
+            item = fact(scope).model_copy(update={"labels": ("Entity", "人物"),
+                                                   "summary": "研究摘要"})
+            if self.inject_bad:
+                item = item.model_copy(update=self.bad)
+            return GraphPage(facts=(item,))
+
+        async def entity(self, scope, provider_id):
+            edge = FactResult(provider_id=str(uuid4()), scope=scope, kind="edge",
+                              source_node_id=str(uuid4()), target_node_id=str(uuid4()),
+                              invalid_at=datetime(2024, 2, 1, tzinfo=timezone.utc), expired_at=expiry)
+            return SearchResult(facts=(edge,))
+
+    provider = MetadataProvider()
+    dispatcher = KnowledgeCommandDispatcher(provider, Coordinator(), Policy())
+    result = reply(await dispatcher.dispatch(wire(scope, "page", {"kind": "node"}), principal="reader"))
+    item = result["result"]["facts"][0]
+    assert item["labels"] == ["Entity", "人物"] and item["summary"] == "研究摘要"
+    edge_result = reply(await dispatcher.dispatch(
+        wire(scope, "entity", {"provider_id": str(uuid4())}), principal="reader"))
+    edge = edge_result["result"]["facts"][0]
+    assert edge["expired_at"] == expiry.isoformat().replace("+00:00", "Z")
+    assert edge["expired_at"] != edge["invalid_at"]
+    for bad_metadata, private_value in (
+        ({"labels": ("secret\nmodel-payload",)}, "model-payload"),
+        ({"labels": "private-label-string"}, "private-label-string"),
+        ({"labels": {"private-label-key": True}}, "private-label-key"),
+        ({"labels": None}, None),
+        ({"labels": False}, None),
+        ({"summary": "private-summary" + "x" * 32769}, "private-summary"),
+    ):
+        provider.bad = bad_metadata
+        provider.inject_bad = True
+        with warnings.catch_warnings(record=True) as captured:
+            warnings.simplefilter("always")
+            failed = reply(await dispatcher.dispatch(wire(scope, "page", {"kind": "node"}), principal="reader"))
+        assert failed["error"] == {"code": "internal_error"}
+        if private_value is not None:
+            assert private_value not in str(failed)
+            assert all(private_value not in str(item.message) for item in captured)
+        assert not captured
 
 
 @pytest.mark.asyncio

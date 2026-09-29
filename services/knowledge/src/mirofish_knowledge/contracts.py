@@ -8,6 +8,7 @@ import re
 from datetime import datetime
 from enum import StrEnum
 from typing import Literal
+from unicodedata import category
 from uuid import UUID, uuid5, NAMESPACE_URL
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator, create_model
@@ -188,11 +189,29 @@ class FactResult(StrictModel):
     target_node_id: str | None = None
     episode_ids: tuple[str, ...] = ()
     evidence_ids: tuple[UUID, ...] = ()
+    labels: tuple[str, ...] = Field(default=(), max_length=64)
+    summary: str | None = Field(default=None, max_length=32768)
     valid_at: datetime | None = None
     invalid_at: datetime | None = None
+    expired_at: datetime | None = None
     created_at: datetime | None = None
     attributes: dict[str, object] = Field(default_factory=dict)
     score: float | None = None
+
+    @field_validator("labels")
+    @classmethod
+    def valid_labels(cls, labels: tuple[str, ...]) -> tuple[str, ...]:
+        if len(set(labels)) != len(labels):
+            raise ValueError("duplicate graph label")
+        for label in labels:
+            if not label or len(label) > 128 or any(category(char) == "Cc" for char in label):
+                raise ValueError("invalid graph label")
+        return labels
+
+    @field_validator("expired_at")
+    @classmethod
+    def aware_expiry(cls, value: datetime | None) -> datetime | None:
+        return _aware(value)
 
 
 class SearchResult(StrictModel):

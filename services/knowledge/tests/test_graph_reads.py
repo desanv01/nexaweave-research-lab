@@ -2,6 +2,7 @@
 
 import base64
 import json
+import warnings
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
@@ -30,6 +31,10 @@ class Rows:
         self.wrong_scope = False
         self.bad_uuid = False
         self.big_name = False
+        self.shadow_labels = False
+        self.summary = None
+        self.expired_at = None
+        self.invalid_at = None
         self.count = count
 
     async def __call__(self, cypher, **params):
@@ -48,8 +53,13 @@ class Rows:
                 row = {"properties": data, "row_group": group}
                 if self.kind == "node":
                     row["labels"] = ["Entity", "Person"]
+                    if self.shadow_labels:
+                        data["labels"] = ["Shadow"]
+                    if self.summary is not None:
+                        data["summary"] = self.summary
                 elif self.kind == "edge":
-                    data.update({"episodes": [self.episode], "fact": "synthetic fact"})
+                    data.update({"episodes": [self.episode], "fact": "synthetic fact",
+                                 "invalid_at": self.invalid_at, "expired_at": self.expired_at})
                     row.update(source_id=identifier(201), target_id=identifier(202),
                                source_group=group, target_group=group)
                 rows.append(row)
@@ -110,6 +120,86 @@ async def test_node_type_is_bound_and_returned_labels_rechecked():
     assert "Person" not in query and params["entity_type"] == "Person"
     with pytest.raises(GraphReadViolation):
         await subject.page(one, GraphPageRequest(kind="node", entity_type="Organization", limit=1))
+
+
+@pytest.mark.asyncio
+async def test_page_explicit_labels_summary_and_distinct_edge_expiry():
+    one = scope()
+    nodes = Rows(one, count=1)
+    nodes.shadow_labels = True
+    nodes.summary = "研究摘要"
+    node = (await provider(nodes).page(one, GraphPageRequest(kind="node", entity_type="Person"))).facts[0]
+    assert node.labels == ("Entity", "Person") and node.summary == "研究摘要"
+    assert "labels" not in node.attributes and "summary" not in node.attributes
+    assert node.attributes["custom"] == "retained" and node.episode_ids
+
+    edges = Rows(one, kind="edge", count=1)
+    edges.invalid_at = datetime(2024, 2, 1, tzinfo=timezone.utc)
+    edges.expired_at = datetime(2024, 3, 1, tzinfo=timezone.utc)
+    edge = (await provider(edges).page(one, GraphPageRequest(kind="edge"))).facts[0]
+    assert edge.invalid_at == edges.invalid_at and edge.expired_at == edges.expired_at
+    assert edge.invalid_at != edge.expired_at
+    assert "expired_at" not in edge.attributes and edge.evidence_ids
+
+
+@pytest.mark.asyncio
+async def test_page_invalid_metadata_is_not_truncated():
+    one = scope()
+    rows = Rows(one, count=1)
+    rows.summary = "x" * 32769
+    with pytest.raises(GraphReadViolation):
+        await provider(rows).page(one, GraphPageRequest(kind="node"))
+    rows.summary = None
+    rows.shadow_labels = True
+    original = rows.__call__
+
+    async def duplicate_labels(cypher, **params):
+        result = await original(cypher, **params)
+        if "ORDER BY" in cypher:
+            result[0]["labels"] = ["Person", "Person"]
+        return result
+
+    subject = provider(rows)
+    subject._rows = duplicate_labels
+    with pytest.raises(GraphReadViolation):
+        await subject.page(one, GraphPageRequest(kind="node"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("labels", ["Person", {"Person": True}, None, False, ["Person"] * 65])
+async def test_page_rejects_malformed_neo4j_label_containers(labels):
+    one = scope()
+    rows = Rows(one, count=1)
+    original = rows.__call__
+
+    async def malformed(cypher, **params):
+        result = await original(cypher, **params)
+        if "ORDER BY" in cypher:
+            result[0]["labels"] = labels
+        return result
+
+    subject = provider(rows)
+    subject._rows = malformed
+    with pytest.raises(GraphReadViolation):
+        await subject.page(one, GraphPageRequest(kind="node"))
+
+
+@pytest.mark.asyncio
+async def test_page_decorated_invalid_fact_does_not_emit_private_serializer_warning():
+    one = scope()
+    subject = provider(Rows(one, count=1))
+    original = subject._decorate_fact
+
+    async def malformed(scope, fact):
+        decorated = await original(scope, fact)
+        return decorated.model_copy(update={"labels": "private-page-label"})
+
+    subject._decorate_fact = malformed
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        with pytest.raises(GraphReadViolation):
+            await subject.page(one, GraphPageRequest(kind="node"))
+    assert not captured
 
 
 @pytest.mark.asyncio

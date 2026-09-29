@@ -117,6 +117,7 @@ async def test_real_graphiti_ingest_scope_provenance_and_duplicate(provider):
     second = await provider.ingest(second_scope, second_source, second_ontology)
     assert any(fact.kind == "node" for fact in first.facts)
     assert any(fact.kind == "edge" for fact in first.facts)
+    assert all(fact.labels for fact in first.facts if fact.kind == "node")
     assert all(fact.scope == first_scope for fact in first.facts)
     assert all(first_source.evidence_ids[0] in fact.evidence_ids for fact in first.facts if fact.episode_ids)
     assert any(fact.kind == "node" for fact in second.facts)
@@ -141,6 +142,42 @@ async def test_real_graphiti_ingest_scope_provenance_and_duplicate(provider):
     assert not {fact.provider_id for fact in first_search.facts} & {fact.provider_id for fact in second_search.facts}
     with pytest.raises(OperationConflict):
         await provider.ingest(first_scope, first_source.model_copy(update={"content": "Conflicting content"}), ontology)
+
+
+@pytest.mark.asyncio
+async def test_real_graphiti_entity_metadata_roundtrip(provider):
+    scope, source, ontology = fixture_data()
+    ingested = await provider.ingest(scope, source, ontology)
+    node = next(fact for fact in ingested.facts if fact.kind == "node" and "Person" in fact.labels)
+    edge = next(fact for fact in ingested.facts if fact.kind == "edge")
+    assert node.summary is None or isinstance(node.summary, str)
+    summary = "研究摘要 — synthetic fixture"
+    expiry = datetime(2024, 3, 1, tzinfo=timezone.utc)
+    invalid = datetime(2024, 2, 1, tzinfo=timezone.utc)
+    await provider._driver.execute_query(
+        "MATCH (n:Entity {uuid: $uuid, group_id: $group_id}) SET n.summary = $summary",
+        params={"uuid": node.provider_id, "group_id": scope.group_id, "summary": summary},
+    )
+    await provider._driver.execute_query(
+        "MATCH ()-[r:RELATES_TO {uuid: $uuid, group_id: $group_id}]->() "
+        "SET r.invalid_at = datetime($invalid_at), r.expired_at = datetime($expired_at)",
+        params={"uuid": edge.provider_id, "group_id": scope.group_id,
+                "invalid_at": invalid.isoformat(), "expired_at": expiry.isoformat()},
+    )
+    node_page = await provider.page(scope, GraphPageRequest(kind="node", entity_type="Person"))
+    paged_node = next(fact for fact in node_page.facts if fact.provider_id == node.provider_id)
+    assert "Person" in paged_node.labels and paged_node.summary == summary
+    assert "summary" not in paged_node.attributes and "labels" not in paged_node.attributes
+    detail = await provider.entity(scope, node.provider_id)
+    detailed_node = next(fact for fact in detail.facts if fact.kind == "node")
+    detailed_edge = next(fact for fact in detail.facts if fact.provider_id == edge.provider_id)
+    assert detailed_node.labels == paged_node.labels and detailed_node.summary == summary
+    assert (detailed_edge.invalid_at, detailed_edge.expired_at) == (invalid, expiry)
+    edge_page = await provider.page(scope, GraphPageRequest(kind="edge"))
+    paged_edge = next(fact for fact in edge_page.facts if fact.provider_id == edge.provider_id)
+    assert (paged_edge.invalid_at, paged_edge.expired_at) == (invalid, expiry)
+    assert paged_edge.expired_at != paged_edge.invalid_at
+    assert "expired_at" not in paged_edge.attributes
 
 
 @pytest.mark.asyncio

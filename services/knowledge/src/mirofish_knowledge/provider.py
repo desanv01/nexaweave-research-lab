@@ -167,16 +167,27 @@ def _request_fingerprint(scope: KnowledgeScope, source: SourceEnvelope, ontology
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _node_labels(value: object) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)) or len(value) > 64:
+        raise ValueError("invalid graph node labels")
+    return tuple(value)
+
+
 def _fact(scope: KnowledgeScope, kind: str, value: Any, *, score: float | None = None, evidence_ids=()) -> FactResult:
     if value.group_id != scope.group_id:
         raise ScopeViolation(f"{kind} outside authorized group")
     attributes = _native(getattr(value, "attributes", None) or {})
+    attributes = {key: item for key, item in attributes.items()
+                  if key not in {"labels", "summary", "expired_at"} and "embedding" not in key.lower()}
     return FactResult(
         provider_id=str(value.uuid), scope=scope, kind=kind,
         name=getattr(value, "name", None), fact=getattr(value, "fact", None),
         source_node_id=getattr(value, "source_node_uuid", None), target_node_id=getattr(value, "target_node_uuid", None),
         episode_ids=tuple(getattr(value, "episodes", None) or ()), evidence_ids=tuple(evidence_ids),
+        labels=_node_labels(getattr(value, "labels", ())) if kind == "node" else (),
+        summary=getattr(value, "summary", None) if kind == "node" else None,
         valid_at=_native(getattr(value, "valid_at", None)), invalid_at=_native(getattr(value, "invalid_at", None)),
+        expired_at=_native(getattr(value, "expired_at", None)) if kind == "edge" else None,
         created_at=_native(getattr(value, "created_at", None)), attributes=attributes, score=score,
     )
 
@@ -420,14 +431,15 @@ class GraphitiKnowledgeProvider:
     async def entity(self, scope: KnowledgeScope, provider_id: str) -> SearchResult:
         UUID(provider_id)  # reject arbitrary values before database access
         rows = await self._rows(
-            "MATCH (n:Entity {uuid: $uuid, group_id: $group_id}) RETURN properties(n) AS properties",
+            "MATCH (n:Entity {uuid: $uuid, group_id: $group_id}) RETURN properties(n) AS properties, labels(n) AS labels",
             uuid=provider_id, group_id=scope.group_id,
         )
         if not rows:
             return SearchResult(facts=())
         data = _native(dict(rows[0]["properties"]))
         facts = [await self._decorate_fact(scope, FactResult(provider_id=data["uuid"], scope=scope, kind="node", name=data.get("name"),
-                            created_at=data.get("created_at"), attributes={k: v for k, v in data.items() if k not in {"uuid", "group_id", "name", "created_at", "name_embedding"}}))]
+                            labels=_node_labels(rows[0]["labels"]), summary=data.get("summary"),
+                            created_at=data.get("created_at"), attributes={k: v for k, v in data.items() if k not in {"uuid", "group_id", "name", "labels", "summary", "expired_at", "created_at"} and "embedding" not in k.lower()}))]
         relations = await self._rows(
             "MATCH (a:Entity)-[r:RELATES_TO]-(b:Entity) WHERE a.uuid = $uuid AND a.group_id = $group_id AND b.group_id = $group_id AND r.group_id = $group_id RETURN properties(r) AS properties, startNode(r).uuid AS source_id, endNode(r).uuid AS target_id LIMIT 100",
             uuid=provider_id, group_id=scope.group_id,
@@ -435,7 +447,7 @@ class GraphitiKnowledgeProvider:
         for row in relations:
             edge = _native(dict(row["properties"]))
             ids = tuple(edge.get("episodes") or ())
-            facts.append(await self._decorate_fact(scope, FactResult(provider_id=edge["uuid"], scope=scope, kind="edge", name=edge.get("name"), fact=edge.get("fact"), source_node_id=row["source_id"], target_node_id=row["target_id"], episode_ids=ids, valid_at=edge.get("valid_at"), invalid_at=edge.get("invalid_at"), created_at=edge.get("created_at"), attributes={k: v for k, v in edge.items() if k not in {"uuid", "group_id", "name", "fact", "episodes", "valid_at", "invalid_at", "created_at", "fact_embedding"}})))
+            facts.append(await self._decorate_fact(scope, FactResult(provider_id=edge["uuid"], scope=scope, kind="edge", name=edge.get("name"), fact=edge.get("fact"), source_node_id=row["source_id"], target_node_id=row["target_id"], episode_ids=ids, valid_at=edge.get("valid_at"), invalid_at=edge.get("invalid_at"), expired_at=edge.get("expired_at"), created_at=edge.get("created_at"), attributes={k: v for k, v in edge.items() if k not in {"uuid", "group_id", "name", "fact", "episodes", "labels", "summary", "valid_at", "invalid_at", "expired_at", "created_at"} and "embedding" not in k.lower()})))
         return SearchResult(facts=tuple(facts))
 
     async def close(self) -> None:
