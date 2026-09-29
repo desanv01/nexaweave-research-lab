@@ -134,3 +134,10 @@ class KnowledgeReadFacade:
         from .preparation_dependencies import create_knowledge_preparation
         return create_knowledge_preparation(
             self, graph_id, chat_client=chat_client, model_name=model_name, base_url=base_url)
+
+    def report_agent(self, graph_id, simulation_id, simulation_requirement, *, model_client,
+                     search_selector=None, interview_capability=None):
+        from .report_dependencies import create_knowledge_report_agent
+        return create_knowledge_report_agent(
+            self, graph_id, simulation_id, simulation_requirement, model_client=model_client,
+            search_selector=search_selector, interview_capability=interview_capability)

@@ -119,9 +119,23 @@
     {
       "imported_path": "backend/app/services/report_agent.py",
       "original_sha256": "b1211efa900e2fe73875b6acbf690550ee21a40b76c5170eee4e6ec404a4be47",
-      "current_sha256": "6a6313ff968946809c97b7bae3b4871d3dfd38964c77a53a7cc614fc2bd6411d",
-      "reason": "U02a bounds report storage/loggers/legacy paths. U01c also strips fabricated tool results in forced-final section responses, matching normal-final behavior.",
-      "phase": "U02a/U01c"
+      "current_sha256": "36144e4d59ddff317c82cd9033d43cd001d08be85ccc6d4c4ca4fb7283930bae",
+      "reason": "U02a safe paths and U01c forced-final sanitization retained. U03l adds trusted neutral report/chat mode, strict failures, bounded evidence sidecar and scope-bound pinned follow-up context while preserving legacy behavior.",
+      "phase": "U02a/U01c/U03l"
+    },
+    {
+      "imported_path": "backend/app/services/zep_tools.py",
+      "original_sha256": "5a2142a6a8662d764a9e31f1b12c2d19f03729f28bfd3e353ac0bcbf71d3e3be",
+      "current_sha256": "c889c15282e68d596cf307202592489d544c168111ae72a3696423b0bf31b3ef",
+      "reason": "Defer legacy SDK imports; preserve inherited research algorithms with explicit strict-neutral input/failure handling and source-evidence labels.",
+      "phase": "U03l"
+    },
+    {
+      "imported_path": "backend/app/utils/llm_client.py",
+      "original_sha256": "c10c12e3d8a5bf16c3bc9b03eb64c438313108b9a9b743c4450785f1477a35e3",
+      "current_sha256": "fee7ae894819de36dffc02da7f1f27fcd4b515abeb3403345b3998dd9e7a606a",
+      "reason": "Defer OpenAI import until actual client construction so injected report workflows import without model SDK; default client behavior retained.",
+      "phase": "U03l"
     },
     {
       "imported_path": "backend/app/services/simulation_manager.py",

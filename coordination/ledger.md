@@ -1,5 +1,15 @@
 # Execution ledger
 
+## Latest — integrated preparation, U03l and U05a proceed
+
+PR48 accepted907e9357, all7CI36578459932; merge73e5146, postmerge36579362173
+SUCCESS. PR49 already accepted22f6573. New U03l packet on
+task/u03-provider-neutral-reports connects inherited report/chat research flow.
+U05 project chat01a0ed73-38a6-7a33-b468-e3ddd7cd5f74 reuses u00 on
+task/u05-budget-admission. Initial handoff reviewed; corrections needed for
+misplaced test assertions and concurrent dispatch/cancellation qualification.
+No paid enablement, full-phase acceptance or invoice-hard-cap claim.
+
 ## Heartbeat13:50 — bridge accepted, preparation combined-base CI pending
 
 Main accepted PR49 exact165fc263 after all7CI36577468639,56store/realPG+CLI;
