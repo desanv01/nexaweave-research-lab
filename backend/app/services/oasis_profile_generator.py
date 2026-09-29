@@ -8,25 +8,21 @@ OASIS Agent Profile生成器
 3. 区分个人实体和抽象群体实体
 """
 
+from __future__ import annotations
+
 import json
 import random
 import time
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, TYPE_CHECKING
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from openai import OpenAI
 from ..config import Config
 from ..utils.logger import get_logger
 from ..utils.locale import get_language_instruction, get_locale, set_locale, t
 from ..utils.openai_chat_compat import create_chat_completion, extract_chat_completion_text
-from ..utils.zep import (
-    call_zep_read_with_retry,
-    get_zep_client,
-    is_retryable_zep_error,
-    normalize_zep_search_query,
-)
-from .zep_entity_reader import EntityNode, ZepEntityReader
+if TYPE_CHECKING:
+    from .zep_entity_reader import EntityNode
 
 logger = get_logger('mirofish.oasis_profile')
 
@@ -246,8 +242,26 @@ class OasisProfileGenerator:
         base_url: Optional[str] = None,
         model_name: Optional[str] = None,
         zep_api_key: Optional[str] = None,
-        graph_id: Optional[str] = None
+        graph_id: Optional[str] = None,
+        *, basic_only: bool = False,
+        rng: random.Random | None = None,
     ):
+        if type(basic_only) is not bool or (rng is not None and not isinstance(rng, random.Random)):
+            raise ValueError("invalid profile generator mode")
+        self.basic_only = basic_only
+        self._rng = rng if rng is not None else random
+        self.graph_id = graph_id
+        if basic_only:
+            self.api_key = None
+            self.base_url = None
+            self.model_name = None
+            self.client = None
+            self.zep_api_key = None
+            self.zep_client = None
+            return
+
+        from openai import OpenAI
+        from ..utils.zep import get_zep_client
         self.api_key = api_key or Config.LLM_API_KEY
         self.base_url = base_url or Config.LLM_BASE_URL
         self.model_name = model_name or Config.LLM_MODEL_NAME
@@ -263,7 +277,6 @@ class OasisProfileGenerator:
         # Zep客户端用于检索丰富上下文
         self.zep_api_key = zep_api_key or Config.ZEP_API_KEY
         self.zep_client = None
-        self.graph_id = graph_id
         
         if self.zep_api_key:
             try:
@@ -288,14 +301,17 @@ class OasisProfileGenerator:
         Returns:
             OasisAgentProfile
         """
+        if getattr(self, "basic_only", False) and use_llm:
+            raise ValueError("basic profile mode forbids model generation")
         entity_type = entity.get_entity_type() or "Entity"
+        rng = getattr(self, "_rng", random)
         
         # 基础信息
         name = entity.name
         user_name = self._generate_username(name)
         
         # 构建上下文信息
-        context = self._build_entity_context(entity)
+        context = "" if getattr(self, "basic_only", False) else self._build_entity_context(entity)
         
         if use_llm:
             # 使用LLM生成详细人设
@@ -321,10 +337,10 @@ class OasisProfileGenerator:
             name=name,
             bio=profile_data.get("bio", f"{entity_type}: {name}"),
             persona=profile_data.get("persona", entity.summary or f"A {entity_type} named {name}."),
-            karma=profile_data.get("karma", random.randint(500, 5000)),
-            friend_count=profile_data.get("friend_count", random.randint(50, 500)),
-            follower_count=profile_data.get("follower_count", random.randint(100, 1000)),
-            statuses_count=profile_data.get("statuses_count", random.randint(100, 2000)),
+            karma=profile_data.get("karma", rng.randint(500, 5000)),
+            friend_count=profile_data.get("friend_count", rng.randint(50, 500)),
+            follower_count=profile_data.get("follower_count", rng.randint(100, 1000)),
+            statuses_count=profile_data.get("statuses_count", rng.randint(100, 2000)),
             age=profile_data.get("age"),
             gender=profile_data.get("gender"),
             mbti=profile_data.get("mbti"),
@@ -342,7 +358,7 @@ class OasisProfileGenerator:
         username = ''.join(c for c in username if c.isalnum() or c == '_')
         
         # 添加随机后缀避免重复
-        suffix = random.randint(100, 999)
+        suffix = getattr(self, "_rng", random).randint(100, 999)
         return f"{username}_{suffix}"
     
     def _search_zep_for_entity(self, entity: EntityNode) -> Dict[str, Any]:
@@ -358,7 +374,11 @@ class OasisProfileGenerator:
         Returns:
             包含facts, node_summaries, context的字典
         """
+        if getattr(self, "basic_only", False):
+            return {"facts": [], "node_summaries": [], "context": ""}
         import concurrent.futures
+        from ..utils.zep import (call_zep_read_with_retry, is_retryable_zep_error,
+                                 normalize_zep_search_query)
         
         if not self.zep_client:
             return {"facts": [], "node_summaries": [], "context": ""}
@@ -823,6 +843,7 @@ class OasisProfileGenerator:
         entity_attributes: Dict[str, Any]
     ) -> Dict[str, Any]:
         """使用规则生成基础人设"""
+        rng = getattr(self, "_rng", random)
         
         # 根据实体类型生成不同的人设
         entity_type_lower = entity_type.lower()
@@ -831,10 +852,10 @@ class OasisProfileGenerator:
             return {
                 "bio": f"{entity_type} with interests in academics and social issues.",
                 "persona": f"{entity_name} is a {entity_type.lower()} who is actively engaged in academic and social discussions. They enjoy sharing perspectives and connecting with peers.",
-                "age": random.randint(18, 30),
-                "gender": random.choice(["male", "female"]),
-                "mbti": random.choice(self.MBTI_TYPES),
-                "country": random.choice(self.COUNTRIES),
+                "age": rng.randint(18, 30),
+                "gender": rng.choice(["male", "female"]),
+                "mbti": rng.choice(self.MBTI_TYPES),
+                "country": rng.choice(self.COUNTRIES),
                 "profession": "Student",
                 "interested_topics": ["Education", "Social Issues", "Technology"],
             }
@@ -843,10 +864,10 @@ class OasisProfileGenerator:
             return {
                 "bio": f"Expert and thought leader in their field.",
                 "persona": f"{entity_name} is a recognized {entity_type.lower()} who shares insights and opinions on important matters. They are known for their expertise and influence in public discourse.",
-                "age": random.randint(35, 60),
-                "gender": random.choice(["male", "female"]),
-                "mbti": random.choice(["ENTJ", "INTJ", "ENTP", "INTP"]),
-                "country": random.choice(self.COUNTRIES),
+                "age": rng.randint(35, 60),
+                "gender": rng.choice(["male", "female"]),
+                "mbti": rng.choice(["ENTJ", "INTJ", "ENTP", "INTP"]),
+                "country": rng.choice(self.COUNTRIES),
                 "profession": entity_attributes.get("occupation", "Expert"),
                 "interested_topics": ["Politics", "Economics", "Culture & Society"],
             }
@@ -880,10 +901,10 @@ class OasisProfileGenerator:
             return {
                 "bio": entity_summary[:150] if entity_summary else f"{entity_type}: {entity_name}",
                 "persona": entity_summary or f"{entity_name} is a {entity_type.lower()} participating in social discussions.",
-                "age": random.randint(25, 50),
-                "gender": random.choice(["male", "female"]),
-                "mbti": random.choice(self.MBTI_TYPES),
-                "country": random.choice(self.COUNTRIES),
+                "age": rng.randint(25, 50),
+                "gender": rng.choice(["male", "female"]),
+                "mbti": rng.choice(self.MBTI_TYPES),
+                "country": rng.choice(self.COUNTRIES),
                 "profession": entity_type,
                 "interested_topics": ["General", "Social Issues"],
             }
@@ -1141,26 +1162,19 @@ class OasisProfileGenerator:
             
             # 写入数据行
             for idx, profile in enumerate(profiles):
-                # user_char: 完整人设（bio + persona），用于LLM系统提示
-                user_char = profile.bio
-                if profile.persona and profile.persona != profile.bio:
-                    user_char = f"{profile.bio} {profile.persona}"
-                # 处理换行符（CSV中用空格替代）
-                user_char = user_char.replace('\n', ' ').replace('\r', ' ')
-                
-                # description: 简短简介，用于外部显示
-                description = profile.bio.replace('\n', ' ').replace('\r', ' ')
-                
-                row = [
-                    idx,                    # user_id: 从0开始的顺序ID
-                    profile.name,           # name: 真实姓名
-                    profile.user_name,      # username: 用户名
-                    user_char,              # user_char: 完整人设（内部LLM使用）
-                    description             # description: 简短简介（外部显示）
-                ]
-                writer.writerow(row)
+                writer.writerow(self.twitter_loader_row(profile, idx))
         
         logger.info(f"已保存 {len(profiles)} 个Twitter Profile到 {file_path} (OASIS CSV格式)")
+
+    @staticmethod
+    def twitter_loader_row(profile: OasisAgentProfile, idx: int) -> list:
+        """The inherited five-column OASIS Twitter loader row, without file I/O."""
+        user_char = profile.bio
+        if profile.persona and profile.persona != profile.bio:
+            user_char = f"{profile.bio} {profile.persona}"
+        return [idx, profile.name, profile.user_name,
+                user_char.replace('\n', ' ').replace('\r', ' '),
+                profile.bio.replace('\n', ' ').replace('\r', ' ')]
     
     def _normalize_gender(self, gender: Optional[str]) -> str:
         """
