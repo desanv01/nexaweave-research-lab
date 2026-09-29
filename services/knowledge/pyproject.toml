@@ -17,6 +17,7 @@ where = ["src"]
 [tool.setuptools.package-data]
 mirofish_knowledge = ["migrations/*.sql"]
 mirofish_storage = ["migrations/*.sql"]
+mirofish_execution = ["migrations/*.sql"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
