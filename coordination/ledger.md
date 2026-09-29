@@ -1,5 +1,36 @@
 # Execution ledger
 
+## Heartbeat13:50 — bridge accepted, preparation combined-base CI pending
+
+Main accepted PR49 exact165fc263 after all7CI36577468639,56store/realPG+CLI;
+merge22f6573. U03k original b77929a also passed all7CI36577324314,575backend
+including cold preparation,44store,110knowledge,51operations,3native/imports,
+8frontend/build,128/24manifest. Updating only accepted base and preserving both
+ledger histories; require final combined exact-head CI before U03k acceptance.
+
+### Historical checkpoints below
+## Heartbeat13:40 — U03k corrected candidate
+
+U03k now retains one accepted bounded projection for filtering/context/grounding,
+rejects incomplete/malformed model JSON in strict mode and fixes cold UTF8 fixture.
+Main65focused tests passed; pending exact-head CI, not accepted/full U03.
+U04b PR47 merged9f37fdb, postmerge36575730712 success. U04c source-ingestion bridge
+in u01 had43offline passes; worker correcting sync plan reads in async dispatch.
+
+## Latest explicit resume and workflow assignment — 2026-09-29
+
+User resumed after second pause. Heartbeat ACTIVE; Main Astra/high Fast OFF
+requested, workers Sol/medium with Fast ON requested. No programmatic Fast/main
+model setter, no global defaults changed. Existing U03 worker now owns packet
+U03k on task/u03-provider-neutral-preparation at accepted cfe4fde. Preserve actual
+inherited manager/persona/config preparation and connect authorized Graphiti
+reader/context, no Zep fallback in explicit neutral mode. Implementation only.
+
+PR46 exact aefceab passed all7CI36512005613 and prior Main local68; merged cfe4fde,
+postmerge36574548166 success. Accepted basic population exports/cold SDK isolation,
+not full U03. U04b exact6f0a719 is PR47 under CI36574673021; no acceptance yet.
+
+### Historical integration checkpoint (superseded by heartbeat above)
 ## Heartbeat13:40 — both workflow candidates move to CI
 
 U04c retained-source to ingestion bridge reviewed;44offline passes after async
