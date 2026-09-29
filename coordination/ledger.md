@@ -14,8 +14,8 @@ Main owns checks and GitHub; fresh GPT-6 Sol/medium workers implement only.
 | Plan v3 synchronization | Completed | All active reference docs synchronized; v2 archived |
 | U00 repository bootstrap | Accepted delivery baseline | PR2 merged as 1166188b2d5dafbab178e72ac1b1cc130bb732f1; post-merge CI36214869721 green; Linux167 tests,128-file manifest and frontend build passed; not application qualification |
 | U01 parity and knowledge compatibility | U01a/U01b/U01c bounded slices accepted | PR9/merge5d77aab; post-merge CI36216733446 green;236 Linux tests,17 knowledge and3 native tests; no paid/full capability qualification |
-| U02 security | U02a–U02f accepted; U02g candidate | Issue26, task/u02-upload-admission syncedf5f1095. Main reviewed/corrected multipart field confusion, deadline and cancellation cases. Local483 passed18 skipped2 inherited Windows privilege failures. Updated graph/project hashes. Await six exact-head CI gates; auth/rendering/hard resource sandbox remain |
-| U03 adapters and operation authority | U03a–U03d accepted | PR27 head44f74c9/mergef5f1095, CI36220466799 and post36220701974 all6 passed:41 knowledge/Neo4j,27 operations,455 Linux,3 native plus imports,manifest128/15,frontend. Strict internal dispatcher only; no listener, paid execution or full provider cutover. Worker idle, next transport/lifecycle packet not assigned |
+| U02 security | U02a–U02g accepted; U02h Main verification | PR28 mergebf7c641, exact-head and postmerge36221146686 all6 passed. Issue30 safe rendering passed8 DOM tests/build; actual-browser fixture under Main review, not accepted |
+| U03 adapters and operation authority | U03a–U03d accepted; U03e CI candidate | Issue29 private-pipe client/stdio boundary corrected after Main review. Local78 passed1 POSIX skip in21.92s, manifest128/15 and diff passed. Initial one-off10s fixture timeout not reproduced, cause unconfirmed. Needs six exact-head CI gates; no bootstrap/cutover/paid execution |
 | U04–U14 | Planned | See approved master plan; no gate accepted |
 
 Repository: https://github.com/desanv01/mirofish-research-lab (private).
