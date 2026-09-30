@@ -1,5 +1,33 @@
 # Execution ledger
 
+## Successor — U05c locally qualified; CI pending
+
+Main reviewed and requested corrections to claim SQL, cancellation consumption,
+prelaunch expiry/token checks, SQL receipt NULL handling and race coverage.
+Corrected stable worker handoff remained unverified until Main execution. Main
+added late-launch/late-settlement regressions;32ownership tests passed7.81s with
+real disposable PostgreSQL and an owned Python child. Existing store81passed18.27s
+and budget/ingestion51passed9.03s with native schema installed; no skipped suites.
+Manifest128/26 and diffcheck passed. Main added runner to project-store CI job.
+Exact-head CI/Git acceptance pending; full U05/native supervision remains open.
+U03 and U05 workers idle; Main owns qualification/integration. Paid calls off.
+
+## Successor — PR54 accepted; U05c assigned
+
+Main accepted4f623481 PR54 after all8CI36665289971:597Python,21native+3imports,
+110knowledge,51operations,81store,17Temporal,8frontend/build,128/26manifest.
+Acceptance5903607945; merge19384b7ad998caa0168aa3678c6003dc444d9750; clean
+integration FF and all8postmerge36665629087 green (native21pass20.19s).
+Strict-neutral unknown demographics now preserved; fullU03/B1/U05 remain open.
+
+Main reused clean u00 from19384b7 on task/u05-native-run-ownership, assigned
+packetU05c to fresh worker01a0eff5-b133-76d2-b4f4-28762963720e Sol/medium.
+Scope durable native ownership/DB leases/conservative coordinator, separate
+mf_native_execution schema, no accepted budget/Temporal/backend changes.
+Worker implements only; Main performs SQL/source reviews, migration execution,
+checks/CI/Git. PostgreSQL skill short transactions/lock order used for packet.
+U03fresh idle afterPR54; u01/u02 idle. Paid off, no public deployment.
+
 ## Successor U03n — stable candidate qualified locally
 
 Main discovered final legacy Reddit serializer fabricated missing demographics;
