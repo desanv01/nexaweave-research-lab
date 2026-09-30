@@ -1,5 +1,33 @@
 # Execution ledger
 
+## Successor — U03o corrected and locally qualified
+
+Main reviewed complete owned-process source and requested bounded IPC/receipt,
+cleanup, offline-child and manifest corrections. Main moved unchanged observation
+DTO into pure contracts (coordinator re-export), wired both runners, and adjusted
+only cold-native test deadline. Final real native25passed71.83s; ownership/process/
+realPG51passed28.36s with1Windows stream-framing skip plus separate message-mode
+coverage. Linux CI must settle stream case. Manifest128/26 and diffcheck pass.
+Main retained failures/final logs and source hashes. No active local child remains;
+PG stopped, volume retained. Worker idle; exact committed CI acceptance pending.
+Bounded scope excludes heartbeat scheduler/reportIPC/checkpoints/livepaidprovider.
+
+## Successor — PR55 accepted; U03o assigned
+
+Main accepted U05c076d171 after local32ownership/81store/51operations passes and
+all8PRCI36667358738 (597Python,21native+3imports,110knowledge,51operations,
+81store+32ownership,17Temporal,8frontend/build,128/26manifest). Acceptance
+5903860449. Readiness GraphQL transient errors resolved with minimal mutation;
+merged8f1807dc79758f40bcfcaee9443343b16994301d. Clean integration FF; all8postmerge
+36667720893 green, storage81 and ownership32 pass. LocalPG stopped; volume retained.
+
+Main prepared clean u03 at accepted8f1807d on task/u03-owned-native-process and
+assigned packetU03o to fresh U03worker01a0eff5-1fc9-7660-88fa-f939a1e0d18c,
+Sol/medium. U05fresh idle at accepted076d171 in u00. Main owns all qualification,
+runtime/lock/CI changes and Git. U03o must bind actual NativeSimulationSession to
+owned spawn lifecycle; no automatic restart/checkpoint/reportIPC/livepaid claim.
+Existing main heartbeat ACTIVE every5minutes; no duplicate workers/automations.
+
 ## Successor — U05c locally qualified; CI pending
 
 Main reviewed and requested corrections to claim SQL, cancellation consumption,

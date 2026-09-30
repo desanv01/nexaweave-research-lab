@@ -187,3 +187,25 @@ class NativeRunReceipt:
         for key in ("run_id", "attempt_id", "instance_id"):
             value[key] = str(value[key])
         return value
+
+
+@dataclass(frozen=True)
+class NativeObservation:
+    """One bounded driver observation; unknown/absent are never terminal proof."""
+
+    status: str
+    receipt: NativeRunReceipt | None = None
+
+    @classmethod
+    def validated(cls, value: object) -> NativeObservation:
+        if not isinstance(value, cls) or value.status not in (
+                "running", "unknown", "absent", "completed", "failed", "cancelled"):
+            raise InvalidNativeRun()
+        if value.status in ("completed", "failed", "cancelled"):
+            receipt = NativeRunReceipt.from_wire(value.receipt)
+            if receipt.outcome != value.status:
+                raise InvalidNativeRun()
+            return cls(value.status, receipt)
+        if value.receipt is not None:
+            raise InvalidNativeRun()
+        return value

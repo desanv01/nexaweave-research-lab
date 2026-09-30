@@ -18,22 +18,25 @@ def child(postgres: bool) -> int:
     guard.install()
     try:
         import pytest
-        targets = ["tests/test_native_run_ownership.py"]
+        targets = ["tests/test_native_run_ownership.py", "tests/test_native_process_driver.py"]
         if postgres:
             targets.append("tests/test_native_run_ownership_integration.py")
+            targets.append("tests/test_native_process_driver_integration.py")
         class Qualification:
-            passed = 0
+            passed = {"test_native_run_ownership_integration.py": 0,
+                      "test_native_process_driver_integration.py": 0}
             skipped = 0
             def pytest_runtest_logreport(self, report):
-                if "test_native_run_ownership_integration.py::" in report.nodeid:
-                    if report.skipped:
-                        self.skipped += 1
-                    if report.when == "call" and report.passed:
-                        self.passed += 1
+                for filename in self.passed:
+                    if filename + "::" in report.nodeid:
+                        if report.skipped:
+                            self.skipped += 1
+                        if report.when == "call" and report.passed:
+                            self.passed[filename] += 1
         qualification = Qualification()
         result = int(pytest.main(["-q", "-p", "pytest_asyncio.plugin", *targets],
                                  plugins=[qualification]))
-        if postgres and (qualification.skipped or qualification.passed < 1):
+        if postgres and (qualification.skipped or not all(qualification.passed.values())):
             print("native_postgres_qualification_incomplete", file=sys.stderr)
             result = 1
     finally:
@@ -53,6 +56,7 @@ def main() -> int:
         return child(args.postgres)
     with tempfile.TemporaryDirectory(prefix="mirofish-native-run-tests-") as directory:
         env = _unit_environment(Path(directory))
+        env["MIROFISH_NATIVE_TEST_OFFLINE"] = "1"
         if args.postgres:
             from psycopg.conninfo import make_conninfo
             password = os.environ.get("PROJECT_STORE_TEST_PASSWORD")
