@@ -112,6 +112,68 @@ jobs:
         if: always()
         run: docker compose -f infra/compose.operations-test.yml down -v
 
+  temporal-execution:
+    name: temporal-execution
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PROJECT_STORE_TEST_PASSWORD: mirofish-ci-disposable-operations-only
+      KNOWLEDGE_POSTGRES_TEST_PASSWORD: mirofish-ci-disposable-operations-only
+      TEMPORAL_TEST_ADDRESS: '127.0.0.1:17233'
+      GRAPHITI_TELEMETRY_ENABLED: 'false'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          version: '0.11.25'
+      - name: Install locked opt-in execution runtime
+        working-directory: services/knowledge
+        run: uv sync --locked --extra test --extra execution --python 3.12.13
+      - name: Download checksum-pinned disposable Temporal server
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/mirofish-temporal"
+          cd "$RUNNER_TEMP/mirofish-temporal"
+          curl --fail --location --retry 3 --max-time 120 --output temporal.tar.gz https://github.com/temporalio/cli/releases/download/v1.9.1/temporal_cli_1.9.1_linux_amd64.tar.gz
+          printf '%s\n' '09a0326a51db84d02735e53542b9ebd8c4758daf47482a9ab0abce15844e60d5  temporal.tar.gz' | sha256sum --check --strict
+          tar -xzf temporal.tar.gz temporal
+      - name: Start disposable PostgreSQL
+        run: docker compose -f infra/compose.operations-test.yml up -d --wait --wait-timeout 120
+      - name: Qualify real workflow, activity, replay and budget path with fake models
+        shell: bash
+        run: |
+          set -euo pipefail
+          temporal_bin="$RUNNER_TEMP/mirofish-temporal/temporal"
+          "$temporal_bin" server start-dev --headless --ip 127.0.0.1 --port 17233 --http-port 17234 --metrics-port 17235 --db-filename "$RUNNER_TEMP/mirofish-temporal/test.db" > "$RUNNER_TEMP/mirofish-temporal/server.log" 2>&1 &
+          temporal_pid=$!
+          trap 'kill "$temporal_pid" 2>/dev/null || true; wait "$temporal_pid" 2>/dev/null || true' EXIT
+          ready=false
+          for attempt in {1..30}; do
+            if "$temporal_bin" operator cluster health --address 127.0.0.1:17233 --command-timeout 2s >/dev/null 2>&1; then
+              ready=true
+              break
+            fi
+            kill -0 "$temporal_pid"
+            sleep 1
+          done
+          if [ "$ready" != true ]; then
+            tail -100 "$RUNNER_TEMP/mirofish-temporal/server.log"
+            exit 1
+          fi
+          services/knowledge/.venv/bin/python tools/run_temporal_execution_tests.py --integration
+      - name: Test service diagnostics on failure
+        if: failure()
+        shell: bash
+        run: |
+          docker compose -f infra/compose.operations-test.yml logs --tail 100 postgres
+          if [ -f "$RUNNER_TEMP/mirofish-temporal/server.log" ]; then
+            tail -100 "$RUNNER_TEMP/mirofish-temporal/server.log"
+          fi
+      - name: Remove only this job's disposable database
+        if: always()
+        run: docker compose -f infra/compose.operations-test.yml down -v
+
   native-engine-windows:
     name: native-engine-windows
     runs-on: windows-latest
