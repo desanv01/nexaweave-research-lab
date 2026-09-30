@@ -18,13 +18,16 @@ def child(postgres: bool) -> int:
     guard.install()
     try:
         import pytest
-        targets = ["tests/test_native_run_ownership.py", "tests/test_native_process_driver.py"]
+        targets = ["tests/test_native_run_ownership.py", "tests/test_native_process_driver.py",
+                   "tests/test_native_run_supervisor.py"]
         if postgres:
             targets.append("tests/test_native_run_ownership_integration.py")
             targets.append("tests/test_native_process_driver_integration.py")
+            targets.append("tests/test_native_run_supervisor_integration.py")
         class Qualification:
             passed = {"test_native_run_ownership_integration.py": 0,
-                      "test_native_process_driver_integration.py": 0}
+                      "test_native_process_driver_integration.py": 0,
+                      "test_native_run_supervisor_integration.py": 0}
             skipped = 0
             def pytest_runtest_logreport(self, report):
                 for filename in self.passed:
