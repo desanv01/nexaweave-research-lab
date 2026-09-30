@@ -25,44 +25,8 @@ OASIS 双平台并行模拟预设脚本
     └── run_state.json       # 运行状态（API 查询用）
 """
 
-# ============================================================
-# 解决 Windows 编码问题：在所有 import 之前设置 UTF-8 编码
-# 这是为了修复 OASIS 第三方库读取文件时未指定编码的问题
-# ============================================================
 import sys
 import os
-
-if sys.platform == 'win32':
-    # 设置 Python 默认 I/O 编码为 UTF-8
-    # 这会影响所有未指定编码的 open() 调用
-    os.environ.setdefault('PYTHONUTF8', '1')
-    os.environ.setdefault('PYTHONIOENCODING', 'utf-8')
-    
-    # 重新配置标准输出流为 UTF-8（解决控制台中文乱码）
-    if hasattr(sys.stdout, 'reconfigure'):
-        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
-    if hasattr(sys.stderr, 'reconfigure'):
-        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
-    
-    # 强制设置默认编码（影响 open() 函数的默认编码）
-    # 注意：这需要在 Python 启动时就设置，运行时设置可能不生效
-    # 所以我们还需要 monkey-patch 内置的 open 函数
-    import builtins
-    _original_open = builtins.open
-    
-    def _utf8_open(file, mode='r', buffering=-1, encoding=None, errors=None, 
-                   newline=None, closefd=True, opener=None):
-        """
-        包装 open() 函数，对于文本模式默认使用 UTF-8 编码
-        这可以修复第三方库（如 OASIS）读取文件时未指定编码的问题
-        """
-        # 只对文本模式（非二进制）且未指定编码的情况设置默认编码
-        if encoding is None and 'b' not in mode:
-            encoding = 'utf-8'
-        return _original_open(file, mode, buffering, encoding, errors, 
-                              newline, closefd, opener)
-    
-    builtins.open = _utf8_open
 
 import argparse
 import asyncio
@@ -80,6 +44,7 @@ from typing import Dict, Any, List, Optional, Tuple
 # 全局变量：用于信号处理
 _shutdown_event = None
 _cleanup_done = False
+_cli_environments = []
 
 # 添加 backend 目录到路径
 # 脚本固定位于 backend/scripts/ 目录
@@ -89,18 +54,8 @@ _project_root = os.path.abspath(os.path.join(_backend_dir, '..'))
 sys.path.insert(0, _scripts_dir)
 sys.path.insert(0, _backend_dir)
 
-# 加载项目根目录的 .env 文件（包含 LLM_API_KEY 等配置）
-from dotenv import load_dotenv
-_env_file = os.path.join(_project_root, '.env')
-if os.path.exists(_env_file):
-    load_dotenv(_env_file)
-    print(f"已加载环境配置: {_env_file}")
-else:
-    # 尝试加载 backend/.env
-    _backend_env = os.path.join(_backend_dir, '.env')
-    if os.path.exists(_backend_env):
-        load_dotenv(_backend_env)
-        print(f"已加载环境配置: {_backend_env}")
+from native_dependencies import (ActionTypeNames as ActionType, close_environment,
+                                 load_native, setup_legacy_cli)
 
 
 class MaxTokensWarningFilter(logging.Filter):
@@ -111,10 +66,6 @@ class MaxTokensWarningFilter(logging.Filter):
         if "max_tokens" in record.getMessage() and "Invalid or missing" in record.getMessage():
             return False
         return True
-
-
-# 在模块加载时立即添加过滤器，确保在 camel 代码执行前生效
-logging.getLogger().addFilter(MaxTokensWarningFilter())
 
 
 def disable_oasis_logging():
@@ -157,21 +108,20 @@ def init_logging_for_simulation(simulation_dir: str):
 
 from action_logger import SimulationLogManager, PlatformActionLogger
 
-try:
-    from camel.models import ModelFactory
-    from camel.types import ModelPlatformType
-    import oasis
-    from oasis import (
-        ActionType,
-        LLMAction,
-        ManualAction,
-        generate_twitter_agent_graph,
-        generate_reddit_agent_graph
-    )
-except ImportError as e:
-    print(f"错误: 缺少依赖 {e}")
-    print("请先安装: pip install oasis-ai camel-ai")
-    sys.exit(1)
+def _load_native_engine():
+    if globals().get("_native_loaded", False):
+        return
+    global ModelFactory, ModelPlatformType, oasis, ActionType, LLMAction
+    global ManualAction, generate_twitter_agent_graph, generate_reddit_agent_graph
+    global TWITTER_ACTIONS, REDDIT_ACTIONS
+    (ModelFactory, ModelPlatformType, oasis, ActionType, LLMAction,
+     ManualAction, generate_twitter_agent_graph,
+     generate_reddit_agent_graph) = load_native()
+    TWITTER_ACTIONS = [ActionType(action.value if hasattr(action, "value") else action)
+                       for action in TWITTER_ACTIONS]
+    REDDIT_ACTIONS = [ActionType(action.value if hasattr(action, "value") else action)
+                      for action in REDDIT_ACTIONS]
+    globals()["_native_loaded"] = True
 
 
 # Twitter可用动作（不包含INTERVIEW，INTERVIEW只能通过ManualAction手动触发）
@@ -1070,7 +1020,8 @@ async def run_twitter_simulation(
     simulation_dir: str,
     action_logger: Optional[PlatformActionLogger] = None,
     main_logger: Optional[SimulationLogManager] = None,
-    max_rounds: Optional[int] = None
+    max_rounds: Optional[int] = None,
+    native_dependencies=None,
 ) -> PlatformSimulation:
     """运行Twitter模拟
     
@@ -1085,6 +1036,7 @@ async def run_twitter_simulation(
         PlatformSimulation: 包含env和agent_graph的结果对象
     """
     result = PlatformSimulation()
+    _load_native_engine()
     
     def log_info(msg):
         if main_logger:
@@ -1094,7 +1046,8 @@ async def run_twitter_simulation(
     log_info("初始化...")
     
     # Twitter 使用通用 LLM 配置
-    model = create_model(config, use_boost=False)
+    model = (native_dependencies.model_for("twitter") if native_dependencies is not None
+             else create_model(config, use_boost=False))
     
     # OASIS Twitter使用CSV格式
     profile_path = os.path.join(simulation_dir, "twitter_profiles.csv")
@@ -1119,12 +1072,18 @@ async def run_twitter_simulation(
     if os.path.exists(db_path):
         os.remove(db_path)
     
+    platform = (native_dependencies.platform_for("twitter", db_path, oasis)
+                if native_dependencies is not None else oasis.DefaultPlatformType.TWITTER)
     result.env = oasis.make(
         agent_graph=result.agent_graph,
-        platform=oasis.DefaultPlatformType.TWITTER,
+        platform=platform,
         database_path=db_path,
         semaphore=30,  # 限制最大并发 LLM 请求数，防止 API 过载
     )
+    if native_dependencies is not None:
+        native_dependencies.adopt("twitter", result)
+    else:
+        _cli_environments.append(result.env)
     
     await result.env.reset()
     log_info("环境已启动")
@@ -1262,7 +1221,8 @@ async def run_reddit_simulation(
     simulation_dir: str,
     action_logger: Optional[PlatformActionLogger] = None,
     main_logger: Optional[SimulationLogManager] = None,
-    max_rounds: Optional[int] = None
+    max_rounds: Optional[int] = None,
+    native_dependencies=None,
 ) -> PlatformSimulation:
     """运行Reddit模拟
     
@@ -1277,6 +1237,7 @@ async def run_reddit_simulation(
         PlatformSimulation: 包含env和agent_graph的结果对象
     """
     result = PlatformSimulation()
+    _load_native_engine()
     
     def log_info(msg):
         if main_logger:
@@ -1286,7 +1247,8 @@ async def run_reddit_simulation(
     log_info("初始化...")
     
     # Reddit 使用加速 LLM 配置（如果有的话，否则回退到通用配置）
-    model = create_model(config, use_boost=True)
+    model = (native_dependencies.model_for("reddit") if native_dependencies is not None
+             else create_model(config, use_boost=True))
     
     profile_path = os.path.join(simulation_dir, "reddit_profiles.json")
     if not os.path.exists(profile_path):
@@ -1310,12 +1272,18 @@ async def run_reddit_simulation(
     if os.path.exists(db_path):
         os.remove(db_path)
     
+    platform = (native_dependencies.platform_for("reddit", db_path, oasis)
+                if native_dependencies is not None else oasis.DefaultPlatformType.REDDIT)
     result.env = oasis.make(
         agent_graph=result.agent_graph,
-        platform=oasis.DefaultPlatformType.REDDIT,
+        platform=platform,
         database_path=db_path,
         semaphore=30,  # 限制最大并发 LLM 请求数，防止 API 过载
     )
+    if native_dependencies is not None:
+        native_dependencies.adopt("reddit", result)
+    else:
+        _cli_environments.append(result.env)
     
     await result.env.reset()
     log_info("环境已启动")
@@ -1456,7 +1424,10 @@ async def run_reddit_simulation(
     return result
 
 
-async def main():
+async def _main_impl():
+    setup_legacy_cli(_project_root, _backend_dir, windows_utf8=True)
+    logging.getLogger().addFilter(MaxTokensWarningFilter())
+    _load_native_engine()
     parser = argparse.ArgumentParser(description='OASIS双平台并行模拟')
     parser.add_argument(
         '--config', 
@@ -1599,22 +1570,28 @@ async def main():
         log_manager.info("\n关闭环境...")
         ipc_handler.update_status("stopped")
     
-    # 关闭环境
-    if twitter_result and twitter_result.env:
-        await twitter_result.env.close()
-        log_manager.info("[Twitter] 环境已关闭")
-    
-    if reddit_result and reddit_result.env:
-        await reddit_result.env.close()
-        log_manager.info("[Reddit] 环境已关闭")
-    
     log_manager.info("=" * 60)
-    log_manager.info(f"全部完成!")
+    log_manager.info("模拟和采访已结束，正在关闭环境")
     log_manager.info(f"日志文件:")
     log_manager.info(f"  - {os.path.join(simulation_dir, 'simulation.log')}")
     log_manager.info(f"  - {os.path.join(simulation_dir, 'twitter', 'actions.jsonl')}")
     log_manager.info(f"  - {os.path.join(simulation_dir, 'reddit', 'actions.jsonl')}")
     log_manager.info("=" * 60)
+
+
+async def main():
+    try:
+        await _main_impl()
+    finally:
+        failed = False
+        for env in reversed(_cli_environments):
+            try:
+                await close_environment(env)
+            except Exception:
+                failed = True
+        _cli_environments.clear()
+        if failed:
+            raise RuntimeError("native environment close failed")
 
 
 def setup_signal_handlers(loop=None):

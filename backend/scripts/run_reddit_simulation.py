@@ -36,15 +36,8 @@ _project_root = os.path.abspath(os.path.join(_backend_dir, '..'))
 sys.path.insert(0, _scripts_dir)
 sys.path.insert(0, _backend_dir)
 
-# 加载项目根目录的 .env 文件（包含 LLM_API_KEY 等配置）
-from dotenv import load_dotenv
-_env_file = os.path.join(_project_root, '.env')
-if os.path.exists(_env_file):
-    load_dotenv(_env_file)
-else:
-    _backend_env = os.path.join(_backend_dir, '.env')
-    if os.path.exists(_backend_env):
-        load_dotenv(_backend_env)
+from native_dependencies import (ActionTypeNames as ActionType, close_environment,
+                                 load_native, setup_legacy_cli)
 
 
 import re
@@ -75,10 +68,6 @@ class MaxTokensWarningFilter(logging.Filter):
         if "max_tokens" in record.getMessage() and "Invalid or missing" in record.getMessage():
             return False
         return True
-
-
-# 在模块加载时立即添加过滤器，确保在 camel 代码执行前生效
-logging.getLogger().addFilter(MaxTokensWarningFilter())
 
 
 def setup_oasis_logging(log_dir: str):
@@ -115,20 +104,12 @@ def setup_oasis_logging(log_dir: str):
         logger.propagate = False
 
 
-try:
-    from camel.models import ModelFactory
-    from camel.types import ModelPlatformType
-    import oasis
-    from oasis import (
-        ActionType,
-        LLMAction,
-        ManualAction,
-        generate_reddit_agent_graph
-    )
-except ImportError as e:
-    print(f"错误: 缺少依赖 {e}")
-    print("请先安装: pip install oasis-ai camel-ai")
-    sys.exit(1)
+def _load_native_engine():
+    global ModelFactory, ModelPlatformType, oasis, ActionType, LLMAction
+    global ManualAction, generate_reddit_agent_graph
+    (ModelFactory, ModelPlatformType, oasis, ActionType, LLMAction,
+     ManualAction, twitter_generator, reddit_generator) = load_native()
+    generate_reddit_agent_graph = reddit_generator
 
 
 # IPC相关常量
@@ -486,11 +467,23 @@ class RedditSimulationRunner:
         return active_agents
     
     async def run(self, max_rounds: int = None):
+        try:
+            return await self._run_impl(max_rounds)
+        finally:
+            try:
+                if self.ipc_handler is not None:
+                    self.ipc_handler.update_status("stopped")
+            finally:
+                await close_environment(self.env)
+
+    async def _run_impl(self, max_rounds: int = None):
         """运行Reddit模拟
         
         Args:
             max_rounds: 最大模拟轮数（可选，用于截断过长的模拟）
         """
+        _load_native_engine()
+        self.AVAILABLE_ACTIONS = [ActionType(action) for action in self.AVAILABLE_ACTIONS]
         print("=" * 60)
         print("OASIS Reddit模拟")
         print(f"配置文件: {self.config_path}")
@@ -650,14 +643,13 @@ class RedditSimulationRunner:
             print("\n关闭环境...")
         
         # 关闭环境
-        self.ipc_handler.update_status("stopped")
-        await self.env.close()
-        
         print("环境已关闭")
         print("=" * 60)
 
 
 async def main():
+    setup_legacy_cli(_project_root, _backend_dir)
+    logging.getLogger().addFilter(MaxTokensWarningFilter())
     parser = argparse.ArgumentParser(description='OASIS Reddit模拟')
     parser.add_argument(
         '--config', 

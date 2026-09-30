@@ -1,5 +1,31 @@
 # Execution ledger
 
+## Successor resume — 2026-09-30
+
+User explicitly resumed full execution after migration. Sole Main is
+01a0efeb-9a00-7d92-86af-f3aad9603a30, Astra/high requested. Fresh U03m worker
+01a0eff5-1fc9-7660-88fa-f939a1e0d18c uses this u03 checkout, Sol/medium;
+fresh U05b01a0eff5-b133-76d2-b4f4-28762963720e owns u00 and is currently idle.
+All previous workers retired. Main FastOFF/workersON requested; no available
+setter/verifier, no global changes. Existing successor heartbeat ACTIVE.
+
+PR52 accepted exact801ab0d5a90e08b508954ec30b9a27d78c959520 against1f3ba5e
+after final Main source/CI review, all8CI36586158974 success. Acceptance comment
+5902933883. Merge68a38117f8d8576d13b636f4b511511c74132e82, clean integration FF;
+postmerge36660469508 all8SUCCESS, Temporal17pass28.06s. Bounded ingestion only,
+not fullU05/native/checkpoint/invoice cap. No paid calls/public deployment.
+
+U03m corrected stable candidate Main-reviewed; native11pass41.61s and all3
+native script imports passed. Focused lean33pass3platformskips3.08s after fixing
+overstrict test (accepted app.config dotenv import). Prior full lean574pass18skip
+3fail included that fixture plus2 Windows symlink privilege failures; Linux CI
+must settle full suite. Manifest128/26 and diffcheck pass. Worker idle after
+handoff. Exact-head CI on accepted main required; no acceptance yet. Optional
+Reddit fields must be explicitly present; no invented attributes. ReviewU03m.md
+records evidence and remaining limits, no complete U03/B1 or U05 claim.
+
+### Historical ledger below
+
 ## Heartbeat14:25 — report candidate qualified; U05a accepted
 
 Main corrected report review72focused tests passed4.87s; manifest128/26 and
