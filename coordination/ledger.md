@@ -1,5 +1,62 @@
 # Execution ledger
 
+## Successor — U05d corrected and locally qualified
+
+Final worker stable idle cursor6c88dc89-c2f3-4ec6-b281-71975f8a591f:19 after
+bounded construction/start gate and retained cleanup corrections; two interrupted
+turns preserved, same worker only. Main reviewed complete source/regressions/docs,
+retained source hashes, ran scrubbed offline owned-child/realPG harness:
+72passed1Windows POSIX-stream skip65.46s. All three requested PG files ran with
+no skips, including supervisor lease>20s, independent cancellation and expiry
+fencing. Manifest128/26 and diffcheck pass. Linux CI still required for stream
+case and exact committed acceptance. No full actual native+PG combined fixture,
+Temporal native scheduling, reportIPC/checkpoints/live paid/full44 claim.
+
+## Successor — U05d Main review and bounded correction
+
+Main verified stable unverified handoff and base3704d129, read all new source,
+tests/docs/handoff. Review U05d.md requires fixed Thread.start failure recovery,
+no new launch on cleanup-only retry, close-before-start and finite-wait coverage,
+in-flight cleanup visibility. SAME worker ACTIVE correction turn
+01a0f4ac-c137-7c30-9ebf-be823dca3427, cursor6c88dc89-c2f3-4ec6-b281-71975f8a591f:8.
+Main owns new harness targets/PG no-skip guard; locked runtime verified and exact
+retained loopbackPG ready after scoped escalation for Docker named-pipe access.
+No candidate tests executed; wait stable correction handoff. No paid/deployment.
+
+## Successor — U05d interruption recovered
+
+Main heartbeat2026-09-30T23:29UTC verified prior worker turn interrupted/idle and
+unchanged u00 branch task/u05-native-host-supervisor at3704d129. No stable handoff;
+partial supervisor and pure test source preserved with exact hashes/snapshots
+in successor resume-2026-10-01/u05d-interrupted. No tests/imports/checks run on
+changing candidate. Existing SAME fresh U05 worker resumed SAME bounded packet,
+ACTIVE turn01a0f4a7-5d1b-7343-8de3-85747bdda371,
+cursor6c88dc89-c2f3-4ec6-b281-71975f8a591f:6. Main awaits stable integration
+tests/docs/handoff before review/execution. Explicit user resume remains active;
+no new user pause, duplicate worker, paid call or deployment.
+
+Main prepared ownership harness supervisor targets and three-file no-skip/nonempty
+PG guard; existing CI consumes that harness. No execution on changing candidate,
+no dependency or CI workflow changes. Worker remains implementation-only.
+
+## Successor — PR56 accepted; U05d assigned
+
+Main accepted U03o76a58668 after all8PRCI36670104894/push36670101065 SUCCESS:
+25Windows native plus3imports,52Linux ownership/process without skips,597Python,
+110knowledge,17Temporal,51operations,81store,8frontend/build712,manifest128/26.
+Acceptance5904350973; merged3704d129d93832a33b883ad583aeab1a3995dfee.
+Clean integration FF; all8postmerge36671129852 SUCCESS,25native/81store/52ownership
+and3nativeimports verified from retained job logs. Retained logs/receipt in
+successor Main records. No paid/deployment/full native+PG combined fixture claim.
+
+Main verified u00 clean, FF076d171 to3704d129, branch task/u05-native-host-supervisor.
+Existing fresh U05worker receives U05d implementation-only packet: single owned
+supervisor loop around accepted coordinator/driver, lease maintenance, durable
+cancellation and bounded retained cleanup. Main owns every execution/check/Git.
+Worker ACTIVE turn01a0f0ae-a94f-79d3-82d2-6a857cc3b0da,
+cursor4fe67998-545f-4fbf-ac28-c4357f8a0d2f:9. U03worker idle; u01/u02 idle.
+No duplicate workers or automations.
+
 ## Successor — U03o corrected and locally qualified
 
 Main reviewed complete owned-process source and requested bounded IPC/receipt,
