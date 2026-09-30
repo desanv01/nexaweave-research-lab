@@ -169,23 +169,26 @@
     {
       "imported_path": "backend/scripts/run_parallel_simulation.py",
       "original_sha256": "e1ee10de9a4599a8b18d01f0678f9f9caf4e0846c2355f302aaf0d56ed95e942",
-      "current_sha256": "d5058ea4b967309e6d5f98a8334a8c32dc26b06f5fdb98d23d69ab8c8e3962de",
-      "reason": "Delegate file IPC to shared bounded transport, preserving parallel platform selection, interview dispatch and availability status flags.",
-      "phase": "U02c"
+      "current_sha256": "cb6de4b5666738d16c18f6722fc8e3cc074b6dfcd76992ccf78c3b71153e6867",
+      "reason": "Delegate file IPC to shared bounded transport, preserving parallel platform selection, interview dispatch and availability status flags. U03m defers native/CLI setup to execution, closes owned environments, and supplies a trusted injected native session without changing inherited action algorithms.",
+      "phase": "U02c/U03m",
+      "review_status": "Main source reviewed; pending exact-head CI"
     },
     {
       "imported_path": "backend/scripts/run_reddit_simulation.py",
       "original_sha256": "edd537c023f8169d78054ecc261d7dca28b5a83af27bdd5bf5edcf2df68d361a",
-      "current_sha256": "b6dea998657e024556cbf3ca9be48f1a7daf8f953d4c6cba0b1be2d9b767c628",
-      "reason": "Delegate file IPC to shared bounded transport without changing native interview or action dispatch.",
-      "phase": "U02c"
+      "current_sha256": "37e66de6b9adb66c737ddbd6d8268063a8774f1fedbc80e7e373788152e34348",
+      "reason": "Delegate file IPC to shared bounded transport without changing native interview or action dispatch. U03m defers native/CLI setup to execution, closes owned environments, and supplies a trusted injected native session without changing inherited action algorithms.",
+      "phase": "U02c/U03m",
+      "review_status": "Main source reviewed; pending exact-head CI"
     },
     {
       "imported_path": "backend/scripts/run_twitter_simulation.py",
       "original_sha256": "cd766f1a55b5cec48a776ce5bb7b072dcfe7a07bd8b0f63f7c1b2b5464b772bf",
-      "current_sha256": "da92019e9b20def43fc48aeda0c22c0d3474e04252d1ccb136859f2c4da4d953",
-      "reason": "Delegate file IPC to shared bounded transport without changing native interview or action dispatch.",
-      "phase": "U02c"
+      "current_sha256": "789d5621f177f267013951382eefb629b46c58832b10e51a9728370c0cd8da42",
+      "reason": "Delegate file IPC to shared bounded transport without changing native interview or action dispatch. U03m defers native/CLI setup to execution, closes owned environments, and supplies a trusted injected native session without changing inherited action algorithms.",
+      "phase": "U02c/U03m",
+      "review_status": "Main source reviewed; pending exact-head CI"
     }
   ]
 }
