@@ -5,36 +5,13 @@ reads an artifact path, constructs a provider, or adopts an existing process.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Callable, Protocol
 from uuid import UUID, uuid4
 
 from .native_run_contracts import (InvalidNativeRun, NativeChildIdentity, NativeRunBusy,
     NativeRunConflict, NativeRunDenied, NativeRunReceipt, NativeRunRequest,
-    NativeRunUncertain, RunState, canonical_uuid, principal_id)
+    NativeRunUncertain, RunState, canonical_uuid, principal_id, NativeObservation)
 from .native_run_store import NativeRunRecord, NativeRunStore
-
-
-@dataclass(frozen=True)
-class NativeObservation:
-    """One bounded driver observation; unknown/absent are never terminal proof."""
-
-    status: str
-    receipt: NativeRunReceipt | None = None
-
-    @classmethod
-    def validated(cls, value: object) -> NativeObservation:
-        if not isinstance(value, cls) or value.status not in (
-                "running", "unknown", "absent", "completed", "failed", "cancelled"):
-            raise InvalidNativeRun()
-        if value.status in ("completed", "failed", "cancelled"):
-            receipt = NativeRunReceipt.from_wire(value.receipt)
-            if receipt.outcome != value.status:
-                raise InvalidNativeRun()
-            return cls(value.status, receipt)
-        if value.receipt is not None:
-            raise InvalidNativeRun()
-        return value
 
 
 class TrustedNativeDriver(Protocol):

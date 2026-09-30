@@ -35,6 +35,8 @@ def main() -> int:
         return child()
     with tempfile.TemporaryDirectory(prefix="mirofish-native-engine-") as directory:
         env = _unit_environment(Path(directory))
+        env["PYTHONPATH"] += os.pathsep + str(ROOT / "services" / "knowledge" / "src")
+        env["MIROFISH_NATIVE_TEST_OFFLINE"] = "1"
         env.update(HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1", HF_HUB_DISABLE_TELEMETRY="1", DO_NOT_TRACK="1")
         # Native OASIS creates ./log during imports. Keep it out of the repo.
         return subprocess.run([sys.executable, str(Path(__file__).resolve()), "--child"], cwd=directory, env=env, timeout=300, check=False).returncode
