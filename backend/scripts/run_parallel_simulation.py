@@ -1255,11 +1255,16 @@ async def run_reddit_simulation(
         log_info(f"错误: Profile文件不存在: {profile_path}")
         return result
     
-    result.agent_graph = await generate_reddit_agent_graph(
-        profile_path=profile_path,
-        model=model,
-        available_actions=REDDIT_ACTIONS,
-    )
+    if native_dependencies is not None:
+        # Trusted in-process bridge builds native AgentGraph/SocialAgent objects
+        # with an honest prompt for absent optional Reddit profile attributes.
+        result.agent_graph = native_dependencies.reddit_agent_graph(REDDIT_ACTIONS)
+    else:
+        result.agent_graph = await generate_reddit_agent_graph(
+            profile_path=profile_path,
+            model=model,
+            available_actions=REDDIT_ACTIONS,
+        )
     
     # 从配置文件获取 Agent 真实名称映射（使用 entity_name 而非默认的 Agent_X）
     agent_names = get_agent_names_from_config(config)

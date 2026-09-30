@@ -19,9 +19,10 @@
     {
       "imported_path": "backend/app/services/oasis_profile_generator.py",
       "original_sha256": "ed9cd3416a46b922bc2f9bf0e9623435d9b96bdf0198db27602ca8c4f0dd0e37",
-      "current_sha256": "ef026707c0995ba389af101be810dab54e8e16315522145f49b8c4cd2e028e1c",
-      "reason": "U03j basic-only/local RNG and inherited Twitter formatting. U03k explicit injected chat/context, strict neutral parsing without fallback, preserving legacy defaults.",
-      "phase": "U03j/U03k"
+      "current_sha256": "f23a2c44843360db189a09e8cca5e05358cc05a9e5346cb2da060dd81ac3189f",
+      "reason": "U03j basic-only/local RNG and inherited Twitter formatting. U03k explicit injected chat/context, strict neutral parsing without fallback, preserving legacy defaults. U03n strict-neutral realtime/final Reddit serialization preserves missing demographic attributes and supplied values; legacy defaults remain.",
+      "phase": "U03j/U03k/U03n",
+      "review_status": "Main source reviewed; pending U03n exact-head CI"
     },
     {
       "imported_path": "frontend/package.json",
@@ -169,10 +170,10 @@
     {
       "imported_path": "backend/scripts/run_parallel_simulation.py",
       "original_sha256": "e1ee10de9a4599a8b18d01f0678f9f9caf4e0846c2355f302aaf0d56ed95e942",
-      "current_sha256": "cb6de4b5666738d16c18f6722fc8e3cc074b6dfcd76992ccf78c3b71153e6867",
-      "reason": "Delegate file IPC to shared bounded transport, preserving parallel platform selection, interview dispatch and availability status flags. U03m defers native/CLI setup to execution, closes owned environments, and supplies a trusted injected native session without changing inherited action algorithms.",
-      "phase": "U02c/U03m",
-      "review_status": "Main source reviewed; pending exact-head CI"
+      "current_sha256": "06223973de40569260fbd6f4764b8735110ea674d4691e98becc5bc7c436b692",
+      "reason": "Delegate file IPC to shared bounded transport, preserving parallel platform selection, interview dispatch and availability status flags. U03m defers native/CLI setup to execution, closes owned environments, and supplies a trusted injected native session without changing inherited action algorithms. U03n uses an explicit trusted neutral Reddit graph seam for honestly partial native profiles; legacy loader remains unchanged.",
+      "phase": "U02c/U03m/U03n",
+      "review_status": "Main source reviewed; pending U03n exact-head CI"
     },
     {
       "imported_path": "backend/scripts/run_reddit_simulation.py",

@@ -986,7 +986,13 @@ class OasisProfileGenerator:
                 try:
                     if output_platform == "reddit":
                         # Reddit JSON 格式
-                        profiles_data = [p.to_reddit_format() for p in existing_profiles]
+                        profiles_data = [
+                            self._strict_neutral_reddit_format(p)
+                            if (getattr(self, 'neutral_mode', False) is True
+                                and getattr(self, 'strict_generation', False) is True)
+                            else p.to_reddit_format()
+                            for p in existing_profiles
+                        ]
                         with open(realtime_output_path, 'w', encoding='utf-8') as f:
                             json.dump(profiles_data, f, ensure_ascii=False, indent=2)
                     else:
@@ -1226,11 +1232,23 @@ class OasisProfileGenerator:
         
         return gender_map.get(gender_lower, "other")
     
+    @staticmethod
+    def _strict_neutral_reddit_format(profile: OasisAgentProfile) -> Dict[str, Any]:
+        """Keep supplied optional values and leave unknown demographics absent."""
+        item = profile.to_reddit_format()
+        for field in ("age", "gender", "mbti", "country"):
+            value = getattr(profile, field)
+            if value is None:
+                item.pop(field, None)
+            else:
+                item[field] = value
+        return item
+
     def _save_reddit_json(self, profiles: List[OasisAgentProfile], file_path: str):
         """
         保存Reddit Profile为JSON格式
         
-        使用与 to_reddit_format() 一致的格式，确保 OASIS 能正确读取。
+        严格中立模式保留可选字段的缺失状态；旧模式保留原有默认值。
         必须包含 user_id 字段，这是 OASIS agent_graph.get_agent() 匹配的关键！
         
         必需字段：
@@ -1239,11 +1257,17 @@ class OasisProfileGenerator:
         - name: 显示名称
         - bio: 简介
         - persona: 详细人设
-        - age: 年龄（整数）
-        - gender: "male", "female", 或 "other"
-        - mbti: MBTI类型
-        - country: 国家
+        旧模式中还包含 age/gender/mbti/country 的历史默认值；严格中立模式
+        仅序列化实际提供的这些可选字段。
         """
+        if (getattr(self, 'neutral_mode', False) is True
+                and getattr(self, 'strict_generation', False) is True):
+            data = [self._strict_neutral_reddit_format(profile)
+                    for profile in profiles]
+            with open(file_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            return
+
         data = []
         for idx, profile in enumerate(profiles):
             # 使用与 to_reddit_format() 一致的格式
