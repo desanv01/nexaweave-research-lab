@@ -26,6 +26,31 @@ records evidence and remaining limits, no complete U03/B1 or U05 claim.
 
 ### Historical ledger below
 
+## Heartbeat14:50 — real Temporal candidate locally qualified
+
+Corrected U05b Main17passed37.42s with real Temporal/PG and fake providers,
+including replay, retained cancellation uncertainty and independent provider
+failure. All source inspected, SDK lock and checksum-pinned eighth CI gate owned
+by Main. Preparing combined accepted-base PR; no full-U05 or paid acceptance.
+U03m real native workflow integration remains active in separate u03.
+
+## Heartbeat14:25 — reports accepted; Temporal real workflow qualification
+
+PR51 exact78a11eba9136c7495fc73c11d0f61663d9f4f525 accepted after Main review,
+82focused and all7CI36584234676 (594backend,81store,110knowledge,51operations,
+3native,8frontend/build,128/26manifest). Merge1f3ba5e, postmerge36584694909 green.
+U03m now builds real native workflow/interview integration in u03 independently.
+
+U05b source reviewed; Main pinned optional temporalio1.33.0/lock and CLI1.9.1.
+Real checks exposed/corrected eager package sandbox imports and unsupported SDK
+dict[str,object] decoding. Latest1failed16passed: core ingestion/freshresult/replay,
+preflight/error history/terminal validators execute; final provider-failure fixture
+incorrectly reused cancellation-fenced scope and never dispatched. Correction
+assigned, no acceptance. Main-owned eighth Temporal CI gate added but not yet
+executed in CI. Local fixtures stopped, retained; no paid provider or whole-U05
+claim. Preserve all44requirements and inherited provenance.
+
+### Earlier candidate checkpoints (superseded above)
 ## Heartbeat14:25 — report candidate qualified; U05a accepted
 
 Main corrected report review72focused tests passed4.87s; manifest128/26 and
