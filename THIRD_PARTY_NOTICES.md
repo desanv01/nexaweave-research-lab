@@ -13,3 +13,15 @@ This is an initial source-level inventory, not a complete release SBOM or legal 
 | Other Python and npm dependencies | Declared in inherited locks | Each pinned-version license and notices must be inventoried for release. |
 
 The root `LICENSE` is the unchanged inherited AGPL-3.0 text. The upstream star-history component retains its own [notice](.github/star-history/THIRD_PARTY_NOTICES.md). Replacing Zep with Graphiti does not change the inherited MiroFish license. No upstream endorsement is claimed.
+
+## Native Reddit profile adapter
+
+`backend/app/services/native_reddit_profiles.py` adapts the component construction
+in `camel-oasis==0.2.5`'s `oasis/social_agent/agents_generator.py`
+(`generate_reddit_agent_graph`) and the prompt in
+`oasis/social_platform/config/user.py` (`UserInfo`). Copyright 2023 CAMEL-AI.org,
+licensed under Apache-2.0. The [dependency license text](docs/licenses/camel-oasis-0.2.5-LICENSE.txt)
+is retained from that installed distribution. The local changes validate partial
+profiles and render missing optional demographics as not supplied, while using
+the native agent, tool, graph and environment implementations. Existing upstream
+notices and the root MiroFish license remain in place.

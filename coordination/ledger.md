@@ -1,5 +1,34 @@
 # Execution ledger
 
+## Successor U03n — stable candidate qualified locally
+
+Main discovered final legacy Reddit serializer fabricated missing demographics;
+expanded strict-neutral-only scope and retained legacy behavior. Corrected source
+now preserves unknowns end to end, actual native components render missing fields
+as not supplied. Main21native passed37.77s,67focused lean passed9.17s plus3platform
+skips; connected preparation/native-round/report fixture passes and artifacts
+remain byte-identical. Manifest128/26, diffcheck pass;2inherited hashes registered,
+native adapter Apache2 license/attribution retained. Worker idle, no executions.
+Exact committed CI required before acceptance; no fullU03/B1/U05 or paid claim.
+
+## Successor heartbeat02:54 — PR53 accepted, U03n assigned
+
+Main accepted exact45cac3f0e86f1adb4d8dfa77923b96da613b8255 against68a38117
+after all8CI36661757455 and per-job logs:595Python,11native+3imports,
+110knowledge,51operations,81store,17Temporal,8frontend/build,128/26manifest.
+Acceptance comment5903152792; merge d6656fd7024ce7432b225eb6ddad029f8038df7f.
+Clean integration FF confirmed. Postmerge36662079976 all8SUCCESS; native11pass
+25.35s plus3imports, saved Main evidence. No active local tests.
+Acceptance bounded to documented U03m trusted fresh-run subset, not fullU03/B1.
+
+Main prepared free u03 from d6656fd on task/u03-native-profile-compatibility and
+assigned U03n to same fresh worker01a0eff5-1fc9-7660-88fa-f939a1e0d18c,Sol/medium.
+Packet removes optional-profile mismatch using actual native components and
+honest unknown attributes; preserves preparation artifacts and legacy CLI.
+Worker implementation-only; Main owns all checks, inherited hashes and Git.
+U05 fresh worker idle; no need for another worker or shared-schema concurrency.
+Paid calls remain off; no public deployment. Existing heartbeat ACTIVE.
+
 ## Successor resume — 2026-09-30
 
 User explicitly resumed full execution after migration. Sole Main is

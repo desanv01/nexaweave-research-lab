@@ -13,6 +13,7 @@ from uuid import UUID
 import pytest
 
 from app.services.knowledge_read_facade import KnowledgeReadFacade, ReadHostSettings
+from app.services.oasis_profile_generator import OasisAgentProfile, OasisProfileGenerator
 from app.services.simulation_manager import SimulationManager, SimulationStatus
 
 
@@ -59,7 +60,8 @@ class ByteClient:
 
 class ScriptedChat:
     def __init__(self, *, incomplete=False, fail=False, broken_persona=False,
-                 malformed_persona=False, broken_config=False):
+                 malformed_persona=False, broken_config=False,
+                 persona_fields=None):
         self.chat = SimpleNamespace(completions=self)
         self.calls = []
         self.incomplete = incomplete
@@ -67,6 +69,7 @@ class ScriptedChat:
         self.broken_persona = broken_persona
         self.malformed_persona = malformed_persona
         self.broken_config = broken_config
+        self.persona_fields = persona_fields or {}
 
     def create(self, **kwargs):
         self.calls.append(kwargs)
@@ -103,7 +106,8 @@ class ScriptedChat:
                        "initial_posts": [{"content": "初始帖", "poster_type": "Person"}],
                        "reasoning": "fixture"}
         else:
-            payload = {"bio": "技术观察者", "persona": "艾丽丝关注技术与社会。"}
+            payload = {"bio": "技术观察者", "persona": "艾丽丝关注技术与社会。",
+                       **self.persona_fields}
         return SimpleNamespace(choices=[SimpleNamespace(
             message=SimpleNamespace(content=json.dumps(payload, ensure_ascii=False)),
             finish_reason="stop")])
@@ -137,6 +141,8 @@ def test_real_inherited_preparation_writes_both_formats_and_grounding(tmp_path):
     config = json.loads((root / "simulation_config.json").read_text(encoding="utf-8"))
     grounding = json.loads((root / "source_grounding.json").read_text(encoding="utf-8"))
     assert reddit[0]["persona"] == "艾丽丝关注技术与社会。"
+    assert all(field not in reddit[0] for field in
+               ("age", "gender", "mbti", "country"))
     assert twitter[0]["name"] == "艾丽丝"
     assert config["agent_configs"][0]["entity_uuid"] == uid(10)
     assert config["event_config"]["initial_posts"][0]["poster_agent_id"] == 0
@@ -147,6 +153,45 @@ def test_real_inherited_preparation_writes_both_formats_and_grounding(tmp_path):
     assert any("艾丽丝认识机构" in call["messages"][-1]["content"]
                and "图谱邻域" in call["messages"][-1]["content"]
                for call in chat.calls)
+
+
+def test_strict_neutral_final_reddit_keeps_supplied_values_and_null_unknowns(tmp_path):
+    supplied = {"age": 47, "gender": "nonbinary", "mbti": "ENTP",
+                "country": "MY"}
+    manager, _, _ = manager_for(tmp_path / "supplied",
+                                ScriptedChat(persona_fields=supplied))
+    state = manager.create_simulation("project-1", "display-1")
+    ready = manager.prepare_simulation(state.simulation_id, "topic", "source",
+                                       defined_entity_types=["Person"],
+                                       parallel_profile_count=1)
+    assert ready.status is SimulationStatus.READY
+    row = json.loads((tmp_path / "supplied" / state.simulation_id /
+                      "reddit_profiles.json").read_text(encoding="utf-8"))[0]
+    assert {field: row[field] for field in supplied} == supplied
+
+    manager, _, _ = manager_for(tmp_path / "nulls",
+                                ScriptedChat(persona_fields={
+                                    "age": None, "gender": None,
+                                    "mbti": None, "country": None}))
+    state = manager.create_simulation("project-1", "display-1")
+    ready = manager.prepare_simulation(state.simulation_id, "topic", "source",
+                                       defined_entity_types=["Person"],
+                                       parallel_profile_count=1)
+    assert ready.status is SimulationStatus.READY
+    row = json.loads((tmp_path / "nulls" / state.simulation_id /
+                      "reddit_profiles.json").read_text(encoding="utf-8"))[0]
+    assert all(field not in row for field in supplied)
+
+
+def test_legacy_reddit_serializer_keeps_inherited_defaults(tmp_path):
+    generator = OasisProfileGenerator(basic_only=True)
+    profile = OasisAgentProfile(user_id=0, user_name="legacy", name="Legacy",
+                                bio="Legacy bio", persona="Legacy persona")
+    path = tmp_path / "legacy_reddit.json"
+    generator.save_profiles([profile], str(path), platform="reddit")
+    row = json.loads(path.read_text(encoding="utf-8"))[0]
+    assert {field: row[field] for field in ("age", "gender", "mbti", "country")} == {
+        "age": 30, "gender": "other", "mbti": "ISTJ", "country": "中国"}
 
 
 def test_wrong_graph_and_incomplete_config_never_ready(tmp_path):

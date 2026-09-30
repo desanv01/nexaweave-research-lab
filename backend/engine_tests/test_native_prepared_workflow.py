@@ -6,6 +6,7 @@ Requires the locked OASIS/CAMEL engine. No external model or embeddings are used
 import asyncio
 import csv
 import json
+import random
 import sqlite3
 from types import SimpleNamespace
 from uuid import UUID
@@ -180,9 +181,7 @@ def _connected_preparation(tmp_path):
                                               "poster_type": "Person"}]}
             else:
                 payload = {"bio": "Explicitly synthetic profile",
-                           "persona": "Synthetic participant for offline qualification",
-                           "mbti": "INTJ", "gender": "other", "age": 30,
-                           "country": "MY"}
+                           "persona": "Synthetic participant for offline qualification"}
             return SimpleNamespace(choices=[SimpleNamespace(
                 message=SimpleNamespace(content=json.dumps(payload)),
                 finish_reason="stop")])
@@ -205,21 +204,44 @@ def _connected_preparation(tmp_path):
     root = tmp_path / state.simulation_id
     profiles = json.loads((root / "reddit_profiles.json").read_text(encoding="utf-8"))
     assert len(profiles) == 2
-    assert all(all(field in profile for field in
-                   ("persona", "mbti", "gender", "age", "country"))
+    assert all(profile["persona"] == "Synthetic participant for offline qualification"
+               and all(field not in profile for field in
+                       ("mbti", "gender", "age", "country"))
                for profile in profiles)
-    return root, state, facade
+    prepared_files = ("state.json", "simulation_config.json",
+                      "source_grounding.json", "twitter_profiles.csv",
+                      "reddit_profiles.json")
+    original_bytes = {name: (root / name).read_bytes() for name in prepared_files}
+    return root, state, facade, original_bytes
 
 
 def test_connected_preparation_native_rounds_and_report_tool(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    root, state, facade = _connected_preparation(tmp_path)
+    root, state, facade, original_bytes = _connected_preparation(tmp_path)
     model = _offline_model()
     session = NativeSimulationSession(root, graph_id="display-1",
                                       simulation_id=state.simulation_id,
                                       models={"twitter": model, "reddit": model},
                                       seed=11, max_rounds=1)
     with session:
+        native_agents = session._results["reddit"].agent_graph.get_agents()
+        assert [agent_id for agent_id, _ in native_agents] == [0, 1]
+        prepared_profiles = json.loads((root / "reddit_profiles.json").read_text(
+            encoding="utf-8"))
+        for actor_id, agent in native_agents:
+            assert agent.user_info.name == prepared_profiles[actor_id]["username"]
+            assert agent.user_info.description == prepared_profiles[actor_id]["bio"]
+            assert agent.user_info.profile["other_info"] == {
+                "user_profile": prepared_profiles[actor_id]["persona"]}
+            prompt = agent.user_info.to_reddit_system_message()
+            injected = agent.system_message.content
+            assert prepared_profiles[actor_id]["persona"] in prompt
+            assert all(f"{label} was not supplied." in prompt for label in
+                       ("Gender", "Age", "MBTI", "Country"))
+            assert all(f"{label} was not supplied." in injected for label in
+                       ("Gender", "Age", "MBTI", "Country"))
+            assert prepared_profiles[actor_id]["persona"] in injected
+            assert "None years old" not in prompt and "30 years old" not in prompt
         for platform in ("twitter", "reddit"):
             with sqlite3.connect(root / f"{platform}_simulation.db") as connection:
                 posts = [row[0] for row in connection.execute("SELECT content FROM post")]
@@ -252,6 +274,8 @@ def test_connected_preparation_native_rounds_and_report_tool(tmp_path, monkeypat
         assert all("Which actor posted?" in item.question for item in result.interviews)
         assert all(item.response == "Synthetic native interview response"
                    for item in result.interviews)
+    assert all((root / name).read_bytes() == content
+               for name, content in original_bytes.items())
 
 
 def test_prepared_profiles_execute_native_rounds_and_interview(tmp_path, monkeypatch):
@@ -263,6 +287,10 @@ def test_prepared_profiles_execute_native_rounds_and_interview(tmp_path, monkeyp
                                       models={"twitter": model, "reddit": model},
                                       seed=7, max_rounds=1)
     with session:
+        complete_agent = session._results["reddit"].agent_graph.get_agent(0)
+        complete_info = complete_agent.user_info.profile["other_info"]
+        assert complete_info["age"] == 30 and complete_info["mbti"] == "INTJ"
+        assert "Age: 30 years old." in complete_agent.user_info.to_reddit_system_message()
         for platform in ("twitter", "reddit"):
             db = root / f"{platform}_simulation.db"
             with sqlite3.connect(db) as connection:
@@ -403,11 +431,44 @@ def test_preflight_rejects_wrong_graph_and_unknown_actor(tmp_path):
                                 seed=1, max_rounds=1)
 
 
-def test_preflight_rejects_reddit_profiles_without_native_optional_fields(tmp_path):
+def test_mixed_optional_reddit_profile_uses_only_supplied_values(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     root = _prepared(tmp_path)
     path = root / "reddit_profiles.json"
     profiles = json.loads(path.read_text(encoding="utf-8"))
-    del profiles[0]["mbti"]
+    del profiles[0]["age"]
+    profiles[0]["gender"] = None
+    profiles[0]["persona"] = "Synthetic first line\r\nSynthetic second line"
+    path.write_text(json.dumps(profiles), encoding="utf-8")
+    original = path.read_bytes()
+    model = _offline_model()
+    session = NativeSimulationSession(root, graph_id="graph-fixture",
+                                      simulation_id="sim-fixture",
+                                      models={"twitter": model, "reddit": model},
+                                      seed=1, max_rounds=1)
+    with session:
+        agent = session._results["reddit"].agent_graph.get_agent(0)
+        other = agent.user_info.profile["other_info"]
+        assert "age" not in other and "gender" not in other
+        assert other["mbti"] == "INTJ" and other["country"] == "MY"
+        prompt = agent.user_info.to_reddit_system_message()
+        assert profiles[0]["persona"] in prompt
+        assert "Age was not supplied." in prompt
+        assert "Gender was not supplied." in prompt
+        assert "MBTI: INTJ." in prompt and "Country: MY." in prompt
+    assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("field,value", [
+    ("age", True), ("age", 0), ("age", 121), ("age", "30"),
+    ("gender", []), ("mbti", "x" * 33), ("country", {}),
+    ("mbti", " " * 32 + "I"),
+])
+def test_preflight_rejects_malformed_supplied_optional_value(tmp_path, field, value):
+    root = _prepared(tmp_path)
+    path = root / "reddit_profiles.json"
+    profiles = json.loads(path.read_text(encoding="utf-8"))
+    profiles[0][field] = value
     path.write_text(json.dumps(profiles), encoding="utf-8")
     with pytest.raises(NeutralCapabilityError, match="invalid_request"):
         NativeSimulationSession(root, graph_id="graph-fixture",
@@ -415,6 +476,56 @@ def test_preflight_rejects_reddit_profiles_without_native_optional_fields(tmp_pa
                                 models={"twitter": _offline_model(),
                                         "reddit": _offline_model()},
                                 seed=1, max_rounds=1)
+
+
+def test_preflight_rejects_missing_reddit_core_field(tmp_path):
+    root = _prepared(tmp_path)
+    path = root / "reddit_profiles.json"
+    profiles = json.loads(path.read_text(encoding="utf-8"))
+    del profiles[0]["persona"]
+    path.write_text(json.dumps(profiles), encoding="utf-8")
+    with pytest.raises(NeutralCapabilityError, match="invalid_request"):
+        NativeSimulationSession(root, graph_id="graph-fixture",
+                                simulation_id="sim-fixture",
+                                models={"twitter": _offline_model(),
+                                        "reddit": _offline_model()},
+                                seed=1, max_rounds=1)
+
+
+def test_reddit_adapter_failure_precedes_every_platform_task(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    root = _prepared(tmp_path)
+    model = _offline_model()
+    session = NativeSimulationSession(root, graph_id="graph-fixture",
+                                      simulation_id="sim-fixture",
+                                      models={"twitter": model, "reddit": model},
+                                      seed=1, max_rounds=1)
+    from app.services import native_simulation
+    from scripts import run_parallel_simulation as native
+
+    operations = []
+
+    async def unexpected_twitter(*_args, **_kwargs):
+        operations.append("twitter")
+
+    async def unexpected_reddit(*_args, **_kwargs):
+        operations.append("reddit")
+
+    def failed_adapter(*_args, **_kwargs):
+        raise ValueError("private adapter failure")
+
+    monkeypatch.setattr(native, "run_twitter_simulation", unexpected_twitter)
+    monkeypatch.setattr(native, "run_reddit_simulation", unexpected_reddit)
+    monkeypatch.setattr(native_simulation, "build_reddit_agent_graph",
+                        failed_adapter)
+    previous_random_state = random.getstate()
+    with pytest.raises(NeutralCapabilityError, match="internal_error"):
+        session.start()
+    assert random.getstate() == previous_random_state
+    assert operations == []
+    assert session._closed
+    assert not (root / "twitter_simulation.db").exists()
+    assert not (root / "reddit_simulation.db").exists()
 
 
 def test_native_failure_closes_adopted_environment(tmp_path, monkeypatch):

@@ -16,6 +16,8 @@ import uuid
 from pathlib import Path
 
 from .knowledge_report_tools import NeutralCapabilityError
+from .native_reddit_profiles import (build_reddit_agent_graph,
+                                     validate_reddit_profile)
 from .zep_tools import AgentInterview, InterviewResult
 
 
@@ -51,6 +53,8 @@ class NativeSimulationSession:
         self.max_rounds = max_rounds
         self.timeout_seconds = timeout_seconds
         self._results = {}
+        self._reddit_graph = None
+        self._reddit_actions = None
         self._runner = None
         self._closed = False
         self._started = False
@@ -125,14 +129,11 @@ class NativeSimulationSession:
                 profiles["twitter"] = rows
             if "reddit" in platforms:
                 rows = _bounded_json(root / "reddit_profiles.json")
-                if (type(rows) is not list or len(rows) != len(agents)
-                        or any(type(row) is not dict or row.get("user_id") != index
-                               or row.get("name") != agents[index]["entity_name"]
-                               or any(key not in row or row[key] is None
-                                      for key in ("username", "bio", "persona",
-                                                  "mbti", "gender", "age", "country"))
-                               for index, row in enumerate(rows))):
+                if type(rows) is not list or len(rows) != len(agents):
                     raise ValueError
+                for index, row in enumerate(rows):
+                    validate_reddit_profile(row, index,
+                                            agents[index]["entity_name"])
                 profiles["reddit"] = rows
             return config, agents, profiles, platforms
         except (OSError, ValueError, TypeError, KeyError, UnicodeError,
@@ -163,6 +164,12 @@ class NativeSimulationSession:
     def model_for(self, platform):
         return self._models[platform]
 
+    def reddit_agent_graph(self, available_actions):
+        if (self._reddit_graph is None
+                or tuple(available_actions) != self._reddit_actions):
+            raise NeutralCapabilityError("invalid_request")
+        return self._reddit_graph
+
     def platform_for(self, platform, db_path, oasis):
         if platform == "reddit":
             return oasis.DefaultPlatformType.REDDIT
@@ -184,6 +191,13 @@ class NativeSimulationSession:
         previous_random_state = random.getstate()
         try:
             random.seed(self.seed)
+            # Fail adapter construction before either native platform task
+            # starts, under the same seed and RNG restoration as native rounds.
+            if "reddit" in self._platforms:
+                self._reddit_actions = tuple(native.REDDIT_ACTIONS)
+                self._reddit_graph = build_reddit_agent_graph(
+                    self._profiles["reddit"], self._models["reddit"],
+                    list(self._reddit_actions))
             for platform in self._platforms:
                 operation = (native.run_twitter_simulation if platform == "twitter"
                              else native.run_reddit_simulation)
@@ -405,6 +419,8 @@ class NativeSimulationSession:
                     except Exception:
                         pass
         self._results.clear()
+        self._reddit_graph = None
+        self._reddit_actions = None
         if failed:
             raise NeutralCapabilityError("internal_error")
 
