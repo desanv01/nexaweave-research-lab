@@ -16,6 +16,7 @@ import uuid
 from pathlib import Path
 
 from .knowledge_report_tools import NeutralCapabilityError
+from .native_controls import parse_execution_controls
 from .native_reddit_profiles import (build_reddit_agent_graph,
                                      validate_reddit_profile)
 from .zep_tools import AgentInterview, InterviewResult
@@ -59,6 +60,8 @@ class NativeSimulationSession:
         self._closed = False
         self._started = False
         self._models = dict(models)
+        self._controls = None
+        self._control_network = {}
         self._config, self._agents, self._profiles, self._platforms = self._preflight()
         if set(self._models) != set(self._platforms) or any(
                 model is None or not callable(getattr(model, "run", None))
@@ -135,6 +138,7 @@ class NativeSimulationSession:
                     validate_reddit_profile(row, index,
                                             agents[index]["entity_name"])
                 profiles["reddit"] = rows
+            self._controls = parse_execution_controls(config, platforms, agents)
             return config, agents, profiles, platforms
         except (OSError, ValueError, TypeError, KeyError, UnicodeError,
                 RecursionError, OverflowError,
@@ -143,7 +147,8 @@ class NativeSimulationSession:
 
     def _native_output_exists(self):
         return any(os.path.lexists(self.simulation_dir / name) for name in (
-            self._claim_name, "twitter_simulation.db", "reddit_simulation.db"))
+            self._claim_name, "twitter_simulation.db", "reddit_simulation.db",
+            "native_effective_controls.json"))
 
     def _claim_fresh_start(self):
         # This bridge is a one-shot runner. Keep the exclusive claim even after
@@ -171,6 +176,11 @@ class NativeSimulationSession:
         return self._reddit_graph
 
     def platform_for(self, platform, db_path, oasis):
+        kwargs = (self._controls.platform_kwargs(platform)
+                  if self._controls is not None else None)
+        if kwargs is not None:
+            from oasis.social_platform.platform import Platform
+            return Platform(db_path=db_path, **kwargs)
         if platform == "reddit":
             return oasis.DefaultPlatformType.REDDIT
         # OASIS's default Twitter platform selects TWHIN weights. Its native
@@ -181,15 +191,80 @@ class NativeSimulationSession:
                         refresh_rec_post_count=2, max_rec_post_len=2,
                         following_post_count=3, use_openai_embedding=False)
 
+    def schedule_for(self, agent_config, simulated_minutes, current_hour):
+        if self._controls is None:
+            return (current_hour,
+                    agent_config.get("active_hours", list(range(8, 23))),
+                    agent_config.get("activity_level", 0.5))
+        return self._controls.schedule(agent_config, simulated_minutes, current_hour)
+
+    def initial_trace_cursor(self, env):
+        # Controls log successful initial actions in round zero. Do not replay
+        # their traces as autonomous round actions. Preserve inherited cursor
+        # behavior when controls are absent.
+        if self._controls is None:
+            return 0
+        return env.platform.db.execute("SELECT COALESCE(MAX(rowid), 0) FROM trace").fetchone()[0]
+
+    async def apply_initial_network(self, platform, env, action_logger, agent_names):
+        if self._controls is None:
+            return 0
+        from oasis import ActionType
+        attempts = self._control_network.setdefault(platform, [])
+        # Registration is complete. Require the native signup mapping rather
+        # than assuming nonexistent IDs can be passed to Platform.follow.
+        rows = env.platform.db.execute("SELECT agent_id, user_id FROM user").fetchall()
+        if (len(rows) != len(self._agents)
+                or dict(rows) != {agent_id: agent_id for agent_id in self._agents}):
+            raise NeutralCapabilityError("internal_error")
+        for follower, followee in self._controls.edges(platform):
+            attempt = {"follower_agent_id": follower, "followee_agent_id": followee,
+                       "status": "uncertain"}
+            attempts.append(attempt)
+            agent = env.agent_graph.get_agent(follower)
+            response = await agent.perform_action_by_data(
+                ActionType.FOLLOW, followee_id=followee)
+            if (type(response) is not dict or set(response) != {"success", "follow_id"}
+                    or response["success"] is not True
+                    or type(response["follow_id"]) is not int or response["follow_id"] < 1):
+                raise NeutralCapabilityError("internal_error")
+            attempt.update(status="applied", follow_id=response["follow_id"])
+            agent.perform_agent_graph_action("follow", {"followee_id": followee})
+            if action_logger:
+                action_logger.log_action(
+                    round_num=0, agent_id=follower,
+                    agent_name=agent_names[follower], action_type="FOLLOW",
+                    action_args={"followee_id": followee},
+                    result=json.dumps(response), success=True)
+        return len(attempts)
+
+    def _write_controls_diagnostic(self, completed):
+        if self._controls is None:
+            return
+        record = self._controls.diagnostic(self._platforms)
+        for setting in record["agent_activity"]:
+            agent_config = self._agents[setting["agent_id"]]
+            if setting["active_hours"] is None:
+                setting["active_hours"] = agent_config.get("active_hours", list(range(8, 23)))
+            if setting["activity_probability"] is None:
+                setting["activity_probability"] = agent_config.get("activity_level", 0.5)
+        record.update(execution_status="completed" if completed else "failed",
+                      initial_network=self._control_network)
+        # Exclusive creation: an old diagnostic is never reset/replaced.
+        with (self.simulation_dir / "native_effective_controls.json").open(
+                "x", encoding="utf-8") as stream:
+            json.dump(record, stream, allow_nan=False, sort_keys=True)
+
     def adopt(self, platform, result):
         self._results[platform] = result
 
     async def _start_async(self):
         from scripts import run_parallel_simulation as native
-        native._load_native_engine()
-        logs = native.SimulationLogManager(str(self.simulation_dir))
         previous_random_state = random.getstate()
+        completed = False
         try:
+            native._load_native_engine()
+            logs = native.SimulationLogManager(str(self.simulation_dir))
             random.seed(self.seed)
             # Fail adapter construction before either native platform task
             # starts, under the same seed and RNG restoration as native rounds.
@@ -208,8 +283,10 @@ class NativeSimulationSession:
                                          native_dependencies=self)
                 if result.env is None or result.agent_graph is None:
                     raise NeutralCapabilityError("report_context_unavailable")
+            completed = True
         finally:
             random.setstate(previous_random_state)
+            self._write_controls_diagnostic(completed)
 
     def start(self):
         if self._closed or self._started:
