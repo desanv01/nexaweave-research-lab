@@ -170,10 +170,10 @@
     {
       "imported_path": "backend/scripts/run_parallel_simulation.py",
       "original_sha256": "e1ee10de9a4599a8b18d01f0678f9f9caf4e0846c2355f302aaf0d56ed95e942",
-      "current_sha256": "06223973de40569260fbd6f4764b8735110ea674d4691e98becc5bc7c436b692",
-      "reason": "Delegate file IPC to shared bounded transport, preserving parallel platform selection, interview dispatch and availability status flags. U03m defers native/CLI setup to execution, closes owned environments, and supplies a trusted injected native session without changing inherited action algorithms. U03n uses an explicit trusted neutral Reddit graph seam for honestly partial native profiles; legacy loader remains unchanged.",
-      "phase": "U02c/U03m/U03n",
-      "review_status": "Main source reviewed; pending U03n exact-head CI"
+      "current_sha256": "096563e53a09902e46fdbcf2f102cce9e3321a5fcf51c0f2007f0f86a1db4c74",
+      "reason": "Delegate file IPC to shared bounded transport, preserving parallel platform selection, interview dispatch and availability status flags. U03m defers native/CLI setup to execution, closes owned environments, and supplies a trusted injected native session without changing inherited action algorithms. U03n uses an explicit trusted neutral Reddit graph seam for honestly partial native profiles; legacy loader remains unchanged. U07a trusted opt-in initial native follows, full-minute local eligibility/probability and initial-event trace cursor; missing controls/direct CLI defaults preserved.",
+      "phase": "U02c/U03m/U03n/U07a",
+      "review_status": "Main source reviewed, actual native35passes/pure41passes; exact-head CI pending"
     },
     {
       "imported_path": "backend/scripts/run_reddit_simulation.py",

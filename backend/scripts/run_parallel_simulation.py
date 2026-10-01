@@ -958,7 +958,8 @@ def get_active_agents_for_round(
     env,
     config: Dict[str, Any],
     current_hour: int,
-    round_num: int
+    round_num: int,
+    *, simulated_minutes=None, native_dependencies=None
 ) -> List:
     """根据时间和配置决定本轮激活哪些Agent"""
     time_config = config.get("time_config", {})
@@ -984,8 +985,13 @@ def get_active_agents_for_round(
         agent_id = cfg.get("agent_id", 0)
         active_hours = cfg.get("active_hours", list(range(8, 23)))
         activity_level = cfg.get("activity_level", 0.5)
+        eligibility_hour = current_hour
+        if native_dependencies is not None:
+            eligibility_hour, active_hours, activity_level = native_dependencies.schedule_for(
+                cfg, simulated_minutes if simulated_minutes is not None else current_hour * 60,
+                current_hour)
         
-        if current_hour not in active_hours:
+        if eligibility_hour not in active_hours:
             continue
         
         if random.random() < activity_level:
@@ -1103,6 +1109,10 @@ async def run_twitter_simulation(
         action_logger.log_round_start(0, 0)  # round 0, simulated_hour 0
     
     initial_action_count = 0
+    if native_dependencies is not None:
+        initial_action_count = await native_dependencies.apply_initial_network(
+            "twitter", result.env, action_logger, agent_names)
+        total_actions += initial_action_count
     if initial_posts:
         initial_actions = {}
         for post in initial_posts:
@@ -1135,6 +1145,8 @@ async def run_twitter_simulation(
     # 记录 round 0 结束
     if action_logger:
         action_logger.log_round_end(0, initial_action_count)
+    if native_dependencies is not None:
+        last_rowid = native_dependencies.initial_trace_cursor(result.env)
     
     # 主模拟循环
     time_config = config.get("time_config", {})
@@ -1163,7 +1175,8 @@ async def run_twitter_simulation(
         simulated_day = simulated_minutes // (60 * 24) + 1
         
         active_agents = get_active_agents_for_round(
-            result.env, config, simulated_hour, round_num
+            result.env, config, simulated_hour, round_num,
+            simulated_minutes=simulated_minutes, native_dependencies=native_dependencies
         )
         
         # 无论是否有活跃agent，都记录round开始
@@ -1308,6 +1321,10 @@ async def run_reddit_simulation(
         action_logger.log_round_start(0, 0)  # round 0, simulated_hour 0
     
     initial_action_count = 0
+    if native_dependencies is not None:
+        initial_action_count = await native_dependencies.apply_initial_network(
+            "reddit", result.env, action_logger, agent_names)
+        total_actions += initial_action_count
     if initial_posts:
         initial_actions = {}
         for post in initial_posts:
@@ -1348,6 +1365,8 @@ async def run_reddit_simulation(
     # 记录 round 0 结束
     if action_logger:
         action_logger.log_round_end(0, initial_action_count)
+    if native_dependencies is not None:
+        last_rowid = native_dependencies.initial_trace_cursor(result.env)
     
     # 主模拟循环
     time_config = config.get("time_config", {})
@@ -1376,7 +1395,8 @@ async def run_reddit_simulation(
         simulated_day = simulated_minutes // (60 * 24) + 1
         
         active_agents = get_active_agents_for_round(
-            result.env, config, simulated_hour, round_num
+            result.env, config, simulated_hour, round_num,
+            simulated_minutes=simulated_minutes, native_dependencies=native_dependencies
         )
         
         # 无论是否有活跃agent，都记录round开始
