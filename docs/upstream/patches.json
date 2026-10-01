@@ -190,6 +190,20 @@
       "reason": "Delegate file IPC to shared bounded transport without changing native interview or action dispatch. U03m defers native/CLI setup to execution, closes owned environments, and supplies a trusted injected native session without changing inherited action algorithms.",
       "phase": "U02c/U03m",
       "review_status": "Main source reviewed; pending exact-head CI"
+    },
+    {
+      "imported_path": "backend/pyproject.toml",
+      "original_sha256": "e923fa98056d1b6085ab789993a1d05f31bfc1e8cbbb6b9aa17d49663253c1a2",
+      "current_sha256": "e2bd63b6db19528cac1907bb4875c6115ef78ae6c245b79a170a96d4cae2c40c",
+      "reason": "Main adds optional pinned psycopg binary runtime for the trusted prepared native PostgreSQL host; inherited backend dependencies and notices retained.",
+      "phase": "U03p"
+    },
+    {
+      "imported_path": "backend/uv.lock",
+      "original_sha256": "877281f85fe26eb120149503b0b99021fd7e3e577d026f584857d03839595b09",
+      "current_sha256": "bcc2cc49e6a7dd0d2430a0b8b877d9aa58a0fa57ac74a76ebc7b6e4ab0586b95",
+      "reason": "Main locks only optional psycopg and psycopg-binary 3.3.6 for the prepared native PostgreSQL host; all existing package records unchanged.",
+      "phase": "U03p"
     }
   ]
 }

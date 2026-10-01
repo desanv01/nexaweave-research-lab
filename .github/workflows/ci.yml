@@ -178,17 +178,26 @@ jobs:
     name: native-engine-windows
     runs-on: windows-latest
     timeout-minutes: 20
+    env:
+      PROJECT_STORE_TEST_PASSWORD: mirofish-ci-disposable-native-only
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
         with:
           version: '0.11.25'
       - name: Install inherited locked backend runtime
-        run: uv sync --project backend --frozen --extra dev --python 3.12.13
+        run: uv sync --project backend --locked --extra dev --extra native-store --python 3.12.13
       - name: Verify native imports without credentials or downloads
         run: backend/.venv/Scripts/python.exe tools/check_engine_imports.py
       - name: Exercise actual native action primitives with temporary SQLite
         run: backend/.venv/Scripts/python.exe tools/run_engine_tests.py
+      - name: Start job-local PostgreSQL with hosted binaries
+        run: ./tools/native_store_ci_postgres.ps1 -Action start
+      - name: Qualify actual prepared native engine with PostgreSQL ownership
+        run: backend/.venv/Scripts/python.exe tools/run_native_store_tests.py --postgres
+      - name: Stop only this job's native PostgreSQL fixture
+        if: always()
+        run: ./tools/native_store_ci_postgres.ps1 -Action stop
 
   project-store:
     name: project-store
