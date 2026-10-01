@@ -6,8 +6,10 @@ import hmac
 import json
 import os
 import re
+import threading
 
 from flask import Flask, Response, jsonify, request
+from werkzeug.exceptions import BadRequest
 
 from .config import Config
 from .services.knowledge_read_facade import KnowledgeReadFacade, ReadHostSettings
@@ -17,6 +19,7 @@ from .utils.browser_origins import parse_allowed_origins
 
 
 _STATUS = {"invalid_request": 400, "invalid_reply": 502, "not_found": 404,
+           "evidence_unavailable": 503,
            "unauthorized": 401, "busy": 409, "tombstoned": 410,
            "conflict": 409, "timeout": 503, "transport_failure": 503,
            "result_too_large": 413, "limit_exceeded": 413,
@@ -76,7 +79,7 @@ def _failure(code, status=None):
     return jsonify({"success": False, "error": {"code": code}}), status or _STATUS.get(code, 503)
 
 
-def create_read_app(config_class, *, facade=None):
+def create_read_app(config_class, *, facade=None, evidence_facade=None):
     app = Flask(__name__)
     app.config.from_object(config_class)
     if app.config.get("DEBUG") or os.environ.get("FLASK_HOST", "127.0.0.1") not in {"127.0.0.1", "::1", "localhost"}:
@@ -90,6 +93,16 @@ def create_read_app(config_class, *, facade=None):
     origins = frozenset(parse_allowed_origins(configured))
     settings = ReadHostSettings.from_config(config_class)
     reader = facade or KnowledgeReadFacade(settings)
+    evidence_lock = threading.Lock()
+    evidence = evidence_facade
+
+    def evidence_reader():
+        nonlocal evidence
+        with evidence_lock:
+            if evidence is None:
+                from .services.knowledge_evidence_facade import KnowledgeEvidenceFacade
+                evidence = KnowledgeEvidenceFacade(settings)
+            return evidence
     app.json.ensure_ascii = False
 
     @app.before_request
@@ -143,7 +156,53 @@ def create_read_app(config_class, *, facade=None):
     def health():
         return jsonify({"status": "ok", "mode": "graphiti_readonly",
                         "capabilities": ["graph_data", "entities", "entity_context",
-                                         "population_preview", "population_export"]})
+                                         "population_preview", "population_export",
+                                         "evidence_research", "evidence_dossier"]})
+
+    def evidence_call(method, graph_id):
+        if graph_id != settings.display_graph_id:
+            return _failure("not_found")
+        from .services.knowledge_evidence_client import REQUEST_LIMITS, RESULT_LIMITS, ENVELOPE_OVERHEAD, validate_payload
+        from .services.knowledge_transport import _json_object
+        try:
+            maximum = REQUEST_LIMITS[method]
+            if (request.args or request.mimetype != "application/json"
+                    or request.headers.get("Transfer-Encoding") or request.headers.get("Content-Encoding")
+                    or request.content_length is None or not 0 < request.content_length <= maximum):
+                raise KnowledgeReadError("invalid_request")
+            raw = request.stream.read(maximum + 1)
+            if len(raw) != request.content_length or len(raw) > maximum:
+                raise KnowledgeReadError("invalid_request")
+            try:
+                payload = _json_object(raw)
+            except ValueError:
+                raise KnowledgeReadError("invalid_request") from None
+            validate_payload(method, payload, graph_id)
+            data = evidence_reader().execute(method, graph_id, payload)
+            # Compact JSON keeps the HTTP wrapper inside explicit envelope overhead.
+            encoded_data = json.dumps(data, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode()
+            if len(encoded_data) > RESULT_LIMITS[method]:
+                raise KnowledgeReadError("result_too_large")
+            body = b'{"success":true,"data":' + encoded_data + b'}'
+            if len(body) > RESULT_LIMITS[method] + ENVELOPE_OVERHEAD:
+                raise KnowledgeReadError("result_too_large")
+            return Response(body, content_type="application/json", headers={"X-Content-Type-Options": "nosniff"})
+        except BadRequest:
+            return _failure("invalid_request")
+        except KnowledgeReadError as error:
+            return _failure(error.code)
+        except KnowledgeTransportError as error:
+            return _failure(error.code if error.code in {"busy", "invalid_request"} else "transport_failure")
+        except Exception:
+            return _failure("internal_error")
+
+    @app.post("/api/graph/research/<graph_id>")
+    def evidence_research(graph_id):
+        return evidence_call("research", graph_id)
+
+    @app.post("/api/graph/dossier/<graph_id>")
+    def evidence_dossier(graph_id):
+        return evidence_call("dossier", graph_id)
 
     @app.get("/api/graph/data/<graph_id>")
     def graph_data(graph_id):

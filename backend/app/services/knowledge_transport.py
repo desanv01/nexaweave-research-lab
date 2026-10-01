@@ -239,11 +239,11 @@ def _read_exact(pipe, length: int) -> bytes:
     return bytes(result)
 
 
-def _read_response(pipe, events: queue.Queue) -> None:
+def _read_response(pipe, events: queue.Queue, response_limit=_RESPONSE_MAX) -> None:
     try:
         header = _read_exact(pipe, 4)
         length = int.from_bytes(header, "big")
-        if not 0 < length <= _RESPONSE_MAX:
+        if not 0 < length <= response_limit:
             raise ValueError
         body = _read_exact(pipe, length)
         if pipe.read(1) != b"":
@@ -281,6 +281,15 @@ def _stop_owned(process, threads) -> None:
 
 
 class KnowledgeProcessClient:
+    def _validate_request(self, raw):
+        return _request_id(raw)
+
+    def _validate_reply(self, raw, request_id):
+        _reply(raw, request_id)
+
+    def _response_limit(self, raw):
+        return _RESPONSE_MAX
+
     def __init__(self, python_executable, bootstrap_script, *, timeout_seconds=120,
                  child_environment=None):
         if (type(timeout_seconds) not in (int, float) or not math.isfinite(timeout_seconds)
@@ -302,7 +311,8 @@ class KnowledgeProcessClient:
         failure = None
         response = None
         try:
-            request_id = _request_id(raw)
+            request_id = self._validate_request(raw)
+            response_limit = self._response_limit(raw)
             frame = len(raw).to_bytes(4, "big") + raw
             try:
                 private_directory = tempfile.TemporaryDirectory(prefix="mirofish-knowledge-")
@@ -322,7 +332,7 @@ class KnowledgeProcessClient:
                                           args=(process.stdin, frame, events), daemon=True,
                                           name="mirofish-knowledge-writer")
                 reader = threading.Thread(target=_read_response,
-                                          args=(process.stdout, events), daemon=True,
+                                          args=(process.stdout, events, response_limit), daemon=True,
                                           name="mirofish-knowledge-reader")
                 threads = [writer, reader]
                 writer.start()
@@ -348,7 +358,7 @@ class KnowledgeProcessClient:
                 process.wait(timeout=remaining)
                 if process.returncode != 0:
                     raise KnowledgeTransportFailure(outcome_unknown=True)
-                _reply(body, request_id)
+                self._validate_reply(body, request_id)
                 response = body
             except KnowledgeTransportError as exc:
                 failure = exc

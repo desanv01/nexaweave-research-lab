@@ -36,5 +36,8 @@ bounded owned cohort comparison and a defect Main found before execution:
 prelaunch cancellation intent was omitted from member output and record digests.
 The corrected candidate exposes authoritative `cancel_requested` independently
 of terminal outcome; declared intent stays pending with no receipt or metrics.
-Pure and actual PostgreSQL regressions cover that distinction. Issue65 remains
-open until Main reviews exact local/hosted qualification and accepts integration.
+Pure and actual PostgreSQL regressions cover that distinction. Main accepted
+PR66 exact09a8cc0 after all8PR36810165440/push36810160406SUCCESS and all final
+PR logs reviewed, mergedbd1643a; issue65 closed. Linux740 and Windows17actual
+nativePG/37native/4nativeTemporalPG passed. Main tracks postmerge36810995137;
+issue3 fullquality remains open.
