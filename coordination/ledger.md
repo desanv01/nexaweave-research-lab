@@ -454,3 +454,8 @@ volume, real SHOW SETTINGS verifiesfalse, suppliedcompose and CI gate assertfals
 Baseline128/31/diff/YAML pass. Fixtures stopped, no runtime lock/dependency change.
 U13 PR68 postmerge36814959074 all8green/logsreviewed. Main owns every hosted gate/
 Git/acceptance; no fullC39/U12/real model/host-wide privacy/all44/paid/public claim.
+
+
+## Main2026-10-01: U14a source packaging candidate reviewed
+
+Corrected stableidle9, seven source/task hashes retained and preserved through accepted-baseFF1d8b3ba. Main baseline128/31/diff/sourceAST/CI YAML pass. Focused Windows57-case unittest qualification running; no full local pass yet. Main added actual committed-tree artifact build/verify/determinism CI probe; existing unit discovery collects new cases. Draft hosted qualification and actual candidate artifact still pending, not release acceptance. Separate U11b owns releasedu00 and authors connected protected Vue workbench using human-selected installed local design guidance; no12ui charge. Main owns all checks/Git/acceptance. Issue69 closedPR70/all8postgreen; issue3fullquality remainsopen.
