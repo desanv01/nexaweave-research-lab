@@ -258,12 +258,16 @@ jobs:
       - name: Install locked isolated knowledge runtime
         working-directory: services/knowledge
         run: uv sync --locked --extra test --python 3.12.13
+      - name: Install non-editable storage candidate for fresh bundle CLI
+        run: uv pip install --python services/knowledge/.venv/bin/python --no-deps --reinstall services/knowledge
       - name: Start disposable PostgreSQL
         run: docker compose -f infra/compose.operations-test.yml up -d --wait --wait-timeout 120
       - name: Verify project revision store
         run: services/knowledge/.venv/bin/python tools/run_project_store_tests.py --postgres
       - name: Qualify DOCX source passages and fresh owned CLI
         run: services/knowledge/.venv/bin/python tools/run_document_source_tests.py
+      - name: Qualify portable retained-source bundles and database-free inspection
+        run: services/knowledge/.venv/bin/python tools/run_research_bundle_tests.py --integration
       - name: Verify one-time native run authority and owned child lifecycle
         run: services/knowledge/.venv/bin/python tools/run_native_run_ownership_tests.py --postgres
       - name: Test database diagnostics on failure
