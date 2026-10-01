@@ -413,3 +413,8 @@ Separate U08 chat01a0f52d-9dc5-7bd0-8ff3-da8a4f979f24 stable idle7 at accepted96
 ## Main2026-10-01: U09a locally qualified; earlier-stage issues reconciled
 
 Separate U09chat01a0f543-cce5-7443-85a7-a7058e942de3 stable idle3. Main source reviewed, accepted-base FF81e0527 preserved source; initial real-store/freshCLI+pure50passes54.03s with one oversized pytest-ID setup/teardown failure. Four actual integration cases passed; bounded IDs-only correction preserves input/product/actual-test hashes. Corrected pure47passes4.07s/no skips. Main new runner and same knowledge CI job require exact hosted51cases and all8gates before acceptance. Reference integrity is not semantic support; model/judge false. Fixtures stopped retaining data. Human requested issue upkeep: six stale delivered issues4/30/34/40/41/45 closed with exact accepted ancestor/CI evidence, unfinished U01issue3 remains open. PR63postmerge all8green exact81e0527. No whole U09/all44/paid/UI/deploy acceptance.
+
+
+## Main2026-10-01: U10a locally qualified; cancellation intent preserved
+
+Separate U10 stable idlecursor8, eleven reviewed hashes retained/preserved after FFaccepted e002806. Main pure101passes/1known Windows symlink privilege skip27.64s; actual native-store PG17passes/no skips124.30s including four U10 cases; existing native recording/fresh CLI2passes/no skips38.56s. Main review defect issue65 corrected explicit cancel_requested and digest without fabricated terminal cancellation/zero samples. Existing psycopg3.3.6 added lean CI profile, no runtime lock changes. Manifest128/28 and diff passed. Exact eight hosted PR/push gates/log review pending; no wholeU10/all44/paid/public acceptance.

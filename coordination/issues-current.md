@@ -28,3 +28,13 @@ release acceptance. No open PR remained at reconciliation; PR63 was accepted.
 Main will inspect newly reported defects during each integration cycle, assign
 scoped implementation in a separate project worker chat when needed, and close
 only after reviewed exact-revision qualification. Avoid blanket issue closure.
+
+## U10 review follow-up
+
+[Issue65](https://github.com/desanv01/mirofish-research-lab/issues/65) tracks the
+bounded owned cohort comparison and a defect Main found before execution:
+prelaunch cancellation intent was omitted from member output and record digests.
+The corrected candidate exposes authoritative `cancel_requested` independently
+of terminal outcome; declared intent stays pending with no receipt or metrics.
+Pure and actual PostgreSQL regressions cover that distinction. Issue65 remains
+open until Main reviews exact local/hosted qualification and accepts integration.
