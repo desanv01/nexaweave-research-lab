@@ -24,6 +24,8 @@ jobs:
         with:
           python-version: '3.12'
       - run: python tools/check_baseline_manifest.py
+      - name: Qualify exact committed source artifact without publishing
+        run: python tools/run_source_release_artifact.py
 
   python-unit:
     name: python-unit
