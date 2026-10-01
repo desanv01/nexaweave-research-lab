@@ -1,5 +1,35 @@
 # Execution ledger
 
+## Successor — U03p locally qualified
+
+Corrected stable worker idle cursorbf79f8a2-75ea-4a29-a23c-944da7a79052:4.
+Main reviewed all files/bounds and retained11 source hashes, unchanged after tests.
+Combined actual offline native OASIS/CAMEL and real guarded PostgreSQL13passed
+43.42s, no skips. Exact terminal recovery, durable attachment before go, authority
+and digest fences, prelaunch cancellation passed. No full native midround cancel
+or Temporal/reportIPC/checkpoint acceptance inferred. Fixture stopped/volume retained.
+Main optional runtime adds only psycopg/psycopg-binary3.3.6; manifest128/28 and
+diffcheck pass. Hosted Windows job-local PG17 helper syntax passed; exact CI pending.
+Main remains active through CI, with existing schedule fallback and workers idle.
+
+## Successor — PR57 accepted; U03p native/store host under Main review
+
+Main accepted exact1dbf136 after all8PRCI36792687215/push36792682443 SUCCESS,
+including73Linux ownership/supervisor tests no skips. Acceptance5921814453;
+merged50a2aabc6ba52d8c77ef196ef2eba2d47fc686d0. Clean integration FF;
+all8postmerge36793271366 green (25native/3imports,81store/73ownership logs retained).
+Main clean-FF u03 to50a2aabc, prepared task/u03-native-store-host and assigned
+U03p to SAME fresh U03worker. Initial stable unverified handoff read in full;
+Main review U03p.md requires conservative driver call-bound admission and honest
+construction cleanup semantics. Correction active; no candidate execution yet.
+
+Main adds optional pinned PG native runtime/lock, runner and CI. Only psycopg/
+psycopg-binary3.3.6 added, existing lock package records unchanged. Manifest128/28
+records both inherited dependency files. Full native+PG connection still requires
+Main actual combined fixture qualification. No paid/public deployment/full44 claim.
+User explicitly requests Main remain active through worker/test/CI waits; existing
+heartbeat remains recovery fallback. U05/u01/u02 idle; no duplicates.
+
 ## Successor — U05d corrected and locally qualified
 
 Final worker stable idle cursor6c88dc89-c2f3-4ec6-b281-71975f8a591f:19 after
