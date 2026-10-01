@@ -55,9 +55,10 @@
     {
       "imported_path": "backend/app/utils/file_parser.py",
       "original_sha256": "f1adfdda1a6674ad7af76dc95a9b76f388470098e4cf514be908440c4167c398",
-      "current_sha256": "327d7f1a6bbcfe434b19990dcb47ba11f3d33699bbf0fe251b1b6b60f2b0a226",
-      "reason": "Bound source bytes/PDF pages/extracted text/multifile results; safe classified errors, BOM decoding and progress-guaranteed bounded chunking. Native parser isolation remains separate.",
-      "phase": "U02e"
+      "current_sha256": "c6de13742d73f5b3bad32b3678350f538bd6cb3a7d2c4c966a1f2de361488b51",
+      "reason": "Bound source bytes/PDF pages/extracted text/multifile results; safe classified errors, BOM decoding and progress-guaranteed bounded chunking. Native parser isolation remains separate. U13a adds bounded DOCX extraction through a fixed standard-library sibling while retaining the five-field saved parser contract and existing formats.",
+      "phase": "U02e/U13a",
+      "review_status": "Main source reviewed; pending U13a exact-head qualification"
     },
     {
       "imported_path": "backend/app/__init__.py",
@@ -69,9 +70,10 @@
     {
       "imported_path": "backend/app/config.py",
       "original_sha256": "a85580b4551724b3c2fff419565c9aa11f6dba1992f5981ed34037a264c2a2f3",
-      "current_sha256": "63e968d399cacef851ec2fc4fc609fc83b6219d081a25f4e861c46d64bfe5aa3",
-      "reason": "U02d explicit origins retained. U03i separate read-only host validation without Zep/model credentials; inherited legacy validation unchanged.",
-      "phase": "U02d/U03i"
+      "current_sha256": "3e1d5e687f65c7e3a47c427656667bb55c5fc90a8cf492b96947f1a11f1bb39e",
+      "reason": "U02d explicit origins retained. U03i separate read-only host validation without Zep/model credentials; inherited legacy validation unchanged. U13a adds DOCX to the inherited allowed-extension list only.",
+      "phase": "U02d/U03i/U13a",
+      "review_status": "Main source reviewed; pending U13a exact-head qualification"
     },
     {
       "imported_path": "backend/run.py",
@@ -204,6 +206,30 @@
       "current_sha256": "79211fa44774e1062123707154c37b54e0ab764fa55483704957fe742dfc4d56",
       "reason": "Main adds pinned opt-in PostgreSQL and Temporal runtime for trusted prepared native hosting; inherited third-party package records and notices retained.",
       "phase": "U03p/U03q"
+    },
+    {
+      "imported_path": "locales/en.json",
+      "original_sha256": "b47c61ba64330cf5094ce611ff270c95f22f0ce4e98bfb6fa05ee6c6e5b93f84",
+      "current_sha256": "921051fb74e90f520df686e7ee119299018a375f1dbf56dbf223941e05306e03",
+      "reason": "U13a updates only the English supported-format label for DOCX.",
+      "phase": "U13a",
+      "review_status": "Main source reviewed; pending U13a exact-head qualification"
+    },
+    {
+      "imported_path": "locales/zh.json",
+      "original_sha256": "7d44d70ca75e89c79c2ce793ddceab32cf7b251bc9210cf81c04d37daf3daab8",
+      "current_sha256": "e48e2784d57e7c30da10c246c43524121afd29a8e4199e1b43261bf5ddf909f2",
+      "reason": "U13a updates only the Chinese supported-format label for DOCX.",
+      "phase": "U13a",
+      "review_status": "Main source reviewed; pending U13a exact-head qualification"
+    },
+    {
+      "imported_path": "frontend/src/views/Home.vue",
+      "original_sha256": "7ebc342c34556912542030bf9e7c98e6ee4d754fe93a44601cd5c7699adcb409",
+      "current_sha256": "5505db07d1038ab412243ede3e9f30bbc07688ed59cbd916752c9492445ed205",
+      "reason": "U13a adds DOCX and already-supported MARKDOWN to the existing upload accept/filter list; no layout/style changes.",
+      "phase": "U13a",
+      "review_status": "Main source reviewed; pending U13a exact-head qualification"
     }
   ]
 }

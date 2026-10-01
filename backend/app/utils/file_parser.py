@@ -164,7 +164,7 @@ def _safe_basename(file_path: str) -> str:
 class FileParser:
     """File parser with bounded source and result sizes."""
 
-    SUPPORTED_EXTENSIONS = {".pdf", ".md", ".markdown", ".txt"}
+    SUPPORTED_EXTENSIONS = {".pdf", ".md", ".markdown", ".txt", ".docx"}
 
     @classmethod
     def is_supported(cls, file_path: str) -> bool:
@@ -178,9 +178,40 @@ class FileParser:
             raise UnsupportedDocumentError()
         if suffix == ".pdf":
             return cls._extract_from_pdf(file_path, limits=resolved)
+        if suffix == ".docx":
+            return cls._extract_from_docx(file_path, limits=resolved)
         if suffix in {".md", ".markdown"}:
             return cls._extract_from_md(file_path, limits=resolved)
         return cls._extract_from_txt(file_path, limits=resolved)
+
+    @staticmethod
+    def _extract_from_docx(file_path: str, *, limits: Optional[ParseLimits] = None) -> str:
+        # The parser worker uses a fixed spec loader under -I, so package-relative
+        # imports and caller-controlled sys.path cannot supply this dependency.
+        import importlib.util
+        import sys
+
+        resolved = _limits_or_default(limits)
+        source = Path(__file__).with_name("docx_extraction.py")
+        name = "_mirofish_docx_extraction"
+        module = sys.modules.get(name)
+        if module is None:
+            spec = importlib.util.spec_from_file_location(name, source)
+            if spec is None or spec.loader is None:
+                raise ImportError("parser module unavailable")
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[name] = module
+            spec.loader.exec_module(module)
+        data = _bounded_source_bytes(file_path, resolved)
+        try:
+            return module.extract_docx(data, max_file_bytes=resolved.max_file_bytes,
+                                       max_text_chars=resolved.max_text_chars).text
+        except module.DocxError as error:
+            failures = {"limit_exceeded": ParseLimitError,
+                        "unsupported_document": UnsupportedDocumentError,
+                        "malformed_document": MalformedDocumentError,
+                        "invalid_source": InvalidSourceError}
+            raise failures.get(error.code, MalformedDocumentError)() from None
 
     @staticmethod
     def _extract_from_pdf(file_path: str, *, limits: Optional[ParseLimits] = None) -> str:

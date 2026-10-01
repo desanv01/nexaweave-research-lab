@@ -66,6 +66,24 @@ def test_real_text_unicode_bom_and_path_with_spaces(tmp_path):
     assert extract_text_isolated(source) == "雪"
 
 
+def test_real_fixed_docx_child_unicode_tables_and_safe_failures(tmp_path, owned_processes):
+    from test_docx_extraction import package, paragraph
+
+    source = tmp_path / "雪 body.docx"
+    source.write_bytes(package(paragraph("A😀猫") + '<w:tbl><w:tr><w:tc>' + paragraph("雪") + '</w:tc><w:tc><w:p/></w:tc></w:tr></w:tbl>'))
+    assert extract_text_isolated(source) == "A😀猫\n\n雪\t"
+    with pytest.raises(ParseLimitError):
+        extract_text_isolated(source, limits=ParseLimits(max_text_chars=3))
+    source.write_bytes(package('<w:altChunk/>'))
+    with pytest.raises(UnsupportedDocumentError):
+        extract_text_isolated(source)
+    source.write_bytes(b"private broken zip")
+    with pytest.raises(MalformedDocumentError) as caught:
+        extract_text_isolated(source)
+    assert "private" not in str(caught.value)
+    _assert_owned_cleanup(owned_processes)
+
+
 def test_real_pdf_malformed_encrypted_and_limits(tmp_path):
     import fitz
 

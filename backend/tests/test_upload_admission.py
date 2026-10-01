@@ -104,6 +104,35 @@ def test_real_tiny_pdf_uses_isolated_parser(route):
     assert "pdf evidence" in calls["kwargs"]["document_texts"][0]
 
 
+def test_docx_upload_uses_actual_parser_before_offline_generator(route):
+    from test_docx_extraction import package, paragraph
+
+    client, _root, calls = route
+    payload = package(paragraph("A😀猫") + '<w:tbl><w:tr><w:tc>' + paragraph("雪") + '</w:tc></w:tr></w:tbl>')
+    response = _post(client, files=[(io.BytesIO(payload), "evidence.DOCX")])
+    assert response.status_code == 200
+    assert calls["constructed"] == calls["generated"] == 1
+    assert calls["kwargs"]["document_texts"] == ["A😀猫\n\n雪"]
+    # CountingGenerator is offline characterization, not ontology quality.
+    assert _saved_project(response).status == ProjectStatus.ONTOLOGY_GENERATED
+
+
+@pytest.mark.parametrize("kind", ["malformed", "unsupported", "blank", "oversized"])
+def test_docx_rejection_precedes_ontology_construction(route, monkeypatch, kind):
+    from test_docx_extraction import package, paragraph
+
+    client, _root, calls = route
+    payload = {"malformed": b"private invalid zip", "unsupported": package('<w:altChunk/>'),
+               "blank": package('<w:p/>'), "oversized": package(paragraph("safe"))}[kind]
+    if kind == "oversized":
+        monkeypatch.setattr(graph_api, "UPLOAD_POLICY", replace(DEFAULT_UPLOAD_POLICY, max_file_bytes=len(payload) - 1))
+    response = _post(client, files=[(io.BytesIO(payload), "evidence.docx")])
+    assert response.status_code == (413 if kind == "oversized" else 422)
+    assert response.json["error_code"] == ("upload_limit_exceeded" if kind == "oversized" else "no_extractable_text" if kind == "blank" else "invalid_document")
+    assert calls["constructed"] == calls["generated"] == 0
+    assert "private" not in response.get_data(as_text=True)
+
+
 def test_real_pdf_page_boundary_exact_and_over(route, monkeypatch):
     import fitz
 

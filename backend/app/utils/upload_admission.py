@@ -28,7 +28,7 @@ class UploadPolicy:
 
 
 DEFAULT_UPLOAD_POLICY = UploadPolicy()
-_ALLOWED_EXTENSIONS = frozenset({"pdf", "md", "markdown", "txt"})
+_ALLOWED_EXTENSIONS = frozenset({"pdf", "md", "markdown", "txt", "docx"})
 
 
 class UploadAdmissionError(ValueError):
