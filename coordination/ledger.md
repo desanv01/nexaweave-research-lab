@@ -390,3 +390,7 @@ Main creates a minimal governance commit on main before branch gates exist.
 The archive import and U00 implementation go through a phase branch and PR.
 All later work uses reviewed phase/task PRs. No worker acceptance substitutes for
 main review. GitHub protection availability will be probed and recorded honestly.
+
+## Main2026-10-01: PR59 accepted; U03q combined qualification; U06 progression
+
+PR59 accepted094026f as7346d16; all8PR/push/postmergeCI succeeded. U03q corrected stable idle:6 reviewed by Main; durable prelaunch PG cancel intent and failure cleanup added. Main locked opt-in TemporalSDK1.33.0, four new third-party records only, inherited versions unchanged; manifest128/28 passed. Combined actual native+Temporal+PG suite session82430 now running; eleven source hashes retained outside checkout. U00 same fresh worker starts U06a evidence research on clean accepted base; Main owns every check/Git operation. Latest human settings Main GPT-6.1 Sol/high, workers GPT-6.1 Sol/medium; Fast preferences remain unverified. No paid/public deployment/all44 acceptance.

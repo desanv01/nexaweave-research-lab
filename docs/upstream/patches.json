@@ -194,16 +194,16 @@
     {
       "imported_path": "backend/pyproject.toml",
       "original_sha256": "e923fa98056d1b6085ab789993a1d05f31bfc1e8cbbb6b9aa17d49663253c1a2",
-      "current_sha256": "e2bd63b6db19528cac1907bb4875c6115ef78ae6c245b79a170a96d4cae2c40c",
-      "reason": "Main adds optional pinned psycopg binary runtime for the trusted prepared native PostgreSQL host; inherited backend dependencies and notices retained.",
-      "phase": "U03p"
+      "current_sha256": "69242a08f3661f8ce9b9a6ceb5a4519eb4e81aa06c69f797551f23ff67f07dff",
+      "reason": "Main adds pinned opt-in PostgreSQL and Temporal runtime for trusted prepared native hosting; inherited third-party package records and notices retained.",
+      "phase": "U03p/U03q"
     },
     {
       "imported_path": "backend/uv.lock",
       "original_sha256": "877281f85fe26eb120149503b0b99021fd7e3e577d026f584857d03839595b09",
-      "current_sha256": "bcc2cc49e6a7dd0d2430a0b8b877d9aa58a0fa57ac74a76ebc7b6e4ab0586b95",
-      "reason": "Main locks only optional psycopg and psycopg-binary 3.3.6 for the prepared native PostgreSQL host; all existing package records unchanged.",
-      "phase": "U03p"
+      "current_sha256": "79211fa44774e1062123707154c37b54e0ab764fa55483704957fe742dfc4d56",
+      "reason": "Main adds pinned opt-in PostgreSQL and Temporal runtime for trusted prepared native hosting; inherited third-party package records and notices retained.",
+      "phase": "U03p/U03q"
     }
   ]
 }

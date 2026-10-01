@@ -180,13 +180,14 @@ jobs:
     timeout-minutes: 20
     env:
       PROJECT_STORE_TEST_PASSWORD: mirofish-ci-disposable-native-only
+      TEMPORAL_TEST_ADDRESS: '127.0.0.1:17233'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
         with:
           version: '0.11.25'
       - name: Install inherited locked backend runtime
-        run: uv sync --project backend --locked --extra dev --extra native-store --python 3.12.13
+        run: uv sync --project backend --locked --extra dev --extra native-store --extra native-temporal --python 3.12.13
       - name: Verify native imports without credentials or downloads
         run: backend/.venv/Scripts/python.exe tools/check_engine_imports.py
       - name: Exercise actual native action primitives with temporary SQLite
@@ -195,6 +196,22 @@ jobs:
         run: ./tools/native_store_ci_postgres.ps1 -Action start
       - name: Qualify actual prepared native engine with PostgreSQL ownership
         run: backend/.venv/Scripts/python.exe tools/run_native_store_tests.py --postgres
+      - name: Qualify prepared native engine through Temporal and PostgreSQL
+        shell: pwsh
+        run: |
+          # Keep the Windows child server in this shell's lifetime; Actions can
+          # terminate child processes when the step that launched them exits.
+          try {
+            ./tools/native_temporal_ci_server.ps1 -Action start
+            if ($LASTEXITCODE -ne 0) { throw 'Temporal fixture start failed' }
+            backend/.venv/Scripts/python.exe tools/run_native_temporal_tests.py --integration
+            if ($LASTEXITCODE -ne 0) { throw 'Prepared native Temporal qualification failed' }
+          } finally {
+            ./tools/native_temporal_ci_server.ps1 -Action stop
+          }
+      - name: Stop only this job's Temporal fixture
+        if: always()
+        run: ./tools/native_temporal_ci_server.ps1 -Action stop
       - name: Stop only this job's native PostgreSQL fixture
         if: always()
         run: ./tools/native_store_ci_postgres.ps1 -Action stop
