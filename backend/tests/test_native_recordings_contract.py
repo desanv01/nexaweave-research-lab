@@ -77,6 +77,31 @@ def hashes(root):
             for p in root.rglob("*") if p.is_file()}
 
 
+def test_describe_is_detached_pinned_bounded_metadata_only(tmp_path):
+    root, _ = fixture_source(tmp_path)
+    target = tmp_path / "bundle"
+    revision = capture(root, target)
+    host = NativeRecording(target, anchors=ANCHORS, expected_revision=revision)
+    expected = host.describe()
+    assert expected == {"version": 1, "recording_revision": revision,
+        "anchors": ANCHORS.wire(), "platforms": ["twitter", "reddit"],
+        "runtime_sha256": "1" * 64,
+        "runtime_versions": strict_json((target / "recording.json").read_bytes())["runtime_versions"],
+        "artifact_sha256": {name: digest((root / name).read_bytes()) for name in (
+            "simulation_config.json", "source_grounding.json", "twitter_profiles.csv", "reddit_profiles.json")}}
+    assert len(canonical(expected)) < 4096
+    edited = host.describe()
+    edited["anchors"]["run_id"] = "other"
+    edited["runtime_versions"]["camel"] = "other"
+    edited["artifact_sha256"].clear()
+    edited["platforms"].clear()
+    (target / "simulation_config.json").write_bytes(b"tamper")
+    (target / "recording.json").write_bytes(b"tamper")
+    assert host.describe() == expected
+    with pytest.raises(RecordingError):
+        NativeRecording(target, anchors=ANCHORS, expected_revision=revision)
+
+
 @pytest.mark.parametrize("raw", [
     b'{"version":1,"version":1}', b'NaN', b'Infinity', b'{}', b'[]',
     b'{"version":true,"operation":"playback","platform":"twitter","limit":1}',

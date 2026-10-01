@@ -467,11 +467,30 @@ class NativeRecording:
             self._artifacts = artifacts
             self._events = events
             self._schemas = schemas
+            self._runtime_sha256 = manifest["runtime_sha256"]
+            self._runtime_versions = dict(manifest["runtime_versions"])
         except RecordingError:
             raise
         except (OSError, ValueError, TypeError, KeyError, UnicodeError, sqlite3.Error,
                 RecursionError, OverflowError, csv.Error):
             raise RecordingError() from None
+
+    def describe(self):
+        """Detached metadata pinned to admitted bytes, without paths or content.
+
+        Fingerprints compare bytes only; they do not establish semantic or
+        provider equivalence. Subsequent bundle edits cannot change this view.
+        """
+        names = ("simulation_config.json", "source_grounding.json", *(
+            "twitter_profiles.csv" if p == "twitter" else "reddit_profiles.json"
+            for p in self._platforms))
+        value = {"version": 1, "recording_revision": self._revision,
+                 "anchors": self._anchors.wire(), "platforms": list(self._platforms),
+                 "runtime_sha256": self._runtime_sha256,
+                 "runtime_versions": dict(self._runtime_versions),
+                 "artifact_sha256": {name: digest(self._artifacts[name]) for name in names}}
+        raw = canonical(value)
+        return strict_json(raw, MAX_JSON)
 
     def _cursor(self, platform, offset):
         return base64.urlsafe_b64encode(canonical(
