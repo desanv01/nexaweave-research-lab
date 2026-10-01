@@ -12,10 +12,13 @@ import json
 import os
 from collections.abc import Mapping
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
+import httpx
+
+from .local_transport import LocalPolicyViolation, LocalTransport, local_endpoint
 
 from .contracts import FactResult, GraphPage, GraphPageRequest, IngestResult, KnowledgeScope, OntologySpec, SearchQuery, SearchResult, SourceEnvelope
 from .operations import CompletionReceipt, request_fingerprint
@@ -23,6 +26,7 @@ from .operations import CompletionReceipt, request_fingerprint
 os.environ["GRAPHITI_TELEMETRY_ENABLED"] = "false"  # before any graphiti_core import
 
 from graphiti_core import Graphiti
+from graphiti_core.driver.neo4j_driver import Neo4jDriver
 from graphiti_core.llm_client import LLMConfig
 from graphiti_core.llm_client.openai_generic_client import OpenAIGenericClient
 from graphiti_core.embedder.openai import OpenAIEmbedder, OpenAIEmbedderConfig
@@ -49,7 +53,7 @@ class ScopeViolation(RuntimeError):
 
 
 class Endpoint(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True, hide_input_in_errors=True)
     base_url: str
     model: str = Field(min_length=1)
     api_key: SecretStr = Field(repr=False)
@@ -63,7 +67,8 @@ class Endpoint(BaseModel):
 
 
 class ProviderConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True, hide_input_in_errors=True)
+    operating_profile: Literal["hybrid", "local_only"] = "hybrid"
     neo4j_uri: str
     neo4j_user: str
     neo4j_password: SecretStr = Field(repr=False)
@@ -77,6 +82,19 @@ class ProviderConfig(BaseModel):
     max_tokens: int = Field(default=4096, ge=128, le=32768)
     max_coroutines: int = Field(default=4, ge=1, le=32)
     total_llm_call_budget: int = Field(default=32, ge=1, le=10000)
+
+    @model_validator(mode="after")
+    def local_admission(self):
+        if self.operating_profile == "local_only":
+            local_endpoint(self.neo4j_uri, bolt=True)
+            for endpoint in (self.llm, self.embedding, self.reranker):
+                if endpoint is not None:
+                    local_endpoint(endpoint.base_url)
+                    if not endpoint.model.strip():
+                        raise LocalPolicyViolation("explicit local model required")
+            if self.search_recipe == "hybrid_cross_encoder" and self.reranker is None:
+                raise LocalPolicyViolation("explicit local reranker required")
+        return self
 
     @field_validator("neo4j_password")
     @classmethod
@@ -99,11 +117,16 @@ class ProviderConfig(BaseModel):
             except ValueError as exc:
                 raise ValueError(f"{name} must be a valid {cast.__name__}") from exc
 
+        profile = os.getenv("KNOWLEDGE_OPERATING_PROFILE", "hybrid")
+        if profile not in {"hybrid", "local_only"}:
+            raise ValueError("unsupported knowledge operating profile")
+        local = profile == "local_only"
         return cls(
+            operating_profile=profile,
             neo4j_uri=required("KNOWLEDGE_NEO4J_URI"),
             neo4j_user=required("KNOWLEDGE_NEO4J_USER"),
             neo4j_password=required("KNOWLEDGE_NEO4J_PASSWORD"),
-            llm=Endpoint(base_url=os.getenv("KNOWLEDGE_LLM_BASE_URL", "https://api.deepseek.com"), model=os.getenv("KNOWLEDGE_LLM_MODEL", "deepseek-flash"), api_key=required("KNOWLEDGE_LLM_API_KEY")),
+            llm=Endpoint(base_url=required("KNOWLEDGE_LLM_BASE_URL") if local else os.getenv("KNOWLEDGE_LLM_BASE_URL", "https://api.deepseek.com"), model=required("KNOWLEDGE_LLM_MODEL") if local else os.getenv("KNOWLEDGE_LLM_MODEL", "deepseek-flash"), api_key=required("KNOWLEDGE_LLM_API_KEY")),
             embedding=Endpoint(base_url=required("KNOWLEDGE_EMBEDDING_BASE_URL"), model=required("KNOWLEDGE_EMBEDDING_MODEL"), api_key=required("KNOWLEDGE_EMBEDDING_API_KEY")),
             embedding_dimension=int(required("KNOWLEDGE_EMBEDDING_DIMENSION")),
             reranker=Endpoint(base_url=required("KNOWLEDGE_RERANKER_BASE_URL"), model=required("KNOWLEDGE_RERANKER_MODEL"), api_key=required("KNOWLEDGE_RERANKER_API_KEY")) if os.getenv("KNOWLEDGE_SEARCH_RECIPE") == "hybrid_cross_encoder" else None,
@@ -197,9 +220,30 @@ class GraphitiKnowledgeProvider:
         self.config = config
         self.graphiti = graphiti
         self._owned_clients: list[AsyncOpenAI] = []
+        self._owned_http_clients: list[httpx.AsyncClient] = []
+        self._owned_transports: list[LocalTransport] = []
+        self._closed = False
+        self._owned_driver: Any = None
+        if graphiti is not None and config is not None and config.operating_profile == "local_only":
+            raise LocalPolicyViolation("injected graph client denied in local knowledge profile")
 
     async def initialize(self) -> None:
+        if self._closed:
+            raise RuntimeError("provider is closed")
+        try:
+            await self._initialize()
+        except BaseException:
+            try:
+                await self.close()
+            except BaseException:
+                pass  # Preserve the original initialization failure.
+            raise
+
+    async def _initialize(self) -> None:
         if self.graphiti is not None:
+            if ((self.config and self.config.operating_profile == "local_only")
+                    or (self.config is None and os.getenv("KNOWLEDGE_OPERATING_PROFILE") == "local_only")):
+                raise LocalPolicyViolation("injected graph client denied in local knowledge profile")
             await self.graphiti.build_indices_and_constraints()
             return
         config = self.config or ProviderConfig.from_env()
@@ -212,12 +256,20 @@ class GraphitiKnowledgeProvider:
             raise ValueError("reranker endpoint required for cross encoder recipe")
 
         def client(endpoint: Endpoint) -> AsyncOpenAI:
-            instance = AsyncOpenAI(api_key=endpoint.api_key.get_secret_value(), base_url=endpoint.base_url, timeout=config.call_timeout_seconds, max_retries=0)
+            options = {}
+            if config.operating_profile == "local_only":
+                transport = LocalTransport(endpoint.base_url)
+                self._owned_transports.append(transport)
+                http_client = httpx.AsyncClient(transport=transport, trust_env=False,
+                                               follow_redirects=False, timeout=config.call_timeout_seconds)
+                self._owned_http_clients.append(http_client)
+                options["http_client"] = http_client
+            instance = AsyncOpenAI(api_key=endpoint.api_key.get_secret_value(), base_url=endpoint.base_url, timeout=config.call_timeout_seconds, max_retries=0, **options)
             self._owned_clients.append(instance)
             return instance
 
         llm = BoundedGenericClient(
-            config=LLMConfig(api_key=config.llm.api_key.get_secret_value(), base_url=config.llm.base_url, model=config.llm.model, temperature=0, max_tokens=config.max_tokens),
+            config=LLMConfig(api_key=config.llm.api_key.get_secret_value(), base_url=config.llm.base_url, model=config.llm.model, small_model=config.llm.model if config.operating_profile == "local_only" else None, temperature=0, max_tokens=config.max_tokens),
             client=client(config.llm), max_tokens=config.max_tokens,
             structured_output_mode=config.structured_output_mode, budget=config.total_llm_call_budget,
         )
@@ -229,13 +281,19 @@ class GraphitiKnowledgeProvider:
         # configured route even with RRF, so no hidden default client can escape.
         rerank_endpoint = config.reranker or config.llm
         reranker = OpenAIRerankerClient(
-            config=LLMConfig(api_key=rerank_endpoint.api_key.get_secret_value(), base_url=rerank_endpoint.base_url, model=rerank_endpoint.model),
+            config=LLMConfig(api_key=rerank_endpoint.api_key.get_secret_value(), base_url=rerank_endpoint.base_url, model=rerank_endpoint.model, small_model=rerank_endpoint.model if config.operating_profile == "local_only" else None),
             client=client(rerank_endpoint),
         )
+        graph_options = {}
+        if config.operating_profile == "local_only":
+            self._owned_driver = Neo4jDriver(config.neo4j_uri, config.neo4j_user,
+                                            config.neo4j_password.get_secret_value())
+            graph_options["graph_driver"] = self._owned_driver
         self.graphiti = CommunityGraphiti(
             uri=config.neo4j_uri, user=config.neo4j_user, password=config.neo4j_password.get_secret_value(),
             llm_client=llm, embedder=embedder, cross_encoder=reranker,
             max_coroutines=config.max_coroutines,
+            **graph_options,
         )
         await self.graphiti.build_indices_and_constraints()
 
@@ -451,7 +509,25 @@ class GraphitiKnowledgeProvider:
         return SearchResult(facts=tuple(facts))
 
     async def close(self) -> None:
-        if self.graphiti is not None:
-            await self.graphiti.close()
-        for client in self._owned_clients:
-            await client.close()
+        if self._closed:
+            return
+        self._closed = True
+        graphiti, self.graphiti = self.graphiti, None
+        clients, self._owned_clients = self._owned_clients, []
+        http_clients, self._owned_http_clients = self._owned_http_clients, []
+        transports, self._owned_transports = self._owned_transports, []
+        driver, self._owned_driver = self._owned_driver, None
+        errors = []
+        if graphiti is not None:
+            try:
+                await graphiti.close()
+                driver = None  # Graphiti owns the driver's successful close.
+            except BaseException as exc:
+                errors.append(exc)
+        for resource, method in ([(driver, "close")] if driver is not None else []) + [(c, "close") for c in clients] + [(c, "aclose") for c in http_clients] + [(t, "aclose") for t in transports]:
+            try:
+                await getattr(resource, method)()
+            except BaseException as exc:
+                errors.append(exc)
+        if errors:
+            raise errors[0]

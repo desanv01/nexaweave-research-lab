@@ -92,6 +92,8 @@ jobs:
         run: docker compose -f infra/compose.operations-test.yml up -d --wait --wait-timeout 120
       - name: Run contracts and real database tests with fake models
         run: services/knowledge/.venv/bin/python tools/run_knowledge_tests.py --neo4j
+      - name: Qualify local-only knowledge policy and actual SDK requests
+        run: services/knowledge/.venv/bin/python tools/run_local_provider_tests.py --neo4j
       - name: Qualify temporal layered research and retained citations with real stores
         run: services/knowledge/.venv/bin/python tools/run_evidence_research_tests.py --integration
       - name: Qualify cited evidence dossiers and fresh JSON CLI with real stores
