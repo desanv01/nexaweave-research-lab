@@ -471,3 +471,8 @@ Git/acceptance; no fullC39/U12/real model/host-wide privacy/all44/paid/public cl
 ## Main2026-10-01: U14a source packaging candidate reviewed
 
 Corrected stableidle9, seven source/task hashes retained and preserved through accepted-baseFF1d8b3ba. Main baseline128/31/diff/sourceAST/CI YAML pass. Focused Windows57-case unittest qualification running; no full local pass yet. Main added actual committed-tree artifact build/verify/determinism CI probe; existing unit discovery collects new cases. Draft hosted qualification and actual candidate artifact still pending, not release acceptance. Separate U11b owns releasedu00 and authors connected protected Vue workbench using human-selected installed local design guidance; no12ui charge. Main owns all checks/Git/acceptance. Issue69 closedPR70/all8postgreen; issue3fullquality remainsopen.
+
+
+## Main2026-10-01: U04b selected retained-source bundle candidate
+
+Correction2 stableidle3 reviewed; three sets of seven source/task hashes retained. Accepted-baseFFb96f50d preserved correction1 bytes. Main found and corrected legitimate metadata-reference rejection, missing early aggregate admission and actual Windows path/fstat ctime discrepancy. Noneditable offline install; sanitized actual combined47pass/1 documented Windows link skip5.71s includes all4 real PostgreSQL/freshCLI cases. Initial41pass/1skip/1failure and metadata-only reproduction retained. No weakening/skipping failed inspect; changed-file checks retained within each stat API. Main added bounded runner and fresh install/qualification in existing project-store CI; requireLinux48/no skips/all8 exact jobs. Fixtures stopped/data preserved. FullC41/U04/all44 remainopen; no import/graph/binary restoration/paid/public claim.
