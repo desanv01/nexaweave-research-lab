@@ -153,7 +153,7 @@ def test_v1_upgrade_preserves_rows_and_rolls_back_failed_v2(factory, monkeypatch
                 assert conn.execute("SELECT version FROM mf_app.schema_migrations").fetchall() == [(1,)]
                 migrate(conn)
                 migrate(conn)
-                assert conn.execute("SELECT version FROM mf_app.schema_migrations ORDER BY version").fetchall() == [(1,), (2,)]
+                assert conn.execute("SELECT version FROM mf_app.schema_migrations ORDER BY version").fetchall() == [(1,), (2,), (3,)]
                 assert conn.execute("SELECT count(*) FROM mf_app.projects WHERE project_id=%s", (owner_project,)).fetchone()[0] == 1
                 conn.execute("ALTER TABLE mf_app.source_revisions ADD COLUMN rogue integer")
                 with pytest.raises(MigrationMismatch):
@@ -161,7 +161,7 @@ def test_v1_upgrade_preserves_rows_and_rolls_back_failed_v2(factory, monkeypatch
                 raise RollbackFixture()
 
 
-def test_fresh_v2_install_and_sql_checksum_denial(factory):
+def test_fresh_v3_install_and_sql_checksum_denial(factory):
     class RollbackFixture(Exception):
         pass
     with factory() as conn:
@@ -169,7 +169,7 @@ def test_fresh_v2_install_and_sql_checksum_denial(factory):
             with conn.transaction():
                 conn.execute("DROP SCHEMA mf_app CASCADE")
                 migrate(conn)
-                assert conn.execute("SELECT version FROM mf_app.schema_migrations ORDER BY version").fetchall() == [(1,), (2,)]
+                assert conn.execute("SELECT version FROM mf_app.schema_migrations ORDER BY version").fetchall() == [(1,), (2,), (3,)]
                 assert conn.execute("SELECT to_regclass('mf_app.passage_evidence')").fetchone()[0] is not None
                 conn.execute("UPDATE mf_app.schema_migrations SET sql_sha256=%s WHERE version=1", ("0" * 64,))
                 with pytest.raises(MigrationMismatch):
