@@ -18,22 +18,30 @@ def child(integration: bool) -> int:
     guard.install()
     try:
         import pytest
-        targets = ["tests/test_temporal_execution.py"]
+        targets = ["tests/test_temporal_execution.py",
+                   "tests/test_temporal_native_execution.py"]
+        integration_names = ("test_temporal_execution_integration.py",
+                             "test_temporal_native_execution_integration.py")
         if integration:
-            targets.append("tests/test_temporal_execution_integration.py")
+            targets.extend("tests/" + name for name in integration_names)
         class Qualification:
-            passed = 0
-            skipped = 0
+            def __init__(self):
+                self.passed = dict.fromkeys(integration_names, 0)
+                self.skipped = dict.fromkeys(integration_names, 0)
+
             def pytest_runtest_logreport(self, report):
-                if "test_temporal_execution_integration.py::" in report.nodeid:
-                    if report.skipped:
-                        self.skipped += 1
-                    if report.when == "call" and report.passed:
-                        self.passed += 1
+                for name in integration_names:
+                    if name + "::" in report.nodeid:
+                        if report.skipped:
+                            self.skipped[name] += 1
+                        if report.when == "call" and report.passed:
+                            self.passed[name] += 1
         qualification = Qualification()
         result = int(pytest.main(["-q", "-p", "pytest_asyncio.plugin", *targets],
                                  plugins=[qualification]))
-        if integration and (qualification.skipped or qualification.passed < 1):
+        if integration and any(qualification.skipped[name]
+                               or qualification.passed[name] < 1
+                               for name in integration_names):
             print("temporal_integration_incomplete", file=sys.stderr)
             result = 1
     finally:
