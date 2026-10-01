@@ -398,3 +398,8 @@ PR59 accepted094026f as7346d16; all8PR/push/postmergeCI succeeded. U03q correcte
 ## Main2026-10-01: U07a connected effective native controls locally qualified
 
 Separate U07 chat01a0f513-6222-7b13-a88f-fe10b2b63b20 owns u03 candidate at accepted819fd3. Main actual offline native35passes/no skips and corrected pure41passes/no skips; actual feed/follow/local scheduling effects, frozen defaults and failure cleanup reviewed. Original unit run617passes/18existing skips, two Windows symlink privilege failures and corrected test fixture mismatch documented in coordination/reviews/U07a.md. Manifest128/28 and diffcheck passed, engine source unchanged. Main exact PR/push CI acceptance remains pending. U06 separately owned u00 candidate remains under CLI stderr qualification. Latest workers6.1Sol/medium, Main6.1Sol/high; Fast requests unverified. No whole-phase/all44/paid/public acceptance.
+
+
+## Main2026-10-01: U06a evidence research locally qualified
+
+Separate U06 worker01a0f50b-85d9-7cb1-8b2b-576e8635e5e5 stable idle6. Main real guarded Neo4j/PostgreSQL and actual fresh JSON CLI76passes/no skips31.43s, source hashes unchanged. Historical provenance correction, retained codepoint citations, lexical ranking/coverage and origin scopes reviewed; test-only typed minimal-schema notification filter preserves all other stderr failures. Fixtures stopped retaining data/logs. Main FFaccepted U07 merge5b99b104 preserved all candidate/CI bytes; manifest128/28 and diff checks passed. Exact hosted gates pending, no whole U06/all44 or paid/UI acceptance.
