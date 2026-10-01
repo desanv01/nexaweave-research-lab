@@ -268,6 +268,8 @@ jobs:
         run: services/knowledge/.venv/bin/python tools/run_document_source_tests.py
       - name: Qualify portable retained-source bundles and database-free inspection
         run: services/knowledge/.venv/bin/python tools/run_research_bundle_tests.py --integration
+      - name: Qualify atomic owned source import and sequential migration rollback
+        run: services/knowledge/.venv/bin/python tools/run_research_import_tests.py --integration
       - name: Verify one-time native run authority and owned child lifecycle
         run: services/knowledge/.venv/bin/python tools/run_native_run_ownership_tests.py --postgres
       - name: Test database diagnostics on failure

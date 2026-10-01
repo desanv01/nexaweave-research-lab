@@ -111,7 +111,8 @@ def migrate(connection: psycopg.Connection) -> None:
     """Apply sequential owned migrations after checking the current catalog head."""
     migrations = []
     for version, filename in ((1, "0001_project_revisions.sql"),
-                              (2, "0002_source_evidence.sql")):
+                              (2, "0002_source_evidence.sql"),
+                              (3, "0003_research_imports.sql")):
         sql = files("mirofish_storage").joinpath("migrations", filename).read_text("utf-8")
         migrations.append((version, sql, hashlib.sha256(sql.encode("utf-8")).hexdigest()))
     try:
