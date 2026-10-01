@@ -55,14 +55,15 @@ def observe(frame,event,arg):
             allowed={'HOME','TMPDIR','TMP','TEMP','GRAPHITI_TELEMETRY_ENABLED','PYTHONNOUSERSITE',
                      'PATH','LANG','SystemRoot','WINDIR','USERPROFILE'}
             safe=(len(arguments)==4 and arguments[1:3]==['-I','-u']
-                  and Path(arguments[3]).name=='evidence_bootstrap.py'
+                  and Path(arguments[3]).name in {'read_bootstrap.py','evidence_bootstrap.py'}
                   and 'site-packages' in Path(arguments[3]).parts
                   and all(k in allowed or k in {
                       'KNOWLEDGE_PRINCIPAL','KNOWLEDGE_DISPLAY_GRAPH_ID','KNOWLEDGE_BOUND_SCOPE_JSON',
                       'KNOWLEDGE_PG_HOST','KNOWLEDGE_PG_PORT','KNOWLEDGE_PG_DATABASE','KNOWLEDGE_PG_USER',
                       'KNOWLEDGE_PG_PASSWORD','KNOWLEDGE_NEO4J_URI','KNOWLEDGE_NEO4J_USER',
                       'KNOWLEDGE_NEO4J_PASSWORD'} for k in env))
-            emit({'event':'spawn','safe':safe,'pid':child.pid})
+            emit({'event':'spawn','safe':safe,'pid':child.pid,
+                  'bootstrap':Path(arguments[3]).name if len(arguments)==4 else None})
     if event=='return' and module=='app.services.knowledge_transport' and name=='_stop_owned':
         child=frame.f_locals.get('process')
         threads=frame.f_locals.get('threads',[])
@@ -118,6 +119,28 @@ def _exchange(port, method, path, body=None, *, token=None, origin=None):
 @pytest.mark.asyncio
 async def test_actual_http_installed_pipe_retained_evidence_history_and_denial(retained_graph, tmp_path):
     f = retained_graph
+    # Only this test's disposable groups receive complete node provenance. The
+    # shared evidence fixture intentionally needs no MENTIONS for edge research.
+    # Bind each episode/edge and both endpoints to the SAME owned group; never
+    # create unscoped links or weaken production enumeration's provenance guard.
+    source_nodes = None
+    source_evidence = None
+    for scope, episode, edge in zip((f["source"], f["simulation"]), f["episodes"], f["edges"], strict=True):
+        records, _, _ = await f["writer"].execute_query(
+            "MATCH (e:Episodic {uuid:$episode,group_id:$group_id}), "
+            "(o:MiroFishIngest {uuid:$episode,group_id:$group_id,status:'complete'}), "
+            "(a:Entity {group_id:$group_id})-[r:RELATES_TO {uuid:$edge,group_id:$group_id}]->"
+            "(b:Entity {group_id:$group_id}) "
+            "WHERE $episode IN r.episodes "
+            "MERGE (e)-[:MENTIONS]->(a) MERGE (e)-[:MENTIONS]->(b) "
+            "RETURN a.uuid AS source_id,b.uuid AS target_id,o.evidence_ids AS evidence_ids",
+            parameters_={"episode": episode, "edge": edge, "group_id": scope.group_id})
+        assert len(records) == 1
+        assert len(records[0]["evidence_ids"]) == len(set(records[0]["evidence_ids"])) == 2
+        if scope == f["source"]:
+            source_nodes = (records[0]["source_id"], records[0]["target_id"])
+            source_evidence = set(records[0]["evidence_ids"])
+    assert source_nodes is not None and source_evidence is not None
     backend_python = os.environ.get("MIROFISH_WORKBENCH_BACKEND_PYTHON")
     knowledge_python = os.environ.get("KNOWLEDGE_PYTHON")
     bootstrap = os.environ.get("KNOWLEDGE_BOOTSTRAP_SCRIPT")
@@ -177,7 +200,7 @@ async def test_actual_http_installed_pipe_retained_evidence_history_and_denial(r
             assert ResearchResult.model_validate_json(json.dumps(result["result"])).resolved_citations == 4
     output_path, error_path = tmp_path / "http-events.jsonl", tmp_path / "http-errors.log"
     process = None
-    calls = 0
+    calls = 0  # Evidence calls each own one child; graph GET owns two page children.
     try:
         with output_path.open("wb") as output, error_path.open("wb") as errors:
             process = subprocess.Popen([backend_python, "-I", "-u", "-c", _HTTP_CHILD],
@@ -202,6 +225,27 @@ async def test_actual_http_installed_pipe_retained_evidence_history_and_denial(r
             assert (await http("POST", route, payload))[0] == 401
             assert (await http("POST", route, payload, token=token, origin="http://evil.example"))[0] == 403
             assert not [e for e in _events(output_path) if e.get("event") == "spawn"]
+            status, headers, body = await http("GET", "/api/graph/data/" + f["ids"][0],
+                token=token, origin="http://localhost:3000")
+            assert status == 200 and headers["Access-Control-Allow-Origin"] == "http://localhost:3000"
+            assert body["success"] is True and set(body) == {"success", "data"}
+            graph = body["data"]
+            assert graph["graph_id"] == f["ids"][0]
+            assert graph["node_count"] == len(graph["nodes"]) == 2
+            assert graph["edge_count"] == len(graph["edges"]) == 1
+            assert {node["uuid"] for node in graph["nodes"]} == set(source_nodes)
+            assert {node["name"] for node in graph["nodes"]} == {"Alice", "猫"}
+            for node in graph["nodes"]:
+                assert node["episodes"] == [f["episodes"][0]]
+                assert set(node["evidence_ids"]) == source_evidence
+            edge, = graph["edges"]
+            assert edge["uuid"] == f["edges"][0]
+            assert edge["source_node_uuid"] == source_nodes[0] and edge["source_node_name"] == "Alice"
+            assert edge["target_node_uuid"] == source_nodes[1] and edge["target_node_name"] == "猫"
+            assert edge["name"] == edge["fact_type"] == "WORKS_FOR"
+            assert edge["fact"] == "Alice works for 猫 source"
+            assert edge["episodes"] == [f["episodes"][0]] and set(edge["evidence_ids"]) == source_evidence
+            assert f["edges"][1] not in json.dumps(graph) and f["episodes"][1] not in json.dumps(graph)
             status, headers, body = await http("POST", route, payload, token=token, origin="http://localhost:3000")
             calls += 1
             assert status == 200 and headers["Access-Control-Allow-Origin"] == "http://localhost:3000"
@@ -209,6 +253,7 @@ async def test_actual_http_installed_pipe_retained_evidence_history_and_denial(r
             expected = await EvidenceResearchService("owner", f["factory"], f["new_driver"],
                 trusted_scope=f["source"]).research(research)
             assert actual == expected and actual.resolved_citations == 4
+            assert set(map(str, actual.source_claims[0].evidence_ids)) == source_evidence
             for claim in (*actual.source_claims, *actual.simulation_observations):
                 assert {c.excerpt for c in claim.citations} == {"😀猫 ", " ev"}
                 assert all(c.source_sha256 == f["retained"].text_sha256 for c in claim.citations)
@@ -244,8 +289,11 @@ async def test_actual_http_installed_pipe_retained_evidence_history_and_denial(r
     events = _events(output_path)
     spawned = [e for e in events if e.get("event") == "spawn"]
     cleaned = [e for e in events if e.get("event") == "cleanup"]
-    assert len(spawned) == len(cleaned) == calls == 4
-    assert len({e["pid"] for e in spawned}) == 4 and all(e["safe"] for e in spawned)
+    assert calls == 4
+    assert len(spawned) == len(cleaned) == calls + 2 == 6
+    assert len({e["pid"] for e in spawned}) == 6 and all(e["safe"] for e in spawned)
+    assert sum(e["bootstrap"] == "read_bootstrap.py" for e in spawned) == 2
+    assert sum(e["bootstrap"] == "evidence_bootstrap.py" for e in spawned) == calls
     assert all(e["closed"] for e in cleaned)
     assert {"event": "shutdown", "loopback_blocked": 0} in events
     # Re-admit both actual ledger scopes and retrieve unchanged retained passages.

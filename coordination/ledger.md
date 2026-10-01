@@ -1,5 +1,17 @@
 # Execution ledger
 
+## Successor — U11b connected workbench locally qualified, exact CI pending
+
+Main reviewed stable U11b source plus actual graph gate and two bounded browser
+clarifications. Final Node32/no skips3.430s/build718/5.61s, actual protected HTTP/
+installed-child/PG/Neo58passes/one known Windows POSIX-link skip68.88s and
+baseline128/32/diff pass. Browser actually connected graph/research/ordered
+citations/dossier/history and401clear/reconnect; keyboard/focus and responsive
+locales reviewed. Exact final browser/process-cleanup evidence retained by Main.
+Actual200percentzoom remains unverified/no fullaccessibility or wholeU11 claim.
+Main prepares reviewed exactcommit/draftPR/all8CI; no paid/public/full44 acceptance.
+Worker idle12, no implicit next packet. Separate U04b owns explicitly releasedu02.
+
 ## Successor — U05e locally qualified
 
 Final corrected worker idlecursor:55. Main reviewed full8files plus runner, retained

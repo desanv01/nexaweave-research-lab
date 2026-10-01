@@ -30,6 +30,7 @@
     "description": "MiroFish - Social Media Opinion Simulation System"
   },
   "nav": {
+    "researchWorkbench": "Evidence workbench",
     "visitGithub": "Visit our Github page"
   },
   "home": {
