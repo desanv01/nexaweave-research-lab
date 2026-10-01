@@ -66,6 +66,8 @@ jobs:
     timeout-minutes: 15
     env:
       KNOWLEDGE_TEST_PASSWORD: mirofish-ci-disposable-fixture-only
+      PROJECT_STORE_TEST_PASSWORD: mirofish-ci-disposable-operations-only
+      KNOWLEDGE_POSTGRES_TEST_PASSWORD: mirofish-ci-disposable-operations-only
       GRAPHITI_TELEMETRY_ENABLED: 'false'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -77,14 +79,21 @@ jobs:
         run: uv sync --locked --extra test --python 3.12.13
       - name: Start disposable real Neo4j Community
         run: docker compose -f infra/compose.knowledge-test.yml up -d --wait --wait-timeout 180
+      - name: Start disposable research PostgreSQL
+        run: docker compose -f infra/compose.operations-test.yml up -d --wait --wait-timeout 120
       - name: Run contracts and real database tests with fake models
         run: services/knowledge/.venv/bin/python tools/run_knowledge_tests.py --neo4j
+      - name: Qualify temporal layered research and retained citations with real stores
+        run: services/knowledge/.venv/bin/python tools/run_evidence_research_tests.py --integration
       - name: Test database diagnostics on failure
         if: failure()
         run: docker compose -f infra/compose.knowledge-test.yml logs --tail 100 neo4j
       - name: Remove only this job's disposable database
         if: always()
         run: docker compose -f infra/compose.knowledge-test.yml down -v
+      - name: Remove only this job's research PostgreSQL
+        if: always()
+        run: docker compose -f infra/compose.operations-test.yml down -v
 
   knowledge-operations:
     name: knowledge-operations
