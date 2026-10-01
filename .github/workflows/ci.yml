@@ -85,6 +85,8 @@ jobs:
         run: services/knowledge/.venv/bin/python tools/run_knowledge_tests.py --neo4j
       - name: Qualify temporal layered research and retained citations with real stores
         run: services/knowledge/.venv/bin/python tools/run_evidence_research_tests.py --integration
+      - name: Qualify cited evidence dossiers and fresh JSON CLI with real stores
+        run: services/knowledge/.venv/bin/python tools/run_evidence_dossier_tests.py --integration
       - name: Test database diagnostics on failure
         if: failure()
         run: docker compose -f infra/compose.knowledge-test.yml logs --tail 100 neo4j
