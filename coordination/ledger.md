@@ -1,5 +1,31 @@
 # Execution ledger
 
+## Successor — U05e locally qualified
+
+Final corrected worker idlecursor:55. Main reviewed full8files plus runner, retained
+9source hashes unchanged after execution. Real scrubbed Temporal+PG+owned offline
+child suites31passed68.49s, no skips; both requested integrationfiles nonempty.
+SDK cancellation observed by owning activity before explicit cleanup retry;
+receipt/duplicate/replay/recovery/uncertainty and retainedcleanup qualified.
+Manifest128/28 and diffcheck passed. Exact fixtures stopped; volume/DB/logs retained,
+no process left in qualifiedruntime. No runtime/lock/acceptedseam changes.
+Main prepares exactcommit/draftPR/CI. Fullactualnative-throughTemporal/full44 open.
+
+## Successor — PR58 accepted; U05e bounded Temporal-native packet active
+
+Main accepted db3be2ccff8846940edbe24f4f0bd6cf6dd086c5 after all8PR/pushCI
+36794989103/36794980513 success, including13combinedactualnative/PG29.25s no skips.
+Merge d95057374b5c0148351f71978064587aac94fbc7; acceptance5922086234.
+All8postmerge36795421988 passed exactmerge; critical logs retained by Main.
+Main verified U05 idle/clean, FFu00 toacceptedmerge, newbranch task/u05-temporal-native;
+SAME worker assigned U05e implementation only with restricted newfiles.
+Main prepared runner's two-file realTemporal integration no-skip/nonempty guard.
+Existing lockedruntime Python3.12.13/TemporalSDK1.33.0/PG3.3.6 verified;
+fresh checksum-verified hidden testserver PID25936 onlyloopback17233/4/5 and retained
+exactPGfixture15432 ready. No candidate execution before stable handoff/Main review.
+Main remains active through worker/test/CI waits; no duplicate worker/automation.
+Fullactualnative-throughTemporal/reportIPC/checkpoints/full44/livepaid remain open.
+
 ## Successor — U03p locally qualified
 
 Corrected stable worker idle cursorbf79f8a2-75ea-4a29-a23c-944da7a79052:4.
