@@ -210,26 +210,34 @@
     {
       "imported_path": "locales/en.json",
       "original_sha256": "b47c61ba64330cf5094ce611ff270c95f22f0ce4e98bfb6fa05ee6c6e5b93f84",
-      "current_sha256": "921051fb74e90f520df686e7ee119299018a375f1dbf56dbf223941e05306e03",
-      "reason": "U13a updates only the English supported-format label for DOCX.",
-      "phase": "U13a",
-      "review_status": "Main source reviewed; pending U13a exact-head qualification"
+      "current_sha256": "a6a2125d80feb11c4e3bff9609e434a79b05ddab7727459854108f8f1dd07aa9",
+      "reason": "U13a updates only the English supported-format label for DOCX. U11b adds only the English Home workbench navigation label; inherited catalog remains.",
+      "phase": "U13a/U11b",
+      "review_status": "Main source reviewed; pending U11b exact-revision CI acceptance"
     },
     {
       "imported_path": "locales/zh.json",
       "original_sha256": "7d44d70ca75e89c79c2ce793ddceab32cf7b251bc9210cf81c04d37daf3daab8",
-      "current_sha256": "e48e2784d57e7c30da10c246c43524121afd29a8e4199e1b43261bf5ddf909f2",
-      "reason": "U13a updates only the Chinese supported-format label for DOCX.",
-      "phase": "U13a",
-      "review_status": "Main source reviewed; pending U13a exact-head qualification"
+      "current_sha256": "140c0ce49df1d84aef891a9d93a3941ede25e7641fc44eb054b31371bd8e47a4",
+      "reason": "U13a updates only the Chinese supported-format label for DOCX. U11b adds only the Chinese Home workbench navigation label; inherited catalog remains.",
+      "phase": "U13a/U11b",
+      "review_status": "Main source reviewed; pending U11b exact-revision CI acceptance"
     },
     {
       "imported_path": "frontend/src/views/Home.vue",
       "original_sha256": "7ebc342c34556912542030bf9e7c98e6ee4d754fe93a44601cd5c7699adcb409",
-      "current_sha256": "5505db07d1038ab412243ede3e9f30bbc07688ed59cbd916752c9492445ed205",
-      "reason": "U13a adds DOCX and already-supported MARKDOWN to the existing upload accept/filter list; no layout/style changes.",
-      "phase": "U13a",
-      "review_status": "Main source reviewed; pending U13a exact-head qualification"
+      "current_sha256": "13f23ed6e580bd687f9eda93c0b4042808820c483a599aa7b5f0b9167e0f71bb",
+      "reason": "U13a adds DOCX and already-supported MARKDOWN to the existing upload accept/filter list; no layout/style changes. U11b adds one localized navigation link to the protected local evidence workbench; inherited Home upload/workflow behavior remains.",
+      "phase": "U13a/U11b",
+      "review_status": "Main source reviewed; pending U11b exact-revision CI acceptance"
+    },
+    {
+      "imported_path": "frontend/src/router/index.js",
+      "original_sha256": "f97c15b4318d0b2b765ebd66e7adfbef91c13023add038cabaed4f2461506d93",
+      "current_sha256": "77fdea05fc8b8c52127f474b704a592b4b84c7640bbcbb07f65fe3a3798a68d6",
+      "reason": "U11b adds one lazy /research route while preserving all inherited routes.",
+      "phase": "U11b",
+      "review_status": "Main source reviewed; pending U11b exact-revision CI acceptance"
     }
   ]
 }

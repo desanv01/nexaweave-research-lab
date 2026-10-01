@@ -30,6 +30,7 @@
     "description": "MiroFish - 社交媒体舆论模拟系统"
   },
   "nav": {
+    "researchWorkbench": "证据工作台",
     "visitGithub": "访问我们的Github主页"
   },
   "home": {
