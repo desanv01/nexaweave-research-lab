@@ -403,3 +403,8 @@ Separate U07 chat01a0f513-6222-7b13-a88f-fe10b2b63b20 owns u03 candidate at acce
 ## Main2026-10-01: U06a evidence research locally qualified
 
 Separate U06 worker01a0f50b-85d9-7cb1-8b2b-576e8635e5e5 stable idle6. Main real guarded Neo4j/PostgreSQL and actual fresh JSON CLI76passes/no skips31.43s, source hashes unchanged. Historical provenance correction, retained codepoint citations, lexical ranking/coverage and origin scopes reviewed; test-only typed minimal-schema notification filter preserves all other stderr failures. Fixtures stopped retaining data/logs. Main FFaccepted U07 merge5b99b104 preserved all candidate/CI bytes; manifest128/28 and diff checks passed. Exact hosted gates pending, no whole U06/all44 or paid/UI acceptance.
+
+
+## Main2026-10-01: U08a recorded playback locally qualified
+
+Separate U08 chat01a0f52d-9dc5-7bd0-8ff3-da8a4f979f24 stable idle7 at accepted96247df. Main reviewed and qualified immutable recording capture/playback/reconstruction: actual both-platform native/fresh CLI2passes/no skips38.12s, pure55passes/1Windows symlink-privilege skip18.46s. Linux CI must qualify symlinks; existing35native regressions passed unchanged. Windows stat mismatch corrected with full same-API identity checks. Source hashes retained, baseline128/28 and diff gates before exact hosted qualification. Closed owned source is trusted host boundary, not live checkpoint continuation/branch execution; both unsupported. No whole U08/all44/paid/UI/deploy acceptance.
