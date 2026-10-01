@@ -423,3 +423,18 @@ Separate U10 stable idlecursor8, eleven reviewed hashes retained/preserved after
 ## Main2026-10-01: U11a locally qualified authenticated evidence API
 
 Separate U11 stable correction idlecursor7. Main103backend/API/reader/readapp/population/cold-startpasses/no skips5.49s;58dispatcher/ordinarypipe/realHTTP-PGNeo4jpasses64.97s, one POSIX interpreter-link skip requires Linux59/no skips. Actual separate minimal locked HTTP backend/default facade/fresh installed child/retained citations/history/denial/cleanup verified. Test-ID correction only, twelve production/actual paths preserved; fourteen candidate plus four Main hashes unchanged after FFaccepted bd1643a. Main installs noneditable knowledge, derives hash-pinned HTTP subset from existing backend lock, updates one inherited factory SHA; baseline128/28 and diff passed. Exact hosted8PR/push/log gates pending. No frontend/wholeU11/all44/paid/public acceptance.
+
+
+## Main2026-10-01: U13a DOCX source locally qualified
+
+SeparateU13 stable idle6 after test-only raw ZIP fixture correction. Main198parser/upload
+passes36.84s/two known Windows symlink/FIFO skips,11actualPG/freshCLIpasses37.39s/
+one directory-link privilege skip. Production and actual test bytes unchanged;
+fifteen candidate/task hashes preserved through FFaccepted73c463c, nineteen
+including Main runners/CI/provenance retained. Frontend8/build712/baseline128/31
+and diff/YAML gates pass. Actual text/codepoint/table passage retention, ownership
+before document access, idempotence/conflicts/limits/cleanup verified. Linux must
+qualify all platform cases and12 actual source tests; exact8PR/push/log gates pending.
+U11 PR67 postmerge36812976510 attempt2 all8green after external registry502 retry.
+Only issue3fullquality remainsopen. Separate U12 activeu02; Main owns all execution.
+No fullU13/all44/paid/public or binary/render/semantic acceptance. Fixtures stopped.

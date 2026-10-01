@@ -258,6 +258,8 @@ jobs:
         run: docker compose -f infra/compose.operations-test.yml up -d --wait --wait-timeout 120
       - name: Verify project revision store
         run: services/knowledge/.venv/bin/python tools/run_project_store_tests.py --postgres
+      - name: Qualify DOCX source passages and fresh owned CLI
+        run: services/knowledge/.venv/bin/python tools/run_document_source_tests.py
       - name: Verify one-time native run authority and owned child lifecycle
         run: services/knowledge/.venv/bin/python tools/run_native_run_ownership_tests.py --postgres
       - name: Test database diagnostics on failure
