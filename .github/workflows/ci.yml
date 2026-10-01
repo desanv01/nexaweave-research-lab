@@ -196,10 +196,19 @@ jobs:
         run: ./tools/native_store_ci_postgres.ps1 -Action start
       - name: Qualify actual prepared native engine with PostgreSQL ownership
         run: backend/.venv/Scripts/python.exe tools/run_native_store_tests.py --postgres
-      - name: Start checksum-pinned job-local Temporal fixture
-        run: ./tools/native_temporal_ci_server.ps1 -Action start
       - name: Qualify prepared native engine through Temporal and PostgreSQL
-        run: backend/.venv/Scripts/python.exe tools/run_native_temporal_tests.py --integration
+        shell: pwsh
+        run: |
+          # Keep the Windows child server in this shell's lifetime; Actions can
+          # terminate child processes when the step that launched them exits.
+          try {
+            ./tools/native_temporal_ci_server.ps1 -Action start
+            if ($LASTEXITCODE -ne 0) { throw 'Temporal fixture start failed' }
+            backend/.venv/Scripts/python.exe tools/run_native_temporal_tests.py --integration
+            if ($LASTEXITCODE -ne 0) { throw 'Prepared native Temporal qualification failed' }
+          } finally {
+            ./tools/native_temporal_ci_server.ps1 -Action stop
+          }
       - name: Stop only this job's Temporal fixture
         if: always()
         run: ./tools/native_temporal_ci_server.ps1 -Action stop
