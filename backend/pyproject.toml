@@ -37,6 +37,7 @@ dependencies = [
 
 [project.optional-dependencies]
 native-store = ["psycopg[binary]==3.3.6"]
+native-temporal = ["psycopg[binary]==3.3.6", "temporalio==1.33.0"]
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
