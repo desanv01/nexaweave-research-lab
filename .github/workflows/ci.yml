@@ -77,6 +77,15 @@ jobs:
       - name: Install locked isolated knowledge runtime
         working-directory: services/knowledge
         run: uv sync --locked --extra test --python 3.12.13
+      - name: Install separate locked HTTP backend and non-editable knowledge package
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv export --locked --project backend --no-dev --no-emit-project --prune openai --prune zep-cloud --prune httpx --prune camel-oasis --prune camel-ai --prune pymupdf --prune charset-normalizer --prune chardet --prune pydantic --output-file "$RUNNER_TEMP/workbench-backend.txt" >/dev/null
+          uv venv --python 3.12.13 "$RUNNER_TEMP/workbench-backend"
+          uv pip install --require-hashes --python "$RUNNER_TEMP/workbench-backend/bin/python" -r "$RUNNER_TEMP/workbench-backend.txt"
+          uv pip install --python services/knowledge/.venv/bin/python --no-deps --reinstall services/knowledge
+          printf 'MIROFISH_WORKBENCH_BACKEND_PYTHON=%s\n' "$RUNNER_TEMP/workbench-backend/bin/python" >> "$GITHUB_ENV"
       - name: Start disposable real Neo4j Community
         run: docker compose -f infra/compose.knowledge-test.yml up -d --wait --wait-timeout 180
       - name: Start disposable research PostgreSQL
@@ -87,6 +96,8 @@ jobs:
         run: services/knowledge/.venv/bin/python tools/run_evidence_research_tests.py --integration
       - name: Qualify cited evidence dossiers and fresh JSON CLI with real stores
         run: services/knowledge/.venv/bin/python tools/run_evidence_dossier_tests.py --integration
+      - name: Qualify authenticated HTTP and installed evidence child with real stores
+        run: services/knowledge/.venv/bin/python tools/run_workbench_evidence_tests.py --integration
       - name: Test database diagnostics on failure
         if: failure()
         run: docker compose -f infra/compose.knowledge-test.yml logs --tail 100 neo4j

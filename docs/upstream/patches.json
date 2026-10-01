@@ -62,9 +62,9 @@
     {
       "imported_path": "backend/app/__init__.py",
       "original_sha256": "f04d262decf6c11437280c0f0c1353774f642888b2ef3f02dfa0e96e992b3c1c",
-      "current_sha256": "c9ca5443ff961ce92b0bc61d93147367a6b7537d0e310400c19f2d5789f9033c",
-      "reason": "U02d exact Origin/CORS and private logging retained. U03i selects explicit graphiti_readonly factory before inherited blueprints/runner; default legacy unchanged.",
-      "phase": "U02d/U03i"
+      "current_sha256": "e7e15e70922c3d68635bed0123588188387b50cb25b6cb30d06f77c17fcc52eb",
+      "reason": "U02d exact Origin/CORS and private logging retained. U03i selects explicit graphiti_readonly factory before inherited blueprints/runner; default legacy unchanged. U11a forwards optional evidence facade only in explicit read-only mode; legacy default unchanged.",
+      "phase": "U02d/U03i / U11a"
     },
     {
       "imported_path": "backend/app/config.py",

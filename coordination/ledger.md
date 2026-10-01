@@ -418,3 +418,8 @@ Separate U09chat01a0f543-cce5-7443-85a7-a7058e942de3 stable idle3. Main source r
 ## Main2026-10-01: U10a locally qualified; cancellation intent preserved
 
 Separate U10 stable idlecursor8, eleven reviewed hashes retained/preserved after FFaccepted e002806. Main pure101passes/1known Windows symlink privilege skip27.64s; actual native-store PG17passes/no skips124.30s including four U10 cases; existing native recording/fresh CLI2passes/no skips38.56s. Main review defect issue65 corrected explicit cancel_requested and digest without fabricated terminal cancellation/zero samples. Existing psycopg3.3.6 added lean CI profile, no runtime lock changes. Manifest128/28 and diff passed. Exact eight hosted PR/push gates/log review pending; no wholeU10/all44/paid/public acceptance.
+
+
+## Main2026-10-01: U11a locally qualified authenticated evidence API
+
+Separate U11 stable correction idlecursor7. Main103backend/API/reader/readapp/population/cold-startpasses/no skips5.49s;58dispatcher/ordinarypipe/realHTTP-PGNeo4jpasses64.97s, one POSIX interpreter-link skip requires Linux59/no skips. Actual separate minimal locked HTTP backend/default facade/fresh installed child/retained citations/history/denial/cleanup verified. Test-ID correction only, twelve production/actual paths preserved; fourteen candidate plus four Main hashes unchanged after FFaccepted bd1643a. Main installs noneditable knowledge, derives hash-pinned HTTP subset from existing backend lock, updates one inherited factory SHA; baseline128/28 and diff passed. Exact hosted8PR/push/log gates pending. No frontend/wholeU11/all44/paid/public acceptance.
