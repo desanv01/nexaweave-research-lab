@@ -41,3 +41,17 @@ PR66 exact09a8cc0 after all8PR36810165440/push36810160406SUCCESS and all final
 PR logs reviewed, mergedbd1643a; issue65 closed. Linux740 and Windows17actual
 nativePG/37native/4nativeTemporalPG passed. Main tracks postmerge36810995137;
 issue3 fullquality remains open.
+
+
+## U12 review follow-up
+
+[Issue69](https://github.com/desanv01/mirofish-research-lab/issues/69) tracks the
+actual enabled Neo4j usage-report default observed in retained PR67 startup logs.
+Main supplied-compose opt-out and actual local SHOW SETTINGS false are qualified;
+original fixture config/data/volume preserved. New CI local-provider gate requires
+actual setting false. Remains open pending exact reviewed PR acceptance; this is
+a reporting configuration fix, not wholeC39/host-wide privacy acceptance.
+
+U11 PR67 andU13 PR68 all8PR/push/postmergegates/logreview complete; bounded
+authenticated evidence API and DOCX/source CLI accepted. Issue3fullquality remains
+OPEN. No whole-phase/live-model/release acceptance inferred.

@@ -438,3 +438,19 @@ qualify all platform cases and12 actual source tests; exact8PR/push/log gates pe
 U11 PR67 postmerge36812976510 attempt2 all8green after external registry502 retry.
 Only issue3fullquality remainsopen. Separate U12 activeu02; Main owns all execution.
 No fullU13/all44/paid/public or binary/render/semantic acceptance. Fixtures stopped.
+
+
+## Main2026-10-01: U12a knowledge-local profile locally qualified
+
+SeparateU12 stableidle5 after two test-only corrections. Main61policy/real SDK HTTP
+passes, actual fresh Neo4j/HTTP/SDK1pass10.41s with guardedWindowsIOCP observation.
+Initial fake type broke SDK isinstance and initial observer omitted Proactor connects;
+production unchanged. Existing knowledge108passes/one known POSIX skip plus unchanged
+child10s startup timeout; failed target alone1pass7.99s at originaldeadline, no code
+change. Hosted Linux requires110existing/62new/no skips. Eleven candidate/integration
+hashes retained, accepted-baseFFedb0011 preserved all eight original hashes.
+Main issue69 fixes actual Neo4j reporting default: retained original config and
+volume, real SHOW SETTINGS verifiesfalse, suppliedcompose and CI gate assertfalse.
+Baseline128/31/diff/YAML pass. Fixtures stopped, no runtime lock/dependency change.
+U13 PR68 postmerge36814959074 all8green/logsreviewed. Main owns every hosted gate/
+Git/acceptance; no fullC39/U12/real model/host-wide privacy/all44/paid/public claim.

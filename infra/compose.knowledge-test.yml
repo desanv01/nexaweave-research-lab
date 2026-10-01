@@ -5,6 +5,7 @@ services:
     environment:
       NEO4J_AUTH: neo4j/${KNOWLEDGE_TEST_PASSWORD:?Set a non-default disposable test password}
       NEO4J_PLUGINS: '[]'
+      NEO4J_dbms_usage__report_enabled: 'false'
     ports:
       - "127.0.0.1:17687:7687"
       - "127.0.0.1:17474:7474"
