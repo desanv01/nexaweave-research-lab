@@ -4,14 +4,27 @@ import { createWorkbenchClient, WorkbenchError, awareTimestamp } from '../api/wo
 import { copyFor, safeError } from '../i18n/workbench.js'
 import EvidenceResults from '../components/workbench/EvidenceResults.vue'
 import SourceLibrary from '../components/workbench/SourceLibrary.vue'
+import SourceIngestion from '../components/workbench/SourceIngestion.vue'
 const locale = ref('en'), copy = computed(() => copyFor(locale.value))
 const origin = ref('http://127.0.0.1:5001'), graph = ref(''), token = ref(''), reveal = ref(false)
 const connected = ref(false), busy = ref(false), status = ref('disconnected'), errorCode = ref('')
+const ingestionRequest = ref('')
+const bannerError = computed(() => {
+  if (errorCode.value && ['unauthorized', 'origin_denied'].includes(errorCode.value)) return safeError(copy.value, errorCode.value)
+  if (ingestionRequest.value && (errorCode.value || status.value === 'cancelled')) return copy.value.ingestionBanner[ingestionRequest.value]
+  return errorCode.value ? safeError(copy.value, errorCode.value) : ''
+})
 const graphData = ref(null), result = ref(null), mode = ref('research'), query = ref(''), title = ref('')
 const sections = ref([{ heading: '', query: '' }]), advanced = ref(false), topK = ref(10), validAt = ref(''), recordedBefore = ref('')
 const graphPage = ref(0), graphKind = ref('nodes')
 const client = createWorkbenchClient()
 const sourceReset = ref(0)
+const inspectedSource = ref(null)
+const ingestionMethods = Object.freeze({
+  plan: (payload, inspected) => operation(() => client.ingestionPlan(payload, inspected), false, true, 'plan'),
+  execute: (payload, known) => operation(() => client.ingestionExecute(payload, known), false, true, 'execute'),
+  status: (payload, known) => operation(() => client.ingestionStatus(payload, known, undefined, inspectedSource.value?.source.project_id), false, true, 'status')
+})
 // Methods capture the single private client. Neither token nor origin is a prop.
 const sourceMethods = Object.freeze({
   list: () => operation(() => client.sourceList(), false, true),
@@ -20,13 +33,13 @@ const sourceMethods = Object.freeze({
 })
 let generation = 0
 const graphEntries = computed(() => graphData.value?.[graphKind.value] || [])
-function clearProtected() { sourceReset.value++; graphData.value = null; result.value = null; graphPage.value = 0 }
-function disconnect() { generation++; client.disconnect(); token.value = ''; reveal.value = false; connected.value = false; busy.value = false; clearProtected(); errorCode.value = ''; status.value = 'disconnected' }
+function clearProtected() { sourceReset.value++; inspectedSource.value = null; graphData.value = null; result.value = null; graphPage.value = 0 }
+function disconnect() { generation++; client.disconnect(); token.value = ''; reveal.value = false; connected.value = false; busy.value = false; clearProtected(); errorCode.value = ''; ingestionRequest.value = ''; status.value = 'disconnected' }
 function cancel() { generation++; client.cancel(); busy.value = false; status.value = 'cancelled'; errorCode.value = ''; if (!connected.value) { client.disconnect(); token.value = ''; clearProtected() } }
-async function operation(action, connecting = false, source = false) {
+async function operation(action, connecting = false, source = false, ingestion = '') {
   const epoch = ++generation
   client.cancel()
-  busy.value = true; errorCode.value = ''; status.value = connecting ? 'connecting' : 'loading'
+  busy.value = true; errorCode.value = ''; ingestionRequest.value = ingestion; status.value = connecting ? 'connecting' : 'loading'
   if (connecting) { connected.value = false; clearProtected() } else if (!source) result.value = null
   try {
     const data = await action()
@@ -36,8 +49,8 @@ async function operation(action, connecting = false, source = false) {
   } catch (e) {
     if (epoch !== generation) { if (source) throw e; return }
     errorCode.value = e instanceof WorkbenchError ? e.code : 'invalid_request'
-    status.value = errorCode.value === 'cancelled' ? 'cancelled' : errorCode.value === 'unauthorized' ? 'denied' : 'error'
-    if (connecting || errorCode.value === 'unauthorized') { client.disconnect(); connected.value = false; token.value = ''; reveal.value = false; clearProtected() }
+    status.value = errorCode.value === 'cancelled' ? 'cancelled' : ['unauthorized', 'origin_denied'].includes(errorCode.value) ? 'denied' : 'error'
+    if (connecting || ['unauthorized', 'origin_denied'].includes(errorCode.value)) { client.disconnect(); connected.value = false; token.value = ''; reveal.value = false; clearProtected() }
     if (source) throw e
   } finally { if (epoch === generation) busy.value = false }
 }
@@ -73,12 +86,13 @@ onBeforeUnmount(disconnect)
           <button type="button" :disabled="connected || busy" :aria-pressed="reveal" @click="reveal = !reveal">{{ reveal ? copy.hide : copy.reveal }}</button>
           <button v-if="!connected" class="primary" type="submit" :disabled="busy">{{ copy.connect }}</button><button v-else type="button" @click="disconnect">{{ copy.disconnect }}</button>
         </form><p id="connection-help" class="help">{{ copy.privacy }}</p>
-        <p class="status" role="status" aria-live="polite" aria-atomic="true">{{ copy.status[status] }}<span v-if="errorCode"> · {{ safeError(copy, errorCode) }}</span></p><button v-if="busy" type="button" @click="cancel">{{ copy.cancel }}</button>
+        <p class="status" role="status" aria-live="polite" aria-atomic="true">{{ copy.status[status] }}<span v-if="bannerError"> · {{ bannerError }}</span></p><button v-if="busy" type="button" @click="cancel">{{ copy.cancel }}</button>
       </section>
       <section v-if="graphData" class="graph-overview"><h2>{{ copy.graphOverview }} <span class="mono">{{ graphData.graph_id }}</span></h2><p>{{ copy.nodes }}: {{ graphData.node_count }} · {{ copy.edges }}: {{ graphData.edge_count }}</p>
         <details><summary>{{ copy.overview }}</summary><div class="choices"><label><input v-model="graphKind" value="nodes" type="radio" @change="graphPage = 0">{{ copy.nodes }}</label><label><input v-model="graphKind" value="edges" type="radio" @change="graphPage = 0">{{ copy.edges }}</label></div><ul><li v-for="entry in graphEntries.slice(graphPage * 10, (graphPage + 1) * 10)" :key="entry.uuid"><details><summary>{{ entry.name || entry.uuid }}</summary><p class="mono">{{ entry.uuid }}</p><p>{{ entry.summary }}</p><p>{{ entry.fact }}</p><p v-if="graphKind === 'edges'">{{ entry.source_node_name }} → {{ entry.target_node_name }}</p></details></li></ul><nav v-if="graphEntries.length > 10" class="actions" :aria-label="copy.graphOverview"><button type="button" :disabled="!graphPage" @click="graphPage--">{{ copy.previous }}</button><span>{{ copy.range }} {{ graphPage + 1 }} / {{ Math.ceil(graphEntries.length / 10) }}</span><button type="button" :disabled="(graphPage + 1) * 10 >= graphEntries.length" @click="graphPage++">{{ copy.next }}</button></nav></details>
       </section>
-      <SourceLibrary :methods="sourceMethods" :connected="connected" :busy="busy" :reset-version="sourceReset" :locale="locale" />
+      <SourceLibrary :methods="sourceMethods" :connected="connected" :busy="busy" :reset-version="sourceReset" :locale="locale" @inspected="inspectedSource = $event" />
+      <SourceIngestion :methods="ingestionMethods" :inspected="inspectedSource" :connected="connected" :busy="busy" :reset-version="sourceReset" :locale="locale" />
       <section class="query-section" aria-labelledby="query-title"><h2 id="query-title">{{ copy.research }}</h2>
         <form @submit.prevent="submit"><fieldset :disabled="!connected || busy"><legend>{{ copy.scope }}</legend><div class="choices"><label><input v-model="mode" type="radio" value="research">{{ copy.research }}</label><label><input v-model="mode" type="radio" value="dossier">{{ copy.dossier }}</label></div>
           <label v-if="mode === 'research'" for="question">{{ copy.query }}<textarea id="question" v-model="query" required rows="3" maxlength="4000"></textarea></label>

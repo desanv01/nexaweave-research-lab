@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { prepareSource } from '../../api/sourceLibrary.js'
 import { copyFor } from '../../i18n/workbench.js'
 const props = defineProps({ methods: { type: Object, required: true }, connected: Boolean, busy: Boolean, resetVersion: Number, locale: { type: String, default: 'en' } })
+const emit = defineEmits(['inspected'])
 const copy = computed(() => copyFor(props.locale).sources)
 const windowData = ref(null), loadedAt = ref(''), inspected = ref(null), receipt = ref(null)
 const name = ref(''), draft = ref(''), inputMode = ref('paste'), selectedFile = ref(null), fileInput = ref(null)
@@ -12,6 +13,7 @@ let generation = 0, inspectorReturnFocus = null, passageReturnFocus = null
 const disabled = computed(() => !props.connected || props.busy || preparing.value || pending.value)
 const points = computed(() => inspected.value ? Array.from(inspected.value.text) : [])
 const excerpt = computed(() => activePassage.value ? points.value.slice(activePassage.value.start, activePassage.value.end).join('') : '')
+watch(inspected, value => emit('inspected', value), { flush: 'sync' })
 const feedback = computed(() => {
   if (preparing.value) return copy.value.preparing
   if (pending.value) return copy.value.working
