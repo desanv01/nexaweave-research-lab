@@ -54,6 +54,128 @@ def _assert_owned_cleanup(owned_processes):
     ]
 
 
+@pytest.mark.parametrize("cleanup_error", [OSError, parser_process.OwnedProcessError])
+@pytest.mark.parametrize("interrupt", [None, KeyboardInterrupt, SystemExit])
+def test_private_directory_cleanup_failure_maps_fixed_parser_error_and_preserves_interrupt(
+    tmp_path, monkeypatch, owned_processes, cleanup_error, interrupt
+):
+    _synthetic_worker(tmp_path, monkeypatch,
+                      "sys.stdin.buffer.read(); sys.stdout.buffer.write(b'{\"version\":1,\"text\":\"x\"}')\n")
+    source = tmp_path / "private source.txt"
+    source.write_text("x", encoding="utf-8")
+    real_cleanup = parser_process.OwnedProcess.cleanup_private_directory
+    removed = []
+
+    def fail_after_actual_removal(owner, directory):
+        real_cleanup(owner, directory)
+        removed.append(Path(directory.name))
+        if cleanup_error is OSError:
+            raise OSError("private directory detail " + directory.name)
+        raise cleanup_error(outcome_unknown=True)
+
+    monkeypatch.setattr(parser_process.OwnedProcess, "cleanup_private_directory", fail_after_actual_removal)
+    if interrupt is not None:
+        real_start = threading.Thread.start
+
+        def interrupt_reader_start(thread):
+            real_start(thread)
+            if thread.name == "mirofish-parser-reader":
+                raise interrupt()
+
+        monkeypatch.setattr(parser_process.threading.Thread, "start", interrupt_reader_start)
+    expected = ParserFailedError if interrupt is None else interrupt
+    with pytest.raises(expected) as caught:
+        extract_text_isolated(source)
+    if interrupt is None:
+        assert caught.value.code == "parser_failed" and str(caught.value) == "parser_failed"
+        assert "private" not in str(caught.value)
+    assert len(removed) == 1 and not removed[0].exists()
+    _assert_owned_cleanup(owned_processes)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="real Windows venv/Job Object parser lifecycle")
+@pytest.mark.parametrize("mode", ["success", "malformed", "overflow", "timeout", "root_exit"])
+def test_windows_descendant_parser_cleanup_and_repeated_reuse(
+    tmp_path, monkeypatch, owned_processes, mode
+):
+    assert sys.prefix != sys.base_prefix, "actual Windows venv redirector gate required"
+    owners = []
+    real_owner = parser_process.OwnedProcess
+
+    class CaptureOwner(real_owner):
+        def __init__(self):
+            super().__init__()
+            owners.append(self)
+
+        def start(self, popen, args, **kwargs):
+            self.directory = Path(kwargs['cwd'])
+            return super().start(popen, args, **kwargs)
+
+    monkeypatch.setattr(parser_process, "OwnedProcess", CaptureOwner)
+    source = tmp_path / "source.txt"
+    source.write_text("x", encoding="utf-8")
+    for ordinal in range(2):
+        marker = tmp_path / f"descendant-{ordinal}.txt"
+        grandchild = (
+            "import os,time; from pathlib import Path; "
+            f"p=Path({str(marker)!r}); q=p.with_suffix('.tmp'); "
+            "q.write_text(str(os.getpid())); q.replace(p); time.sleep(30)"
+        )
+        body = (
+            "import subprocess\n"
+            "sys.stdin.buffer.read()\n"
+            f"child=subprocess.Popen([sys.executable,'-I','-u','-c',{grandchild!r}], "
+            + ("stdout=subprocess.DEVNULL" if mode in {"success", "malformed"} else "stdout=sys.stdout")
+            + ")\n"
+            "end=time.monotonic()+5\n"
+            f"while not os.path.exists({str(marker)!r}) and time.monotonic()<end: time.sleep(0.01)\n"
+            f"assert os.path.exists({str(marker)!r})\n"
+        )
+        if mode == "success":
+            body += "sys.stdout.buffer.write(b'{\"version\":1,\"text\":\"x\"}'); sys.stdout.buffer.flush()\n"
+        elif mode == "malformed":
+            body += "sys.stdout.buffer.write(b'not json'); sys.stdout.buffer.flush()\n"
+        elif mode == "overflow":
+            body += "sys.stdout.buffer.write(b'x'*5000); sys.stdout.buffer.flush(); time.sleep(30)\n"
+        elif mode == "timeout":
+            body += "time.sleep(30)\n"
+        _synthetic_worker(tmp_path, monkeypatch, body)
+        if mode == "success":
+            assert extract_text_isolated(source, limits=ParseLimits(max_text_chars=1), timeout_seconds=7) == "x"
+        else:
+            error = ParserProtocolError if mode in {"malformed", "overflow"} else ParserTimeoutError
+            with pytest.raises(error):
+                extract_text_isolated(source, limits=ParseLimits(max_text_chars=1), timeout_seconds=7)
+        assert marker.exists(), "failure must occur after the actual grandchild starts"
+        owner = owners[-1]
+        assert owner.tree_empty and owner.closed and owner.job is None
+        assert owner.process.stdin.closed and owner.process.stdout.closed
+        assert owner.process._handle.closed
+        assert not owner.directory.exists()
+        _assert_owned_cleanup(owned_processes)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows preownership failure of actual suspended process")
+@pytest.mark.parametrize("seam", ["assign", "resume"])
+def test_windows_parser_startup_failure_has_no_child_code_or_retry(
+    tmp_path, monkeypatch, owned_processes, seam
+):
+    from app.utils import owned_process
+    marker = tmp_path / "must not execute.txt"
+    _synthetic_worker(tmp_path, monkeypatch,
+                      f"open({str(marker)!r}, 'w').write('executed')\n")
+
+    def fail(self, process):
+        raise owned_process.OwnedProcessError()
+
+    monkeypatch.setattr(owned_process._WindowsJob, seam, fail)
+    with pytest.raises(ParserFailedError):
+        extract_text_isolated(tmp_path / "source.txt", timeout_seconds=1)
+    assert not marker.exists() and len(owned_processes) == 1
+    assert owned_processes[0]._handle.closed
+    _assert_owned_cleanup(owned_processes)
+
+
 def test_real_text_unicode_bom_and_path_with_spaces(tmp_path):
     source = tmp_path / "雪 source.txt"
     source.write_bytes("Café 雪\n".encode("utf-8"))

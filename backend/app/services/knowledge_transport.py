@@ -6,6 +6,7 @@ This module is stdlib-only. It is a process-failure boundary, not a sandbox.
 from __future__ import annotations
 
 import json
+import importlib.util
 import math
 import os
 import queue
@@ -18,6 +19,15 @@ import threading
 import time
 from pathlib import Path
 from uuid import UUID
+
+
+# Source-loaded transport tests intentionally do not import app (which starts
+# Flask). Load the one shared stdlib helper only from this trusted source tree.
+_owner_spec = importlib.util.spec_from_file_location(
+    "_mirofish_owned_process", Path(__file__).resolve().parent.parent / "utils" / "owned_process.py")
+_owned_process = importlib.util.module_from_spec(_owner_spec)
+_owner_spec.loader.exec_module(_owned_process)
+OwnedProcess = _owned_process.OwnedProcess
 
 
 _REQUEST_MAX = 512 * 1024
@@ -253,31 +263,8 @@ def _read_response(pipe, events: queue.Queue, response_limit=_RESPONSE_MAX) -> N
         events.put(("reader_error", None))
 
 
-def _stop_owned(process, threads) -> None:
-    if process is not None:
-        if process.poll() is None:
-            try:
-                process.terminate()
-                process.wait(timeout=0.5)
-            except (OSError, subprocess.TimeoutExpired):
-                if process.poll() is None:
-                    try:
-                        process.kill()
-                    except OSError:
-                        pass
-        try:
-            process.wait(timeout=1)
-        except (OSError, subprocess.TimeoutExpired):
-            pass
-        for pipe in (process.stdin, process.stdout):
-            if pipe is not None:
-                try:
-                    pipe.close()
-                except (OSError, ValueError):
-                    pass
-    for thread in threads:
-        if thread.ident is not None:
-            thread.join(timeout=1)
+def _stop_owned(owner, threads) -> None:
+    owner.stop(threads)
 
 
 class KnowledgeProcessClient:
@@ -305,6 +292,7 @@ class KnowledgeProcessClient:
         if not self._lock.acquire(blocking=False):
             raise KnowledgeBusy()
         process = None
+        owner = OwnedProcess()
         threads = []
         spawned = False
         private_directory = None
@@ -316,10 +304,11 @@ class KnowledgeProcessClient:
             frame = len(raw).to_bytes(4, "big") + raw
             try:
                 private_directory = tempfile.TemporaryDirectory(prefix="mirofish-knowledge-")
+                owner.bind_private_directory(private_directory)
                 directory = private_directory.name
                 events = queue.Queue()
                 creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-                process = subprocess.Popen(
+                process = owner.start(subprocess.Popen,
                     [self._python, "-I", "-u", self._script],
                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                     shell=False, close_fds=True, cwd=directory,
@@ -363,23 +352,23 @@ class KnowledgeProcessClient:
             except KnowledgeTransportError as exc:
                 failure = exc
             except Exception:
-                failure = KnowledgeTransportFailure(outcome_unknown=spawned)
+                failure = KnowledgeTransportFailure(outcome_unknown=spawned or owner.started)
             except BaseException as exc:
                 failure = exc
             finally:
                 try:
-                    _stop_owned(process, threads)
+                    _stop_owned(owner, threads)
                 except BaseException as cleanup_error:
                     if not isinstance(failure, (KeyboardInterrupt, SystemExit)):
                         failure = (cleanup_error if isinstance(cleanup_error, (KeyboardInterrupt, SystemExit))
-                                   else KnowledgeTransportFailure(outcome_unknown=spawned))
+                                   else KnowledgeTransportFailure(outcome_unknown=spawned or owner.started))
                 if private_directory is not None:
                     try:
-                        private_directory.cleanup()
+                        owner.cleanup_private_directory(private_directory)
                     except BaseException as cleanup_error:
                         if not isinstance(failure, (KeyboardInterrupt, SystemExit)):
                             failure = (cleanup_error if isinstance(cleanup_error, (KeyboardInterrupt, SystemExit))
-                                       else KnowledgeTransportFailure(outcome_unknown=spawned))
+                                       else KnowledgeTransportFailure(outcome_unknown=spawned or owner.started))
             if failure is not None:
                 raise failure
             return response

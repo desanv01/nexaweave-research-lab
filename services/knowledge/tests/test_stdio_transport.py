@@ -31,6 +31,12 @@ def transport():
     return module
 
 
+def test_standalone_transport_loads_shared_stdlib_helper(transport):
+    assert Path(transport._owned_process.__file__).resolve() == (
+        BACKEND_CLIENT.parent.parent / "utils" / "owned_process.py").resolve()
+    assert transport.OwnedProcess is transport._owned_process.OwnedProcess
+
+
 def request(method="page", *, request_id=None, payload=None):
     return json.dumps({
         "version": 1, "request_id": request_id or str(uuid4()), "method": method,
