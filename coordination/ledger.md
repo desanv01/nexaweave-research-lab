@@ -1,3 +1,7 @@
+# Main U13b local qualification — 2026-10-03; exact hosted CI pending
+
+Latest accepted PR78 merge49172568b32d6c88e9e3b9823db8bf335b5b2320/all24 gates/logs remains recorded in Main continuation. U13b extends protected research_local retained-source PDF page text using optional pinned PyMuPDF1.26.7 exclusively in fixed installed PG-only source child after admission/persisted authorization; no graph/provider calls or original binary persistence. Main local218 API/read +28 actual parser/profile +28 actual PostgreSQL/HTTP source checks passed with no skips; inherited warnings only in API suite. Main reviewed optional lock/scoped knowledge CI source-pdf extra/mandatory runner;128baseline32patch check passed. Original/corrected source provenance and failed runs retained. Workerstableidle9/u03ownership; Main owns Git/hosted acceptance. Exact-head PR/push/postmerge gates still required. No whole-phase/all44/release/paid/public acceptance; issue3 remains open after integration-cycle read. U06c connected workbench remains separate Main qualification.
+
 # Execution ledger
 
 ## Successor — U11b connected workbench locally qualified, exact CI pending

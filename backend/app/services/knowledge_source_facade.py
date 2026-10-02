@@ -7,13 +7,16 @@ from dataclasses import asdict
 from uuid import uuid4
 
 from .knowledge_source_client import (KnowledgeSourceProcessClient, MAX_BYTES, HASH,
-    TEXT_BYTES, encoded, text_value, declarations, metadata, validate_payload, validate_result)
+    TEXT_BYTES, encoded, text_value, declarations, metadata, validate_payload, validate_result,
+    pdf_upload, pdf_receipt)
 from .knowledge_transport import KnowledgeBusy, KnowledgeTransportFailure, _json_object, _uuid
 from .knowledge_reader import KnowledgeReadError
 
 
 def validate_upload(value):
     try:
+        if type(value) is dict and value.get("format") == "pdf":
+            return pdf_upload(value)
         if (type(value) is not dict or set(value) != {"schema_version", "source_revision",
                 "source_name", "format", "content", "input_sha256"}
                 or type(value["schema_version"]) is not int or value["schema_version"] != 1):
@@ -49,6 +52,8 @@ def validate_public_result(method, data, scope, payload):
     if method != "retain":
         return validate_result(method, data, scope, payload)
     try:
+        if payload["format"] == "pdf":
+            return pdf_receipt(data, scope, payload)
         if type(data) is not dict or set(data) != {"schema_version", "binary_retained",
                 "graph_ingestion_executed", "source", "offset_unit", "passages", "extraction"}:
             raise ValueError
@@ -127,7 +132,7 @@ class KnowledgeSourceFacade:
             raise KnowledgeReadError(result["error"]["code"])
         data = validate_result(method, result["result"], self._settings.scope, payload)
         if time.monotonic() > deadline:
-            raise KnowledgeTransportFailure(outcome_unknown=method == "retain")
+            raise KnowledgeTransportFailure(outcome_unknown=method in {"retain", "retain_pdf"})
         return data
 
     def execute(self, method, graph_id, payload):
@@ -143,6 +148,10 @@ class KnowledgeSourceFacade:
             if method != "retain":
                 return self._call(method, payload, deadline)
             self._call("context", {}, deadline)
+            if payload["format"] == "pdf":
+                # Native extraction and retained-source mutation occur together
+                # in the fixed installed source child after persisted authority.
+                return self._call("retain_pdf", payload, deadline)
             blocks = None
             extraction = {"format": "text", "input_hash_verified": True,
                 "input_sha256": payload["input_sha256"], "binary_persistently_bound": False,

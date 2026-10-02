@@ -1,5 +1,6 @@
 """Installed PostgreSQL-only retained source authority. No graph runtime imports."""
 import hashlib
+import base64
 import json
 import os
 import re
@@ -120,8 +121,34 @@ def validate_payload(method, payload):
         text_value(payload["source_name"], name=True)
         text_value(payload["text"])
         declarations(payload["source_revision"], payload["text"], payload["blocks"])
+    elif method == "retain_pdf":
+        pdf_input(payload)
     else:
         raise ValueError
+
+
+def pdf_input(payload):
+    """Validate decoded input and digest before importing any PDF runtime."""
+    if (type(payload) is not dict or set(payload) != {"schema_version", "source_revision",
+            "source_name", "format", "content", "input_sha256"}
+            or type(payload["schema_version"]) is not int or payload["schema_version"] != 1
+            or type(payload["format"]) is not str or payload["format"] != "pdf"):
+        raise ValueError
+    uuid_value(payload["source_revision"])
+    text_value(payload["source_name"], name=True)
+    content = payload["content"]
+    if (type(content) is not str or not content.isascii()
+            or not 0 < len(content) <= 4 * ((2 * TEXT_BYTES + 2) // 3)
+            or type(payload["input_sha256"]) is not str
+            or not re.fullmatch(r"[0-9a-f]{64}", payload["input_sha256"])):
+        raise ValueError
+    binary = base64.b64decode(content, validate=True)
+    if (not 0 < len(binary) <= 2 * TEXT_BYTES
+            or base64.b64encode(binary).decode("ascii") != content
+            or hashlib.sha256(binary).hexdigest() != payload["input_sha256"]
+            or b"%PDF-" not in binary[:1024] or not binary.rstrip().endswith(b"%%EOF")):
+        raise ValueError
+    return binary
 
 
 @dataclass(frozen=True, repr=False)
@@ -221,6 +248,32 @@ class SourceLibrary:
         if method == "get":
             return source_result(store.get_source(self.settings.principal, scope.project_id,
                                  payload["source_revision"]), include_text=True)
+        if method == "retain_pdf":
+            # This lazy import is reached only after strict bytes/digest admission
+            # and persisted scope/project authorization in the fixed source child.
+            from mirofish_storage.pdf import extract_pdf, PdfError
+            try:
+                extracted = extract_pdf(pdf_input(payload))
+            except PdfError as error:
+                raise SourceError(error.code) from None
+            passages = extracted.declarations(payload["source_revision"])
+            extraction = {"format": "pdf", "input_hash_verified": True,
+                "input_sha256": payload["input_sha256"], "input_digest_persisted": False,
+                "blocks_persisted": False, "original_document_verified": False,
+                "binary_persistently_bound": False, "ocr_performed": False,
+                "page_layout": "unknown", "semantic_quality": "unknown", "coverage": ["page_text"],
+                "page_text": [extracted.text[p["start"]:p["end"]] for p in extracted.pages],
+                "pages": list(extracted.pages), "page_count": extracted.page_count,
+                "empty_page_count": extracted.empty_page_count, "declared_passage_count": len(passages)}
+            # Reserve the exact variable-size receipt and a conservative metadata
+            # allowance before the one immutable source transaction.
+            if len(encoded(extraction)) + len(encoded(passages)) + 100 * 256 + 4096 > MAX_BYTES:
+                raise SourceError("result_too_large")
+            text_value(extracted.text)
+            self.authorize()
+            record = store.ingest_text(self.settings.principal, scope.project_id, payload["source_revision"],
+                payload["source_name"], extracted.text, passages)
+            return {**source_result(record), "extraction": extraction}
         passages = declarations(payload["source_revision"], payload["text"], payload["blocks"])
         # The mutation result contains at most 100 small metadata records, no full text.
         # Admission reserves worst-case escaped name/time/offset fields before insert.

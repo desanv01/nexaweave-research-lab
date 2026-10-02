@@ -1,4 +1,4 @@
-"""Source endpoints registered only by the explicit research_local factory."""
+"""Protected text/DOCX/PDF retention through the fixed source facade and child."""
 import threading
 
 from flask import Response, request
