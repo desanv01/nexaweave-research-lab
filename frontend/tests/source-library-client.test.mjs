@@ -1,9 +1,9 @@
 // Authored regression sources. Main must execute these against locked tooling.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { webcrypto } from 'node:crypto'
+import { webcrypto, createHash } from 'node:crypto'
 import { createWorkbenchClient } from '../src/api/workbench.js'
-import { prepareSource, sha256, sourcePayload, validateSourceResult, TEXT_LIMIT, DOCX_LIMIT } from '../src/api/sourceLibrary.js'
+import { prepareSource, sha256, sourcePayload, verifySourceInput, validateSourceResult, TEXT_LIMIT, DOCX_LIMIT } from '../src/api/sourceLibrary.js'
 Object.defineProperty(globalThis, 'crypto', { value: webcrypto, configurable: true })
 const enc = new TextEncoder(), revision = '11111111-1111-4111-8111-111111111111', project = '22222222-2222-4222-8222-222222222222'
 const evidence = n => `33333333-3333-5333-8333-${String(n).padStart(12, '0')}`
@@ -74,7 +74,7 @@ test('prepare preserves UTF8 BOM bytes; rejects limits/format/name/control/inval
   assert.equal(prepared.payload.input_sha256, await sha256(bytes)); assert.equal(prepared.filename, 'source.md')
   assert.equal(prepared.codepoints, Array.from(text).length)
   let reads = 0
-  for (const [name, size] of [['huge.txt', TEXT_LIMIT + 1], ['huge.docx', DOCX_LIMIT + 1], ['other.pdf', 1], ['C:\\fakepath\\source.txt', 1]]) {
+  for (const [name, size] of [['huge.txt', TEXT_LIMIT + 1], ['huge.docx', DOCX_LIMIT + 1], ['other.rtf', 1], ['C:\\fakepath\\source.txt', 1]]) {
     await assert.rejects(prepareSource({ name: 'valid', file: { name, size, arrayBuffer: async () => { reads++; return new ArrayBuffer(size) } } }))
   }
   assert.equal(reads, 0)
@@ -212,4 +212,80 @@ test('source_denied is a fixed safe source error; arbitrary codes and server tex
     const malformed = await connected(() => fixed({ success: false, error }))
     await assert.rejects(malformed.client.sourceList(), e => e.code === 'invalid_reply' && !e.message.includes('private'))
   }
+})
+
+const pdfFile = (bytes = enc.encode('%PDF-1.7\nsynthetic\n%%EOF\n'), name = '<img onerror=x>.PDF') => ({ name, size: bytes.length, arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) })
+function fixturePageId(namespace, page) {
+  const canonical = Object.fromEntries(Object.entries(page).sort(([a], [b]) => a.localeCompare(b)))
+  const raw = createHash('sha1').update(Buffer.from(namespace.replaceAll('-', ''), 'hex')).update('pdf-page-text-v1:' + JSON.stringify(canonical)).digest().subarray(0, 16)
+  raw[6] = (raw[6] & 15) | 80; raw[8] = (raw[8] & 63) | 128
+  const h = raw.toString('hex'); return `${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20)}`
+}
+async function pdfReceipt(payload, texts = ['中😀\n', '', '\u0085', '\uFEFF']) {
+  let offset = 0
+  const pages = []
+  for (const [i, text] of texts.entries()) {
+    offset += i ? 2 : 0
+    // Explicit known fixture whitespace; do not reuse production predicate.
+    pages.push({ page: i + 1, start: offset, end: offset + Array.from(text).length, empty: ['', '\u0085', ' \t\n', '\u00a0'].includes(text), excerpt_sha256: createHash('sha256').update(text).digest('hex') })
+    offset += Array.from(text).length
+  }
+  const text = texts.join('\n\n'), passages = pages.filter(p => !p.empty).map(p => ({ evidence_id: fixturePageId(payload.source_revision, p), start: p.start, end: p.end, page: p.page, excerpt_sha256: p.excerpt_sha256 }))
+  return { schema_version: 1, binary_retained: false, graph_ingestion_executed: false, source: { project_id: project, source_revision: payload.source_revision, source_name: payload.source_name, text_sha256: createHash('sha256').update(text).digest('hex'), byte_length: enc.encode(text).length, codepoint_length: Array.from(text).length, recorded_at: '2026-10-03T00:00:00Z' }, offset_unit: 'unicode_codepoint', passages, extraction: { format: 'pdf', input_hash_verified: true, input_sha256: payload.input_sha256, input_digest_persisted: false, blocks_persisted: false, original_document_verified: false, binary_persistently_bound: false, ocr_performed: false, page_layout: 'unknown', semantic_quality: 'unknown', coverage: ['page_text'], page_text: texts, pages, page_count: texts.length, empty_page_count: pages.filter(p => p.empty).length, declared_passage_count: passages.length } }
+}
+test('P01 PDF preparation is immutable, literal, bounded and native-free', async () => {
+  const prepared = await prepareSource({ name: '<script>中😀</script>', file: pdfFile() })
+  assert.equal(prepared.payload.format, 'pdf'); assert.equal(prepared.filename, '<img onerror=x>.PDF'); assert.equal(prepared.codepoints, null)
+  assert.ok(Object.isFrozen(prepared)); assert.ok(Object.isFrozen(prepared.payload))
+  await verifySourceInput(prepared.payload)
+  assert.throws(() => { prepared.payload.source_name = 'changed' }, TypeError)
+  for (const bytes of [enc.encode('bad\n%%EOF'), enc.encode('%PDF-1.7\nmissing'), enc.encode('%PDF-1.7\n%%EOF\u00a0'), enc.encode('x'.repeat(1024) + '%PDF-1.7\n%%EOF')]) await assert.rejects(prepareSource({ name: 'pdf', file: pdfFile(bytes) }), code('invalid_request'))
+  const full = new Uint8Array(DOCX_LIMIT + 1); full.set(enc.encode('%PDF-1.7')); full.set(enc.encode('%%EOF'), full.length - 5)
+  await assert.rejects(prepareSource({ name: 'pdf', file: pdfFile(full) }), code('limit_exceeded'))
+  const exact = full.slice(1); exact.set(enc.encode('%PDF-1.7')); await prepareSource({ name: 'pdf', file: pdfFile(exact) })
+  await assert.rejects(prepareSource({ name: 'pdf', file: pdfFile(undefined, 'x.pdf.exe') }), code('unsupported'))
+  await assert.rejects(prepareSource({ name: 'pdf', file: pdfFile() }, {}), code('crypto_unavailable'))
+  assert.throws(() => sourcePayload({ ...prepared.payload, content: prepared.payload.content + '=' }), code('invalid_request'))
+})
+test('P02 exact PDF Unicode, empty-page and canonical UUID receipt then persisted GET', async () => {
+  const prepared = await prepareSource({ name: 'PDF 中', file: pdfFile() }), v = await pdfReceipt(prepared.payload)
+  await validateSourceResult('sourceRetain', v, prepared.payload)
+  assert.deepEqual(v.passages.map(p => p.page), [1, 4])
+  assert.equal(v.extraction.pages[2].empty, true); assert.equal(v.extraction.pages[3].empty, false)
+  const { extraction, ...stored } = v
+  await validateSourceResult('sourceGet', { ...stored, text: extraction.page_text.join('\n\n') }, { source_revision: prepared.payload.source_revision, project_id: project })
+  for (const texts of [[''], ['\u0085'], ['x'.repeat(32769)], ['x', '\0'], Array(101).fill('x')]) await assert.rejects(validateSourceResult('sourceRetain', await pdfReceipt(prepared.payload, texts), prepared.payload), code('invalid_reply'))
+  const large = await pdfReceipt(prepared.payload, Array(33).fill('x'.repeat(32768)))
+  await assert.rejects(validateSourceResult('sourceRetain', large, prepared.payload), code('invalid_reply'))
+})
+test('P03 every PDF declaration, identity, count, flag, digest and schema corruption fails closed', async () => {
+  const prepared = await prepareSource({ name: 'PDF', file: pdfFile() }), v = await pdfReceipt(prepared.payload)
+  const changes = [
+    x => x.extraction.page_text.reverse(), x => x.extraction.pages.reverse(), x => x.passages.reverse(),
+    x => x.extraction.page_text.pop(), x => x.extraction.pages.push(x.extraction.pages[0]), x => x.passages.push(x.passages[0]),
+    x => x.extraction.coverage = ['page_text', 'layout'], x => x.extraction.page_count = true,
+    x => x.extraction.empty_page_count++, x => x.extraction.declared_passage_count++,
+    x => x.source.source_revision = revision, x => x.source.source_name = 'swapped', x => x.source.project_id = true,
+    x => x.source.text_sha256 = '0'.repeat(64), x => x.source.byte_length++, x => x.source.codepoint_length++,
+    x => x.extraction.input_sha256 = '0'.repeat(64), x => x.extraction.extra = false,
+    x => x.extraction.pages[0].extra = false, x => x.extraction.pages[0].page = true,
+    x => x.extraction.pages[0].start++, x => x.extraction.pages[0].end++, x => x.extraction.pages[2].empty = false,
+    x => x.extraction.pages[0].excerpt_sha256 = '0'.repeat(64), x => x.passages[0].evidence_id = evidence(1),
+    x => x.passages[0].page++, x => x.passages[0].start++, x => x.passages[0].end++,
+    x => x.passages[0].excerpt_sha256 = '0'.repeat(64), x => delete x.extraction.pages,
+    ...['input_digest_persisted', 'blocks_persisted', 'original_document_verified', 'binary_persistently_bound', 'ocr_performed'].map(k => x => { x.extraction[k] = true }),
+    ...['page_layout', 'semantic_quality'].map(k => x => { x.extraction[k] = 'verified' })
+  ]
+  for (const change of changes) { const altered = structuredClone(v); change(altered); await assert.rejects(validateSourceResult('sourceRetain', altered, prepared.payload), code('invalid_reply')) }
+  await assert.rejects(validateSourceResult('sourceRetain', v, { ...prepared.payload, project_id: revision }), code('invalid_reply'))
+})
+
+test('P07 PDF transport posts once only after explicit retain and lost outcome allows reads only', async () => {
+  const prepared = await prepareSource({ name: 'PDF', file: pdfFile() })
+  const { client, calls } = await connected(() => fixed({ success: false, error: { code: 'outcome_unknown' } }))
+  assert.equal(calls.length, 1)
+  await assert.rejects(client.sourceRetain(prepared.payload), code('outcome_unknown'))
+  assert.equal(calls.filter(c => c.options.method === 'POST').length, 1)
+  await assert.rejects(client.sourceGet({ source_revision: prepared.payload.source_revision }), code('outcome_unknown'))
+  assert.equal(calls.filter(c => c.options.method === 'POST').length, 1)
 })

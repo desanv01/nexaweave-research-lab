@@ -242,3 +242,16 @@ test('shared route ingestion banners never encourage resubmission after denial o
     } finally { mounted.cleanup(); globalThis.fetch = previousFetch }
   }
 })
+
+test('P06 inspected page evidence preserves graph eligibility32768 and never automatically plans', async () => {
+  for (const length of [32768, 32769]) {
+    const inspected = { source: { source_revision: uuid, source_name: 'Extracted PDF', text_sha256: 'a'.repeat(64), byte_length: length, codepoint_length: length }, text: 'x'.repeat(length), passages: [{ evidence_id: uuid, start: 0, end: 1, page: 2, excerpt_sha256: 'b'.repeat(64) }] }
+    let plans = 0, executions = 0
+    const mounted = mount(ingestion.component, { connected: true, inspected, locale: 'en', methods: { plan: async () => { plans++; throw { code: 'source_unavailable' } }, execute: async () => { executions++ } } })
+    try {
+      await settle(); assert.equal(plans, 0); assert.equal(executions, 0)
+      assert.equal(mounted.root.querySelector('.source-ingestion fieldset').disabled, length > 32768)
+      if (length > 32768) assert.ok(mounted.root.textContent.includes(copyFor('en').ingestion.ineligible))
+    } finally { mounted.cleanup() }
+  }
+})

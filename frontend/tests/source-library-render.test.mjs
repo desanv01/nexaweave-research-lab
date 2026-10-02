@@ -174,3 +174,64 @@ test('source_denied renders fixed localized copy without server-provided text', 
     }
   } finally { mounted.cleanup() }
 })
+
+test('P04 real SFC PDF chooser prepares locally, retains once, then explicitly inspects page evidence', async () => {
+  let posted, posts = 0, gets = 0; const seen = [], text = '中😀\n\n\n\n\uFEFF'
+  const methods = { retain: async p => {
+    posted = p; posts++
+    return { ...flags, source: { project_id: project, source_revision: p.source_revision, source_name: p.source_name, text_sha256: await sha256(enc.encode(text)), byte_length: enc.encode(text).length, codepoint_length: Array.from(text).length, recorded_at: '2026-10-03T00:00:00Z' }, passages: [{ evidence_id: revision, start: 0, end: 2, page: 1, excerpt_sha256: await sha256(enc.encode('中😀')) }], extraction: { format: 'pdf', input_sha256: p.input_sha256, page_count: 3, empty_page_count: 1, declared_passage_count: 2, pages: [{ page: 1, start: 0, end: 2, empty: false }, { page: 2, start: 4, end: 4, empty: true }, { page: 3, start: 6, end: 7, empty: false }] } }
+  }, get: async () => { gets++; return { ...flags, source: { project_id: project, source_revision: posted.source_revision, source_name: posted.source_name, text_sha256: await sha256(enc.encode(text)), codepoint_length: Array.from(text).length }, text, passages: [{ evidence_id: revision, start: 0, end: 2, page: 1, excerpt_sha256: await sha256(enc.encode('中😀')) }] } } }
+  const mounted = mount(sources.component, { connected: true, resetVersion: 0, locale: 'en', methods, onInspected: value => seen.push(value) })
+  try {
+    input(mounted.root, '#source-name', '<script>PDF 中😀</script>')
+    const radio = mounted.root.querySelector('input[value="file"]'); radio.checked = true; radio.dispatchEvent(new dom.window.Event('change', { bubbles: true })); await settle()
+    const chooser = mounted.root.querySelector('#source-file'), bytes = enc.encode('%PDF-1.7\n%%EOF\n')
+    assert.equal(chooser.accept, '.txt,.md,.docx,.pdf')
+    Object.defineProperty(chooser, 'files', { configurable: true, value: [{ name: '<img src=x>.pdf', size: bytes.length, arrayBuffer: async () => bytes.buffer }] })
+    chooser.dispatchEvent(new dom.window.Event('change', { bubbles: true })); await settle()
+    mounted.root.querySelector('.source-form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true })); await cryptoSettle()
+    assert.equal(posts, 0); assert.equal(gets, 0); assert.equal(seen.length, 0)
+    assert.ok(mounted.root.querySelector('.prepared').textContent.includes(cp.pdfPrepare)); assert.ok(mounted.root.querySelector('.prepared').textContent.includes('<img src=x>.pdf'))
+    button(mounted.root, cp.retain).click(); await cryptoSettle()
+    assert.equal(posts, 1); assert.equal(gets, 0); assert.equal(mounted.root.querySelector('.source-inspector'), null)
+    assert.ok(mounted.root.querySelector('.pdf-summary').textContent.includes(cp.emptyPages)); assert.ok(mounted.root.textContent.includes(cp.pdfExtraction))
+    assert.equal(mounted.root.querySelector('img,script'), null); assert.equal(chooser.value, '')
+    button(mounted.root, cp.inspectAttempt).click(); await cryptoSettle()
+    assert.equal(gets, 1); assert.equal(posts, 1); assert.equal(seen.at(-1).text, text)
+    const passage = mounted.root.querySelector('.source-inspector ol button'); assert.ok(passage.textContent.includes(cp.page + ' 1'))
+    passage.click(); await settle(); assert.equal(mounted.root.querySelector('.excerpt-text').textContent, '中😀')
+    for (const locale of ['zh', 'ms']) { mounted.props.locale = locale; await settle(); assert.ok(mounted.root.textContent.includes(copyFor(locale).sources.pdfExtraction)); assert.equal(posts, 1) }
+    mounted.props.resetVersion++; await settle(); assert.equal(mounted.root.querySelector('.receipt'), null); assert.equal(mounted.root.querySelector('.attempt'), null); assert.equal(seen.at(-1), null)
+  } finally { mounted.cleanup() }
+})
+test('P05 late PDF preparation after auth-reset cannot restore private selection or POST', async () => {
+  let resolve, posts = 0
+  const mounted = mount(sources.component, { connected: true, resetVersion: 0, locale: 'en', methods: { retain: async () => { posts++ } } })
+  try {
+    input(mounted.root, '#source-name', 'private PDF')
+    const radio = mounted.root.querySelector('input[value="file"]'); radio.checked = true; radio.dispatchEvent(new dom.window.Event('change', { bubbles: true })); await settle()
+    const chooser = mounted.root.querySelector('#source-file'), bytes = enc.encode('%PDF-1.7\n%%EOF')
+    Object.defineProperty(chooser, 'files', { configurable: true, value: [{ name: 'private.pdf', size: bytes.length, arrayBuffer: () => new Promise(r => { resolve = r }) }] })
+    chooser.dispatchEvent(new dom.window.Event('change', { bubbles: true })); await settle()
+    mounted.root.querySelector('.source-form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true })); await settle()
+    mounted.props.connected = false; await settle(); resolve(bytes.buffer); await cryptoSettle()
+    assert.equal(mounted.root.querySelector('.prepared'), null); assert.equal(mounted.root.querySelector('#source-name').value, ''); assert.equal(posts, 0)
+  } finally { mounted.cleanup() }
+})
+
+test('P08 PDF prepared review is invalidated by edits and discard before submission', async () => {
+  let posts = 0
+  const mounted = mount(sources.component, { connected: true, resetVersion: 0, locale: 'en', methods: { retain: async () => { posts++ } } })
+  try {
+    input(mounted.root, '#source-name', 'PDF')
+    const radio = mounted.root.querySelector('input[value="file"]'); radio.checked = true; radio.dispatchEvent(new dom.window.Event('change', { bubbles: true })); await settle()
+    const chooser = mounted.root.querySelector('#source-file'), bytes = enc.encode('%PDF-1.7\n%%EOF')
+    Object.defineProperty(chooser, 'files', { configurable: true, value: [{ name: 'x.pdf', size: bytes.length, arrayBuffer: async () => bytes.buffer }] })
+    chooser.dispatchEvent(new dom.window.Event('change', { bubbles: true })); await settle()
+    const prepareForm = () => mounted.root.querySelector('.source-form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }))
+    prepareForm(); await cryptoSettle(); assert.ok(mounted.root.querySelector('.prepared'))
+    input(mounted.root, '#source-name', 'Edited'); await settle(); assert.equal(mounted.root.querySelector('.prepared'), null)
+    prepareForm(); await cryptoSettle(); assert.ok(mounted.root.querySelector('.prepared'))
+    button(mounted.root, cp.discard).click(); await settle(); assert.equal(mounted.root.querySelector('.prepared'), null); assert.equal(mounted.root.querySelector('#source-name').value, ''); assert.equal(posts, 0)
+  } finally { mounted.cleanup() }
+})
