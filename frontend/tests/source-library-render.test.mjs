@@ -21,7 +21,8 @@ async function compile(path, replacements = {}) {
 }
 const sources = await compile('../src/components/workbench/SourceLibrary.vue')
 const evidence = await compile('../src/components/workbench/EvidenceResults.vue')
-const route = await compile('../src/views/ResearchWorkbench.vue', { '../components/workbench/SourceLibrary.vue': sources.url, '../components/workbench/EvidenceResults.vue': evidence.url })
+const ingestion = await compile('../src/components/workbench/SourceIngestion.vue')
+const route = await compile('../src/views/ResearchWorkbench.vue', { '../components/workbench/SourceLibrary.vue': sources.url, '../components/workbench/EvidenceResults.vue': evidence.url, '../components/workbench/SourceIngestion.vue': ingestion.url })
 function mount(component, initial = {}) {
   const props = reactive(initial), root = document.createElement('div'); document.body.append(root)
   const app = createApp({ setup: () => () => h(component, props) })
@@ -35,6 +36,18 @@ function input(root, selector, value) { const el = root.querySelector(selector);
 function button(root, text) { return [...root.querySelectorAll('button')].find(b => b.textContent === text) }
 const cp = copyFor('en').sources, enc = new TextEncoder(), revision = '11111111-1111-4111-8111-111111111111', project = '22222222-2222-4222-8222-222222222222'
 const malicious = '<img src=x onerror=alert(1)> 中😀 https://evil.test'
+test('source selection emits only explicit successful inspection and clears on close and reset', async () => {
+  const seen = [], data = await item()
+  const mounted = mount(sources.component, { connected: true, resetVersion: 0, locale: 'en', onInspected: value => seen.push(value), methods: { list: async () => library([data.source]), get: async () => data } })
+  try {
+    assert.equal(seen.length, 0)
+    button(mounted.root, cp.load).click(); await settle(); assert.equal(seen.length, 0)
+    mounted.root.querySelector('.source-list button').click(); await settle(); assert.equal(seen.at(-1).source.source_revision, revision)
+    mounted.root.querySelector('#source-inspector > button').click(); await settle(); assert.equal(seen.at(-1), null)
+    mounted.root.querySelector('.source-list button').click(); await settle(); assert.equal(seen.at(-1).source.source_revision, revision)
+    mounted.props.resetVersion++; await settle(); assert.equal(seen.at(-1), null)
+  } finally { mounted.cleanup() }
+})
 const flags = { schema_version: 1, binary_retained: false, graph_ingestion_executed: false }
 function library(sources = [], has_more = false) { return { ...flags, sources, has_more, window_limit: 20 } }
 async function item() {

@@ -1,5 +1,6 @@
 // Isolated protected read client. Never share the inherited Axios interceptors.
 import { sourcePayload, sourceReadRequest, verifySourceInput, validateSourceResult } from './sourceLibrary.js'
+import { ingestionPayload, validateIngestionResult } from './sourceIngestion.js'
 export class WorkbenchError extends Error {
   constructor(code) { super(code); this.name = 'WorkbenchError'; this.code = code }
 }
@@ -206,14 +207,19 @@ export function validateResult(method, value, graph) {
 }
 export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs = 125000 } = {}) {
   if (!Number.isFinite(deadlineMs) || deadlineMs < 1 || deadlineMs > 150000) fail('invalid_connection')
-  let connection = null, active = null, generation = 0, authenticated = false
+  let connection = null, active = null, generation = 0, authenticated = false, ingestionScope = null
   function cancel() { generation++; active?.abort(); active = null }
-  function disconnect() { cancel(); connection = null; authenticated = false }
-  async function request(method, payload) {
+  function disconnect() { cancel(); connection = null; authenticated = false; ingestionScope = null }
+  async function request(method, payload, ingestionContext) {
     if (!connection || (method !== 'graph' && !authenticated)) fail('disconnected')
     cancel()
-    const source = method.startsWith('source')
-    const raw = method === 'graph' || method === 'sourceList' || method === 'sourceGet' ? undefined : method === 'sourceRetain' ? sourcePayload(payload) : requestPayload(method, payload, connection.graph)
+    const source = method.startsWith('source'), ingestion = method.startsWith('ingestion')
+    const ingestionRaw = ingestion ? ingestionPayload(payload, method === 'ingestionStatus') : undefined
+    if (ingestion) {
+      payload = JSON.parse(ingestionRaw)
+      ingestionContext = JSON.parse(JSON.stringify({ ...ingestionContext, ...(ingestionScope ? { scope: ingestionScope } : {}) }))
+    }
+    const raw = ingestion ? (method === 'ingestionStatus' ? undefined : ingestionRaw) : method === 'graph' || method === 'sourceList' || method === 'sourceGet' ? undefined : method === 'sourceRetain' ? sourcePayload(payload) : requestPayload(method, payload, connection.graph)
     const sourceRequest = method === 'sourceGet' ? sourceReadRequest(payload) : method === 'sourceRetain' ? JSON.parse(raw) : undefined
     const epoch = generation, current = connection, controller = new AbortController()
     active = controller
@@ -232,15 +238,21 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
     try {
       const paths = { graph: 'data', research: 'research', dossier: 'dossier' }
       if (method === 'sourceRetain') { await guarded(verifySourceInput(sourceRequest)); owned() }
+      if (method === 'ingestionPlan') {
+        await guarded(validateSourceResult('sourceGet', ingestionContext.inspected, { source_revision: payload.source_revision }))
+        owned()
+        if (ingestionContext.inspected.source.codepoint_length > 32768 || !ingestionContext.inspected.passages.length) fail('invalid_request')
+      }
       const sourcePaths = { sourceList: 'library', sourceGet: 'item', sourceRetain: 'retain' }
-      const path = source ? `/api/source/${sourcePaths[method]}/${current.graph}${method === 'sourceGet' ? '/' + sourceRequest.source_revision : ''}` : `/api/graph/${paths[method]}/${current.graph}`
+      const ingestionPaths = { ingestionPlan: 'plan', ingestionExecute: 'execute', ingestionStatus: 'operation' }
+      const path = ingestion ? `/api/source/ingestion/${ingestionPaths[method]}/${current.graph}${method === 'ingestionStatus' ? '/' + payload.operation_id : ''}` : source ? `/api/source/${sourcePaths[method]}/${current.graph}${method === 'sourceGet' ? '/' + sourceRequest.source_revision : ''}` : `/api/graph/${paths[method]}/${current.graph}`
       const response = await guarded(fetchImpl(`${current.origin}${path}`, { method: raw === undefined ? 'GET' : 'POST', headers: { Authorization: `Bearer ${current.token}`, ...(raw ? { 'Content-Type': 'application/json' } : {}) }, body: raw, signal: controller.signal, redirect: 'error', credentials: 'omit', cache: 'no-store', referrerPolicy: 'no-referrer' }))
       responseBody = response.body
       owned()
       if (response.status === 401) { disconnect(); fail('unauthorized') }
-      if (source && response.status === 404 && !/^application\/json(?:\s*;|$)/i.test(response.headers.get('content-type') || '')) fail('source_unavailable')
+      if ((source || ingestion) && response.status === 404 && !/^application\/json(?:\s*;|$)/i.test(response.headers.get('content-type') || '')) fail('source_unavailable')
       if (response.redirected || response.type === 'opaqueredirect' || !/^application\/json(?:\s*;|$)/i.test(response.headers.get('content-type') || '') || !response.body?.getReader) fail()
-      const cap = (source || method === 'dossier' ? 4194304 : 2097152) + 1024
+      const cap = ingestion ? 263168 : (source || method === 'dossier' ? 4194304 : 2097152) + 1024
       const length = response.headers.get('content-length')
       if (length && (!/^\d+$/.test(length) || Number(length) > cap)) fail('result_too_large')
       reader = response.body.getReader()
@@ -259,12 +271,12 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
       if (!obj(value) || typeof value.success !== 'boolean') fail()
       if (!response.ok || !value.success) {
         shape(value, 'success error'); shape(value.error, 'code')
-        if (value.success !== false || !(SERVER_CODES.has(value.error.code) || source && ['source_unavailable', 'source_denied', 'outcome_unknown'].includes(value.error.code))) fail()
-        if (value.error.code === 'unauthorized') disconnect()
+        if (value.success !== false || !(SERVER_CODES.has(value.error.code) || (source || ingestion) && ['source_unavailable', 'source_denied', 'outcome_unknown', 'cancelled', 'uncertain', 'model_calls_disabled', 'budget_denied'].includes(value.error.code))) fail()
+        if (['unauthorized', 'origin_denied'].includes(value.error.code)) disconnect()
         fail(value.error.code)
       }
       shape(value, 'success data')
-      const result = source ? await guarded(validateSourceResult(method, value.data, sourceRequest)) : validateResult(method, value.data, current.graph)
+      const result = ingestion ? await guarded(validateIngestionResult(method, value.data, { ...ingestionContext, payload })) : source ? await guarded(validateSourceResult(method, value.data, sourceRequest)) : validateResult(method, value.data, current.graph)
       if (method === 'research' && [...result.source_claims, ...result.simulation_observations, ...result.other_claims].length > (payload.top_k ?? 10)) fail()
       if (method === 'dossier') {
         const returned = result.request
@@ -272,10 +284,12 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
         const sameTime = (a, b) => a == null && b == null || a != null && b != null && Date.parse(a) === Date.parse(b) && submillisecond(a) === submillisecond(b)
         if (returned.title !== payload.title || returned.sections.length !== payload.sections.length || returned.sections.some((s, i) => s.heading !== payload.sections[i].heading || s.query !== payload.sections[i].query || s.top_k !== (payload.sections[i].top_k ?? 10)) || !sameTime(returned.valid_at, payload.valid_at) || !sameTime(returned.recorded_before, payload.recorded_before)) fail()
       }
-      owned(); return result
+      owned()
+      if (ingestion) ingestionScope = { ...result.scope }
+      return result
     } catch (error) {
       if (generation !== epoch || controller.signal.aborted) {
-        if (error instanceof WorkbenchError && error.code === 'unauthorized') throw error
+        if (error instanceof WorkbenchError && ['unauthorized', 'origin_denied'].includes(error.code)) throw error
         fail(timedOut ? 'deadline' : 'cancelled')
       }
       if (error instanceof WorkbenchError) throw error
@@ -302,6 +316,9 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
     sourceList: () => request('sourceList'),
     sourceGet: payload => request('sourceGet', payload),
     sourceRetain: payload => request('sourceRetain', payload),
+    ingestionPlan: (payload, inspected, scope) => request('ingestionPlan', payload, { inspected, scope }),
+    ingestionExecute: (payload, known) => request('ingestionExecute', payload, { known, scope: known.scope }),
+    ingestionStatus: (payload, known, scope, project) => request('ingestionStatus', payload, { known, scope, project }),
     cancel, disconnect
   }
 }

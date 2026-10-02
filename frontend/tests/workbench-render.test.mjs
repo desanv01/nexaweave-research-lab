@@ -3,11 +3,15 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import { webcrypto } from 'node:crypto'
 import { JSDOM } from 'jsdom'
 import { parse, compileScript } from '@vue/compiler-sfc'
 import { createWorkbenchClient } from '../src/api/workbench.js'
+import { sha256 } from '../src/api/sourceLibrary.js'
+import { ingestionFingerprint, ingestionIdentities } from '../src/api/sourceIngestion.js'
 import { copyFor, safeError, workbenchCopy } from '../src/i18n/workbench.js'
 const dom = new JSDOM('<!doctype html><html><body></body></html>', { url: 'http://127.0.0.1:5173/research' })
+Object.defineProperty(globalThis, 'crypto', { value: webcrypto, configurable: true })
 for (const name of ['window', 'document', 'Element', 'HTMLElement', 'SVGElement', 'Node']) globalThis[name] = name === 'window' ? dom.window : dom.window[name]
 const { createApp, nextTick, h } = await import('vue')
 async function compile(path, replacements = {}) {
@@ -21,7 +25,8 @@ async function compile(path, replacements = {}) {
 }
 const evidence = await compile('../src/components/workbench/EvidenceResults.vue')
 const sources = await compile('../src/components/workbench/SourceLibrary.vue')
-const workbench = await compile('../src/views/ResearchWorkbench.vue', { '../components/workbench/EvidenceResults.vue': evidence.url, '../components/workbench/SourceLibrary.vue': sources.url })
+const ingestion = await compile('../src/components/workbench/SourceIngestion.vue')
+const workbench = await compile('../src/views/ResearchWorkbench.vue', { '../components/workbench/EvidenceResults.vue': evidence.url, '../components/workbench/SourceLibrary.vue': sources.url, '../components/workbench/SourceIngestion.vue': ingestion.url })
 function mount(component, props) {
   const root = document.createElement('div'); document.body.append(root)
   const app = createApp(component, props)
@@ -37,6 +42,16 @@ function input(root, selector, value) {
 const uuid = '11111111-1111-1111-1111-111111111111'
 const scope = { schema_version: 1, workspace_id: uuid, project_id: uuid, graph_id: uuid, run_id: null, branch_id: null, layer: 'source' }
 const malicious = '<img src=x onerror=alert(1)> 中😀 https://evil.test'
+test('real connected ingestion component is initially read-only and manual recovery is disabled until connection', async () => {
+  const mounted = mount(workbench.component)
+  try {
+    assert.ok(mounted.root.textContent.includes(copyFor('en').ingestion.title))
+    assert.ok(mounted.root.querySelector('.source-ingestion fieldset').disabled)
+    assert.ok(mounted.root.querySelector('#ingestion-operation').disabled)
+    assert.equal(mounted.root.querySelector('.plan-review'), null)
+    assert.equal(mounted.root.querySelector('.attempt'), null)
+  } finally { mounted.cleanup() }
+})
 function researchResult() {
   const citation = { evidence_id: uuid, project_id: uuid, source_revision: uuid, source_name: '<script>name</script>', source_sha256: 'a'.repeat(64), source_byte_length: 1000, source_codepoint_length: 200, source_recorded_at: '2026-10-01T00:00:00Z', start: 3, end: 3 + [...malicious].length, offset_unit: 'unicode_codepoint', excerpt: malicious, excerpt_sha256: 'b'.repeat(64), declared_page: 2 }
   return { schema_version: 1, source_claims: [{ provider_id: 'edge', kind: 'edge', scope, claim_class: 'source', name: 'predicate', fact: malicious, source_node_id: 'a', target_node_id: 'b', episode_ids: [], evidence_ids: [uuid], created_at: null, valid_at: null, invalid_at: null, expired_at: null, rank_basis: 'lexical_token_overlap', overlap_tokens: 1, query_tokens: 2, citations: [citation], unavailable_evidence_ids: [] }], simulation_observations: [], other_claims: [], scopes: [{ display_graph_id: 'graph_1', scope, pages: 1, scanned: 1, eligible: 1, excluded: 0, unknown: 0, returned: 1, truncated: false }], passage_coverage: [], competing_claim_candidates: [], linked_citations: 1, resolved_citations: 1, unavailable_citations: 0, historical: false, historical_semantics: 'retained_edges_not_bitemporal_reconstruction', rank_basis: 'lexical_token_overlap' }
@@ -85,6 +100,7 @@ test('all route copy keys are present in English, Chinese and Malay; unknown err
     assert.deepEqual(keys(workbenchCopy[locale]), keys(workbenchCopy.en))
     assert.deepEqual(keys(workbenchCopy[locale].status), keys(workbenchCopy.en.status))
     assert.deepEqual(keys(workbenchCopy[locale].errors), keys(workbenchCopy.en.errors))
+    assert.deepEqual(keys(workbenchCopy[locale].ingestionBanner), keys(workbenchCopy.en.ingestionBanner))
     assert.equal(safeError(copyFor(locale), 'private traceback secret'), copyFor(locale).errors.unavailable)
   }
 })
@@ -93,7 +109,8 @@ test('actual route connects, renders fetched facts, changes local language and c
   globalThis.fetch = async (url, options) => { calls.push({ url, options }); return response(calls.length === 1 ? graphResult : researchResult()) }
   const mounted = mount(workbench.component)
   try {
-    assert.equal(mounted.root.querySelectorAll('[role="status"]').length, 1)
+    assert.equal(mounted.root.querySelectorAll('.connection [role="status"]').length, 1)
+    assert.equal(mounted.root.querySelectorAll('.source-ingestion [role="status"]').length, 1)
     assert.ok(mounted.root.textContent.includes(copyFor('en').status.disconnected))
     assert.ok(mounted.root.querySelector('.query-section fieldset').disabled)
     input(mounted.root, '#graph-id', 'graph_1'); input(mounted.root, '#bearer-token', 'test-token')
@@ -153,4 +170,75 @@ test('dossier sections and traces remain in declared order, including empty sect
     assert.deepEqual([...mounted.root.querySelectorAll('.trace > .claim-text')].map(e => e.textContent), ['Q1', 'Q2'])
     assert.ok(mounted.root.textContent.includes(copyFor('en').empty))
   } finally { mounted.cleanup() }
+})
+async function waitForRoute(predicate) {
+  for (let i = 0; i < 100; i++) { await settle(); if (predicate()) return; await new Promise(resolve => setTimeout(resolve, 5)) }
+  assert.fail('Expected route state did not arrive')
+}
+const clickText = (root, text) => [...root.querySelectorAll('button')].find(button => button.textContent === text)?.click()
+const rejectResponse = (code, status) => new Response(JSON.stringify({ success: false, error: { code } }), { status, headers: { 'Content-Type': 'application/json' } })
+test('shared route ingestion banners never encourage resubmission after denial or uncertain execution; safe status and auth clearing remain', async () => {
+  for (const [executeCode, executeStatus] of [['model_calls_disabled', 403], ['outcome_unknown', 503]]) {
+    const previousFetch = globalThis.fetch, calls = [], text = 'Exact 中😀 source\r\n', bytes = new TextEncoder().encode(text)
+    const source = { project_id: uuid, source_revision: uuid, source_name: 'Synthetic source', text_sha256: await sha256(bytes), byte_length: bytes.length, codepoint_length: Array.from(text).length, recorded_at: '2026-10-03T00:00:00.123456+00:00' }
+    const sourceDTO = { schema_version: 1, binary_retained: false, graph_ingestion_executed: false, source, text, offset_unit: 'unicode_codepoint', passages: [{ evidence_id: uuid, start: 0, end: source.codepoint_length, page: null, excerpt_sha256: source.text_sha256 }] }
+    let planned, statusMode = 'missing', planFailure = true
+    globalThis.fetch = async (url, options) => {
+      calls.push({ url, method: options.method })
+      if (url.includes('/api/graph/data/')) return response(graphResult)
+      if (url.includes('/api/source/library/')) return response({ schema_version: 1, binary_retained: false, graph_ingestion_executed: false, sources: [source], has_more: false, window_limit: 20 })
+      if (url.includes('/api/source/item/')) return response(sourceDTO)
+      if (url.includes('/ingestion/plan/')) {
+        if (planFailure) return rejectResponse('source_unavailable', 503)
+        const payload = JSON.parse(options.body), ids = await ingestionIdentities(scope, payload.operation_id)
+        planned = { schema_version: 1, scope, operation_id: payload.operation_id, episode_id: ids.episode_id, fingerprint: await ingestionFingerprint(scope, sourceDTO, payload), evidence_ids: [uuid], graph_ingestion_executed: false, model_calls_made: false, actual_usage_microusd: null, source_revision: uuid, source_sha256: source.text_sha256, source_byte_length: source.byte_length, source_codepoint_length: source.codepoint_length, ontology_revision: payload.ontology.revision, eligibility_codepoint_limit: 32768, spending_authorized: false }
+        return response(planned)
+      }
+      if (url.includes('/ingestion/execute/')) return rejectResponse(executeCode, executeStatus)
+      if (url.includes('/ingestion/operation/')) {
+        if (statusMode === 'missing') return rejectResponse('not_found', 404)
+        if (statusMode === 'denied') return new Response('private server token', { status: 401 })
+        return response({ schema_version: 1, scope, operation_id: planned.operation_id, episode_id: planned.episode_id, fingerprint: planned.fingerprint, evidence_ids: planned.evidence_ids, graph_ingestion_executed: false, model_calls_made: null, actual_usage_microusd: null, state: 'uncertain', budget_state: 'uncertain', ceiling_microusd: 100, receipt: null })
+      }
+      if (url.includes('/api/graph/research/')) return rejectResponse('busy', 503)
+      assert.fail('Unexpected route request: ' + url)
+    }
+    const mounted = mount(workbench.component)
+    const banner = () => mounted.root.querySelector('.connection [role="status"]').textContent
+    const postCount = route => calls.filter(call => call.method === 'POST' && call.url.includes(route)).length
+    try {
+      input(mounted.root, '#graph-id', 'graph_1'); input(mounted.root, '#bearer-token', 'test-token')
+      mounted.root.querySelector('.connection-form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true })); await settle()
+      clickText(mounted.root, copyFor('en').sources.load); await settle()
+      mounted.root.querySelector('.source-list button').click(); await waitForRoute(() => !!mounted.root.querySelector('.selected-source'))
+      const planForm = mounted.root.querySelector('.source-ingestion > form')
+      planForm.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true })); await waitForRoute(() => banner().includes(copyFor('en').ingestionBanner.plan))
+      assert.equal(postCount('/execute/'), 0); assert.ok(!banner().includes(copyFor('en').errors.unavailable))
+      planFailure = false
+      planForm.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true })); await waitForRoute(() => !!mounted.root.querySelector('.plan-review'))
+      const acknowledgement = mounted.root.querySelector('.acknowledgement input'); acknowledgement.checked = true; acknowledgement.dispatchEvent(new dom.window.Event('change', { bubbles: true })); await settle()
+      clickText(mounted.root, copyFor('en').ingestion.execute); await waitForRoute(() => banner().includes(copyFor('en').ingestionBanner.execute))
+      assert.equal(postCount('/execute/'), 1)
+      assert.ok(!banner().includes(copyFor('en').errors.unavailable)); assert.ok(!banner().includes('Submit again when ready'))
+      assert.ok([...mounted.root.querySelectorAll('button')].find(button => button.textContent === copyFor('en').ingestion.execute).disabled)
+      assert.equal([...mounted.root.querySelectorAll('button')].find(button => button.textContent === copyFor('en').ingestion.checkStatus).disabled, false)
+      clickText(mounted.root, copyFor('en').ingestion.execute); await settle(); assert.equal(postCount('/execute/'), 1)
+      for (const locale of ['zh', 'ms', 'en']) {
+        const before = calls.length
+        input(mounted.root, '#workbench-language', locale); await settle()
+        assert.ok(banner().includes(copyFor(locale).ingestionBanner.execute)); assert.ok(!banner().includes(copyFor(locale).errors.unavailable)); assert.equal(calls.length, before)
+      }
+      clickText(mounted.root, copyFor('en').ingestion.checkStatus); await waitForRoute(() => banner().includes(copyFor('en').ingestionBanner.status))
+      assert.equal(postCount('/execute/'), 1); assert.ok(!banner().includes(copyFor('en').errors.unavailable)); assert.ok(mounted.root.textContent.includes(copyFor('en').ingestion.notFound))
+      statusMode = 'uncertain'; clickText(mounted.root, copyFor('en').ingestion.checkStatus); await waitForRoute(() => !!mounted.root.querySelector('.outcome'))
+      assert.ok(mounted.root.querySelector('.outcome').textContent.includes(copyFor('en').ingestion.graphStates.uncertain)); assert.equal(postCount('/execute/'), 1)
+      // Shared read failures retain their existing read retry guidance.
+      input(mounted.root, '#question', 'question'); mounted.root.querySelector('.query-section form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true })); await settle()
+      assert.ok(banner().includes(copyFor('en').errors.unavailable)); assert.equal(postCount('/execute/'), 1)
+      statusMode = 'denied'; clickText(mounted.root, copyFor('en').ingestion.checkStatus); await settle()
+      assert.ok(banner().includes(copyFor('en').errors.unauthorized)); assert.ok(!banner().includes(copyFor('en').ingestionBanner.status))
+      assert.equal(mounted.root.querySelector('.graph-overview'), null); assert.equal(mounted.root.querySelector('.attempt'), null); assert.equal(mounted.root.querySelector('#bearer-token').value, '')
+      assert.ok(!mounted.root.textContent.includes('private server token')); assert.equal(postCount('/execute/'), 1)
+    } finally { mounted.cleanup(); globalThis.fetch = previousFetch }
+  }
 })
