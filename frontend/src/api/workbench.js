@@ -1,4 +1,5 @@
 // Isolated protected read client. Never share the inherited Axios interceptors.
+import { sourcePayload, sourceReadRequest, verifySourceInput, validateSourceResult } from './sourceLibrary.js'
 export class WorkbenchError extends Error {
   constructor(code) { super(code); this.name = 'WorkbenchError'; this.code = code }
 }
@@ -211,7 +212,9 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
   async function request(method, payload) {
     if (!connection || (method !== 'graph' && !authenticated)) fail('disconnected')
     cancel()
-    const raw = method === 'graph' ? undefined : requestPayload(method, payload, connection.graph)
+    const source = method.startsWith('source')
+    const raw = method === 'graph' || method === 'sourceList' || method === 'sourceGet' ? undefined : method === 'sourceRetain' ? sourcePayload(payload) : requestPayload(method, payload, connection.graph)
+    const sourceRequest = method === 'sourceGet' ? sourceReadRequest(payload) : method === 'sourceRetain' ? JSON.parse(raw) : undefined
     const epoch = generation, current = connection, controller = new AbortController()
     active = controller
     let timedOut = false, reader, responseBody
@@ -228,12 +231,16 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
     })
     try {
       const paths = { graph: 'data', research: 'research', dossier: 'dossier' }
-      const response = await guarded(fetchImpl(`${current.origin}/api/graph/${paths[method]}/${current.graph}`, { method: method === 'graph' ? 'GET' : 'POST', headers: { Authorization: `Bearer ${current.token}`, ...(raw ? { 'Content-Type': 'application/json' } : {}) }, body: raw, signal: controller.signal, redirect: 'error', credentials: 'omit', cache: 'no-store', referrerPolicy: 'no-referrer' }))
+      if (method === 'sourceRetain') { await guarded(verifySourceInput(sourceRequest)); owned() }
+      const sourcePaths = { sourceList: 'library', sourceGet: 'item', sourceRetain: 'retain' }
+      const path = source ? `/api/source/${sourcePaths[method]}/${current.graph}${method === 'sourceGet' ? '/' + sourceRequest.source_revision : ''}` : `/api/graph/${paths[method]}/${current.graph}`
+      const response = await guarded(fetchImpl(`${current.origin}${path}`, { method: raw === undefined ? 'GET' : 'POST', headers: { Authorization: `Bearer ${current.token}`, ...(raw ? { 'Content-Type': 'application/json' } : {}) }, body: raw, signal: controller.signal, redirect: 'error', credentials: 'omit', cache: 'no-store', referrerPolicy: 'no-referrer' }))
       responseBody = response.body
       owned()
       if (response.status === 401) { disconnect(); fail('unauthorized') }
+      if (source && response.status === 404 && !/^application\/json(?:\s*;|$)/i.test(response.headers.get('content-type') || '')) fail('source_unavailable')
       if (response.redirected || response.type === 'opaqueredirect' || !/^application\/json(?:\s*;|$)/i.test(response.headers.get('content-type') || '') || !response.body?.getReader) fail()
-      const cap = (method === 'dossier' ? 4194304 : 2097152) + 1024
+      const cap = (source || method === 'dossier' ? 4194304 : 2097152) + 1024
       const length = response.headers.get('content-length')
       if (length && (!/^\d+$/.test(length) || Number(length) > cap)) fail('result_too_large')
       reader = response.body.getReader()
@@ -252,12 +259,12 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
       if (!obj(value) || typeof value.success !== 'boolean') fail()
       if (!response.ok || !value.success) {
         shape(value, 'success error'); shape(value.error, 'code')
-        if (value.success !== false || !SERVER_CODES.has(value.error.code)) fail()
+        if (value.success !== false || !(SERVER_CODES.has(value.error.code) || source && ['source_unavailable', 'source_denied', 'outcome_unknown'].includes(value.error.code))) fail()
         if (value.error.code === 'unauthorized') disconnect()
         fail(value.error.code)
       }
       shape(value, 'success data')
-      const result = validateResult(method, value.data, current.graph)
+      const result = source ? await guarded(validateSourceResult(method, value.data, sourceRequest)) : validateResult(method, value.data, current.graph)
       if (method === 'research' && [...result.source_claims, ...result.simulation_observations, ...result.other_claims].length > (payload.top_k ?? 10)) fail()
       if (method === 'dossier') {
         const returned = result.request
@@ -292,6 +299,9 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
     },
     research: payload => request('research', payload),
     dossier: payload => request('dossier', payload),
+    sourceList: () => request('sourceList'),
+    sourceGet: payload => request('sourceGet', payload),
+    sourceRetain: payload => request('sourceRetain', payload),
     cancel, disconnect
   }
 }

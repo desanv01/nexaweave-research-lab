@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, ref } from 'vue'
 import { createWorkbenchClient, WorkbenchError, awareTimestamp } from '../api/workbench.js'
 import { copyFor, safeError } from '../i18n/workbench.js'
 import EvidenceResults from '../components/workbench/EvidenceResults.vue'
+import SourceLibrary from '../components/workbench/SourceLibrary.vue'
 const locale = ref('en'), copy = computed(() => copyFor(locale.value))
 const origin = ref('http://127.0.0.1:5001'), graph = ref(''), token = ref(''), reveal = ref(false)
 const connected = ref(false), busy = ref(false), status = ref('disconnected'), errorCode = ref('')
@@ -10,25 +11,34 @@ const graphData = ref(null), result = ref(null), mode = ref('research'), query =
 const sections = ref([{ heading: '', query: '' }]), advanced = ref(false), topK = ref(10), validAt = ref(''), recordedBefore = ref('')
 const graphPage = ref(0), graphKind = ref('nodes')
 const client = createWorkbenchClient()
+const sourceReset = ref(0)
+// Methods capture the single private client. Neither token nor origin is a prop.
+const sourceMethods = Object.freeze({
+  list: () => operation(() => client.sourceList(), false, true),
+  get: payload => operation(() => client.sourceGet(payload), false, true),
+  retain: payload => operation(() => client.sourceRetain(payload), false, true)
+})
 let generation = 0
 const graphEntries = computed(() => graphData.value?.[graphKind.value] || [])
-function clearProtected() { graphData.value = null; result.value = null; graphPage.value = 0 }
+function clearProtected() { sourceReset.value++; graphData.value = null; result.value = null; graphPage.value = 0 }
 function disconnect() { generation++; client.disconnect(); token.value = ''; reveal.value = false; connected.value = false; busy.value = false; clearProtected(); errorCode.value = ''; status.value = 'disconnected' }
 function cancel() { generation++; client.cancel(); busy.value = false; status.value = 'cancelled'; errorCode.value = ''; if (!connected.value) { client.disconnect(); token.value = ''; clearProtected() } }
-async function operation(action, connecting = false) {
+async function operation(action, connecting = false, source = false) {
   const epoch = ++generation
   client.cancel()
   busy.value = true; errorCode.value = ''; status.value = connecting ? 'connecting' : 'loading'
-  if (connecting) { connected.value = false; clearProtected() } else result.value = null
+  if (connecting) { connected.value = false; clearProtected() } else if (!source) result.value = null
   try {
     const data = await action()
-    if (epoch !== generation) return
-    if (connecting) { graphData.value = data; connected.value = true; status.value = 'connected' } else { result.value = data; status.value = 'success' }
+    if (epoch !== generation) { if (source) throw new WorkbenchError('cancelled'); return }
+    if (connecting) { graphData.value = data; connected.value = true; status.value = 'connected' } else if (!source) { result.value = data; status.value = 'success' } else status.value = 'connected'
+    return data
   } catch (e) {
-    if (epoch !== generation) return
+    if (epoch !== generation) { if (source) throw e; return }
     errorCode.value = e instanceof WorkbenchError ? e.code : 'invalid_request'
     status.value = errorCode.value === 'cancelled' ? 'cancelled' : errorCode.value === 'unauthorized' ? 'denied' : 'error'
     if (connecting || errorCode.value === 'unauthorized') { client.disconnect(); connected.value = false; token.value = ''; reveal.value = false; clearProtected() }
+    if (source) throw e
   } finally { if (epoch === generation) busy.value = false }
 }
 function connect() {
@@ -68,6 +78,7 @@ onBeforeUnmount(disconnect)
       <section v-if="graphData" class="graph-overview"><h2>{{ copy.graphOverview }} <span class="mono">{{ graphData.graph_id }}</span></h2><p>{{ copy.nodes }}: {{ graphData.node_count }} · {{ copy.edges }}: {{ graphData.edge_count }}</p>
         <details><summary>{{ copy.overview }}</summary><div class="choices"><label><input v-model="graphKind" value="nodes" type="radio" @change="graphPage = 0">{{ copy.nodes }}</label><label><input v-model="graphKind" value="edges" type="radio" @change="graphPage = 0">{{ copy.edges }}</label></div><ul><li v-for="entry in graphEntries.slice(graphPage * 10, (graphPage + 1) * 10)" :key="entry.uuid"><details><summary>{{ entry.name || entry.uuid }}</summary><p class="mono">{{ entry.uuid }}</p><p>{{ entry.summary }}</p><p>{{ entry.fact }}</p><p v-if="graphKind === 'edges'">{{ entry.source_node_name }} → {{ entry.target_node_name }}</p></details></li></ul><nav v-if="graphEntries.length > 10" class="actions" :aria-label="copy.graphOverview"><button type="button" :disabled="!graphPage" @click="graphPage--">{{ copy.previous }}</button><span>{{ copy.range }} {{ graphPage + 1 }} / {{ Math.ceil(graphEntries.length / 10) }}</span><button type="button" :disabled="(graphPage + 1) * 10 >= graphEntries.length" @click="graphPage++">{{ copy.next }}</button></nav></details>
       </section>
+      <SourceLibrary :methods="sourceMethods" :connected="connected" :busy="busy" :reset-version="sourceReset" :locale="locale" />
       <section class="query-section" aria-labelledby="query-title"><h2 id="query-title">{{ copy.research }}</h2>
         <form @submit.prevent="submit"><fieldset :disabled="!connected || busy"><legend>{{ copy.scope }}</legend><div class="choices"><label><input v-model="mode" type="radio" value="research">{{ copy.research }}</label><label><input v-model="mode" type="radio" value="dossier">{{ copy.dossier }}</label></div>
           <label v-if="mode === 'research'" for="question">{{ copy.query }}<textarea id="question" v-model="query" required rows="3" maxlength="4000"></textarea></label>
