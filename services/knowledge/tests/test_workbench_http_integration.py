@@ -65,9 +65,11 @@ def observe(frame,event,arg):
             emit({'event':'spawn','safe':safe,'pid':child.pid,
                   'bootstrap':Path(arguments[3]).name if len(arguments)==4 else None})
     if event=='return' and module=='app.services.knowledge_transport' and name=='_stop_owned':
-        child=frame.f_locals.get('process')
+        owner=frame.f_locals.get('owner');child=getattr(owner,'process',None)
         threads=frame.f_locals.get('threads',[])
-        emit({'event':'cleanup','closed':child is not None and child.poll() is not None
+        emit({'event':'cleanup','closed':owner is not None and owner.closed
+              and (os.name!='nt' or (owner.tree_empty and owner.job is None))
+              and child is not None and child.poll() is not None
               and child.stdin.closed and child.stdout.closed and all(not t.is_alive() for t in threads)})
 sys.setprofile(observe);threading.setprofile(observe)
 from app import create_app

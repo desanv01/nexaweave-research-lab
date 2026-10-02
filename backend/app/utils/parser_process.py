@@ -15,6 +15,8 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 
+from .owned_process import OwnedProcess, OwnedProcessError
+
 from .file_parser import (
     FileParser,
     InvalidSourceError,
@@ -171,31 +173,8 @@ def _read_response(pipe, byte_limit, events):
         events.put(("reader_error", None))
 
 
-def _stop_and_reap(process, threads):
-    if process is not None:
-        if process.poll() is None:
-            try:
-                process.terminate()
-                process.wait(timeout=0.5)
-            except (OSError, subprocess.TimeoutExpired):
-                if process.poll() is None:
-                    try:
-                        process.kill()
-                    except OSError:
-                        pass
-        try:
-            process.wait()
-        except OSError:
-            pass
-        for pipe in (process.stdin, process.stdout):
-            if pipe is not None:
-                try:
-                    pipe.close()
-                except OSError:
-                    pass
-    for thread in threads:
-        if thread.ident is not None:
-            thread.join()
+def _stop_and_reap(owner, threads):
+    owner.stop(threads)
 
 
 def _parse_response(data, limits):
@@ -243,17 +222,20 @@ def extract_text_isolated(file_path, *, limits=None, timeout_seconds=30) -> str:
     byte_limit = limits.max_text_chars * 6 + 4096
     deadline = None
     process = None
+    owner = OwnedProcess()
     threads = []
     events = queue.Queue()
 
     try:
         private_directory = tempfile.TemporaryDirectory(prefix="mirofish-parser-")
+        owner.bind_private_directory(private_directory)
     except OSError:
         raise ParserFailedError() from None
-    with private_directory as directory:
+    try:
+        directory = private_directory.name
         try:
             creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-            process = subprocess.Popen(
+            process = owner.start(subprocess.Popen,
                 [sys.executable, "-I", "-u", str(_WORKER_SCRIPT)],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
@@ -268,11 +250,13 @@ def extract_text_isolated(file_path, *, limits=None, timeout_seconds=30) -> str:
             writer = threading.Thread(
                 target=_send_request,
                 args=(process.stdin, payload, events),
+                daemon=True,
                 name="mirofish-parser-writer",
             )
             reader = threading.Thread(
                 target=_read_response,
                 args=(process.stdout, byte_limit, events),
+                daemon=True,
                 name="mirofish-parser-reader",
             )
             threads = [writer, reader]
@@ -308,5 +292,17 @@ def extract_text_isolated(file_path, *, limits=None, timeout_seconds=30) -> str:
         except (OSError, RuntimeError, subprocess.SubprocessError):
             raise ParserFailedError() from None
         finally:
-            _stop_and_reap(process, threads)
+            interrupted = isinstance(sys.exc_info()[1], (KeyboardInterrupt, SystemExit))
+            try:
+                _stop_and_reap(owner, threads)
+            except OwnedProcessError:
+                if not interrupted:
+                    raise ParserFailedError() from None
+    finally:
+        interrupted = isinstance(sys.exc_info()[1], (KeyboardInterrupt, SystemExit))
+        try:
+            owner.cleanup_private_directory(private_directory)
+        except (OSError, OwnedProcessError):
+            if not interrupted:
+                raise ParserFailedError() from None
     return _parse_response(response_bytes, limits)

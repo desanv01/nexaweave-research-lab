@@ -10,7 +10,8 @@ from tools.run_unit_tests import LoopbackOnlySockets, _unit_environment
 
 TARGETS = ('test_knowledge_evidence_client.py', 'test_knowledge_evidence_app.py',
            'test_knowledge_reader.py', 'test_knowledge_read_app.py',
-           'test_knowledge_population.py', 'test_knowledge_cold_start.py')
+           'test_knowledge_population.py', 'test_knowledge_cold_start.py',
+           'test_source_library_api.py')
 
 
 def child():

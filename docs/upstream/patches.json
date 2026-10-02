@@ -63,9 +63,10 @@
     {
       "imported_path": "backend/app/__init__.py",
       "original_sha256": "f04d262decf6c11437280c0f0c1353774f642888b2ef3f02dfa0e96e992b3c1c",
-      "current_sha256": "e7e15e70922c3d68635bed0123588188387b50cb25b6cb30d06f77c17fcc52eb",
-      "reason": "U02d exact Origin/CORS and private logging retained. U03i selects explicit graphiti_readonly factory before inherited blueprints/runner; default legacy unchanged. U11a forwards optional evidence facade only in explicit read-only mode; legacy default unchanged.",
-      "phase": "U02d/U03i / U11a"
+      "current_sha256": "c9ac994c59b8af3704a99f41215707a18debc40642c564eb3e780bab930c74bf",
+      "reason": "U02d exact Origin/CORS and private logging retained. U03i selects explicit graphiti_readonly factory before inherited blueprints/runner; default legacy unchanged. U11a forwards optional evidence facade only in explicit read-only mode; legacy default unchanged. U04d explicitly selects research_local source-retention routes using the same protected factory/settings; graphiti_readonly and legacy defaults remain.",
+      "phase": "U02d/U03i / U11a / U04d",
+      "review_status": "Main source reviewed; U04d exact-revision CI acceptance pending."
     },
     {
       "imported_path": "backend/app/config.py",
@@ -78,9 +79,10 @@
     {
       "imported_path": "backend/run.py",
       "original_sha256": "893a01b2e1881e4eb06bdbc4737e444d72eb374f9f326a1249dbc9aa04274483",
-      "current_sha256": "47cfe6e45105fbe34075bf196c8dc907a7e7ca58ed9e4e3940bb89c7067c92a5",
-      "reason": "Select explicit graphiti_readonly startup validation and loopback default; preserve legacy startup behavior.",
-      "phase": "U03i"
+      "current_sha256": "932f0ee46196af219c32f3eab45ee73d22106327ed77455fa4ca9c3750857c15",
+      "reason": "Select explicit graphiti_readonly startup validation and loopback default; preserve legacy startup behavior. U04d recognizes explicit research_local through the protected validator and loopback default; legacy behavior unchanged.",
+      "phase": "U03i / U04d",
+      "review_status": "Main source reviewed; exact U04d CI qualification pending."
     },
     {
       "imported_path": "tests/test_local_star_count_fetch.py",

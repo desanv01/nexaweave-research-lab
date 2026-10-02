@@ -26,7 +26,7 @@ def main():
     """主函数"""
     # 验证配置
     mode = os.environ.get('MIROFISH_APP_MODE', 'legacy')
-    if mode == 'graphiti_readonly':
+    if mode in {'graphiti_readonly', 'research_local'}:
         errors = Config.validate_readonly()
     elif mode == 'legacy':
         errors = Config.validate()
@@ -43,7 +43,7 @@ def main():
     app = create_app()
     
     # 获取运行配置
-    host = os.environ.get('FLASK_HOST', '127.0.0.1' if mode == 'graphiti_readonly' else '0.0.0.0')
+    host = os.environ.get('FLASK_HOST', '127.0.0.1' if mode in {'graphiti_readonly', 'research_local'} else '0.0.0.0')
     port = int(os.environ.get('FLASK_PORT', 5001))
     debug = Config.DEBUG
     
@@ -53,4 +53,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
