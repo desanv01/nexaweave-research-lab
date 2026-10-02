@@ -511,3 +511,7 @@ Revised PR75 candidate and exact hosted PR/push/log qualification remain pending
 
 
 Main integration formatting: staged whitespace check found mixed CRLF in the new owned-process test. Main normalized only that candidate file to LF; complete module AST equals the executed worker original, which remains untouched. Root u12b-line-ending-normalization.json preserves both hashes. No assertion/runtime change or redundant test rerun; final CI still required.
+
+## Main U11c connected source workbench review
+
+Accepted dependency PR75mergeb9c6496/all24 reviewed CI gates. Eleven frozen U11c source/task hashes unchanged. Main53 Node passes/no skips11.99s and Vite18.50s; baseline128/32. Actual synthetic Vue/Flask/installed child/PG/Neo browser source list/inspection/Unicode offsets/keyboard focus/literal paste/BOM CRLF exact file/DOCX main-body and table extraction/locales320–1440/reload persisted revision/auth denial/disconnect plus inherited research/dossier qualified. Main review coordination/reviews/U11c-source-workbench.md records exact digests/evidence and limits. Initial30minute fixture lifetime failure retained; second recovery fixture exit0, both ownedtrees/freshNeoGroups closed, namedPG/Neo stopped/data retained, temporary browser closed. No paid calls, binary retention, OCR, graph ingestion, semantic/full-pagination/full44 or whole-phase acceptance. Exact hosted frontend PR/push/postmerge gates pending. Main owns Git/acceptance; U11c worker idle9 unchanged, U06b first handoff idle2 remains unverified.

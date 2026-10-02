@@ -20,7 +20,8 @@ async function compile(path, replacements = {}) {
   return { component: (await import(url)).default, url }
 }
 const evidence = await compile('../src/components/workbench/EvidenceResults.vue')
-const workbench = await compile('../src/views/ResearchWorkbench.vue', { '../components/workbench/EvidenceResults.vue': evidence.url })
+const sources = await compile('../src/components/workbench/SourceLibrary.vue')
+const workbench = await compile('../src/views/ResearchWorkbench.vue', { '../components/workbench/EvidenceResults.vue': evidence.url, '../components/workbench/SourceLibrary.vue': sources.url })
 function mount(component, props) {
   const root = document.createElement('div'); document.body.append(root)
   const app = createApp(component, props)
