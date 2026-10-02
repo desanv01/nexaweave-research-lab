@@ -498,3 +498,187 @@ def test_actual_research_entrypoint_rejects_unsafe_configuration(protected_entry
     with pytest.raises(SystemExit) as error:
         entrypoint.main()
     assert error.value.code == 1 and not launches
+
+
+def pdf_upload_fixture():
+    binary = b"%PDF-1.7\nsynthetic wire admission fixture\n%%EOF"
+    return {"schema_version": 1, "source_revision": str(uuid4()), "source_name": "PDF 猫",
+        "format": "pdf", "content": base64.b64encode(binary).decode(),
+        "input_sha256": hashlib.sha256(binary).hexdigest()}
+
+
+def pdf_receipt_fixture(payload):
+    texts = ["Beginning 猫\n", "", "Middle 雪\n", "End\n"]
+    pages, passages, offset = [], [], 0
+    for ordinal, text in enumerate(texts):
+        offset += 2 if ordinal else 0
+        page = {"page": ordinal + 1, "start": offset, "end": offset + len(text),
+            "empty": not text.strip(), "excerpt_sha256": hashlib.sha256(text.encode()).hexdigest()}
+        pages.append(page)
+        if not page["empty"]:
+            identity = "pdf-page-text-v1:" + json.dumps(page, sort_keys=True,
+                ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+            passages.append({"evidence_id": str(uuid5(UUID(payload["source_revision"]), identity)),
+                "start": page["start"], "end": page["end"], "page": ordinal + 1,
+                "excerpt_sha256": page["excerpt_sha256"]})
+        offset += len(text)
+    text = "\n\n".join(texts)
+    return {"schema_version": 1, "binary_retained": False, "graph_ingestion_executed": False,
+        "offset_unit": "unicode_codepoint", "source": {"project_id": scope()["project_id"],
+        "source_revision": payload["source_revision"], "source_name": payload["source_name"],
+        "text_sha256": hashlib.sha256(text.encode()).hexdigest(), "byte_length": len(text.encode()),
+        "codepoint_length": len(text), "recorded_at": "2026-10-02T00:00:00+00:00"},
+        "passages": passages, "extraction": {"format": "pdf", "input_hash_verified": True,
+        "input_sha256": payload["input_sha256"], "input_digest_persisted": False,
+        "blocks_persisted": False, "original_document_verified": False, "binary_persistently_bound": False,
+        "ocr_performed": False, "page_layout": "unknown", "semantic_quality": "unknown",
+        "coverage": ["page_text"], "page_text": texts, "pages": pages,
+        "page_count": 4, "empty_page_count": 1, "declared_passage_count": 3}}
+
+
+def install_pdf_wire_reply(child, *, corrupt_result=None):
+    original = child.call
+    def call(raw):
+        request = json.loads(raw)
+        if request["method"] != "retain_pdf":
+            return original(raw)
+        child.calls.append(request)
+        result = pdf_receipt_fixture(request["payload"])
+        # A PDF-specific result callback must not reach the original client's
+        # context response (which has scope, but no extraction/source/passages).
+        if corrupt_result is not None:
+            corrupt_result(result)
+        return encoded({"version": 1, "request_id": request["request_id"], "ok": True, "result": result})
+    child.call = call
+
+
+def test_pdf_http_wire_admission_and_receipt_use_fixed_child_without_native_backend(host, monkeypatch):
+    import builtins
+    http, child, headers, _ = host
+    original = builtins.__import__
+    def imports(name, *args, **kwargs):
+        if name.split(".")[0] in {"pymupdf", "fitz", "mirofish_storage"}:
+            raise AssertionError("PDF runtime entered Flask")
+        return original(name, *args, **kwargs)
+    monkeypatch.setattr(builtins, "__import__", imports)
+    install_pdf_wire_reply(child)
+    payload = pdf_upload_fixture()
+    response = http.post("/api/source/retain/display-1", json=payload, headers=headers)
+    assert response.status_code == 200
+    assert response.json["data"] == pdf_receipt_fixture(payload)
+    assert [call["method"] for call in child.calls] == ["context", "retain_pdf"]
+    assert response.headers["Cache-Control"] == "no-store"
+    assert response.headers["X-Content-Type-Options"] == "nosniff"
+
+
+@pytest.mark.parametrize("change", [
+    lambda p: p.update(content=p["content"] + "="), lambda p: p.update(content="%%%"),
+    lambda p: p.update(input_sha256="0" * 64), lambda p: p.update(extra="path"),
+    lambda p: p.update(schema_version=True), lambda p: p.update(content="x" * (4 * ((2 * TEXT_BYTES + 2) // 3) + 1)),
+])
+def test_pdf_denials_before_child(host, change):
+    http, child, headers, _ = host
+    payload = pdf_upload_fixture()
+    change(payload)
+    assert http.post("/api/source/retain/display-1", json=payload, headers=headers).status_code == 400
+    assert not child.calls
+
+
+@pytest.mark.parametrize("corrupt", [
+    lambda r: r["extraction"].update(ocr_performed=True),
+    lambda r: r["extraction"].update(input_digest_persisted=True),
+    lambda r: r["extraction"].update(blocks_persisted=True),
+    lambda r: r["extraction"].update(original_document_verified=True),
+    lambda r: r["extraction"].update(binary_persistently_bound=True),
+    lambda r: r["extraction"].update(input_hash_verified=False),
+    lambda r: r["extraction"].update(page_count=True),
+    lambda r: r["extraction"].update(empty_page_count=0),
+    lambda r: r["extraction"].update(declared_passage_count=4),
+    lambda r: r["extraction"]["pages"][0].update(start=True),
+    lambda r: r["extraction"]["pages"][2].update(page=2),
+    lambda r: r["extraction"]["pages"][0].update(extra="secret"),
+    lambda r: r["extraction"]["page_text"].__setitem__(0, "tampered"),
+    lambda r: r["passages"][0].update(excerpt_sha256="0" * 64),
+    lambda r: r["passages"][0].update(evidence_id=str(uuid4())),
+    lambda r: r["passages"][0].update(page=True),
+    lambda r: r["source"].update(text_sha256="0" * 64),
+    lambda r: r["source"].update(project_id=str(uuid4())),
+    lambda r: r.update(binary_retained=True),
+    lambda r: r.update(graph_ingestion_executed=True),
+    lambda r: r.update(extra="secret"),
+])
+def test_pdf_corrupt_receipt_unknown_no_retry(host, corrupt):
+    http, child, headers, settings = host
+    install_pdf_wire_reply(child, corrupt_result=corrupt)
+    payload = pdf_upload_fixture()
+    # The public DTO boundary must reject the same corrupt receipt even if an
+    # explicitly injected facade bypasses child transport validation.
+    from app.services.knowledge_source_facade import validate_public_result
+    receipt = pdf_receipt_fixture(payload)
+    corrupt(receipt)
+    with pytest.raises(KnowledgeTransportFailure) as error:
+        validate_public_result("retain", receipt, settings.scope, payload)
+    assert error.value.outcome_unknown is True
+    response = http.post("/api/source/retain/display-1", json=payload, headers=headers)
+    assert response.status_code == 503 and response.json["error"]["code"] == "outcome_unknown"
+    assert [call["method"] for call in child.calls] == ["context", "retain_pdf"]
+
+
+def test_pdf_late_reply_is_unknown_without_retry(host, monkeypatch):
+    _, child, _, settings = host
+    from app.services import knowledge_source_facade as module
+    now = {"value": 0}
+    monkeypatch.setattr(module.time, "monotonic", lambda: now["value"])
+    install_pdf_wire_reply(child)
+    original = child.call
+    def late(raw):
+        reply = original(raw)
+        if json.loads(raw)["method"] == "retain_pdf": now["value"] = 61
+        return reply
+    child.call = late
+    facade = KnowledgeSourceFacade(settings, client_factory=lambda: child)
+    with pytest.raises(KnowledgeTransportFailure) as error:
+        facade.execute("retain", "display-1", pdf_upload_fixture())
+    assert error.value.outcome_unknown is True
+    assert [call["method"] for call in child.calls] == ["context", "retain_pdf"]
+
+
+def test_pdf_context_denial_and_shared_deadline_prevent_pdf_dispatch(host, monkeypatch):
+    _, child, _, settings = host
+    facade = KnowledgeSourceFacade(settings, client_factory=lambda: child)
+    child.denied = "source_denied"
+    with pytest.raises(KnowledgeReadError) as error:
+        facade.execute("retain", "display-1", pdf_upload_fixture())
+    assert error.value.code == "source_denied"
+    assert [call["method"] for call in child.calls] == ["context"]
+    child.calls.clear();child.denied = None
+    from app.services import knowledge_source_facade as module
+    now = {"value": 0}
+    monkeypatch.setattr(module.time, "monotonic", lambda: now["value"])
+    original = child.call
+    def late_context(raw):
+        reply = original(raw)
+        now["value"] = 61
+        return reply
+    child.call = late_context
+    with pytest.raises(KnowledgeTransportFailure) as error:
+        facade.execute("retain", "display-1", pdf_upload_fixture())
+    assert error.value.outcome_unknown is False
+    assert [call["method"] for call in child.calls] == ["context"]
+
+
+def test_pdf_profile_unavailable_fixed_child_error_is_not_empty_success(host):
+    http, child, headers, _ = host
+    original = child.call
+    def unavailable(raw):
+        request = json.loads(raw)
+        if request["method"] != "retain_pdf": return original(raw)
+        child.calls.append(request)
+        return encoded({"version": 1, "request_id": request["request_id"], "ok": False,
+            "error": {"code": "source_unavailable"}})
+    child.call = unavailable
+    response = http.post("/api/source/retain/display-1", json=pdf_upload_fixture(), headers=headers)
+    assert response.status_code == 503
+    assert response.json == {"success": False, "error": {"code": "source_unavailable"}}
+    assert [call["method"] for call in child.calls] == ["context", "retain_pdf"]
+    assert child.records == {}

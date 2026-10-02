@@ -1,5 +1,6 @@
 """Source-only profile of the accepted owned process transport (stdlib only)."""
 import hashlib
+import base64
 import json
 import re
 from datetime import datetime
@@ -21,6 +22,105 @@ CHILD_KEYS = ("KNOWLEDGE_PRINCIPAL", "KNOWLEDGE_DISPLAY_GRAPH_ID", "KNOWLEDGE_BO
     "KNOWLEDGE_PG_HOST", "KNOWLEDGE_PG_PORT", "KNOWLEDGE_PG_DATABASE", "KNOWLEDGE_PG_USER",
     "KNOWLEDGE_PG_PASSWORD")
 HASH = re.compile(r"[0-9a-f]{64}\Z")
+
+
+def pdf_upload(value):
+    """Native-free, strict PDF bytes admission shared by facade and transport."""
+    if (type(value) is not dict or set(value) != {"schema_version", "source_revision",
+            "source_name", "format", "content", "input_sha256"}
+            or type(value["schema_version"]) is not int or value["schema_version"] != 1
+            or type(value["format"]) is not str or value["format"] != "pdf"):
+        raise ValueError
+    _uuid(value["source_revision"])
+    text_value(value["source_name"], 1024, name=True)
+    content = value["content"]
+    if (type(content) is not str or not content.isascii()
+            or not 0 < len(content) <= 4 * ((2 * TEXT_BYTES + 2) // 3)
+            or type(value["input_sha256"]) is not str or not HASH.fullmatch(value["input_sha256"])):
+        raise ValueError
+    binary = base64.b64decode(content, validate=True)
+    if (not 0 < len(binary) <= 2 * TEXT_BYTES
+            or base64.b64encode(binary).decode("ascii") != content
+            or hashlib.sha256(binary).hexdigest() != value["input_sha256"]
+            or b"%PDF-" not in binary[:1024] or not binary.rstrip().endswith(b"%%EOF")
+            or len(encoded(value)) > MAX_BYTES):
+        raise ValueError
+    return binary
+
+
+def pdf_receipt(value, scope, payload):
+    """Reconstruct exact retained Unicode text and verify every page and passage."""
+    common = {"schema_version", "binary_retained", "graph_ingestion_executed"}
+    if (type(value) is not dict or set(value) != common | {"source", "passages", "offset_unit", "extraction"}
+            or type(value["schema_version"]) is not int or value["schema_version"] != 1
+            or value["binary_retained"] is not False or value["graph_ingestion_executed"] is not False
+            or value["offset_unit"] != "unicode_codepoint"):
+        raise ValueError
+    extraction = value["extraction"]
+    fields = {"format", "input_hash_verified", "input_sha256", "input_digest_persisted",
+        "blocks_persisted", "original_document_verified", "binary_persistently_bound",
+        "ocr_performed", "page_layout", "semantic_quality", "coverage", "page_text", "pages",
+        "page_count", "empty_page_count", "declared_passage_count"}
+    if (type(extraction) is not dict or set(extraction) != fields
+            or any(type(extraction[k]) is not str for k in ("format", "input_sha256", "page_layout", "semantic_quality"))
+            or type(extraction["coverage"]) is not list
+            or extraction["format"] != "pdf" or payload["format"] != "pdf"
+            or extraction["input_hash_verified"] is not True
+            or extraction["input_sha256"] != payload["input_sha256"]
+            or any(extraction[k] is not False for k in ("input_digest_persisted", "blocks_persisted",
+                "original_document_verified", "binary_persistently_bound", "ocr_performed"))
+            or extraction["page_layout"] != "unknown" or extraction["semantic_quality"] != "unknown"
+            or extraction["coverage"] != ["page_text"]):
+        raise ValueError
+    count = extraction["page_count"]
+    texts, pages = extraction["page_text"], extraction["pages"]
+    if (type(count) is not int or not 1 <= count <= 100 or type(texts) is not list
+            or type(pages) is not list or len(texts) != count or len(pages) != count
+            or type(extraction["empty_page_count"]) is not int
+            or type(extraction["declared_passage_count"]) is not int):
+        raise ValueError
+    expected, offset, size, empty_count = [], 0, 0, 0
+    for ordinal, (text, page) in enumerate(zip(texts, pages)):
+        if type(text) is not str or any((ord(c) < 32 and c not in "\t\n\r") or ord(c) == 127 for c in text):
+            raise ValueError
+        raw = text.encode("utf-8")
+        offset += 2 if ordinal else 0
+        size += len(raw) + (2 if ordinal else 0)
+        if len(raw) > EXCERPT_BYTES or size > TEXT_BYTES:
+            raise ValueError
+        declared = {"page": ordinal + 1, "start": offset, "end": offset + len(text),
+            "empty": not text.strip(), "excerpt_sha256": hashlib.sha256(raw).hexdigest()}
+        if (type(page) is not dict or set(page) != set(declared)
+                or any(type(page[k]) is not int for k in ("page", "start", "end"))
+                or type(page["empty"]) is not bool or type(page["excerpt_sha256"]) is not str or page != declared):
+            raise ValueError
+        if declared["empty"]:
+            empty_count += 1
+        else:
+            identity = "pdf-page-text-v1:" + json.dumps(declared, sort_keys=True,
+                ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+            expected.append({"evidence_id": str(uuid5(UUID(payload["source_revision"]), identity)),
+                "start": declared["start"], "end": declared["end"], "page": ordinal + 1,
+                "excerpt_sha256": declared["excerpt_sha256"]})
+        offset += len(text)
+    if (not expected or extraction["empty_page_count"] != empty_count
+            or extraction["declared_passage_count"] != len(expected)
+            or type(value["passages"]) is not list or len(value["passages"]) != len(expected)):
+        raise ValueError
+    for actual, declared in zip(value["passages"], expected):
+        if (type(actual) is not dict or set(actual) != set(declared)
+                or any(type(actual[k]) is not str for k in ("evidence_id", "excerpt_sha256"))
+                or any(type(actual[k]) is not int for k in ("start", "end", "page")) or actual != declared):
+            raise ValueError
+    source = value["source"]
+    metadata(source, scope)
+    text = "\n\n".join(texts)
+    if (source["source_revision"] != payload["source_revision"] or source["source_name"] != payload["source_name"]
+            or source["text_sha256"] != hashlib.sha256(text.encode()).hexdigest()
+            or source["byte_length"] != size or source["codepoint_length"] != len(text)
+            or len(encoded(value)) > MAX_BYTES):
+        raise ValueError
+    return value
 
 
 def encoded(value):
@@ -108,6 +208,8 @@ def validate_payload(method, value):
             text_value(value["source_name"], 1024, name=True)
             text_value(value["text"])
             declarations(value["source_revision"], value["text"], value["blocks"])
+        elif method == "retain_pdf":
+            pdf_upload(value)
         else:
             raise ValueError
         if len(encoded(value)) > MAX_BYTES:
@@ -142,6 +244,8 @@ def metadata(value, scope):
 
 def validate_result(method, value, scope, payload):
     try:
+        if method == "retain_pdf":
+            return pdf_receipt(value, scope, payload)
         if (type(value) is not dict or type(value.get("schema_version")) is not int
                 or value["schema_version"] != 1 or value.get("binary_retained") is not False
                 or value.get("graph_ingestion_executed") is not False):

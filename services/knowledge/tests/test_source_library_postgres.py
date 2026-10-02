@@ -292,3 +292,69 @@ def test_source_settings_reject_ambient_libpq_before_connect(monkeypatch, key):
     monkeypatch.setenv(key, "")
     with pytest.raises(ValueError):
         SourceSettings.from_environment()
+
+
+@pytest.mark.postgres
+def test_actual_pdf_owned_pg_exact_pages_restart_idempotence_conflict_and_evidence(factory):
+    from test_pdf_source import pdf_bytes
+    from test_source_library import pdf_payload
+    from mirofish_storage.pdf import extract_pdf
+    settings, project = owned(factory)
+    binary = pdf_bytes(["Beginning 猫", "", "Middle 雪", "End 中文"])
+    extracted = extract_pdf(binary)
+    value = pdf_payload(binary)
+    connections = []
+    def tracked():
+        conn = factory()
+        connections.append(conn)
+        return conn
+    before = ProjectStore(factory).get("owner", project)
+    library = SourceLibrary(settings, connection_factory=tracked)
+    first = library.execute("retain_pdf", value)
+    assert library.execute("retain_pdf", value) == first
+    record = SourceStore(factory).get_source("owner", project, value["source_revision"])
+    assert record.text == extracted.text
+    assert [p.page for p in record.passages] == [1, 3, 4]
+    assert [str(p.evidence_id) for p in record.passages] == [p["evidence_id"] for p in extracted.declarations(value["source_revision"])]
+    assert record.text_sha256 != value["input_sha256"]
+    assert not hasattr(record, "input_sha256") and not hasattr(record, "binary")
+    receipt = first["extraction"]
+    assert receipt["page_count"] == 4 and receipt["empty_page_count"] == 1
+    assert receipt["declared_passage_count"] == 3 and receipt["input_hash_verified"] is True
+    for key in ("input_digest_persisted", "blocks_persisted", "original_document_verified",
+            "binary_persistently_bound", "ocr_performed"):
+        assert receipt[key] is False
+    fresh = SourceLibrary(settings, connection_factory=tracked)
+    read = fresh.execute("get", {"source_revision": value["source_revision"]})
+    assert read["text"] == extracted.text and read["passages"] == first["passages"]
+    assert "extraction" not in read and "input_sha256" not in read["source"]
+    for passage in record.passages:
+        evidence = SourceStore(factory).resolve_evidence("owner", project, passage.evidence_id)
+        assert evidence.excerpt == record.text[passage.start:passage.end]
+        assert evidence.excerpt_sha256 == hashlib.sha256(evidence.excerpt.encode()).hexdigest()
+        assert evidence.declared_page == passage.page
+        with pytest.raises(NotFound):
+            SourceStore(factory).resolve_evidence("other", project, passage.evidence_id)
+    with pytest.raises(NotFound):
+        SourceStore(factory).get_source("other", project, value["source_revision"])
+    with pytest.raises(Conflict):
+        fresh.execute("retain_pdf", dict(value, source_name="changed"))
+    assert SourceStore(factory).get_source("owner", project, value["source_revision"]) == record
+    assert ProjectStore(factory).get("owner", project) == before
+    assert ProjectStore(factory).history("owner", project) == [before]
+    assert connections and all(conn.closed for conn in connections)
+
+
+@pytest.mark.postgres
+def test_actual_pdf_child_rejects_unauthorized_scope_and_bad_pdf_without_mutation(factory):
+    from test_pdf_source import pdf_bytes
+    from test_source_library import pdf_payload
+    settings, project = owned(factory)
+    denied = replace(settings, principal="other")
+    value = pdf_payload(pdf_bytes(["owner only 猫"]))
+    result = json.loads(SourceLibrary(denied, connection_factory=factory).dispatch(request(denied, "retain_pdf", value)))
+    assert result["ok"] is False and result["error"]["code"] == "not_found"
+    malformed = pdf_payload(b"%PDF-1.7\nmalformed\n%%EOF")
+    result = json.loads(SourceLibrary(settings, connection_factory=factory).dispatch(request(settings, "retain_pdf", malformed)))
+    assert result["ok"] is False and result["error"]["code"] == "invalid_request"
+    assert SourceStore(factory).list_sources("owner", project) == []

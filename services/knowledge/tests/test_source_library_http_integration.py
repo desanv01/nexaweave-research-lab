@@ -34,7 +34,7 @@ sys.path.insert(0,str(Path(root)/'backend'))
 from tools.run_unit_tests import LoopbackOnlySockets
 guard=LoopbackOnlySockets();guard.install()
 original=builtins.__import__
-blocked=('mirofish_knowledge','graphiti_core','openai','neo4j','camel','oasis','torch','transformers','temporalio')
+blocked=('mirofish_knowledge','graphiti_core','openai','neo4j','camel','oasis','torch','transformers','temporalio','pymupdf','fitz')
 def imports(name,*args,**kwargs):
     if any(name==p or name.startswith(p+'.') for p in blocked):
         raise AssertionError('backend provider/runtime import')
@@ -246,7 +246,7 @@ sys.path.insert(0,root)
 from tools.run_unit_tests import LoopbackOnlySockets
 sys.path.remove(root)
 guard=LoopbackOnlySockets();guard.install()
-blocked=('graphiti_core','openai','neo4j','mirofish_knowledge.provider','mirofish_knowledge.read_runtime')
+blocked=('graphiti_core','openai','neo4j','mirofish_knowledge.provider','mirofish_knowledge.read_runtime','pymupdf','fitz')
 class NoProviders(importlib.abc.MetaPathFinder):
     def find_spec(self,fullname,path=None,target=None):
         if any(fullname==item or fullname.startswith(item+'.') for item in blocked):
@@ -308,3 +308,61 @@ def test_actual_installed_source_child_reads_owned_pg_without_provider_imports(f
     assert response['request_id']==request_id and response['ok'] is True
     assert response['result']['scope']==scope.model_dump(mode='json')
     assert response['result']['binary_retained'] is response['result']['graph_ingestion_executed'] is False
+
+
+def test_actual_http_pdf_fixed_child_pg_pages_restart_and_private_denials(factory,tmp_path):
+    from test_pdf_source import pdf_bytes
+    from mirofish_storage.pdf import extract_pdf
+    scope,display,before=_seed(factory)
+    binary=pdf_bytes(['Beginning 猫','','Middle 雪','End 中文'])
+    extracted=extract_pdf(binary)
+    revision=uuid4()
+    payload=_payload(revision,'owned PDF 猫',binary,'pdf')
+    route='/api/source/retain/'+display
+    sources=SourceStore(factory)
+    with _host(tmp_path,scope,display) as (port,token,events):
+        assert _exchange(port,'POST',route,payload)[0]==401
+        assert _exchange(port,'POST',route,payload,token=token,origin='http://denied.example')[0]==403
+        assert _exchange(port,'POST',route,dict(payload,input_sha256='0'*64),token=token)[0]==400
+        assert _exchange(port,'POST',route,dict(payload,content=payload['content']+'='),token=token)[0]==400
+        assert _exchange(port,'POST',route,dict(payload,path='private'),token=token)[0]==400
+        assert not [e for e in _events(events) if e.get('event')=='spawn']
+        status,headers,response=_exchange(port,'POST',route,payload,token=token)
+        assert status==200 and response['success'] is True
+        assert headers['Cache-Control']=='no-store' and headers['X-Content-Type-Options']=='nosniff'
+        first=response['data'];receipt=first['extraction']
+        record=sources.get_source('owner',scope.project_id,revision)
+        assert record.text==extracted.text
+        assert [p.page for p in record.passages]==[1,3,4]
+        assert receipt['page_count']==4 and receipt['empty_page_count']==1
+        assert receipt['declared_passage_count']==3 and receipt['coverage']==['page_text']
+        assert '\n\n'.join(receipt['page_text'])==record.text
+        assert first['binary_retained'] is first['graph_ingestion_executed'] is False
+        for key in ('input_digest_persisted','blocks_persisted','original_document_verified',
+                'binary_persistently_bound','ocr_performed'):
+            assert receipt[key] is False
+        assert receipt['input_sha256']==payload['input_sha256'] and receipt['input_hash_verified'] is True
+        assert receipt['page_layout']==receipt['semantic_quality']=='unknown'
+        status,_,repeat=_exchange(port,'POST',route,payload,token=token)
+        assert status==200 and repeat['data']==first
+        assert _exchange(port,'POST',route,dict(payload,source_name='changed'),token=token)[0]==409
+        malformed=_payload(uuid4(),'malformed',b'%PDF-1.7\nprivate malformed\n%%EOF','pdf')
+        status,_,error=_exchange(port,'POST',route,malformed,token=token)
+        assert status==400 and error=={'success':False,'error':{'code':'invalid_request'}}
+        assert sources.get_source('owner',scope.project_id,revision)==record
+        assert len(sources.list_sources('owner',scope.project_id))==1
+        assert ProjectStore(factory).get('owner',scope.project_id)==before
+        assert ProjectStore(factory).history('owner',scope.project_id)==[before]
+    restart=tmp_path/'pdf-restart';restart.mkdir()
+    with _host(restart,scope,display) as (port,token,_):
+        status,_,response=_exchange(port,'GET',f'/api/source/item/{display}/{revision}',token=token)
+        assert status==200 and response['data']['text']==record.text
+        assert response['data']['passages']==first['passages'] and 'extraction' not in response['data']
+        assert 'input_sha256' not in response['data']['source']
+        for actual,passage in zip(response['data']['passages'],record.passages,strict=True):
+            assert record.text[actual['start']:actual['end']]==passage.excerpt
+            assert actual['excerpt_sha256']==hashlib.sha256(passage.excerpt.encode()).hexdigest()
+            evidence=sources.resolve_evidence('owner',scope.project_id,passage.evidence_id)
+            assert evidence.excerpt_sha256==actual['excerpt_sha256'] and evidence.declared_page==actual['page']
+        status,_,library=_exchange(port,'GET','/api/source/library/'+display,token=token)
+        assert status==200 and library['data']['sources']==[first['source']]
