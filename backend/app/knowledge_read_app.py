@@ -79,7 +79,10 @@ def _failure(code, status=None):
     return jsonify({"success": False, "error": {"code": code}}), status or _STATUS.get(code, 503)
 
 
-def create_read_app(config_class, *, facade=None, evidence_facade=None):
+def create_read_app(config_class, *, facade=None, evidence_facade=None, source_facade=None,
+                    mode="graphiti_readonly"):
+    if mode not in {"graphiti_readonly", "research_local"}:
+        raise ValueError("invalid application mode")
     app = Flask(__name__)
     app.config.from_object(config_class)
     if app.config.get("DEBUG") or os.environ.get("FLASK_HOST", "127.0.0.1") not in {"127.0.0.1", "::1", "localhost"}:
@@ -92,6 +95,9 @@ def create_read_app(config_class, *, facade=None, evidence_facade=None):
         configured = os.environ["MIROFISH_ALLOWED_ORIGINS"]
     origins = frozenset(parse_allowed_origins(configured))
     settings = ReadHostSettings.from_config(config_class)
+    if mode == "research_local":
+        from .source_library_api import register_source_routes
+        register_source_routes(app, settings, source_facade=source_facade)
     reader = facade or KnowledgeReadFacade(settings)
     evidence_lock = threading.Lock()
     evidence = evidence_facade
@@ -154,10 +160,11 @@ def create_read_app(config_class, *, facade=None, evidence_facade=None):
 
     @app.get("/health")
     def health():
-        return jsonify({"status": "ok", "mode": "graphiti_readonly",
+        return jsonify({"status": "ok", "mode": mode,
                         "capabilities": ["graph_data", "entities", "entity_context",
                                          "population_preview", "population_export",
-                                         "evidence_research", "evidence_dossier"]})
+                                         "evidence_research", "evidence_dossier"] +
+                        (["source_library", "source_retention"] if mode == "research_local" else [])})
 
     def evidence_call(method, graph_id):
         if graph_id != settings.display_graph_id:

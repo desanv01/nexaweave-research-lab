@@ -102,6 +102,8 @@ jobs:
         run: services/knowledge/.venv/bin/python tools/run_evidence_dossier_tests.py --integration
       - name: Qualify authenticated HTTP and installed evidence child with real stores
         run: services/knowledge/.venv/bin/python tools/run_workbench_evidence_tests.py --integration
+      - name: Qualify protected retained-source HTTP and installed PG-only child
+        run: services/knowledge/.venv/bin/python tools/run_source_library_tests.py
       - name: Test database diagnostics on failure
         if: failure()
         run: docker compose -f infra/compose.knowledge-test.yml logs --tail 100 neo4j
