@@ -63,9 +63,9 @@
     {
       "imported_path": "backend/app/__init__.py",
       "original_sha256": "f04d262decf6c11437280c0f0c1353774f642888b2ef3f02dfa0e96e992b3c1c",
-      "current_sha256": "c9ac994c59b8af3704a99f41215707a18debc40642c564eb3e780bab930c74bf",
-      "reason": "U02d exact Origin/CORS and private logging retained. U03i selects explicit graphiti_readonly factory before inherited blueprints/runner; default legacy unchanged. U11a forwards optional evidence facade only in explicit read-only mode; legacy default unchanged. U04d explicitly selects research_local source-retention routes using the same protected factory/settings; graphiti_readonly and legacy defaults remain.",
-      "phase": "U02d/U03i / U11a / U04d",
+      "current_sha256": "852c8f357bb86086f3b3db633ccc2be6ff0dae7945a8ccfaaa90aaee563c5215",
+      "reason": "U02d exact Origin/CORS and private logging retained. U03i selects explicit graphiti_readonly factory before inherited blueprints/runner; default legacy unchanged. U11a forwards optional evidence facade only in explicit read-only mode; legacy default unchanged. U04d explicitly selects research_local source-retention routes using the same protected factory/settings; graphiti_readonly and legacy defaults remain. U06b forwards optional protected research source-ingestion facade; legacy/read-only modes preserve inherited behavior.",
+      "phase": "U02d/U03i / U11a / U04d/U06b",
       "review_status": "Main source reviewed; U04d exact-revision CI acceptance pending."
     },
     {
