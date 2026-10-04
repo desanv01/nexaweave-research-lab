@@ -1,6 +1,7 @@
 <script setup>
 import { computed, nextTick, ref, watch } from 'vue'
 import { copyFor } from '../../i18n/workbench.js'
+import DossierExport from './DossierExport.vue'
 const props = defineProps({ result: Object, locale: { type: String, default: 'en' } })
 const copy = computed(() => copyFor(props.locale))
 const selected = ref(null), inspector = ref(null), page = ref(0), passagePage = ref(0)
@@ -30,6 +31,7 @@ function close() { selected.value = null; opener?.focus(); opener = null }
   <section class="evidence" :aria-label="copy.results">
     <div class="result-layout"><div class="result-main"><h2>{{ copy.results }}</h2>
       <template v-if="result">
+        <DossierExport v-if="isDossier" :result="result" :locale="locale" />
         <ol v-if="isDossier"><li v-for="section in result.sections" :key="section.ordinal"><h3>{{ section.heading }}</h3><p>{{ copy.returned }}: {{ section.source_claim_keys.length + section.simulation_observation_keys.length + section.other_claim_keys.length }}</p></li></ol>
         <dl class="counts"><div v-for="(label, i) in [copy.linked, copy.resolved, copy.missing]" :key="label"><dt>{{ label }}</dt><dd>{{ counts[i] }}</dd></div></dl>
         <p v-if="!rows.length" class="empty">{{ copy.empty }}</p>
