@@ -85,3 +85,13 @@ workbenchCopy.ms.experiments = {
   statisticLabels: { sample_count: 'Sampel tersedia', missing_count: 'Pemerhatian hilang', min: 'Minimum', max: 'Maksimum', arithmetic_mean: 'Min aritmetik (anggaran)', median: 'Median', population_standard_deviation: 'Sisihan piawai populasi (anggaran)' },
   fieldLabels: { seed: 'Benih dinyatakan', max_rounds: 'Pusingan maksimum', runtime_sha256: 'Cap jari masa jalan', platforms: 'Platform', project_revision: 'Semakan projek', prepared_artifact_sha256: 'Cap jari artifak disediakan', artifact_sha256: 'Cap jari artifak tersimpan', runtime_versions: 'Versi masa jalan' }
 }
+
+workbenchCopy.en.exports = {
+  title: 'Download retained dossier', markdown: 'Download Markdown', json: 'Download JSON', help: 'Downloads contain the current retained evidence. Changing the interface language does not translate the evidence.', requested: 'Download requested. Your browser controls saving the file.', invalid: 'This dossier is unavailable or invalid. Request a new dossier explicitly.', tooLarge: 'The download exceeds the 4 MiB limit. No file was requested.', failed: 'The download could not be requested. Try again when your browser is ready.'
+}
+workbenchCopy.zh.exports = {
+  title: '下载保留的证据档案', markdown: '下载 Markdown', json: '下载 JSON', help: '下载包含当前保留的证据。更改界面语言不会翻译证据内容。', requested: '已请求下载。文件保存由浏览器控制。', invalid: '此证据档案不可用或无效。请明确请求新的档案。', tooLarge: '下载超过 4 MiB 限制，未请求文件。', failed: '无法请求下载。请在浏览器准备好后重试。'
+}
+workbenchCopy.ms.exports = {
+  title: 'Muat turun dosier tersimpan', markdown: 'Muat turun Markdown', json: 'Muat turun JSON', help: 'Muat turun mengandungi bukti tersimpan semasa. Menukar bahasa antara muka tidak menterjemahkan bukti.', requested: 'Muat turun diminta. Pelayar anda mengawal penyimpanan fail.', invalid: 'Dosier ini tidak tersedia atau tidak sah. Minta dosier baharu secara jelas.', tooLarge: 'Muat turun melebihi had 4 MiB. Tiada fail diminta.', failed: 'Muat turun tidak dapat diminta. Cuba lagi apabila pelayar anda bersedia.'
+}

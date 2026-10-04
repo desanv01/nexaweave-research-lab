@@ -20,7 +20,8 @@ async function compile(path, replacements = {}) {
   return { component: (await import(url)).default, url }
 }
 const sources = await compile('../src/components/workbench/SourceLibrary.vue')
-const evidence = await compile('../src/components/workbench/EvidenceResults.vue')
+const dossierExport = await compile('../src/components/workbench/DossierExport.vue')
+const evidence = await compile('../src/components/workbench/EvidenceResults.vue', { './DossierExport.vue': dossierExport.url })
 const ingestion = await compile('../src/components/workbench/SourceIngestion.vue')
 const experiments = await compile('../src/components/workbench/ExperimentComparison.vue')
 const route = await compile('../src/views/ResearchWorkbench.vue', { '../components/workbench/SourceLibrary.vue': sources.url, '../components/workbench/EvidenceResults.vue': evidence.url, '../components/workbench/SourceIngestion.vue': ingestion.url, '../components/workbench/ExperimentComparison.vue': experiments.url })

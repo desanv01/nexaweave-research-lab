@@ -23,7 +23,8 @@ async function compile(path, replacements = {}) {
   const url = `data:text/javascript;base64,${Buffer.from(`${code}\nexport default __component`).toString('base64')}`
   return { component: (await import(url)).default, url }
 }
-const evidence = await compile('../src/components/workbench/EvidenceResults.vue')
+const dossierExport = await compile('../src/components/workbench/DossierExport.vue')
+const evidence = await compile('../src/components/workbench/EvidenceResults.vue', { './DossierExport.vue': dossierExport.url })
 const sources = await compile('../src/components/workbench/SourceLibrary.vue')
 const ingestion = await compile('../src/components/workbench/SourceIngestion.vue')
 const experiments = await compile('../src/components/workbench/ExperimentComparison.vue')
@@ -304,4 +305,65 @@ test('shared parent cancellation aborts the pending experiment read and late cat
     assert.ok(mounted.root.querySelector('.experiment-comparison .feedback').textContent.includes(copyFor('en').experiments.cancelled))
     assert.equal(mounted.root.querySelector('.query-section fieldset').disabled, false)
   } finally { mounted.cleanup(); globalThis.fetch = previousFetch }
+})
+
+function retainedExportDossier(request) {
+  const normalized = { ...request, valid_at: request.valid_at ?? null, recorded_before: request.recorded_before ?? null }
+  return { schema_version: 1, mode: 'model_free_evidence_dossier', request: normalized, sections: request.sections.map((s, i) => ({ ordinal: i + 1, heading: s.heading, source_claim_keys: [], simulation_observation_keys: [], other_claim_keys: [] })), claims: [], references: [], research_trace: request.sections.map((s, i) => ({ ordinal: i + 1, request_sha256: 'a'.repeat(64), response_sha256: 'b'.repeat(64), query: s.query, top_k: s.top_k, display_graph_ids: request.display_graph_ids, valid_at: null, recorded_before: null, scopes: [{ display_graph_id: 'graph_1', scope, pages: 1, scanned: 0, eligible: 0, excluded: 0, unknown: 0, returned: 0, truncated: false }], passage_coverage: [], competing_claim_candidates: [], linked_citations: 0, resolved_citations: 0, unavailable_citations: 0, historical: false, historical_semantics: 'retained_edges_not_bitemporal_reconstruction', rank_basis: 'lexical_token_overlap' })), summary: { section_count: request.sections.length, query_count: request.sections.length, distinct_scoped_facts: 0, reference_links: 0, resolved_references: 0, unavailable_references: 0, query_reference_links: 0, query_resolved_references: 0, query_unavailable_references: 0, scanned_per_query_sum: 0, unknown_per_query_sum: 0, truncated_query_scopes: 0, passage_coverage: [], coverage_label: 'retrieved_passage_union_per_retained_revision' }, input_sha256: 'a'.repeat(64), trace_sha256: 'b'.repeat(64), records_sha256: 'c'.repeat(64), model_generated: false, semantic_judge_used: false, claim_support_status: 'not_reviewed', consistency: 'individually_guarded_queries_not_atomic_snapshot', limitations: ['Lexical only'], markdown: '\uFEFF# 中😀\r\n<script>inert</script> &#60;img&#62;' }
+}
+test('actual route admits dossier then exports locally; new request, disconnect, authorization failure and unmount clean its URL', async () => {
+  for (const lifecycle of ['request', 'disconnect', 'authorization', 'unmount']) {
+    const previousFetch = globalThis.fetch, priorCreate = URL.createObjectURL, priorRevoke = URL.revokeObjectURL, priorClick = dom.window.HTMLAnchorElement.prototype.click
+    const calls = [], blobs = [], clicks = [], revoked = []; let pending, pendingSignal
+    globalThis.fetch = async (url, options) => {
+      calls.push({ url, options })
+      if (calls.length === 1) return response(graphResult)
+      if (calls.length === 2) return response(retainedExportDossier(JSON.parse(options.body)))
+      if (lifecycle === 'authorization') return new Response('private secret', { status: 401 })
+      pendingSignal = options.signal
+      return new Promise(resolve => { pending = resolve })
+    }
+    URL.createObjectURL = blob => { blobs.push(blob); return `blob:route-${blobs.length}` }
+    URL.revokeObjectURL = url => revoked.push(url)
+    dom.window.HTMLAnchorElement.prototype.click = function () { clicks.push({ href: this.href, filename: this.download }) }
+    const mounted = mount(workbench.component); let closed = false
+    try {
+      input(mounted.root, '#graph-id', 'graph_1'); input(mounted.root, '#bearer-token', 'test-token')
+      mounted.root.querySelector('.connection-form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true })); await settle()
+      const radio = mounted.root.querySelector('input[value="dossier"]'); radio.checked = true; radio.dispatchEvent(new dom.window.Event('change', { bubbles: true })); await settle()
+      input(mounted.root, '#dossier-title', 'Retained evidence'); input(mounted.root, '#heading-0', 'Evidence'); input(mounted.root, '#query-0', '中')
+      mounted.root.querySelector('.query-section form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true })); await settle()
+      assert.equal(calls.length, 2); assert.ok(calls[1].url.endsWith('/api/graph/dossier/graph_1'))
+      assert.equal(blobs.length, 0); assert.equal(clicks.length, 0)
+      const exports = mounted.root.querySelector('.dossier-export'); assert.ok(exports)
+      exports.querySelector('button').click(); await settle()
+      assert.equal(clicks[0].filename, 'mirofish-evidence-dossier.md'); assert.equal(calls.length, 2)
+      const mdBytes = new Uint8Array(await blobs[0].arrayBuffer())
+      input(mounted.root, '#workbench-language', 'zh'); await settle()
+      assert.equal(exports.querySelector('button').textContent, copyFor('zh').exports.markdown)
+      assert.equal(clicks.length, 1); assert.equal(calls.length, 2)
+      exports.querySelectorAll('button')[1].click(); await settle()
+      assert.equal(clicks[1].filename, 'mirofish-evidence-dossier.json'); assert.equal(calls.length, 2)
+      const dto = JSON.parse(await blobs[1].text()); assert.deepEqual(mdBytes, new TextEncoder().encode(dto.markdown))
+      assert.deepEqual(revoked, ['blob:route-1'])
+      if (lifecycle === 'disconnect') [...mounted.root.querySelectorAll('button')].find(b => b.textContent === copyFor('zh').disconnect).click()
+      else if (lifecycle === 'unmount') { mounted.cleanup(); closed = true }
+      else mounted.root.querySelector('.query-section form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }))
+      await settle()
+      assert.deepEqual(revoked, ['blob:route-1', 'blob:route-2'])
+      assert.equal(mounted.root.querySelector('.dossier-export'), null)
+      assert.equal(mounted.root.textContent.includes(copyFor('zh').exports.requested), false)
+      assert.equal(clicks.length, 2)
+      if (lifecycle === 'request') {
+        assert.equal(calls.length, 3); mounted.cleanup(); closed = true; assert.equal(pendingSignal.aborted, true)
+        pending(response(retainedExportDossier(JSON.parse(calls[2].options.body)))); await settle(); assert.equal(clicks.length, 2)
+      } else if (lifecycle === 'authorization') {
+        assert.equal(calls.length, 3); assert.equal(mounted.root.querySelector('.graph-overview'), null)
+        assert.ok(!mounted.root.textContent.includes('private secret'))
+      } else assert.equal(calls.length, 2)
+    } finally {
+      if (!closed) mounted.cleanup()
+      globalThis.fetch = previousFetch; URL.createObjectURL = priorCreate; URL.revokeObjectURL = priorRevoke; dom.window.HTMLAnchorElement.prototype.click = priorClick
+    }
+  }
 })
