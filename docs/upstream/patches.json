@@ -63,10 +63,10 @@
     {
       "imported_path": "backend/app/__init__.py",
       "original_sha256": "f04d262decf6c11437280c0f0c1353774f642888b2ef3f02dfa0e96e992b3c1c",
-      "current_sha256": "852c8f357bb86086f3b3db633ccc2be6ff0dae7945a8ccfaaa90aaee563c5215",
-      "reason": "U02d exact Origin/CORS and private logging retained. U03i selects explicit graphiti_readonly factory before inherited blueprints/runner; default legacy unchanged. U11a forwards optional evidence facade only in explicit read-only mode; legacy default unchanged. U04d explicitly selects research_local source-retention routes using the same protected factory/settings; graphiti_readonly and legacy defaults remain. U06b forwards optional protected research source-ingestion facade; legacy/read-only modes preserve inherited behavior.",
-      "phase": "U02d/U03i / U11a / U04d/U06b",
-      "review_status": "Main source reviewed; U04d exact-revision CI acceptance pending."
+      "current_sha256": "c4d5c23b00fff59d1f5caebe0b6dd82f96948c91c2e01f40c95095d17c98bd5c",
+      "reason": "U02d exact Origin/CORS and private logging retained. U03i selects explicit graphiti_readonly factory before inherited blueprints/runner; default legacy unchanged. U11a forwards optional evidence facade only in explicit read-only mode; legacy default unchanged. U04d explicitly selects research_local source-retention routes using the same protected factory/settings; graphiti_readonly and legacy defaults remain. U06b forwards optional protected research source-ingestion facade; legacy/read-only modes preserve inherited behavior. U10b forwards optional protected experiment facade only through the existing research-local factory; no legacy/read-only blueprint or runtime change.",
+      "phase": "U02d/U03i / U11a / U04d/U06b/U10b",
+      "review_status": "Main reviewed U10b factory forwarding;309 API/read and12 native/PG/socket tests passed, exact hosted acceptance pending."
     },
     {
       "imported_path": "backend/app/config.py",

@@ -22,6 +22,8 @@ def child() -> int:
         class Qualification:
             passed = 0
             skipped = 0
+            targets = {'test_native_experiment_http.py': 0,
+                       'test_native_experiment_socket.py': 0}
 
             def pytest_runtest_logreport(self, report):
                 if "native_store_tests" in report.nodeid:
@@ -29,6 +31,9 @@ def child() -> int:
                         self.skipped += 1
                     if report.when == "call" and report.passed:
                         self.passed += 1
+                        for name in self.targets:
+                            if name + '::' in report.nodeid:
+                                self.targets[name] += 1
 
         qualification = Qualification()
         result = int(pytest.main([
@@ -36,7 +41,9 @@ def child() -> int:
             "-o", "markers=postgres: guarded disposable PostgreSQL integration",
             str(ROOT / "backend" / "native_store_tests"),
         ], plugins=[qualification]))
-        if qualification.skipped or qualification.passed == 0:
+        if (qualification.skipped or qualification.passed == 0
+                or qualification.targets['test_native_experiment_http.py'] < 10
+                or qualification.targets['test_native_experiment_socket.py'] < 2):
             print("native_store_qualification_incomplete", file=sys.stderr)
             result = 1
     finally:
@@ -73,6 +80,13 @@ def main() -> int:
         env.update(MIROFISH_NATIVE_TEST_OFFLINE="1", HF_HUB_OFFLINE="1",
                    TRANSFORMERS_OFFLINE="1", HF_HUB_DISABLE_TELEMETRY="1",
                    DO_NOT_TRACK="1", PROJECT_STORE_POSTGRES_INTEGRATION="1")
+        for name in ('MIROFISH_EXPERIMENT_TEST_PYTHON',
+                     'MIROFISH_EXPERIMENT_TEST_HTTP_PYTHON',
+                     'MIROFISH_EXPERIMENT_TEST_BOOTSTRAP'):
+            value = os.environ.get(name)
+            if not value or not Path(value).is_absolute() or not Path(value).is_file():
+                parser.error('explicit installed experiment test runtimes required')
+            env[name] = value
         env["PROJECT_STORE_POSTGRES_TEST_DSN"] = make_conninfo(
             host="127.0.0.1", port=15432, dbname="mirofish_operations_test",
             user="mirofish_fixture", password=password, connect_timeout=5)
