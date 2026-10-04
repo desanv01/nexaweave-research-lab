@@ -220,6 +220,17 @@ jobs:
           version: '0.11.25'
       - name: Install inherited locked backend runtime
         run: uv sync --project backend --locked --extra dev --extra native-store --extra native-temporal --python 3.12.13
+      - name: Install fixed experiment child package and select explicit test runtimes
+        shell: pwsh
+        run: |
+          uv pip install --python backend/.venv/Scripts/python.exe --no-deps services/knowledge
+          if ($LASTEXITCODE -ne 0) { throw 'Installed experiment child package failed' }
+          $experimentPython = (Resolve-Path backend/.venv/Scripts/python.exe).Path
+          $experimentBootstrap = & $experimentPython -I -c "import importlib.util; print(importlib.util.find_spec('mirofish_knowledge.read_bootstrap').origin)"
+          if ($LASTEXITCODE -ne 0) { throw 'Installed bootstrap selection failed' }
+          "MIROFISH_EXPERIMENT_TEST_PYTHON=$experimentPython" >> $env:GITHUB_ENV
+          "MIROFISH_EXPERIMENT_TEST_HTTP_PYTHON=$experimentPython" >> $env:GITHUB_ENV
+          "MIROFISH_EXPERIMENT_TEST_BOOTSTRAP=$experimentBootstrap" >> $env:GITHUB_ENV
       - name: Qualify actual owned Windows parser and knowledge process trees
         run: |
           backend/.venv/Scripts/python.exe tools/run_owned_process_tests.py

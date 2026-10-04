@@ -79,7 +79,7 @@ def _failure(code, status=None):
     return jsonify({"success": False, "error": {"code": code}}), status or _STATUS.get(code, 503)
 
 
-def create_read_app(config_class, *, facade=None, evidence_facade=None, source_facade=None, ingestion_facade=None,
+def create_read_app(config_class, *, facade=None, evidence_facade=None, source_facade=None, ingestion_facade=None, experiment_facade=None,
                     mode="graphiti_readonly"):
     if mode not in {"graphiti_readonly", "research_local"}:
         raise ValueError("invalid application mode")
@@ -100,6 +100,8 @@ def create_read_app(config_class, *, facade=None, evidence_facade=None, source_f
         register_source_routes(app, settings, source_facade=source_facade)
         from .source_ingestion_api import register_ingestion_routes
         register_ingestion_routes(app, settings, ingestion_facade=ingestion_facade)
+        from .experiment_api import register_experiment_routes
+        register_experiment_routes(app, settings, experiment_facade=experiment_facade)
     reader = facade or KnowledgeReadFacade(settings)
     evidence_lock = threading.Lock()
     evidence = evidence_facade
