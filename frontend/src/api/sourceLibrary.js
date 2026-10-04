@@ -3,6 +3,7 @@
 import { WorkbenchError, awareTimestamp } from './workbench.js'
 export const TEXT_LIMIT = 1048576
 export const DOCX_LIMIT = 2097152
+export const PDF_LIMIT = 2097152
 const enc = new TextEncoder()
 const bad = (code = 'invalid_reply') => { throw new WorkbenchError(code) }
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
@@ -55,16 +56,67 @@ function base64(bytes) {
   for (let i = 0; i < bytes.length; i += 8192) binary += String.fromCharCode(...bytes.subarray(i, i + 8192))
   return btoa(binary)
 }
+function pdfBytes(bytes) {
+  // Python bytes.rstrip removes only these six ASCII whitespace bytes.
+  const header = String.fromCharCode(...bytes.subarray(0, 1024))
+  let end = bytes.length
+  while (end && [9, 10, 11, 12, 13, 32].includes(bytes[end - 1])) end--
+  if (!bytes.length || bytes.length > PDF_LIMIT || !header.includes('%PDF-') || end < 5 || String.fromCharCode(...bytes.subarray(end - 5, end)) !== '%%EOF') bad()
+}
+// Python str.isspace, excluding forbidden C0 controls handled separately.
+const pythonWhitespace = /^[\u0009-\u000d\u001c-\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]*$/u
+async function pageEvidenceId(revision, declared, cryptoImpl) {
+  if (!cryptoImpl?.subtle) bad('crypto_unavailable')
+  const namespace = Uint8Array.from(revision.replaceAll('-', '').match(/../g), x => parseInt(x, 16))
+  const canonical = JSON.stringify({ empty: declared.empty, end: declared.end, excerpt_sha256: declared.excerpt_sha256, page: declared.page, start: declared.start })
+  const name = enc.encode('pdf-page-text-v1:' + canonical), input = new Uint8Array(16 + name.length)
+  input.set(namespace); input.set(name, 16)
+  const bytes = new Uint8Array(await cryptoImpl.subtle.digest('SHA-1', input)).slice(0, 16)
+  bytes[6] = (bytes[6] & 15) | 80; bytes[8] = (bytes[8] & 63) | 128
+  const h = Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('')
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`
+}
+async function pdfExtraction(v, payload, cryptoImpl) {
+  extractionCommon(v, payload)
+  shape(v, 'format input_hash_verified input_sha256 input_digest_persisted blocks_persisted original_document_verified binary_persistently_bound ocr_performed page_layout semantic_quality coverage page_text pages page_count empty_page_count declared_passage_count')
+  if (!Array.isArray(v.coverage) || v.coverage.length !== 1 || v.coverage[0] !== 'page_text') bad()
+  int(v.page_count, 100, 1); int(v.empty_page_count, v.page_count); int(v.declared_passage_count, v.page_count, 1)
+  if (!Array.isArray(v.page_text) || !Array.isArray(v.pages) || v.page_text.length !== v.page_count || v.pages.length !== v.page_count) bad()
+  let offset = 0, size = 0, empty = 0
+  const expected = []
+  for (let i = 0; i < v.page_count; i++) {
+    const text = v.page_text[i], p = v.pages[i]
+    str(text, 32768)
+    if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(text)) bad()
+    const bytes = enc.encode(text)
+    if (bytes.length > 32768) bad()
+    offset += i ? 2 : 0; size += bytes.length + (i ? 2 : 0)
+    if (size > TEXT_LIMIT) bad()
+    const declared = { page: i + 1, start: offset, end: offset + Array.from(text).length, empty: pythonWhitespace.test(text), excerpt_sha256: await sha256(bytes, cryptoImpl) }
+    shape(p, 'page start end empty excerpt_sha256')
+    for (const key of Object.keys(declared)) if (p[key] !== declared[key]) bad()
+    if (declared.empty) empty++
+    else expected.push({ evidence_id: await pageEvidenceId(payload.source_revision, declared, cryptoImpl), start: declared.start, end: declared.end, page: declared.page, excerpt_sha256: declared.excerpt_sha256 })
+    offset = declared.end
+  }
+  if (!expected.length || empty !== v.empty_page_count || expected.length !== v.declared_passage_count) bad()
+  return { text: v.page_text.join('\n\n'), expected }
+}
+function extractionCommon(v, payload) {
+  if (!v || v.format !== payload.format || v.input_hash_verified !== true || v.input_sha256 !== payload.input_sha256 || v.page_layout !== 'unknown' || v.semantic_quality !== 'unknown') bad()
+  for (const k of ['input_digest_persisted', 'blocks_persisted', 'original_document_verified', 'binary_persistently_bound', 'ocr_performed']) if (v[k] !== false) bad()
+}
 export function sourcePayload(v) {
   try {
     shape(v, 'schema_version source_revision source_name format content input_sha256')
-    if (v.schema_version !== 1 || !['text', 'docx'].includes(v.format)) bad()
+    if (v.schema_version !== 1 || !['text', 'docx', 'pdf'].includes(v.format)) bad()
     id(v.source_revision); uploadName(v.source_name); hash(v.input_sha256)
     if (v.format === 'text') uploadText(v.content)
     else {
       if (typeof v.content !== 'string' || v.content.length > Math.ceil(DOCX_LIMIT / 3) * 4 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(v.content)) bad()
       const binary = atob(v.content)
       if (!binary.length || binary.length > DOCX_LIMIT || btoa(binary) !== v.content) bad()
+      if (v.format === 'pdf') pdfBytes(Uint8Array.from(binary, c => c.charCodeAt(0)))
     }
     return JSON.stringify(v)
   } catch { bad('invalid_request') }
@@ -82,19 +134,21 @@ export async function prepareSource({ name, text, file }, cryptoImpl = globalThi
       if (typeof file.name !== 'string' || /[\\/]/.test(file.name) || !Number.isSafeInteger(file.size) || file.size < 1) bad()
       filename = file.name
       if (/\.docx$/i.test(filename)) format = 'docx'
+      else if (/\.pdf$/i.test(filename)) format = 'pdf'
       else if (!/\.(txt|md)$/i.test(filename)) bad('unsupported')
-      if (file.size > (format === 'docx' ? DOCX_LIMIT : TEXT_LIMIT)) bad('limit_exceeded')
+      if (file.size > (format === 'text' ? TEXT_LIMIT : DOCX_LIMIT)) bad('limit_exceeded')
       bytes = new Uint8Array(await file.arrayBuffer())
       if (bytes.length !== file.size) bad()
       // ignoreBOM:true preserves U+FEFF instead of silently stripping it.
-      content = format === 'docx' ? base64(bytes) : new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes)
+      if (format === 'pdf') pdfBytes(bytes)
+      content = format !== 'text' ? base64(bytes) : new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes)
       if (format === 'text') uploadText(content)
     } else { uploadText(text); content = text; bytes = enc.encode(text) }
     const digest = await sha256(bytes, cryptoImpl)
     if (!cryptoImpl?.randomUUID) bad('crypto_unavailable')
     const payload = { schema_version: 1, source_revision: cryptoImpl.randomUUID(), source_name: name, format, content, input_sha256: digest }
     sourcePayload(payload)
-    return { payload, filename, inputBytes: bytes.length, codepoints: format === 'text' ? Array.from(content).length : null }
+    return Object.freeze({ payload: Object.freeze(payload), filename, inputBytes: bytes.length, codepoints: format === 'text' ? Array.from(content).length : null })
   } catch (e) { if (e instanceof WorkbenchError && ['crypto_unavailable', 'unsupported', 'limit_exceeded'].includes(e.code)) throw e; bad('invalid_request') }
 }
 async function verifyText(v, text, cryptoImpl) {
@@ -140,6 +194,12 @@ export async function validateSourceResult(method, v, request, cryptoImpl = glob
       if (v.offset_unit !== 'unicode_codepoint' || v.source.source_revision !== request.source_revision || request.project_id && v.source.project_id !== request.project_id) bad()
       if (retained) {
         if (v.source.source_name !== request.source_name) bad()
+        if (request.format === 'pdf') {
+          const { text, expected } = await pdfExtraction(v.extraction, request, cryptoImpl)
+          if (expected.length !== v.passages.length) bad()
+          for (let i = 0; i < expected.length; i++) for (const k of Object.keys(expected[i])) if (v.passages[i][k] !== expected[i][k]) bad()
+          await verifyText(v, text, cryptoImpl)
+        } else {
         extraction(v.extraction, request, v.source.codepoint_length)
         if (request.format === 'text') {
           if (v.source.text_sha256 !== request.input_sha256) bad()
@@ -154,6 +214,7 @@ export async function validateSourceResult(method, v, request, cryptoImpl = glob
           // Receipt shape is verified; extracted text hashes need an explicit GET.
           const declared = v.extraction.blocks.filter(b => !b.empty)
           if (declared.length !== v.passages.length || v.passages.some((p, i) => p.start !== declared[i].start || p.end !== declared[i].end || p.page !== null)) bad()
+        }
         }
       } else await verifyText(v, v.text, cryptoImpl)
     }
