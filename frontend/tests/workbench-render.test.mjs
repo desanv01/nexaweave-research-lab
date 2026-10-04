@@ -26,7 +26,8 @@ async function compile(path, replacements = {}) {
 const evidence = await compile('../src/components/workbench/EvidenceResults.vue')
 const sources = await compile('../src/components/workbench/SourceLibrary.vue')
 const ingestion = await compile('../src/components/workbench/SourceIngestion.vue')
-const workbench = await compile('../src/views/ResearchWorkbench.vue', { '../components/workbench/EvidenceResults.vue': evidence.url, '../components/workbench/SourceLibrary.vue': sources.url, '../components/workbench/SourceIngestion.vue': ingestion.url })
+const experiments = await compile('../src/components/workbench/ExperimentComparison.vue')
+const workbench = await compile('../src/views/ResearchWorkbench.vue', { '../components/workbench/EvidenceResults.vue': evidence.url, '../components/workbench/SourceLibrary.vue': sources.url, '../components/workbench/SourceIngestion.vue': ingestion.url, '../components/workbench/ExperimentComparison.vue': experiments.url })
 function mount(component, props) {
   const root = document.createElement('div'); document.body.append(root)
   const app = createApp(component, props)
@@ -254,4 +255,53 @@ test('P06 inspected page evidence preserves graph eligibility32768 and never aut
       if (length > 32768) assert.ok(mounted.root.textContent.includes(copyFor('en').ingestion.ineligible))
     } finally { mounted.cleanup() }
   }
+})
+
+function experimentCatalog() {
+  return { version: 1, project_id: uuid, project_revision: 1, cohort_manifest_digest: 'a'.repeat(64), public_projection_digest: 'b'.repeat(64), members: [{ member_id: 'member:1', member_label: malicious, case_label: 'Case', run_id: uuid, state: 'failed', cancel_requested: true, seed: '9223372036854775807', max_rounds: 2, platforms: ['twitter'] }] }
+}
+test('actual nested experiment section uses manual catalog only and clears on 401/403, disconnect and reload', async () => {
+  for (const action of ['401', '403', 'disconnect', 'reload']) {
+    const previousFetch = globalThis.fetch, calls = []
+    let mounted
+    globalThis.fetch = async (url, options) => {
+      calls.push({ url, options })
+      if (url.includes('/api/graph/data/')) return response(graphResult)
+      assert.equal(url, 'http://127.0.0.1:5001/api/experiments/catalog'); assert.equal(options.method, 'GET'); assert.equal(options.body, undefined)
+      if (calls.length === 3 && ['401', '403'].includes(action)) return new Response('private server secret', { status: Number(action) })
+      return response(experimentCatalog())
+    }
+    try {
+      mounted = mount(workbench.component); await settle(); assert.equal(calls.length, 0)
+      assert.equal(mounted.root.querySelector('.experiment-comparison .catalog-load').disabled, true)
+      input(mounted.root, '#graph-id', 'graph_1'); input(mounted.root, '#bearer-token', 'secret')
+      mounted.root.querySelector('.connection-form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true })); await settle(); assert.equal(calls.length, 1)
+      input(mounted.root, '#workbench-language', 'zh'); await settle(); assert.equal(calls.length, 1)
+      mounted.root.querySelector('.catalog-load').click(); await settle(); assert.equal(calls.length, 2)
+      assert.ok(mounted.root.querySelector('.catalog-member').textContent.includes('9223372036854775807'))
+      assert.ok(mounted.root.querySelector('.catalog-member').textContent.includes(malicious)); assert.equal(mounted.root.querySelector('.experiment-comparison img, .experiment-comparison script, .experiment-comparison a'), null)
+      if (['401', '403'].includes(action)) { mounted.root.querySelector('.catalog-load').click(); await settle(); assert.equal(calls.length, 3); assert.equal(mounted.root.querySelector('.graph-overview'), null) }
+      else if (action === 'disconnect') { clickText(mounted.root, copyFor('zh').disconnect); await settle() }
+      else { mounted.cleanup(); mounted = mount(workbench.component); await settle() }
+      assert.equal(mounted.root.querySelector('.catalog-member'), null); assert.equal(mounted.root.querySelector('.comparison-result'), null)
+      assert.equal(mounted.root.querySelector('#bearer-token').value, ''); assert.equal(mounted.root.querySelector('.catalog-load').disabled, true)
+      assert.ok(!mounted.root.textContent.includes('private server secret'))
+      assert.equal(calls.filter(c => c.options.method === 'POST').length, 0)
+    } finally { mounted?.cleanup(); globalThis.fetch = previousFetch }
+  }
+})
+test('shared parent cancellation aborts the pending experiment read and late catalog cannot populate UI', async () => {
+  const previousFetch = globalThis.fetch; let resolve, signal, calls = 0
+  globalThis.fetch = async (_url, options) => ++calls === 1 ? response(graphResult) : new Promise(r => { resolve = r; signal = options.signal })
+  const mounted = mount(workbench.component)
+  try {
+    input(mounted.root, '#graph-id', 'graph_1'); input(mounted.root, '#bearer-token', 'secret')
+    mounted.root.querySelector('.connection-form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true })); await settle()
+    mounted.root.querySelector('.catalog-load').click(); await settle()
+    assert.equal(mounted.root.querySelector('.query-section fieldset').disabled, true)
+    clickText(mounted.root, copyFor('en').cancel); await settle(); assert.equal(signal.aborted, true)
+    resolve(response(experimentCatalog())); await settle(); assert.equal(mounted.root.querySelector('.catalog-member'), null); assert.equal(calls, 2)
+    assert.ok(mounted.root.querySelector('.experiment-comparison .feedback').textContent.includes(copyFor('en').experiments.cancelled))
+    assert.equal(mounted.root.querySelector('.query-section fieldset').disabled, false)
+  } finally { mounted.cleanup(); globalThis.fetch = previousFetch }
 })

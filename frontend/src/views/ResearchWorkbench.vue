@@ -5,6 +5,7 @@ import { copyFor, safeError } from '../i18n/workbench.js'
 import EvidenceResults from '../components/workbench/EvidenceResults.vue'
 import SourceLibrary from '../components/workbench/SourceLibrary.vue'
 import SourceIngestion from '../components/workbench/SourceIngestion.vue'
+import ExperimentComparison from '../components/workbench/ExperimentComparison.vue'
 const locale = ref('en'), copy = computed(() => copyFor(locale.value))
 const origin = ref('http://127.0.0.1:5001'), graph = ref(''), token = ref(''), reveal = ref(false)
 const connected = ref(false), busy = ref(false), status = ref('disconnected'), errorCode = ref('')
@@ -30,6 +31,10 @@ const sourceMethods = Object.freeze({
   list: () => operation(() => client.sourceList(), false, true),
   get: payload => operation(() => client.sourceGet(payload), false, true),
   retain: payload => operation(() => client.sourceRetain(payload), false, true)
+})
+const experimentMethods = Object.freeze({
+  catalog: () => operation(() => client.experimentCatalog(), false, true),
+  compare: (payload, catalog) => operation(() => client.experimentCompare(payload, catalog), false, true)
 })
 let generation = 0
 const graphEntries = computed(() => graphData.value?.[graphKind.value] || [])
@@ -93,6 +98,7 @@ onBeforeUnmount(disconnect)
       </section>
       <SourceLibrary :methods="sourceMethods" :connected="connected" :busy="busy" :reset-version="sourceReset" :locale="locale" @inspected="inspectedSource = $event" />
       <SourceIngestion :methods="ingestionMethods" :inspected="inspectedSource" :connected="connected" :busy="busy" :reset-version="sourceReset" :locale="locale" />
+      <ExperimentComparison :methods="experimentMethods" :connected="connected" :busy="busy" :reset-version="sourceReset" :locale="locale" />
       <section class="query-section" aria-labelledby="query-title"><h2 id="query-title">{{ copy.research }}</h2>
         <form @submit.prevent="submit"><fieldset :disabled="!connected || busy"><legend>{{ copy.scope }}</legend><div class="choices"><label><input v-model="mode" type="radio" value="research">{{ copy.research }}</label><label><input v-model="mode" type="radio" value="dossier">{{ copy.dossier }}</label></div>
           <label v-if="mode === 'research'" for="question">{{ copy.query }}<textarea id="question" v-model="query" required rows="3" maxlength="4000"></textarea></label>
