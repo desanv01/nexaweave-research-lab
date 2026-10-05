@@ -63,10 +63,10 @@
     {
       "imported_path": "backend/app/__init__.py",
       "original_sha256": "f04d262decf6c11437280c0f0c1353774f642888b2ef3f02dfa0e96e992b3c1c",
-      "current_sha256": "abed53cc7ab436e2b3e5f404af4fdf34c87d044241c16b37786026f4a6a33c5d",
-      "reason": "U02d exact Origin/CORS and private logging retained. U03i selects explicit graphiti_readonly factory before inherited blueprints/runner; default legacy unchanged. U11a forwards optional evidence facade only in explicit read-only mode; legacy default unchanged. U04d explicitly selects research_local source-retention routes using the same protected factory/settings; graphiti_readonly and legacy defaults remain. U06b forwards optional protected research source-ingestion facade; legacy/read-only modes preserve inherited behavior. U10b forwards optional protected experiment facade only through the existing research-local factory; no legacy/read-only blueprint or runtime change. U07c forwards the explicitly injected trusted preparation facade through research_local factory without initializing optional engines in ordinary HTTP imports.",
-      "phase": "U02d/U03i / U11a / U04d/U06b/U10b/U07c",
-      "review_status": "Main reviewed exact U07c source;101 offline unit/no skips and18 real PG/Temporal/no skips passed. Actual combined browser and exact hosted acceptance pending."
+      "current_sha256": "3d37005594180d03d483a3b89d863e1ae0f2a6df24dae84c7aaed477f997244f",
+      "reason": "U02d exact Origin/CORS and private logging retained. U03i selects explicit graphiti_readonly factory before inherited blueprints/runner; default legacy unchanged. U11a forwards optional evidence facade only in explicit read-only mode; legacy default unchanged. U04d explicitly selects research_local source-retention routes using the same protected factory/settings; graphiti_readonly and legacy defaults remain. U06b forwards optional protected research source-ingestion facade; legacy/read-only modes preserve inherited behavior. U10b forwards optional protected experiment facade only through the existing research-local factory; no legacy/read-only blueprint or runtime change. U07c forwards the explicitly injected trusted preparation facade through research_local factory without initializing optional engines in ordinary HTTP imports. U07d forwards an explicitly injected protected native-launch facade only through research_local; preserves ordinary import and legacy behavior.",
+      "phase": "U02d/U03i / U11a / U04d/U06b/U10b/U07c/U07d",
+      "review_status": "Main reviewed exact U07d source.96 unit plus2 new fixture checks,26 PG cases plus2 corrected Temporal cases, actual generated-preparation two-platform OASIS1 case and107 relevant Node cases/build passed locally with zero selected skips. Original failures retained. Combined browser and exact hosted acceptance remain pending."
     },
     {
       "imported_path": "backend/app/config.py",

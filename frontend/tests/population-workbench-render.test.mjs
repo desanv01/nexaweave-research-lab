@@ -17,13 +17,14 @@ async function compile(path, replacements = {}) {
 }
 const population = await compile('../src/components/workbench/PopulationWorkbench.vue')
 const preparation = await compile('../src/components/workbench/SimulationPreparation.vue')
+const nativeLaunch = await compile('../src/components/workbench/NativeLaunch.vue')
 const dossier = await compile('../src/components/workbench/DossierExport.vue')
 const evidence = await compile('../src/components/workbench/EvidenceResults.vue', { './DossierExport.vue': dossier.url })
 const sources = await compile('../src/components/workbench/SourceLibrary.vue')
 const ingestion = await compile('../src/components/workbench/SourceIngestion.vue')
 const experiments = await compile('../src/components/workbench/ExperimentComparison.vue')
 const workbench = await compile('../src/views/ResearchWorkbench.vue', {
-  '../components/workbench/PopulationWorkbench.vue': population.url, '../components/workbench/SimulationPreparation.vue': preparation.url,
+  '../components/workbench/PopulationWorkbench.vue': population.url, '../components/workbench/SimulationPreparation.vue': preparation.url, '../components/workbench/NativeLaunch.vue': nativeLaunch.url,
   '../components/workbench/EvidenceResults.vue': evidence.url,
   '../components/workbench/SourceLibrary.vue': sources.url,
   '../components/workbench/SourceIngestion.vue': ingestion.url,

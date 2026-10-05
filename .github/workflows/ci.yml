@@ -237,6 +237,10 @@ jobs:
         run: |
           backend/.venv/Scripts/python.exe tools/run_preparation_tests.py --unit
           if ($LASTEXITCODE -ne 0) { throw 'Preparation offline qualification failed' }
+      - name: Qualify connected native launch contracts and capped model boundaries
+        run: |
+          backend/.venv/Scripts/python.exe tools/run_native_launch_tests.py --unit
+          if ($LASTEXITCODE -ne 0) { throw 'Native launch offline qualification failed' }
       - name: Qualify actual owned Windows parser and knowledge process trees
         run: |
           backend/.venv/Scripts/python.exe tools/run_owned_process_tests.py
@@ -261,6 +265,10 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw 'Prepared native Temporal qualification failed' }
             backend/.venv/Scripts/python.exe tools/run_preparation_tests.py --integration
             if ($LASTEXITCODE -ne 0) { throw 'Durable preparation PG/Temporal qualification failed' }
+            backend/.venv/Scripts/python.exe tools/run_native_launch_tests.py --integration
+            if ($LASTEXITCODE -ne 0) { throw 'Connected native launch PG/Temporal qualification failed' }
+            backend/.venv/Scripts/python.exe tools/run_native_launch_tests.py --engine
+            if ($LASTEXITCODE -ne 0) { throw 'Generated preparation to owned native engine qualification failed' }
           } finally {
             ./tools/native_temporal_ci_server.ps1 -Action stop
           }

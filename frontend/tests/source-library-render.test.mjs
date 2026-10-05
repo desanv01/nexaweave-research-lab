@@ -8,6 +8,12 @@ import { parse, compileScript } from '@vue/compiler-sfc'
 import { copyFor, workbenchCopy } from '../src/i18n/workbench.js'
 import { sha256 } from '../src/api/sourceLibrary.js'
 Object.defineProperty(globalThis, 'crypto', { value: webcrypto, configurable: true })
+// Track actual WebCrypto work; a fixed sleep cannot prove async admission ended.
+const pendingDigests = new Set(), actualDigest = webcrypto.subtle.digest.bind(webcrypto.subtle)
+webcrypto.subtle.digest = (...args) => {
+  const work = actualDigest(...args); pendingDigests.add(work)
+  return work.finally(() => pendingDigests.delete(work))
+}
 const dom = new JSDOM('<!doctype html><html><body></body></html>', { url: 'http://127.0.0.1:5173/research' })
 for (const name of ['window', 'document', 'Element', 'HTMLElement', 'SVGElement', 'Node']) globalThis[name] = name === 'window' ? dom.window : dom.window[name]
 const { createApp, nextTick, h, reactive } = await import('vue')
@@ -26,7 +32,8 @@ const ingestion = await compile('../src/components/workbench/SourceIngestion.vue
 const experiments = await compile('../src/components/workbench/ExperimentComparison.vue')
 const population = await compile('../src/components/workbench/PopulationWorkbench.vue')
 const preparation = await compile('../src/components/workbench/SimulationPreparation.vue')
-const route = await compile('../src/views/ResearchWorkbench.vue', { '../components/workbench/SourceLibrary.vue': sources.url, '../components/workbench/EvidenceResults.vue': evidence.url, '../components/workbench/SourceIngestion.vue': ingestion.url, '../components/workbench/ExperimentComparison.vue': experiments.url, '../components/workbench/PopulationWorkbench.vue': population.url, '../components/workbench/SimulationPreparation.vue': preparation.url })
+const nativeLaunch = await compile('../src/components/workbench/NativeLaunch.vue')
+const route = await compile('../src/views/ResearchWorkbench.vue', { '../components/workbench/SourceLibrary.vue': sources.url, '../components/workbench/EvidenceResults.vue': evidence.url, '../components/workbench/SourceIngestion.vue': ingestion.url, '../components/workbench/ExperimentComparison.vue': experiments.url, '../components/workbench/PopulationWorkbench.vue': population.url, '../components/workbench/SimulationPreparation.vue': preparation.url, '../components/workbench/NativeLaunch.vue': nativeLaunch.url })
 function mount(component, initial = {}) {
   const props = reactive(initial), root = document.createElement('div'); document.body.append(root)
   const app = createApp({ setup: () => () => h(component, props) })
@@ -35,7 +42,21 @@ function mount(component, initial = {}) {
   return { root, props, cleanup() { app.unmount(); root.remove() } }
 }
 async function settle() { for (let i = 0; i < 16; i++) { await Promise.resolve(); await nextTick() } }
-async function cryptoSettle() { await new Promise(r => setTimeout(r, 30)); await settle() }
+async function cryptoSettle() {
+  const deadline = Date.now() + 2000
+  await settle()
+  while (pendingDigests.size) {
+    const left = deadline - Date.now()
+    assert.ok(left > 0, 'bounded WebCrypto admission did not complete')
+    let timer
+    try {
+      await Promise.race([Promise.all([...pendingDigests]), new Promise((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error('bounded WebCrypto admission did not complete')), left)
+      })])
+    } finally { clearTimeout(timer) }
+    await settle()
+  }
+}
 function input(root, selector, value) { const el = root.querySelector(selector); el.value = value; el.dispatchEvent(new dom.window.Event(el.tagName === 'SELECT' ? 'change' : 'input', { bubbles: true })) }
 function button(root, text) { return [...root.querySelectorAll('button')].find(b => b.textContent === text) }
 const cp = copyFor('en').sources, enc = new TextEncoder(), revision = '11111111-1111-4111-8111-111111111111', project = '22222222-2222-4222-8222-222222222222'

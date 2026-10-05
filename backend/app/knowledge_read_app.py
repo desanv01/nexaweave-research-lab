@@ -80,7 +80,7 @@ def _failure(code, status=None):
 
 
 def create_read_app(config_class, *, facade=None, evidence_facade=None, source_facade=None, ingestion_facade=None, experiment_facade=None,
-                    preparation_facade=None, mode="graphiti_readonly"):
+                    preparation_facade=None, native_launch_facade=None, mode="graphiti_readonly"):
     if mode not in {"graphiti_readonly", "research_local"}:
         raise ValueError("invalid application mode")
     app = Flask(__name__)
@@ -104,6 +104,8 @@ def create_read_app(config_class, *, facade=None, evidence_facade=None, source_f
         register_experiment_routes(app, settings, experiment_facade=experiment_facade)
         from .preparation_api import register_preparation_routes
         register_preparation_routes(app, settings, preparation_facade=preparation_facade)
+        from .native_launch_api import register_native_launch_routes
+        register_native_launch_routes(app, settings, native_launch_facade=native_launch_facade)
     reader = facade or KnowledgeReadFacade(settings)
     evidence_lock = threading.Lock()
     evidence = evidence_facade
