@@ -2,6 +2,7 @@
 import { sourcePayload, sourceReadRequest, verifySourceInput, validateSourceResult } from './sourceLibrary.js'
 import { ingestionPayload, validateIngestionResult } from './sourceIngestion.js'
 import { experimentSelection, validateExperimentCatalog, validateExperimentComparison } from './experimentComparison.js'
+import { populationOptions, validatePopulationPreview, validatePopulationExport } from './populationWorkbench.js'
 export class WorkbenchError extends Error {
   constructor(code) { super(code); this.name = 'WorkbenchError'; this.code = code }
 }
@@ -24,7 +25,7 @@ const obj = v => v !== null && typeof v === 'object' && !Array.isArray(v)
 function shape(v, fields) {
   if (!obj(v) || Object.keys(v).sort().join('|') !== fields.split(' ').sort().join('|')) fail()
 }
-function uniqueJson(raw) {
+export function uniqueJson(raw) {
   const parsed = JSON.parse(raw)
   // JSON.parse alone silently accepts duplicate keys. Track decoded object keys
   // after syntax parsing, including escaped spellings, with a finite depth.
@@ -208,13 +209,26 @@ export function validateResult(method, value, graph) {
 }
 export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs = 125000 } = {}) {
   if (!Number.isFinite(deadlineMs) || deadlineMs < 1 || deadlineMs > 150000) fail('invalid_connection')
-  let connection = null, active = null, generation = 0, authenticated = false, ingestionScope = null
-  function cancel() { generation++; active?.abort(); active = null }
-  function disconnect() { cancel(); connection = null; authenticated = false; ingestionScope = null }
+  let connection = null, active = null, generation = 0, authenticated = false, ingestionScope = null, populationAdmission = null
+  function cancel(preservePopulation = false) { generation++; active?.abort(); active = null; if (!preservePopulation) populationAdmission = null }
+  function disconnect() { cancel(); connection = null; authenticated = false; ingestionScope = null; populationAdmission = null }
   async function request(method, payload, ingestionContext) {
     if (!connection || (method !== 'graph' && !authenticated)) fail('disconnected')
-    cancel()
+    const population = method.startsWith('population')
+    cancel(method === 'populationExport')
     const source = method.startsWith('source'), ingestion = method.startsWith('ingestion'), experiment = method.startsWith('experiment')
+    if (!population || method === 'populationPreview') populationAdmission = null
+    let populationRequest
+    if (population) {
+      try { populationRequest = populationOptions(payload?.options, payload?.platform); payload = populationRequest }
+      catch { fail('invalid_request') }
+      if (method === 'populationExport') {
+        const previewOptions = { ...populationRequest }; delete previewOptions.platform
+        try { ingestionContext = validatePopulationPreview(ingestionContext, connection.graph, previewOptions) }
+        catch { fail('invalid_request') }
+        if (!populationAdmission || JSON.stringify(previewOptions) !== JSON.stringify(populationAdmission.options) || JSON.stringify(ingestionContext) !== JSON.stringify(populationAdmission.preview)) fail('invalid_request')
+      }
+    }
     let experimentRequest
     if (method === 'experimentCompare') {
       try { experimentRequest = experimentSelection(payload, ingestionContext); payload = experimentRequest.payload } catch { fail('invalid_request') }
@@ -224,7 +238,8 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
       payload = JSON.parse(ingestionRaw)
       ingestionContext = JSON.parse(JSON.stringify({ ...ingestionContext, ...(ingestionScope ? { scope: ingestionScope } : {}) }))
     }
-    const raw = experiment ? experimentRequest?.raw : ingestion ? (method === 'ingestionStatus' ? undefined : ingestionRaw) : method === 'graph' || method === 'sourceList' || method === 'sourceGet' ? undefined : method === 'sourceRetain' ? sourcePayload(payload) : requestPayload(method, payload, connection.graph)
+    const raw = population ? JSON.stringify(populationRequest) : experiment ? experimentRequest?.raw : ingestion ? (method === 'ingestionStatus' ? undefined : ingestionRaw) : method === 'graph' || method === 'sourceList' || method === 'sourceGet' ? undefined : method === 'sourceRetain' ? sourcePayload(payload) : requestPayload(method, payload, connection.graph)
+    if (population && encoder.encode(raw).length > 16384) fail('invalid_request')
     const sourceRequest = method === 'sourceGet' ? sourceReadRequest(payload) : method === 'sourceRetain' ? JSON.parse(raw) : undefined
     const epoch = generation, current = connection, controller = new AbortController()
     active = controller
@@ -250,28 +265,39 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
       }
       const sourcePaths = { sourceList: 'library', sourceGet: 'item', sourceRetain: 'retain' }
       const ingestionPaths = { ingestionPlan: 'plan', ingestionExecute: 'execute', ingestionStatus: 'operation' }
-      const path = experiment ? `/api/experiments/${method === 'experimentCatalog' ? 'catalog' : 'compare'}` : ingestion ? `/api/source/ingestion/${ingestionPaths[method]}/${current.graph}${method === 'ingestionStatus' ? '/' + payload.operation_id : ''}` : source ? `/api/source/${sourcePaths[method]}/${current.graph}${method === 'sourceGet' ? '/' + sourceRequest.source_revision : ''}` : `/api/graph/${paths[method]}/${current.graph}`
+      const path = population ? `/api/graph/population/${current.graph}/${method === 'populationPreview' ? 'preview' : 'export'}` : experiment ? `/api/experiments/${method === 'experimentCatalog' ? 'catalog' : 'compare'}` : ingestion ? `/api/source/ingestion/${ingestionPaths[method]}/${current.graph}${method === 'ingestionStatus' ? '/' + payload.operation_id : ''}` : source ? `/api/source/${sourcePaths[method]}/${current.graph}${method === 'sourceGet' ? '/' + sourceRequest.source_revision : ''}` : `/api/graph/${paths[method]}/${current.graph}`
       const response = await guarded(fetchImpl(`${current.origin}${path}`, { method: raw === undefined ? 'GET' : 'POST', headers: { Authorization: `Bearer ${current.token}`, ...(raw ? { 'Content-Type': 'application/json' } : {}) }, body: raw, signal: controller.signal, redirect: 'error', credentials: 'omit', cache: 'no-store', referrerPolicy: 'no-referrer' }))
       responseBody = response.body
       owned()
       if (response.status === 401) { disconnect(); fail('unauthorized') }
-      if (experiment && response.status === 403) { disconnect(); fail('origin_denied') }
+      if ((experiment || population) && response.status === 403) { disconnect(); fail('origin_denied') }
       if ((source || ingestion) && response.status === 404 && !/^application\/json(?:\s*;|$)/i.test(response.headers.get('content-type') || '')) fail('source_unavailable')
-      if (response.redirected || response.type === 'opaqueredirect' || !/^application\/json(?:\s*;|$)/i.test(response.headers.get('content-type') || '') || !response.body?.getReader) fail()
-      const cap = experiment ? (method === 'experimentCatalog' ? 32768 : 524288) + 16384 : ingestion ? 263168 : (source || method === 'dossier' ? 4194304 : 2097152) + 1024
+      if (population && [404, 501].includes(response.status) && !/^application\/json(?:\s*;|$)/i.test(response.headers.get('content-type') || '')) fail('population_unavailable')
+      const exportOk = method === 'populationExport' && response.ok && (payload.platform === 'twitter' ? /^text\/csv\s*;\s*charset=utf-8$/i : /^application\/json\s*;\s*charset=utf-8$/i).test(response.headers.get('content-type') || '')
+      if (method === 'populationExport' && response.ok && !exportOk) fail()
+      if (response.redirected || response.type === 'opaqueredirect' || (!exportOk && !/^application\/json(?:\s*;|$)/i.test(response.headers.get('content-type') || '')) || !response.body?.getReader) fail()
+      const cap = population ? 2097152 + (method === 'populationPreview' ? 1024 : 0) : experiment ? (method === 'experimentCatalog' ? 32768 : 524288) + 16384 : ingestion ? 263168 : (source || method === 'dossier' ? 4194304 : 2097152) + 1024
       const length = response.headers.get('content-length')
       if (length && (!/^\d+$/.test(length) || Number(length) > cap)) fail('result_too_large')
       reader = response.body.getReader()
-      const decoder = new TextDecoder('utf-8', { fatal: true }); let size = 0, body = ''
+      const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: population }); let size = 0, body = ''; const exportChunks = []
       while (true) {
         const chunk = await guarded(reader.read()); owned()
         if (chunk.done) break
         size += chunk.value.byteLength
         if (size > cap) fail('result_too_large')
+        if (exportOk) exportChunks.push(new Uint8Array(chunk.value))
         try { body += decoder.decode(chunk.value, { stream: true }) } catch { fail() }
       }
       try { body += decoder.decode() } catch { fail() }
       owned()
+      if (exportOk) {
+        let admitted
+        try { admitted = validatePopulationExport(body, payload.platform, ingestionContext) } catch { fail('invalid_reply') }
+        const bytes = new Uint8Array(size); let offset = 0
+        for (const chunk of exportChunks) { bytes.set(chunk, offset); offset += chunk.byteLength }
+        owned(); return { bytes, mime: response.headers.get('content-type'), filename: payload.platform === 'twitter' ? 'oasis-twitter-profiles.csv' : 'oasis-reddit-profiles.json', rows: admitted }
+      }
       let value
       try { value = uniqueJson(body) } catch { fail() }
       if (!obj(value) || typeof value.success !== 'boolean') fail()
@@ -285,6 +311,8 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
       let result
       if (experiment) {
         try { result = method === 'experimentCatalog' ? validateExperimentCatalog(value.data) : validateExperimentComparison(value.data, experimentRequest.catalog, experimentRequest.payload) } catch { fail('invalid_reply') }
+      } else if (population) {
+        try { result = validatePopulationPreview(value.data, current.graph, populationRequest) } catch { fail('invalid_reply') }
       } else result = ingestion ? await guarded(validateIngestionResult(method, value.data, { ...ingestionContext, payload })) : source ? await guarded(validateSourceResult(method, value.data, sourceRequest)) : validateResult(method, value.data, current.graph)
       if (method === 'research' && [...result.source_claims, ...result.simulation_observations, ...result.other_claims].length > (payload.top_k ?? 10)) fail()
       if (method === 'dossier') {
@@ -295,6 +323,7 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
       }
       owned()
       if (ingestion) ingestionScope = { ...result.scope }
+      if (method === 'populationPreview') populationAdmission = { options: populationOptions(populationRequest), preview: JSON.parse(JSON.stringify(result)) }
       return result
     } catch (error) {
       if (generation !== epoch || controller.signal.aborted) {
@@ -327,6 +356,8 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
     sourceRetain: payload => request('sourceRetain', payload),
     experimentCatalog: () => request('experimentCatalog'),
     experimentCompare: (payload, catalog) => request('experimentCompare', payload, catalog),
+    populationPreview: options => request('populationPreview', { options }),
+    populationExport: (platform, options, preview) => request('populationExport', { platform, options }, preview),
     ingestionPlan: (payload, inspected, scope) => request('ingestionPlan', payload, { inspected, scope }),
     ingestionExecute: (payload, known) => request('ingestionExecute', payload, { known, scope: known.scope }),
     ingestionStatus: (payload, known, scope, project) => request('ingestionStatus', payload, { known, scope, project }),

@@ -6,6 +6,8 @@ import EvidenceResults from '../components/workbench/EvidenceResults.vue'
 import SourceLibrary from '../components/workbench/SourceLibrary.vue'
 import SourceIngestion from '../components/workbench/SourceIngestion.vue'
 import ExperimentComparison from '../components/workbench/ExperimentComparison.vue'
+import PopulationWorkbench from '../components/workbench/PopulationWorkbench.vue'
+import { populationCopyFor } from '../i18n/populationWorkbench.js'
 const locale = ref('en'), copy = computed(() => copyFor(locale.value))
 const origin = ref('http://127.0.0.1:5001'), graph = ref(''), token = ref(''), reveal = ref(false)
 const connected = ref(false), busy = ref(false), status = ref('disconnected'), errorCode = ref('')
@@ -20,6 +22,10 @@ const sections = ref([{ heading: '', query: '' }]), advanced = ref(false), topK 
 const graphPage = ref(0), graphKind = ref('nodes')
 const client = createWorkbenchClient()
 const sourceReset = ref(0)
+const populationReset = ref(0)
+const populationFeedback = ref('')
+const populationStatus = computed(() => populationCopyFor(locale.value)[populationFeedback.value] || '')
+const populationTypes = computed(() => graphData.value?.nodes.flatMap(node => node.labels) || [])
 const inspectedSource = ref(null)
 const ingestionMethods = Object.freeze({
   plan: (payload, inspected) => operation(() => client.ingestionPlan(payload, inspected), false, true, 'plan'),
@@ -36,14 +42,20 @@ const experimentMethods = Object.freeze({
   catalog: () => operation(() => client.experimentCatalog(), false, true),
   compare: (payload, catalog) => operation(() => client.experimentCompare(payload, catalog), false, true)
 })
+const populationMethods = Object.freeze({
+  preview: options => operation(() => client.populationPreview(options), false, true, '', true),
+  export: (platform, options, preview) => operation(() => client.populationExport(platform, options, preview), false, true, '', true),
+  feedback: code => { populationFeedback.value = ['ready', 'changed', 'prepared', 'requested', 'invalid', 'invalidReply', 'denied', 'cancelled', 'unavailable', 'emptySelection', 'failed'].includes(code) ? code : '' }
+})
 let generation = 0
 const graphEntries = computed(() => graphData.value?.[graphKind.value] || [])
-function clearProtected() { sourceReset.value++; inspectedSource.value = null; graphData.value = null; result.value = null; graphPage.value = 0 }
+function clearProtected() { sourceReset.value++; populationReset.value++; inspectedSource.value = null; graphData.value = null; result.value = null; graphPage.value = 0 }
 function disconnect() { generation++; client.disconnect(); token.value = ''; reveal.value = false; connected.value = false; busy.value = false; clearProtected(); errorCode.value = ''; ingestionRequest.value = ''; status.value = 'disconnected' }
-function cancel() { generation++; client.cancel(); busy.value = false; status.value = 'cancelled'; errorCode.value = ''; if (!connected.value) { client.disconnect(); token.value = ''; clearProtected() } }
-async function operation(action, connecting = false, source = false, ingestion = '') {
+function cancel() { generation++; populationReset.value++; client.cancel(); busy.value = false; status.value = 'cancelled'; errorCode.value = ''; if (!connected.value) { client.disconnect(); token.value = ''; clearProtected() } }
+async function operation(action, connecting = false, source = false, ingestion = '', population = false) {
   const epoch = ++generation
-  client.cancel()
+  if (!population) populationReset.value++
+  client.cancel(population)
   busy.value = true; errorCode.value = ''; ingestionRequest.value = ingestion; status.value = connecting ? 'connecting' : 'loading'
   if (connecting) { connected.value = false; clearProtected() } else if (!source) result.value = null
   try {
@@ -91,7 +103,7 @@ onBeforeUnmount(disconnect)
           <button type="button" :disabled="connected || busy" :aria-pressed="reveal" @click="reveal = !reveal">{{ reveal ? copy.hide : copy.reveal }}</button>
           <button v-if="!connected" class="primary" type="submit" :disabled="busy">{{ copy.connect }}</button><button v-else type="button" @click="disconnect">{{ copy.disconnect }}</button>
         </form><p id="connection-help" class="help">{{ copy.privacy }}</p>
-        <p class="status" role="status" aria-live="polite" aria-atomic="true">{{ copy.status[status] }}<span v-if="bannerError"> · {{ bannerError }}</span></p><button v-if="busy" type="button" @click="cancel">{{ copy.cancel }}</button>
+        <p class="status" role="status" aria-live="polite" aria-atomic="true">{{ copy.status[status] }}<span v-if="bannerError"> · {{ bannerError }}</span><span v-if="populationStatus"> · {{ populationStatus }}</span></p><button v-if="busy" type="button" @click="cancel">{{ copy.cancel }}</button>
       </section>
       <section v-if="graphData" class="graph-overview"><h2>{{ copy.graphOverview }} <span class="mono">{{ graphData.graph_id }}</span></h2><p>{{ copy.nodes }}: {{ graphData.node_count }} · {{ copy.edges }}: {{ graphData.edge_count }}</p>
         <details><summary>{{ copy.overview }}</summary><div class="choices"><label><input v-model="graphKind" value="nodes" type="radio" @change="graphPage = 0">{{ copy.nodes }}</label><label><input v-model="graphKind" value="edges" type="radio" @change="graphPage = 0">{{ copy.edges }}</label></div><ul><li v-for="entry in graphEntries.slice(graphPage * 10, (graphPage + 1) * 10)" :key="entry.uuid"><details><summary>{{ entry.name || entry.uuid }}</summary><p class="mono">{{ entry.uuid }}</p><p>{{ entry.summary }}</p><p>{{ entry.fact }}</p><p v-if="graphKind === 'edges'">{{ entry.source_node_name }} → {{ entry.target_node_name }}</p></details></li></ul><nav v-if="graphEntries.length > 10" class="actions" :aria-label="copy.graphOverview"><button type="button" :disabled="!graphPage" @click="graphPage--">{{ copy.previous }}</button><span>{{ copy.range }} {{ graphPage + 1 }} / {{ Math.ceil(graphEntries.length / 10) }}</span><button type="button" :disabled="(graphPage + 1) * 10 >= graphEntries.length" @click="graphPage++">{{ copy.next }}</button></nav></details>
@@ -99,6 +111,7 @@ onBeforeUnmount(disconnect)
       <SourceLibrary :methods="sourceMethods" :connected="connected" :busy="busy" :reset-version="sourceReset" :locale="locale" @inspected="inspectedSource = $event" />
       <SourceIngestion :methods="ingestionMethods" :inspected="inspectedSource" :connected="connected" :busy="busy" :reset-version="sourceReset" :locale="locale" />
       <ExperimentComparison :methods="experimentMethods" :connected="connected" :busy="busy" :reset-version="sourceReset" :locale="locale" />
+      <PopulationWorkbench :methods="populationMethods" :connected="connected" :busy="busy" :reset-version="populationReset" :locale="locale" :type-labels="populationTypes" />
       <section class="query-section" aria-labelledby="query-title"><h2 id="query-title">{{ copy.research }}</h2>
         <form @submit.prevent="submit"><fieldset :disabled="!connected || busy"><legend>{{ copy.scope }}</legend><div class="choices"><label><input v-model="mode" type="radio" value="research">{{ copy.research }}</label><label><input v-model="mode" type="radio" value="dossier">{{ copy.dossier }}</label></div>
           <label v-if="mode === 'research'" for="question">{{ copy.query }}<textarea id="question" v-model="query" required rows="3" maxlength="4000"></textarea></label>
