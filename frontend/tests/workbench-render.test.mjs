@@ -28,7 +28,8 @@ const evidence = await compile('../src/components/workbench/EvidenceResults.vue'
 const sources = await compile('../src/components/workbench/SourceLibrary.vue')
 const ingestion = await compile('../src/components/workbench/SourceIngestion.vue')
 const experiments = await compile('../src/components/workbench/ExperimentComparison.vue')
-const workbench = await compile('../src/views/ResearchWorkbench.vue', { '../components/workbench/EvidenceResults.vue': evidence.url, '../components/workbench/SourceLibrary.vue': sources.url, '../components/workbench/SourceIngestion.vue': ingestion.url, '../components/workbench/ExperimentComparison.vue': experiments.url })
+const population = await compile('../src/components/workbench/PopulationWorkbench.vue')
+const workbench = await compile('../src/views/ResearchWorkbench.vue', { '../components/workbench/EvidenceResults.vue': evidence.url, '../components/workbench/SourceLibrary.vue': sources.url, '../components/workbench/SourceIngestion.vue': ingestion.url, '../components/workbench/ExperimentComparison.vue': experiments.url, '../components/workbench/PopulationWorkbench.vue': population.url })
 function mount(component, props) {
   const root = document.createElement('div'); document.body.append(root)
   const app = createApp(component, props)
