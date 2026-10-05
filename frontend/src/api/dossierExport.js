@@ -2,8 +2,8 @@ import { validateResult } from './workbench.js'
 
 export const DOSSIER_EXPORT_LIMIT = 4 * 1024 * 1024
 const formats = Object.freeze({
-  markdown: { filename: 'mirofish-evidence-dossier.md', mime: 'text/markdown;charset=utf-8' },
-  json: { filename: 'mirofish-evidence-dossier.json', mime: 'application/json;charset=utf-8' }
+  markdown: { filename: 'nexaweave-evidence-dossier.md', mime: 'text/markdown;charset=utf-8' },
+  json: { filename: 'nexaweave-evidence-dossier.json', mime: 'application/json;charset=utf-8' }
 })
 
 // Local DTO admission is not authentication or fingerprint verification.

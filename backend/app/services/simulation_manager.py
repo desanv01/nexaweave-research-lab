@@ -221,6 +221,7 @@ class SimulationManager:
         graph_id: str,
         enable_twitter: bool = True,
         enable_reddit: bool = True,
+        *, trusted_simulation_id: Optional[str] = None,
     ) -> SimulationState:
         """
         创建新的模拟
@@ -235,7 +236,15 @@ class SimulationManager:
             SimulationState
         """
         import uuid
-        simulation_id = f"sim_{uuid.uuid4().hex[:12]}"
+        if trusted_simulation_id is not None:
+            import re
+            if self._preparation is None or not re.fullmatch(r'sim_[0-9a-f]{32}', trusted_simulation_id):
+                raise ValueError('invalid trusted simulation identity')
+            simulation_id = trusted_simulation_id
+            if os.path.exists(self._get_simulation_dir(simulation_id)):
+                raise ValueError('trusted simulation already exists')
+        else:
+            simulation_id = f"sim_{uuid.uuid4().hex[:12]}"
         
         state = SimulationState(
             simulation_id=simulation_id,

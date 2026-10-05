@@ -2,6 +2,15 @@
 
 All notable accepted project changes will be recorded here. Entries that are still in a draft PR are explicitly unverified.
 
+## Unreleased — NexaWeave visible branding (unverified)
+
+- 2026-10-05 human decision: product name NexaWeave and public source repository [desanv01/nexaweave-research-lab](https://github.com/desanv01/nexaweave-research-lab); Main recorded the repository metadata change separately.
+- Authored visible navigation, document titles, EN/ZH product copy and an accessible text wordmark in the existing layout. Dossier downloads use `nexaweave-evidence-dossier.md` and `.json`.
+- Updated repository presentation to the accepted PR86 / `be004ce` baseline and pending U07c qualification. Eight broad workstreams, all 44 capabilities and full release qualification remain incomplete.
+- Preserved upstream MiroFish attribution and runtime/API/persisted compatibility identifiers. This source handoff has not been tested, merged or accepted; it is not a public app deployment or qualified release.
+
+The following entries are historical bounded acceptance records. Their status and restrictions describe the recorded milestone, not current repository visibility or whole-project completion.
+
 ## Unreleased — U01b and U02a bounded slices accepted
 
 - PR6 / merge83e7edf: executable simulation schedule, profile, action-log and
@@ -26,4 +35,4 @@ All notable accepted project changes will be recorded here. Entries that are sti
 - Imported the 128-file MiroFish archive as an attributed snapshot. Archive SHA-256: `d3bef0afea92b99626526ffcce0508414feb3f9e88c3edda1f283ce5f447bf53`; source commit unknown.
 - Preserved both inherited workflows as inert references and added a minimal, credential-free CI workflow for source integrity, inherited unit fixtures and frontend build.
 - Added repository documentation and a single recorded test-path adaptation for the quarantined star-history workflow.
-- [PR2](https://github.com/desanv01/mirofish-research-lab/pull/2) accepted as merge1166188: Linux167 tests, manifest and frontend build passed, including post-merge CI36214869721. This establishes a delivery baseline, not a runtime or security release.
+- [PR2](https://github.com/desanv01/nexaweave-research-lab/pull/2) accepted as merge1166188: Linux167 tests, manifest and frontend build passed, including post-merge CI36214869721. This establishes a delivery baseline, not a runtime or security release.

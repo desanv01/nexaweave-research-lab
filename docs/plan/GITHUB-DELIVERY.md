@@ -54,11 +54,13 @@ Reference README roadmap text has some stale entries relative to its existing wo
 
 ## 2. Repository ownership and visibility
 
-Approved default: `desanv01/mirofish-research-lab`, initially private. Main confirms authenticated owner/repo identity and availability before creation during U00. Do not assume that having read the public reference establishes write access to a future repository.
+**Latest direct human decision — 2026-10-05:** the human resumed implementation and explicitly authorized public source visibility and a new product/repository name without further confirmation. Main recorded and verified PUBLIC [desanv01/nexaweave-research-lab](https://github.com/desanv01/nexaweave-research-lab); the product is NexaWeave. This supersedes the initial private-source restriction for this repository. Public application deployment and uncapped paid calls are not authorized. Keep existing runtime, package, API and persisted compatibility identifiers; a visible rename is not a data migration or history rewrite.
 
-Create a derived repository or an appropriate upstream fork according to the chosen visibility and GitHub constraints; a separate private repository with an attributed import is the default proposal. Retain upstream history only when actually available/matched. Initial governance/bootstrap is recorded before protections are enforceable; subsequent work goes through PRs.
+**Historical U00 decision:** approved default `desanv01/mirofish-research-lab`, initially private. Main confirmed authenticated owner/repo identity and availability before creation during U00. Reading a public reference did not establish write access to a future repository.
 
-Maintain `UPSTREAM.md`, the ZIP hash, selected upstream SHA(s), `LICENSE`, third-party notices and a change/provenance log. Upstream code and tests remain attributed even when refactored. Public release visibility and any special licensing grant are separate recorded choices.
+The initial proposal was a separate private repository with an attributed import, subject to GitHub constraints. That initial visibility choice is superseded by the dated public-source decision above. Retain upstream history only when actually available/matched. Initial governance/bootstrap is recorded before protections are enforceable; subsequent work goes through PRs.
+
+Maintain `UPSTREAM.md`, the ZIP hash, selected upstream SHA(s), `LICENSE`, third-party notices and a change/provenance log. Upstream MiroFish code and tests remain attributed even when refactored or visibly rebranded. No relicensing is implied. Qualified application release/deployment and any special licensing grant remain separate recorded choices.
 
 ## 3. Branch model
 
@@ -89,6 +91,8 @@ Emergency fixes use `fix/<scope>`; upstream selected changes use `upstream/<shor
 Routine commits, pushes, PR management and qualified merges are part of the requested execution workflow once the plan is approved; main does not request redundant permission for each normal phase action. Broad publication/deployment or unexpected destructive operations remain separately scoped.
 
 The review record must identify the exact reviewed HEAD and base. Changes after acceptance invalidate that acceptance until rechecked. Store final exact-SHA acceptance as a PR/check artifact rather than changing source after its final test merely to record its own hash.
+
+The public-source decision does not relax delivery gates. Main reviews every required PR and push job and full combined/step logs for the exact reviewed revision before a match-head merge, then every required exact post-merge job and full logs before integration acceptance. Preserve failures and unchanged accepted evidence; do not substitute CI-only success for remaining local/browser/live workflow qualification or invent reviewer approvals.
 
 ## 5. GitHub protection and single-account constraint
 

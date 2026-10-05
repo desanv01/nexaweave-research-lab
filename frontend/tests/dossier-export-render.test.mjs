@@ -52,7 +52,7 @@ test('explicit native buttons download literal bytes only; locale changes preser
     const button = m.root.querySelector('button'); button.focus(); assert.equal(document.activeElement, button)
     // The native browser's Enter/Space activation produces click; jsdom does not synthesize it.
     assert.equal(button.type, 'button'); button.click(); await settle()
-    assert.deepEqual(m.clicks[0], { href: 'blob:owned-1', filename: 'mirofish-evidence-dossier.md', connected: true })
+    assert.deepEqual(m.clicks[0], { href: 'blob:owned-1', filename: 'nexaweave-evidence-dossier.md', connected: true })
     assert.equal(m.blobs[0].type, 'text/markdown;charset=utf-8')
     assert.deepEqual(new Uint8Array(await m.blobs[0].arrayBuffer()), new TextEncoder().encode(m.props.result.markdown))
     assert.equal(document.querySelector('a'), null); assert.equal(document.activeElement, button)
@@ -67,7 +67,7 @@ test('explicit native buttons download literal bytes only; locale changes preser
     assert.deepEqual(m.revoked, ['blob:owned-1']); assert.equal(m.timers.size, 1)
     assert.deepEqual(new Uint8Array(await m.blobs[1].arrayBuffer()), new Uint8Array(await m.blobs[0].arrayBuffer()))
     m.root.querySelectorAll('button')[1].click(); await settle()
-    assert.equal(m.blobs[2].type, 'application/json;charset=utf-8'); assert.equal(m.clicks[2].filename, 'mirofish-evidence-dossier.json')
+    assert.equal(m.blobs[2].type, 'application/json;charset=utf-8'); assert.equal(m.clicks[2].filename, 'nexaweave-evidence-dossier.json')
     assert.deepEqual(JSON.parse(await m.blobs[2].text()), JSON.parse(JSON.stringify(m.props.result)))
     m.runCleanup(); assert.equal(m.timers.size, 0); assert.deepEqual(m.revoked, ['blob:owned-1', 'blob:owned-2', 'blob:owned-3'])
     assert.equal(m.clicks.length, 3); assert.equal(m.fetches, 0)

@@ -25,7 +25,8 @@ const evidence = await compile('../src/components/workbench/EvidenceResults.vue'
 const ingestion = await compile('../src/components/workbench/SourceIngestion.vue')
 const experiments = await compile('../src/components/workbench/ExperimentComparison.vue')
 const population = await compile('../src/components/workbench/PopulationWorkbench.vue')
-const route = await compile('../src/views/ResearchWorkbench.vue', { '../components/workbench/SourceLibrary.vue': sources.url, '../components/workbench/EvidenceResults.vue': evidence.url, '../components/workbench/SourceIngestion.vue': ingestion.url, '../components/workbench/ExperimentComparison.vue': experiments.url, '../components/workbench/PopulationWorkbench.vue': population.url })
+const preparation = await compile('../src/components/workbench/SimulationPreparation.vue')
+const route = await compile('../src/views/ResearchWorkbench.vue', { '../components/workbench/SourceLibrary.vue': sources.url, '../components/workbench/EvidenceResults.vue': evidence.url, '../components/workbench/SourceIngestion.vue': ingestion.url, '../components/workbench/ExperimentComparison.vue': experiments.url, '../components/workbench/PopulationWorkbench.vue': population.url, '../components/workbench/SimulationPreparation.vue': preparation.url })
 function mount(component, initial = {}) {
   const props = reactive(initial), root = document.createElement('div'); document.body.append(root)
   const app = createApp({ setup: () => () => h(component, props) })

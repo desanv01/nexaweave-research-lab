@@ -19,6 +19,7 @@ from mirofish_knowledge.operations import CompletionReceipt, _receipt
 from mirofish_storage import ProjectStore
 from mirofish_storage.store import NotFound as ProjectNotFound, StorageError as ProjectStorageError
 from mirofish_storage.validation import InvalidProject, principal_id, uuid_value
+from .preparation_contracts import PreparedBudgetReceipt, PreparationAuthorityError
 
 MAX_MONEY = 2**63 - 1
 _HEX = re.compile(r"[0-9a-f]{64}\Z")
@@ -68,7 +69,7 @@ class Reservation:
     scope_group_id: str
     episode_id: UUID
     evidence_ids: tuple[UUID, ...]
-    receipt: CompletionReceipt | None
+    receipt: CompletionReceipt | PreparedBudgetReceipt | None
     error_code: str | None
 
 @dataclass(frozen=True)
@@ -171,14 +172,20 @@ def _reservation(row: tuple) -> Reservation:
             raise ValueError
         saved = None
         if receipt is not None:
-            if (set(receipt) != {"group_id", "episode_id", "fingerprint", "evidence_ids"}
+            if type(receipt) is dict and receipt.get('kind') == 'prepared_budget_v1':
+                saved = PreparedBudgetReceipt.from_wire(receipt)
+                if (saved.operation_id != operation or saved.attempt_id != attempt
+                        or saved.fingerprint != fingerprint or evidence_ids):
+                    raise ValueError
+            elif (set(receipt) != {"group_id", "episode_id", "fingerprint", "evidence_ids"}
                     or receipt["group_id"] != group or receipt["episode_id"] != str(episode)
                     or receipt["fingerprint"] != fingerprint or receipt["evidence_ids"] != [str(v) for v in evidence_ids]):
                 raise ValueError
-            saved = CompletionReceipt(group, episode, fingerprint, evidence_ids)
+            else:
+                saved = CompletionReceipt(group, episode, fingerprint, evidence_ids)
         return Reservation(account, operation, _fingerprint(fingerprint), ceiling,
                            ReservationState(state), attempt, group, episode, evidence_ids, saved, error)
-    except (ValueError, TypeError, KeyError, InvalidBudget):
+    except (ValueError, TypeError, KeyError, InvalidBudget, PreparationAuthorityError):
         raise BudgetUncertain() from None
 
 class BudgetLedger:
@@ -325,3 +332,38 @@ class BudgetLedger:
         return self._transition(principal, account_id, operation_id, attempt_id,
                                 ReservationState.started, ReservationState.uncertain,
                                 error_code=error_code)
+
+    def reserve_prepared(self, principal, account_id, scope, operation_id,
+                         plan_sha256, ceiling_microusd):
+        """Use the SAME account lock/cap totals as ingestion, with tagged purpose.
+
+        A domain-separated fingerprint prevents accidental ingestion reuse.
+        No knowledge completion receipt is manufactured for preparation.
+        """
+        plan_sha256 = _fingerprint(plan_sha256)
+        fingerprint = hashlib.sha256(('prepared_budget_v1:' + plan_sha256).encode('ascii')).hexdigest()
+        return self.reserve(principal, account_id, scope, operation_id, fingerprint,
+                            ceiling_microusd, ())
+
+    def settle_prepared(self, principal, account_id, scope, operation_id,
+                        attempt_id, plan_sha256, artifact_sha256):
+        scope, operation_id = _scope(scope), _uuid(operation_id)
+        account_id, attempt_id = _uuid(account_id), _uuid(attempt_id)
+        principal = _principal(principal)
+        fingerprint = hashlib.sha256(('prepared_budget_v1:' + _fingerprint(plan_sha256)).encode('ascii')).hexdigest()
+        receipt = PreparedBudgetReceipt(operation_id, attempt_id, fingerprint,
+                                        _fingerprint(artifact_sha256))
+        with _transaction(self._connect) as conn:
+            account = self._account(conn, principal, account_id, lock=True)
+            prior = self._row(conn, account_id, operation_id)
+            if (account[2] != scope.project_id or prior is None or prior.attempt_id != attempt_id
+                    or prior.fingerprint != fingerprint or prior.scope_group_id != scope.group_id
+                    or prior.episode_id != scope.episode_uuid(operation_id) or prior.evidence_ids):
+                raise BudgetUncertain()
+            if prior.state == ReservationState.settled and prior.receipt == receipt:
+                return prior
+            if prior.state != ReservationState.started:
+                raise BudgetUncertain()
+            conn.execute("UPDATE mf_execution.reservations SET state='settled',receipt=%s,updated_at=now() "
+                         "WHERE account_id=%s AND operation_id=%s", (Jsonb(receipt.json_value()), account_id, operation_id))
+            return self._row(conn, account_id, operation_id)

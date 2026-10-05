@@ -2,11 +2,11 @@
   <div class="home-container">
     <!-- 顶部导航栏 -->
     <nav class="navbar">
-      <div class="nav-brand">MIROFISH</div>
+      <div class="nav-brand">NexaWeave</div>
       <div class="nav-links">
         <RouterLink to="/research">{{ $t('nav.researchWorkbench') }}</RouterLink>
         <LanguageSwitcher />
-        <a href="https://github.com/666ghj/MiroFish" target="_blank" class="github-link">
+        <a href="https://github.com/desanv01/nexaweave-research-lab" target="_blank" rel="noopener noreferrer" class="github-link">
           {{ $t('nav.visitGithub') }} <span class="arrow">↗</span>
         </a>
       </div>
@@ -45,7 +45,7 @@
         <div class="hero-right">
           <!-- Logo 区域 -->
           <div class="logo-container">
-            <img src="../assets/logo/MiroFish_logo_left.jpeg" alt="MiroFish Logo" class="hero-logo" />
+            <span class="hero-wordmark">NexaWeave</span>
           </div>
           
           <button class="scroll-down-btn" @click="scrollToBottom">
@@ -505,6 +505,7 @@ const startSimulation = () => {
 
 .hero-right {
   flex: 0.8;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
@@ -513,14 +514,20 @@ const startSimulation = () => {
 
 .logo-container {
   width: 100%;
+  box-sizing: border-box;
   display: flex;
   justify-content: flex-end;
   padding-right: 40px;
 }
 
-.hero-logo {
-  max-width: 500px; /* 调整logo大小 */
-  width: 100%;
+.hero-wordmark {
+  max-width: 100%;
+  font-family: var(--font-mono);
+  font-size: clamp(1.5rem, 4vw, 3.5rem);
+  font-weight: 800;
+  line-height: 1.2;
+  letter-spacing: -0.04em;
+  color: var(--black);
 }
 
 .scroll-down-btn {
@@ -890,9 +897,125 @@ const startSimulation = () => {
     margin-bottom: 40px;
   }
   
-  .hero-logo {
-    max-width: 200px;
+  .hero-wordmark {
+    font-size: clamp(1.5rem, 6vw, 2.5rem);
     margin-bottom: 20px;
+  }
+}
+
+@media (max-width: 768px) {
+  .home-container .navbar {
+    height: auto;
+    min-height: 60px;
+    padding: 16px 20px;
+    flex-wrap: wrap;
+    gap: 16px;
+  }
+
+  .home-container .nav-links {
+    flex: 1 1 100%;
+    min-width: 0;
+    max-width: 100%;
+    flex-wrap: wrap;
+    gap: 12px 16px;
+  }
+
+  .nav-links > a {
+    min-width: 0;
+    max-width: 100%;
+    color: inherit;
+    overflow-wrap: anywhere;
+  }
+
+  .nav-links :deep(.switcher-trigger) {
+    color: var(--white);
+  }
+
+  .home-container .main-content {
+    width: 100%;
+    padding: 32px 20px;
+  }
+
+  .home-container .hero-section,
+  .home-container .dashboard-section {
+    min-width: 0;
+    max-width: 100%;
+    gap: 32px;
+  }
+
+  .home-container .hero-section {
+    margin-bottom: 40px;
+  }
+
+  .home-container .hero-left,
+  .home-container .hero-right,
+  .home-container .dashboard-section .left-panel,
+  .home-container .dashboard-section .right-panel {
+    flex: 0 1 auto;
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
+    overflow-wrap: anywhere;
+  }
+
+  .home-container .hero-left {
+    margin-bottom: 0;
+  }
+
+  .home-container .tag-row,
+  .home-container .console-header {
+    flex-wrap: wrap;
+    gap: 8px 12px;
+  }
+
+  .home-container .main-title {
+    font-size: clamp(2rem, 7vw, 3rem);
+    letter-spacing: -1px;
+    margin-bottom: 24px;
+  }
+
+  .home-container .hero-desc {
+    margin-bottom: 24px;
+    text-align: left;
+  }
+
+  .home-container .logo-container {
+    padding-right: 0;
+  }
+
+  .home-container .dashboard-section {
+    padding-top: 32px;
+  }
+
+  .home-container .metrics-row {
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+
+  .home-container .metric-card {
+    flex: 1 1 200px;
+    min-width: 0;
+    max-width: 100%;
+    padding: 20px;
+  }
+
+  .home-container .steps-container {
+    padding: 20px;
+  }
+
+  .home-container .step-info,
+  .home-container .file-name {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .home-container .console-section {
+    padding: 16px;
+  }
+
+  .home-container .start-engine-btn {
+    gap: 12px;
+    overflow-wrap: anywhere;
   }
 }
 </style>

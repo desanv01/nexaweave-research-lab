@@ -22,8 +22,8 @@ test('literal UTF8 Markdown and complete detached JSON retain evidence and prove
   const md = prepareDossierExport(result, 'markdown'), json = prepareDossierExport(result, 'json')
   assert.equal(md.ok, true); assert.equal(json.ok, true)
   assert.deepEqual(md.bytes, new TextEncoder().encode(literal))
-  assert.equal(md.filename, 'mirofish-evidence-dossier.md'); assert.equal(md.mime, 'text/markdown;charset=utf-8')
-  assert.equal(json.filename, 'mirofish-evidence-dossier.json'); assert.equal(json.mime, 'application/json;charset=utf-8')
+  assert.equal(md.filename, 'nexaweave-evidence-dossier.md'); assert.equal(md.mime, 'text/markdown;charset=utf-8')
+  assert.equal(json.filename, 'nexaweave-evidence-dossier.json'); assert.equal(json.mime, 'application/json;charset=utf-8')
   assert.deepEqual(JSON.parse(new TextDecoder().decode(json.bytes)), original)
   result.references[0].citation.excerpt = 'changed'
   assert.deepEqual(JSON.parse(new TextDecoder().decode(json.bytes)), original)
