@@ -54,6 +54,23 @@ recorded. Main fixed only the shared native-clear interference, actual crypto
 synchronization, lightweight spawned fixture and selector; no assertion or
 deadline was waived.
 
+Original draft PR/push CI each failed, with full111-log archives retained.
+Windows dedicated native98 unit cases passed4.74seconds. Linux reported1292
+passes and7 failures because those7 SDK-dependent fixtures were in its generic
+backend collection. Main verified identical function ASTs when moving all7
+into the required dedicated native suite: no assertion, name, body or bound
+changed; all remaining helper/pure function ASTs are also identical. A fresh
+local full native98 run then passed58.03seconds with zero selected skips;
+actual target accounting is43 durable,32 API,8 native budget and15 shared-budget
+regressions. Production source is unchanged.
+
+The earlier primitive step also collected the new PG/Temporal integration file
+before its fixture paths/services existed. Main now selects that unchanged case
+only in its already mandatory later run_native_launch_tests.py --engine step,
+which fails closed on empty collection or any selected skip. The primitive
+suite retains all its original tests. Required exact updated hosted gates remain
+pending; failed original runs are not accepted.
+
 Combined browser qualification is OPEN. Four fresh fixture attempts stopped
 before any HTTP/browser child because Neo4j missed the unchanged60second
 readiness limit. A test-container heap adjustment did not resolve it and the

@@ -152,62 +152,6 @@ def host_fixture(tmp_path):
     return host,payload,calls,project
 
 
-def test_ready_binding_one_shot_cancellation_and_configuration_freeze(tmp_path):
-    host,payload,calls,project=host_fixture(tmp_path)
-    planned=host.plan(payload)
-    assert not calls and planned['request']['max_rounds']==2
-    assert host.plan(payload)==planned
-    queued=host.start(reference(planned))
-    assert queued['state']=='queued' and len(calls)==1
-    assert host.start(reference(planned))['request']==planned['request'] and len(calls)==1
-    cancelled=host.cancel(reference(planned))
-    assert cancelled['cancel_requested'] and cancelled['state']=='queued' and cancelled['receipt'] is None
-    assert cancelled['cleanup']=={'known':False,'pending':None,'owner_thread_alive':None}
-    alternate=host.plan(dict(payload,launch_id=str(uuid4())))
-    with pytest.raises(LaunchAuthorityError):
-        host.start(reference(alternate))
-    project.revision=2
-    from app.services.preparation_client import PreparationError
-    with pytest.raises(PreparationError):
-        host.status(reference(planned))
-
-
-def test_lost_ack_recovery_cannot_reschedule_or_release(tmp_path):
-    host,payload,calls,_=host_fixture(tmp_path)
-    planned=host.plan(payload)
-    original=host.temporal_call
-    def lost(method,request,ref):
-        value=original(method,request,ref)
-        if method=='start':
-            raise RuntimeError('PRIVATE_LOST_ACK')
-        return value
-    host.temporal_call=lost
-    with pytest.raises(NativeLaunchError) as error:
-        host.start(reference(planned))
-    assert error.value.code=='native_launch_uncertain'
-    recovered=host.status(reference(planned))
-    assert recovered['state']=='uncertain' and recovered['workflow'] is None and len(calls)==1
-    assert host.start(reference(planned))['state']=='uncertain' and len(calls)==1
-    assert host.budget.rows[UUID(payload['launch_id'])].state==ReservationState.uncertain
-    alternate=host.plan(dict(payload,launch_id=str(uuid4())))
-    with pytest.raises(LaunchAuthorityError):host.start(reference(alternate))
-    assert len(calls)==1
-
-
-def test_disabled_review_does_not_spend_artifact_and_new_review_can_start(tmp_path):
-    host,payload,calls,_=host_fixture(tmp_path)
-    host.ceiling=None;host.authorize=lambda:False
-    disabled=host.plan(payload)
-    assert disabled['ceiling_microusd'] is None and not disabled['authorization']['model_calls_enabled']
-    with pytest.raises(NativeLaunchError):host.start(reference(disabled))
-    assert not calls and not host.budget.rows
-    host.ceiling=4;host.authorize=lambda:True
-    fresh=host.plan(dict(payload,launch_id=str(uuid4())))
-    assert fresh['launch_sha256']!=disabled['launch_sha256']
-    assert host.start(reference(fresh))['state']=='queued' and len(calls)==1
-    assert host.status(reference(disabled))['ceiling_microusd'] is None
-
-
 @pytest.mark.parametrize('change',['disabled','limits','label','factory','runtime','ceiling'])
 def test_policy_changes_deny_before_dispatch(tmp_path,change):
     host,payload,calls,_=host_fixture(tmp_path)
@@ -220,18 +164,6 @@ def test_policy_changes_deny_before_dispatch(tmp_path,change):
     else:host.ceiling=5
     with pytest.raises(NativeLaunchError) as error:host.start(reference(planned))
     assert error.value.code=='model_calls_disabled' and not calls and not host.budget.rows
-
-
-def test_shared_sync_async_call_bound_and_picklable_parameters():
-    factory=BoundedNativeModelFactory(('twitter','reddit'),dict(LIMITS,max_calls=2),scripted_native_backends,cooperative_transport=True)
-    assert pickle.loads(pickle.dumps(factory)).configured()
-    models=factory()
-    models['twitter'].run([{'role':'user','content':'one'}])
-    import asyncio
-    asyncio.run(models['reddit'].arun([{'role':'user','content':'two'}]))
-    with pytest.raises(NativeModelBoundExceeded):models['twitter'].run([{'role':'user','content':'three'}])
-    assert not replace(factory,mode='provider').configured()
-    assert not replace(factory,sdk_retries=1).configured()
 
 
 def test_input_output_and_time_bounds():
@@ -269,69 +201,6 @@ def test_literal_loopback_local_transport_is_explicitly_accepted():
         backend=SimpleNamespace(_timeout=5,_max_retries=0,_url=url,_base_url=None,
                                 model_config_dict={'max_tokens':100,'stream':False})
         validate_transport(backend,mode='local',timeout_seconds=15,max_tokens=4096)
-
-
-def test_budget_adapter_keeps_failed_close_owner_retained_until_same_owner_retry():
-    from test_native_run_supervisor import request,MemoryStore,ControlledDriver,ScriptedCoordinator
-    from mirofish_execution.budgeted_native_supervisor import BudgetedNativeSupervisor
-    req=request();store=MemoryStore(req);driver=ControlledDriver()
-    driver.allow_launch.set();driver.finish.set();driver.fail_first_close=True
-    coordinator=ScriptedCoordinator(req,store,driver)
-    class Ledger:
-        def __init__(self):self.receipts=[]
-        def settle_native(self,principal,account,scope,request,attempt,sha,receipt):
-            assert store.value.receipt==receipt and request==req
-            self.receipts.append(receipt)
-    ledger=Ledger()
-    supervisor=BudgetedNativeSupervisor(req,coordinator,ledger=ledger,account_id=uuid4(),scope=object(),
-        budget_attempt_id=uuid4(),launch_sha256='a'*64,poll_seconds=0.05)
-    try:
-        supervisor.start(5);result=supervisor.wait(5)
-        assert result.receipt is not None and ledger.receipts
-        assert driver.first_close_failed.wait(5)
-        pending=supervisor.status()
-        assert pending.cleanup_pending and pending.thread_alive
-        assert supervisor.close(5)
-        closed=supervisor.status()
-        assert not closed.cleanup_pending and not closed.thread_alive and driver.closes==2
-    finally:
-        driver.allow_launch.set();driver.allow_close.set();assert supervisor.close(5)
-
-
-def test_same_id_queue_failure_close_proof_cannot_release_concurrent_queued_winner(tmp_path):
-    from concurrent.futures import ThreadPoolExecutor
-    host,payload,calls,_=host_fixture(tmp_path)
-    dto=host.plan(payload)
-    first_queue=threading.Event();winner_queued=threading.Event()
-    actual_queue=host.store.queue;actual_close=host.store.close_undispatched
-    original_bridge=host.temporal_call
-    def queue(principal,run,sha,attempt):
-        if threading.current_thread().name.startswith('failed-start'):
-            first_queue.set()
-            raise LaunchAuthorityError('conflict')
-        assert first_queue.wait(5)
-        return actual_queue(principal,run,sha,attempt)
-    def close(principal,run,sha):
-        assert winner_queued.wait(5)
-        return actual_close(principal,run,sha)
-    def bridge(method,request,ref):
-        result=original_bridge(method,request,ref)
-        if method=='start':winner_queued.set()
-        return result
-    host.store.queue=queue;host.store.close_undispatched=close;host.temporal_call=bridge
-    try:
-        with ThreadPoolExecutor(max_workers=1,thread_name_prefix='failed-start') as first:
-            failure=first.submit(host.start,reference(dto))
-            assert first_queue.wait(5)
-            queued=host.start(reference(dto))
-            with pytest.raises(LaunchAuthorityError):failure.result(timeout=5)
-        assert queued['state']=='queued' and len(calls)==1
-        row=host.store.get('owner',payload['launch_id'])
-        assert row.dispatch_claimed and row.budget_attempt_id is not None
-        assert host.budget.rows[row.run_id].state==ReservationState.started
-        assert actual_close('owner',row.run_id,row.launch_sha256)[1] is False
-    finally:
-        winner_queued.set()
 
 
 @pytest.mark.parametrize('mutate',[
@@ -388,22 +257,3 @@ def test_spawn_gate_module_import_is_lightweight():
     result=subprocess.run([sys.executable,'-c',code],capture_output=True,text=True,timeout=10,check=False)
     assert result.returncode==0,'lightweight_gate_import_failed'
     assert result.stdout.strip()=='gate_import_forbidden_modules='
-
-
-def test_gate_failure_diagnostics_do_not_refresh_authority_or_leak_exception_text():
-    from test_temporal_connected_launch import gate_diagnostics
-    class ClosedProcess:
-        def is_alive(self):raise ValueError('PRIVATE_CREDENTIAL_ENDPOINT_PATH')
-    driver=SimpleNamespace(_spent=True,_closed=True,_owned=None,_pending=(ClosedProcess(),None,None))
-    class Supervisor:
-        coordinator=SimpleNamespace(driver=driver)
-        def _snapshot(self,*,refresh):
-            assert refresh is False
-            return SimpleNamespace(phase='error',run_state=SimpleNamespace(value='uncertain'),
-                error_code='native_run_uncertain',cancel_requested=False,cleanup_pending=True,thread_alive=True)
-    diagnostic=gate_diagnostics([Supervisor()])
-    assert diagnostic['owners'][0]['cached_run_state']=='uncertain'
-    assert diagnostic['owners'][0]['error_code']=='native_run_uncertain'
-    assert diagnostic['owners'][0]['cleanup_pending'] and diagnostic['owners'][0]['owner_thread_alive']
-    assert not diagnostic['owners'][0]['process_known'] and diagnostic['owners'][0]['process_alive'] is None
-    assert 'PRIVATE' not in json.dumps(diagnostic)

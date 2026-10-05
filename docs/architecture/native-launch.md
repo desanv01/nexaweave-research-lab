@@ -124,3 +124,15 @@ state, fixed safe error codes, owner/cleanup booleans and available numeric
 process/reader observations; no authority refresh, retry, path/credential/endpoint
 or exception text is added. A cold import fixture detects eager heavy dependency
 regressions. This fixture correction requires Main execution to establish cause.
+
+Correction3 classifies seven SDK/knowledge-runtime-dependent unit fixtures in
+`services/knowledge/tests/test_native_launch_budget.py`, where Main's required
+installed native unit runner already collects them. Their original function
+names, bodies, assertions, helper behavior and deadlines are preserved. They
+have no postgres/module-level marker, skip, replacement SDK or fallback.
+The generic backend test file retains all43 pure parametrized cases, including
+the cold lightweight gate import, and the API file retains all32 cases. Shared
+helper primitives remain in the backend module for native, engine and browser
+fixtures. Main must still execute the complete98 native unit cases with no
+selected skips after the move; this source-only classification is not a pass
+for the original failed Linux CI job or a waiver of its seven failures.

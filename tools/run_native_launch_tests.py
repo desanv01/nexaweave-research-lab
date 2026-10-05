@@ -69,9 +69,9 @@ def child(mode: str) -> int:
 
         proof = Qualification()
         if mode == 'fixture':
-            targets = (NEW_TARGETS[1],)
+            targets = (NEW_TARGETS[1], NEW_TARGETS[3])
             selection = 'spawn_gate_module_import_is_lightweight or gate_failure_diagnostics_do_not_refresh_authority_or_leak_exception_text'
-            required = ('test_durable_native_launch.py',)
+            required = ('test_durable_native_launch.py', 'test_native_launch_budget.py')
         elif mode == 'temporal':
             targets = (NEW_TARGETS[-1],)
             selection = 'native_launch_temporal'

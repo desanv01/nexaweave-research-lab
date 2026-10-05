@@ -1,9 +1,53 @@
-# U07d backend stable correction2 handoff — UNVERIFIED
+# U07d backend stable correction3 handoff — UNVERIFIED
 
 Base supplied by Main: accepted PR88
 `0e8676117c63c6ff9d2146055c4832aa3fb439a8`.
 Checkout: `C:/Users/Dv/Desktop/MiroFish/_implementation_worktrees/u02`.
 This is source/fixture authoring only, not an execution or acceptance receipt.
+
+Correction3 authoring baseline supplied by Main: committed
+`0289ce8b43f91c30c9a6bf27d92fd628993beb2d`, draftPR90. I statically read the
+retained U07D-PR-PYTHON-FAILED-FULL.log: generic Linux1292passed/7FAILED/16
+inherited skips45.58sec. Four Start fixtures lack the real optional Temporal
+host SDK in that environment, the CAMEL boundary fixture lacks camel, and the
+supervisor/gate-diagnostic fixtures lack the dedicated knowledge fixture path.
+The original failure remains intact. Main separately reported correction2
+fixture2cases passed7.24sec, actual Temporal2cases passed58.11sec and fresh
+preparation→both-platform OASIS1case passed159.38sec with cleanup closed. Those
+are Main's execution receipts, not worker-executed checks or final acceptance.
+
+Exactly these SEVEN test bodies were moved unchanged from
+backend/tests/test_durable_native_launch.py into
+services/knowledge/tests/test_native_launch_budget.py:
+
+- test_ready_binding_one_shot_cancellation_and_configuration_freeze
+- test_lost_ack_recovery_cannot_reschedule_or_release
+- test_disabled_review_does_not_spend_artifact_and_new_review_can_start
+- test_shared_sync_async_call_bound_and_picklable_parameters
+- test_budget_adapter_keeps_failed_close_owner_retained_until_same_owner_retry
+- test_same_id_queue_failure_close_proof_cannot_release_concurrent_queued_winner
+- test_gate_failure_diagnostics_do_not_refresh_authority_or_leak_exception_text
+
+Names, assertion text, bodies/helper behavior and bounds are preserved. The
+dedicated file imports existing non-test helpers/types; no test_* aliases are
+left in the generic backend module. The moved7 remain unmarked unit cases,
+alongside the unchanged original pure budget fixture; its original2 postgres
+cases are unchanged. There is no module-level postgres marker to deselect moved
+cases. All43 pure backend fixtures, including cold import, and32API fixtures
+remain for generic Linux; Main's installed native --unit is intended still to
+execute all98 including moved7 with zero selected skips. No test/assertion was
+removed, weakened or replaced, and no production stub/fallback was introduced.
+Static rg text inspection confirmed the seven definitions occur only in the
+dedicated file and the remaining backend test definitions remain in place;
+no collection/import/parser/check execution was performed.
+
+Correction3 edits ONLY those2 fixture files, docs/architecture/native-launch.md
+and this handoff inside the same20. Shared scripted/model/host helpers used by
+engine and browser are retained. Product/core/engine/browser/CI/Main runners,
+dependencies and installed environments are unchanged. No tests, imports,
+builds, Git, network/provider calls or runtime were executed. The classified
+source remains UNVERIFIED pending Main's complete native/generic qualification.
+Stable correction3: stop tools/edits and retain idle exclusive ownership.
 
 Main-reported correction1 evidence is retained: exact-installed96unit/no skips
 passed66.46sec; PGTemporal26passed/2FAILED/no skips492.30sec under unchanged600.
