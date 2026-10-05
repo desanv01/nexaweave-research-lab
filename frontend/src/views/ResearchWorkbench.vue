@@ -7,6 +7,7 @@ import SourceLibrary from '../components/workbench/SourceLibrary.vue'
 import SourceIngestion from '../components/workbench/SourceIngestion.vue'
 import ExperimentComparison from '../components/workbench/ExperimentComparison.vue'
 import PopulationWorkbench from '../components/workbench/PopulationWorkbench.vue'
+import SimulationPreparation from '../components/workbench/SimulationPreparation.vue'
 import { populationCopyFor } from '../i18n/populationWorkbench.js'
 const locale = ref('en'), copy = computed(() => copyFor(locale.value))
 const origin = ref('http://127.0.0.1:5001'), graph = ref(''), token = ref(''), reveal = ref(false)
@@ -27,6 +28,12 @@ const populationFeedback = ref('')
 const populationStatus = computed(() => populationCopyFor(locale.value)[populationFeedback.value] || '')
 const populationTypes = computed(() => graphData.value?.nodes.flatMap(node => node.labels) || [])
 const inspectedSource = ref(null)
+const preparationReset = ref(0)
+const preparationMethods = Object.freeze({
+  plan: (payload, source) => operation(() => client.preparationPlan(payload, source), false, true),
+  start: payload => operation(() => client.preparationStart(payload), false, true),
+  status: payload => operation(() => client.preparationStatus(payload), false, true)
+})
 const ingestionMethods = Object.freeze({
   plan: (payload, inspected) => operation(() => client.ingestionPlan(payload, inspected), false, true, 'plan'),
   execute: (payload, known) => operation(() => client.ingestionExecute(payload, known), false, true, 'execute'),
@@ -49,7 +56,7 @@ const populationMethods = Object.freeze({
 })
 let generation = 0
 const graphEntries = computed(() => graphData.value?.[graphKind.value] || [])
-function clearProtected() { sourceReset.value++; populationReset.value++; inspectedSource.value = null; graphData.value = null; result.value = null; graphPage.value = 0 }
+function clearProtected() { sourceReset.value++; populationReset.value++; preparationReset.value++; inspectedSource.value = null; graphData.value = null; result.value = null; graphPage.value = 0 }
 function disconnect() { generation++; client.disconnect(); token.value = ''; reveal.value = false; connected.value = false; busy.value = false; clearProtected(); errorCode.value = ''; ingestionRequest.value = ''; status.value = 'disconnected' }
 function cancel() { generation++; populationReset.value++; client.cancel(); busy.value = false; status.value = 'cancelled'; errorCode.value = ''; if (!connected.value) { client.disconnect(); token.value = ''; clearProtected() } }
 async function operation(action, connecting = false, source = false, ingestion = '', population = false) {
@@ -92,9 +99,9 @@ onBeforeUnmount(disconnect)
 <template>
   <div class="workbench" :lang="locale">
     <a class="skip" href="#research-main">{{ copy.skip }}</a>
-    <header class="header"><RouterLink to="/" class="brand">MIROFISH <span>{{ copy.home }}</span></RouterLink><label for="workbench-language">{{ copy.language }}<select id="workbench-language" v-model="locale"><option value="en">English</option><option value="zh">中文</option><option value="ms">Bahasa Melayu</option></select></label></header>
+    <header class="header"><RouterLink to="/" class="brand">NexaWeave <span>{{ copy.home }}</span></RouterLink><label for="workbench-language">{{ copy.language }}<select id="workbench-language" v-model="locale"><option value="en">English</option><option value="zh">中文</option><option value="ms">Bahasa Melayu</option></select></label></header>
     <main id="research-main" tabindex="-1">
-      <div class="intro"><p class="eyebrow">MIROFISH RESEARCH LAB</p><h1>{{ copy.title }}</h1><p>{{ copy.intro }}</p></div>
+      <div class="intro"><p class="eyebrow">NEXAWEAVE RESEARCH LAB</p><h1>{{ copy.title }}</h1><p>{{ copy.intro }}</p></div>
       <section class="connection" aria-labelledby="connection-title"><h2 id="connection-title">{{ copy.connection }}</h2>
         <form @submit.prevent="connect" class="connection-form">
           <label for="api-origin">{{ copy.origin }}<input id="api-origin" v-model="origin" :disabled="connected || busy" required spellcheck="false" autocomplete="off" aria-describedby="connection-help"></label>
@@ -112,6 +119,7 @@ onBeforeUnmount(disconnect)
       <SourceIngestion :methods="ingestionMethods" :inspected="inspectedSource" :connected="connected" :busy="busy" :reset-version="sourceReset" :locale="locale" />
       <ExperimentComparison :methods="experimentMethods" :connected="connected" :busy="busy" :reset-version="sourceReset" :locale="locale" />
       <PopulationWorkbench :methods="populationMethods" :connected="connected" :busy="busy" :reset-version="populationReset" :locale="locale" :type-labels="populationTypes" />
+      <SimulationPreparation :methods="preparationMethods" :connected="connected" :busy="busy" :reset-version="preparationReset" :locale="locale" :source="inspectedSource?.source || null" :display-graph-id="graphData?.graph_id || ''" :type-labels="populationTypes" />
       <section class="query-section" aria-labelledby="query-title"><h2 id="query-title">{{ copy.research }}</h2>
         <form @submit.prevent="submit"><fieldset :disabled="!connected || busy"><legend>{{ copy.scope }}</legend><div class="choices"><label><input v-model="mode" type="radio" value="research">{{ copy.research }}</label><label><input v-model="mode" type="radio" value="dossier">{{ copy.dossier }}</label></div>
           <label v-if="mode === 'research'" for="question">{{ copy.query }}<textarea id="question" v-model="query" required rows="3" maxlength="4000"></textarea></label>

@@ -63,10 +63,10 @@
     {
       "imported_path": "backend/app/__init__.py",
       "original_sha256": "f04d262decf6c11437280c0f0c1353774f642888b2ef3f02dfa0e96e992b3c1c",
-      "current_sha256": "c4d5c23b00fff59d1f5caebe0b6dd82f96948c91c2e01f40c95095d17c98bd5c",
-      "reason": "U02d exact Origin/CORS and private logging retained. U03i selects explicit graphiti_readonly factory before inherited blueprints/runner; default legacy unchanged. U11a forwards optional evidence facade only in explicit read-only mode; legacy default unchanged. U04d explicitly selects research_local source-retention routes using the same protected factory/settings; graphiti_readonly and legacy defaults remain. U06b forwards optional protected research source-ingestion facade; legacy/read-only modes preserve inherited behavior. U10b forwards optional protected experiment facade only through the existing research-local factory; no legacy/read-only blueprint or runtime change.",
-      "phase": "U02d/U03i / U11a / U04d/U06b/U10b",
-      "review_status": "Main reviewed U10b factory forwarding;309 API/read and12 native/PG/socket tests passed, exact hosted acceptance pending."
+      "current_sha256": "abed53cc7ab436e2b3e5f404af4fdf34c87d044241c16b37786026f4a6a33c5d",
+      "reason": "U02d exact Origin/CORS and private logging retained. U03i selects explicit graphiti_readonly factory before inherited blueprints/runner; default legacy unchanged. U11a forwards optional evidence facade only in explicit read-only mode; legacy default unchanged. U04d explicitly selects research_local source-retention routes using the same protected factory/settings; graphiti_readonly and legacy defaults remain. U06b forwards optional protected research source-ingestion facade; legacy/read-only modes preserve inherited behavior. U10b forwards optional protected experiment facade only through the existing research-local factory; no legacy/read-only blueprint or runtime change. U07c forwards the explicitly injected trusted preparation facade through research_local factory without initializing optional engines in ordinary HTTP imports.",
+      "phase": "U02d/U03i / U11a / U04d/U06b/U10b/U07c",
+      "review_status": "Main reviewed exact U07c source;101 offline unit/no skips and18 real PG/Temporal/no skips passed. Actual combined browser and exact hosted acceptance pending."
     },
     {
       "imported_path": "backend/app/config.py",
@@ -145,9 +145,10 @@
     {
       "imported_path": "backend/app/services/simulation_manager.py",
       "original_sha256": "6287937a965a97cea12a0d54ac55e7d1ae98944a96accfd7504a21350cc4e902",
-      "current_sha256": "6d39c2d8692429c95f655fef85d67e46f157a4e1183131c6e169ef47d776ca03",
-      "reason": "U02a bounded paths; U03k trusted graph-bound preparation dependencies, complete artifact/ID checks before READY and fixed neutral errors, preserving legacy defaults.",
-      "phase": "U02a/U03k"
+      "current_sha256": "9d63c30eb42428586cdc40fe1a91b6cceede1eeb6f78220d4a496dfcada63e02",
+      "reason": "U02a bounded paths; U03k trusted graph-bound preparation dependencies, complete artifact/ID checks before READY and fixed neutral errors, preserving legacy defaults. U07c neutral trusted preparation may use an explicitly supplied full operation-UUID simulation ID; strict validation and exclusive new directory prevent overwrite, with the legacy random-ID default preserved.",
+      "phase": "U02a/U03k/U07c",
+      "review_status": "Main reviewed exact U07c source;101 offline unit/no skips and18 real PG/Temporal/no skips passed. Actual combined browser and exact hosted acceptance pending."
     },
     {
       "imported_path": "backend/app/services/simulation_config_generator.py",
@@ -212,26 +213,26 @@
     {
       "imported_path": "locales/en.json",
       "original_sha256": "b47c61ba64330cf5094ce611ff270c95f22f0ce4e98bfb6fa05ee6c6e5b93f84",
-      "current_sha256": "a6a2125d80feb11c4e3bff9609e434a79b05ddab7727459854108f8f1dd07aa9",
-      "reason": "U13a updates only the English supported-format label for DOCX. U11b adds only the English Home workbench navigation label; inherited catalog remains.",
-      "phase": "U13a/U11b",
-      "review_status": "Main source reviewed; pending U11b exact-revision CI acceptance"
+      "current_sha256": "775c63006124d82b5896eb360342c5b6814171a752ea3040a5af875fb47156b5",
+      "reason": "U13a updates only the English supported-format label for DOCX. U11b adds only the English Home workbench navigation label; inherited catalog remains. Main applies human-authorized visible NexaWeave branding/public repository links; preserves legal provenance, behavior and persisted compatibility. Main correction2 fixes observed Home mobile overflow and removes unqualified scale/cost/ready claims while preserving controls, locale keys and placeholders.",
+      "phase": "U13a/U11b/U00-NexaWeave",
+      "review_status": "Main reviewed exact branding source; relevant build/export/browser and exact hosted acceptance pending."
     },
     {
       "imported_path": "locales/zh.json",
       "original_sha256": "7d44d70ca75e89c79c2ce793ddceab32cf7b251bc9210cf81c04d37daf3daab8",
-      "current_sha256": "140c0ce49df1d84aef891a9d93a3941ede25e7641fc44eb054b31371bd8e47a4",
-      "reason": "U13a updates only the Chinese supported-format label for DOCX. U11b adds only the Chinese Home workbench navigation label; inherited catalog remains.",
-      "phase": "U13a/U11b",
-      "review_status": "Main source reviewed; pending U11b exact-revision CI acceptance"
+      "current_sha256": "f426b18a001914f07612267dd4589da62d8354db8067d60670ca8f87887e87be",
+      "reason": "U13a updates only the Chinese supported-format label for DOCX. U11b adds only the Chinese Home workbench navigation label; inherited catalog remains. Main applies human-authorized visible NexaWeave branding/public repository links; preserves legal provenance, behavior and persisted compatibility. Main correction2 fixes observed Home mobile overflow and removes unqualified scale/cost/ready claims while preserving controls, locale keys and placeholders.",
+      "phase": "U13a/U11b/U00-NexaWeave",
+      "review_status": "Main reviewed exact branding source; relevant build/export/browser and exact hosted acceptance pending."
     },
     {
       "imported_path": "frontend/src/views/Home.vue",
       "original_sha256": "7ebc342c34556912542030bf9e7c98e6ee4d754fe93a44601cd5c7699adcb409",
-      "current_sha256": "13f23ed6e580bd687f9eda93c0b4042808820c483a599aa7b5f0b9167e0f71bb",
-      "reason": "U13a adds DOCX and already-supported MARKDOWN to the existing upload accept/filter list; no layout/style changes. U11b adds one localized navigation link to the protected local evidence workbench; inherited Home upload/workflow behavior remains.",
-      "phase": "U13a/U11b",
-      "review_status": "Main source reviewed; pending U11b exact-revision CI acceptance"
+      "current_sha256": "4a9b84ad18313ada43659032239431c0c855cfa0f7df12bef309fd8263d5a488",
+      "reason": "U13a adds DOCX and already-supported MARKDOWN to the existing upload accept/filter list; no layout/style changes. U11b adds one localized navigation link to the protected local evidence workbench; inherited Home upload/workflow behavior remains. Main applies human-authorized visible NexaWeave branding/public repository links; preserves legal provenance, behavior and persisted compatibility. Main correction2 fixes observed Home mobile overflow and removes unqualified scale/cost/ready claims while preserving controls, locale keys and placeholders.",
+      "phase": "U13a/U11b/U00-NexaWeave",
+      "review_status": "Main reviewed exact branding source; relevant build/export/browser and exact hosted acceptance pending."
     },
     {
       "imported_path": "frontend/src/router/index.js",
@@ -240,6 +241,78 @@
       "reason": "U11b adds one lazy /research route while preserving all inherited routes.",
       "phase": "U11b",
       "review_status": "Main source reviewed; pending U11b exact-revision CI acceptance"
+    },
+    {
+      "imported_path": "frontend/index.html",
+      "original_sha256": "69ce89b9ce4f5995064453fe2709da0a68e518c9a9aae29dde26226c036eef36",
+      "reason": "Main applies human-authorized visible NexaWeave branding/public repository links; preserves legal provenance, behavior and persisted compatibility.",
+      "phase": "U00-NexaWeave",
+      "current_sha256": "60d04cd45b9e74a0bb3d2dd6782489782349ae0b0090e868d8ffa451aedf224b",
+      "review_status": "Main reviewed exact branding source; relevant build/export/browser and exact hosted acceptance pending."
+    },
+    {
+      "imported_path": "frontend/src/views/InteractionView.vue",
+      "original_sha256": "11c23dfcba96c9f7b32eb14128fbcd661795e70328125ba216008fb13ea194a2",
+      "reason": "Main applies human-authorized visible NexaWeave branding/public repository links; preserves legal provenance, behavior and persisted compatibility.",
+      "phase": "U00-NexaWeave",
+      "current_sha256": "d14b7225b6c59bf213e6aaade15c034ecbeb82c955633c3e1957bf75d2eab996",
+      "review_status": "Main reviewed exact branding source; relevant build/export/browser and exact hosted acceptance pending."
+    },
+    {
+      "imported_path": "frontend/src/views/MainView.vue",
+      "original_sha256": "a8ec014c42edf3b1b294f1f81e2d335efb7a635bb8d5df7733636d0c8da431c6",
+      "reason": "Main applies human-authorized visible NexaWeave branding/public repository links; preserves legal provenance, behavior and persisted compatibility.",
+      "phase": "U00-NexaWeave",
+      "current_sha256": "50a44ac09d5a8af143c255dbbf07c088a0251140f4e4f79f14833cad36b14dac",
+      "review_status": "Main reviewed exact branding source; relevant build/export/browser and exact hosted acceptance pending."
+    },
+    {
+      "imported_path": "frontend/src/views/Process.vue",
+      "original_sha256": "23296f9e52a7c35f08756df3ffe411aa3030e0dfca5b6db6a487697d7d826c27",
+      "reason": "Main applies human-authorized visible NexaWeave branding/public repository links; preserves legal provenance, behavior and persisted compatibility.",
+      "phase": "U00-NexaWeave",
+      "current_sha256": "e35ed0a2bd27fdf0e7988a5ae2029ff80f9743cace0c904a6f39a08ac5cbcb43",
+      "review_status": "Main reviewed exact branding source; relevant build/export/browser and exact hosted acceptance pending."
+    },
+    {
+      "imported_path": "frontend/src/views/ReportView.vue",
+      "original_sha256": "ad15621e83d7c0a1499def1e8e2c08eab3d7a479ed75843e3d3d3bccf0ca6022",
+      "reason": "Main applies human-authorized visible NexaWeave branding/public repository links; preserves legal provenance, behavior and persisted compatibility.",
+      "phase": "U00-NexaWeave",
+      "current_sha256": "c2acef6efc6dc46854d1961764953de23126c0f1198627247260e47e131d3ed1",
+      "review_status": "Main reviewed exact branding source; relevant build/export/browser and exact hosted acceptance pending."
+    },
+    {
+      "imported_path": "frontend/src/views/SimulationRunView.vue",
+      "original_sha256": "1b3da793fe8bf7c67f3455e35a81273c4dc61333732a1ab5924ea9be482ec944",
+      "reason": "Main applies human-authorized visible NexaWeave branding/public repository links; preserves legal provenance, behavior and persisted compatibility.",
+      "phase": "U00-NexaWeave",
+      "current_sha256": "eb45a9118a01e3340c1572ecc681c7331c74de47f2f12614faf6ba615cfc241f",
+      "review_status": "Main reviewed exact branding source; relevant build/export/browser and exact hosted acceptance pending."
+    },
+    {
+      "imported_path": "frontend/src/views/SimulationView.vue",
+      "original_sha256": "6657200000a169337dd30d30c218362220e46b8d7b42b08225992a60e5f6a1bf",
+      "reason": "Main applies human-authorized visible NexaWeave branding/public repository links; preserves legal provenance, behavior and persisted compatibility.",
+      "phase": "U00-NexaWeave",
+      "current_sha256": "00aecbce40a5a4b7716f4292de1f7ad77c73c07afda4324a5a26d6ab6ffa68ee",
+      "review_status": "Main reviewed exact branding source; relevant build/export/browser and exact hosted acceptance pending."
+    },
+    {
+      "imported_path": "package.json",
+      "original_sha256": "f2b8cc90bc21b0b4990d5192b5e7c09161982760dede52cb743862d908526715",
+      "reason": "Main applies human-authorized visible NexaWeave branding/public repository links; preserves legal provenance, behavior and persisted compatibility.",
+      "phase": "U00-NexaWeave",
+      "current_sha256": "490cc01fd06e9ba7e04c1691a098e6e7c98fda2475488359c87f473870f2f8b0",
+      "review_status": "Main reviewed exact branding source; relevant build/export/browser and exact hosted acceptance pending."
+    },
+    {
+      "imported_path": "package-lock.json",
+      "original_sha256": "8a4bcce87e9e5ab7f27f498ad8d3d4d53ad3862fa894dfc0918092f7039edcbd",
+      "reason": "Main applies human-authorized visible NexaWeave branding/public repository links; preserves legal provenance, behavior and persisted compatibility.",
+      "phase": "U00-NexaWeave",
+      "current_sha256": "468e26c128ee60b5f568ea52706977af66adc66b1c2fc6738b5c2f962ed63da3",
+      "review_status": "Main reviewed exact branding source; relevant build/export/browser and exact hosted acceptance pending."
     }
   ]
 }

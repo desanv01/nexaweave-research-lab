@@ -41,6 +41,8 @@ jobs:
           python-version: '3.12'
       - name: Install fixture/unit dependencies only
         run: python -m pip install -r tools/ci-unit-requirements.txt
+      - name: Install non-editable preparation authority contracts without model dependencies
+        run: python -m pip install --no-deps services/knowledge
       - name: Run inherited offline unit suites
         run: python tools/run_unit_tests.py
 
@@ -231,6 +233,10 @@ jobs:
           "MIROFISH_EXPERIMENT_TEST_PYTHON=$experimentPython" >> $env:GITHUB_ENV
           "MIROFISH_EXPERIMENT_TEST_HTTP_PYTHON=$experimentPython" >> $env:GITHUB_ENV
           "MIROFISH_EXPERIMENT_TEST_BOOTSTRAP=$experimentBootstrap" >> $env:GITHUB_ENV
+      - name: Qualify durable preparation and directly affected offline generators
+        run: |
+          backend/.venv/Scripts/python.exe tools/run_preparation_tests.py --unit
+          if ($LASTEXITCODE -ne 0) { throw 'Preparation offline qualification failed' }
       - name: Qualify actual owned Windows parser and knowledge process trees
         run: |
           backend/.venv/Scripts/python.exe tools/run_owned_process_tests.py
@@ -253,6 +259,8 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw 'Temporal fixture start failed' }
             backend/.venv/Scripts/python.exe tools/run_native_temporal_tests.py --integration
             if ($LASTEXITCODE -ne 0) { throw 'Prepared native Temporal qualification failed' }
+            backend/.venv/Scripts/python.exe tools/run_preparation_tests.py --integration
+            if ($LASTEXITCODE -ne 0) { throw 'Durable preparation PG/Temporal qualification failed' }
           } finally {
             ./tools/native_temporal_ci_server.ps1 -Action stop
           }

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from typing import Callable
 
 from .oasis_profile_generator import OasisProfileGenerator
@@ -23,15 +24,27 @@ class _ProjectionReader:
     """The manager filters the one accepted projection used for context/evidence."""
     accepted_reader: object
     graph: dict
+    selected_entity_uuids: tuple[str, ...] | None = None
 
     def filter_defined_entities(self, graph_id, defined_entity_types=None,
                                 enrich_with_edges=True):
-        return self.accepted_reader._filter_projected_graph(
+        result = self.accepted_reader._filter_projected_graph(
             graph_id, self.graph, defined_entity_types, enrich_with_edges)
+        if self.selected_entity_uuids is not None:
+            from .knowledge_reader import FilteredEntities
+            entities = {entity.uuid: entity for entity in result.entities}
+            if any(uuid not in entities for uuid in self.selected_entity_uuids):
+                raise ValueError('frozen selection mismatch')
+            selected = [entities[uuid] for uuid in self.selected_entity_uuids]
+            return FilteredEntities(selected, {label for entity in selected for label in entity.labels
+                                              if label not in {'Entity', 'Node'}},
+                                    result.total_count, len(selected))
+        return result
 
 
 def create_knowledge_preparation(facade, graph_id: str, *, chat_client,
-                                 model_name: str, base_url: str) -> PreparationDependencies:
+                                 model_name: str, base_url: str, frozen_graph=None,
+                                 selected_entity_uuids=None) -> PreparationDependencies:
     """Bind one accepted reader and real generators to the host's display graph.
 
     Only trusted service code should call this helper. The supplied chat client
@@ -46,7 +59,15 @@ def create_knowledge_preparation(facade, graph_id: str, *, chat_client,
             or type(base_url) is not str or not base_url.strip()):
         raise ValueError("missing injected model metadata")
     reader = facade._reader()
-    graph = reader.get_graph_data(graph_id)
+    graph = reader.get_graph_data(graph_id) if frozen_graph is None else json.loads(
+        json.dumps(frozen_graph, ensure_ascii=False, allow_nan=False))
+    if graph.get('graph_id') != graph_id:
+        raise ValueError('frozen graph binding mismatch')
+    if selected_entity_uuids is not None:
+        selected_entity_uuids = tuple(selected_entity_uuids)
+        if (not selected_entity_uuids or len(selected_entity_uuids) > 100
+                or list(selected_entity_uuids) != sorted(set(selected_entity_uuids))):
+            raise ValueError('invalid frozen selection')
     nodes = {node["uuid"]: node for node in graph["nodes"]}
     neighbors = {uuid: [] for uuid in nodes}
     incident = {uuid: [] for uuid in nodes}
@@ -80,7 +101,7 @@ def create_knowledge_preparation(facade, graph_id: str, *, chat_client,
         }
 
     return PreparationDependencies(
-        graph_id=graph_id, reader=_ProjectionReader(reader, graph), grounding=grounding,
+        graph_id=graph_id, reader=_ProjectionReader(reader, graph, selected_entity_uuids), grounding=grounding,
         profile_generator=lambda: OasisProfileGenerator(
             graph_id=graph_id, chat_client=chat_client, context_callback=context,
             model_name=model_name, base_url=base_url, strict_generation=True),

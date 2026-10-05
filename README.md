@@ -1,20 +1,20 @@
-# MiroFish Research Lab
+# NexaWeave
 
-**An attributed MiroFish research workbench being upgraded for self-hosted knowledge and evidence-aware simulation.**
+**An evidence-grounded agent simulation and research workbench, derived from MiroFish.**
 
-![Status: implementation](https://img.shields.io/badge/status-implementation-8a6d3b) ![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue) ![Phase: U01–U02](https://img.shields.io/badge/phase-U01--U02-lightgrey)
+![Status: active development](https://img.shields.io/badge/status-active_development-8a6d3b) ![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue) ![Source: public](https://img.shields.io/badge/source-public-lightgrey)
 
 [简体中文](README-ZH.md) · [Development notes](docs/development.md) · [Roadmap](ROADMAP.md)
 
-This repository retains MiroFish's Vue, Flask, OASIS/CAMEL and investigative workflow as the source base. The approved target uses Graphiti with self-hosted Neo4j Community for the knowledge graph. Paid model APIs may be used later with explicit configuration and limits.
+NexaWeave retains MiroFish's Vue, Flask, OASIS/CAMEL and investigative workflow as the source base. The locked architecture uses Graphiti with self-hosted Neo4j Community, PostgreSQL application authority and Temporal durable orchestration. Paid model execution requires local credentials and a concrete total spending cap.
 
-> **Project status — U00 accepted; U01–U02 in progress.** The isolated Graphiti/Neo4j compatibility package passes real-database tests with synthetic models. The imported application still calls Zep Cloud; its provider cutover is not complete. No complete Zep-free run, security qualification, release package or supported deployment is claimed. Do not expose the inherited baseline to a network or real research data. See [knowledge qualification](docs/knowledge-compatibility.md) for the bounded database test profile.
+> **Public source; active development, no qualified release.** Latest accepted baseline: `be004ce23bf5425ab28d9540428bea2759a6c4dc` / [PR86](https://github.com/desanv01/nexaweave-research-lab/pull/86), delivering bounded graph population, grounding and native Save. PR81–86 have reviewed required gates. Eight broad workstreams remain partially implemented; the complete end-to-end workflow, all 44 capabilities and release qualification remain incomplete. U07c graph-bound durable preparation is authored and undergoing Main local/browser qualification; it is not merged or accepted. Public source visibility does not imply an application deployment.
 
 ---
 
 ## Screenshots
 
-No Research Lab screenshots have been captured from an accepted build yet. Planned captures, with synthetic data, are: guided workflow; dual-platform monitor; graph and evidence; report and experiment views. The images in the [archived upstream README](docs/upstream/README.md.reference) depict upstream MiroFish, not this project's accepted state.
+No NexaWeave screenshots are published here yet. Planned captures, with synthetic data, are: guided workflow; dual-platform monitor; graph and evidence; report and experiment views. The images in the [archived upstream README](docs/upstream/README.md.reference) depict upstream MiroFish, not this project's accepted state.
 
 ## Why this exists
 
@@ -22,7 +22,7 @@ MiroFish already joins source documents, a knowledge graph, agent populations, t
 
 ## What it does
 
-The imported source contains document ingestion, ontology and graph services, simulation setup and execution, graph exploration, reports, interviews, surveys and follow-up chat. These are **source-observed capabilities**, not Research Lab acceptance claims. The operational Graphiti provider, provenance improvements, durable experiments and local-only mode are planned work. [Current status](#current-status) distinguishes them.
+The inherited source contains document ingestion, ontology and graph services, simulation setup and execution, graph exploration, reports, interviews, surveys and follow-up chat. These are **source-observed capabilities**, not whole-application acceptance claims. Accepted bounded work includes graph population, source grounding and native export Save. Durable preparation and the complete connected simulation/report journey remain under qualification. [Current status](#current-status) distinguishes delivered slices from remaining work.
 
 ## How it works
 
@@ -36,17 +36,17 @@ flowchart LR
   F --> G[Interviews, surveys and follow-up]
 ```
 
-Today the imported `C` path uses Zep Cloud. Graphiti and Neo4j Community are the locked replacement. The diagram describes the inherited workflow and intended provider cutover, not a verified end-to-end Research Lab run.
+Graphiti and Neo4j Community are the locked knowledge stack; Zep is not a target prerequisite. The diagram describes the inherited workflow and connected target, not a verified end-to-end NexaWeave run.
 
-### Launch sequence at U00
+### Development checks inherited from U00
 
 The available sequence is an offline source check, not an application launch:
 
 1. Install the lean Python unit dependencies and check the imported source manifest.
 2. Run `python tools/run_unit_tests.py`; it starts both inherited pytest directories with dummy provider keys, disables `.env` loading and blocks non-loopback connections while allowing local HTTP fixtures.
-3. Build the inherited Vue frontend separately. No Research Lab backend service or browser journey is qualified yet.
+3. Build the inherited Vue frontend separately. These checks do not qualify the complete backend or browser journey.
 
-A supported runtime launch sequence will be documented after the Graphiti/Neo4j integration, security and live workflow gates pass.
+A supported release launch sequence will be documented after the complete connected workflow and release gates pass.
 
 ## Requirements
 
@@ -54,8 +54,8 @@ A supported runtime launch sequence will be documented after the Graphiti/Neo4j 
 | --- | --- |
 | Source/unit work | Python 3.12 and Node 24.14.1 are the initial CI selections; backend metadata permits Python 3.11–3.12. |
 | Frontend fixture build | `frontend/package-lock.json` and npm; no model key or database. |
-| Full inherited backend | OASIS/CAMEL, model API and Zep integration remain in the archived dependency set. This is not a supported Research Lab deployment. |
-| Target hybrid profile | Self-hosted Graphiti/Neo4j Community plus configured model APIs; versions and resource needs await qualification. |
+| Full inherited backend | OASIS/CAMEL, model API and legacy Zep integration remain in the archived dependency set; that archive is not a supported NexaWeave deployment. |
+| Target hybrid profile | Graphiti/self-hosted Neo4j Community, PostgreSQL, Temporal and separately configured generation/embedding providers; complete deployment qualification remains open. |
 | Fully local profile | Planned for U12; no cloud-egress guarantee yet. |
 
 Do not use the inherited `npm run dev`, `setup:all`, or Docker files as a safe supported startup path. They precede the provider replacement and security gates.
@@ -68,11 +68,11 @@ The [archive manifest](docs/upstream/archive-manifest.json) records the source Z
 
 ### Build from source for offline development
 
-From the repository root, `cd frontend`, `npm ci --ignore-scripts`, then `npm run build`. For inherited fixture/unit tests, return to the root, install `tools/ci-unit-requirements.txt` into a disposable Python 3.12 environment, then run `python tools/run_unit_tests.py`. See [development notes](docs/development.md) for the exact commands and scope. Package installation needs access to package registries; the launcher restricts test-process connections to loopback fixtures.
+From the repository root, `cd frontend`, `npm ci --ignore-scripts`, then `npm run build`. For inherited fixture/unit tests, return to the root, install `tools/ci-unit-requirements.txt` into a disposable Python 3.12 environment, install the local authority package with `python -m pip install --no-deps services/knowledge`, then run `python tools/run_unit_tests.py`. See [development notes](docs/development.md) for the exact commands and scope. Package installation needs access to package registries; the launcher restricts test-process connections to loopback fixtures.
 
 ### Run, smoke test and package
 
-There is no supported Research Lab run or release package at U00. Graphiti/Neo4j integration, safe local startup, live smoke tests, persistent volumes, backup/restore and release packaging have separate acceptance gates. Watch [releases](https://github.com/desanv01/mirofish-research-lab/releases) for qualified artifacts; no artifact is implied by this link.
+No qualified NexaWeave release package or public application deployment is claimed. Safe startup, the complete live workflow, persistent volumes, backup/restore and packaging have remaining acceptance gates. Watch [releases](https://github.com/desanv01/nexaweave-research-lab/releases) for qualified artifacts; no artifact is implied by this link.
 
 ## Command-line reference
 
@@ -82,7 +82,7 @@ There is no supported Research Lab run or release package at U00. Graphiti/Neo4j
 | `python tools/run_unit_tests.py` | Run inherited fixture/unit suites with dummy keys and a loopback-only socket guard after installing the lean profile. |
 | `npm run build` in `frontend/` | Build the inherited Vue frontend. |
 
-These are development checks, not service launch or export commands. No Research Lab CLI for diagnosis, export or migration exists yet.
+These are development checks, not a supported service launch sequence. This table makes no complete diagnosis, export or migration CLI claim.
 
 ## Where things live
 
@@ -91,7 +91,7 @@ These are development checks, not service launch or export commands. No Research
 | Source identity | `docs/upstream/archive-manifest.json` and `docs/upstream/import-notes.md` |
 | Configuration sample | `.env.example`; never commit a filled `.env` |
 | Imported runtime files | `backend/uploads/`, `backend/logs/`, `backend/data/` as applicable; excluded from Git |
-| Future Neo4j/PostgreSQL data, snapshots, exports | Layout and backup procedure pending implementation and qualification |
+| Neo4j/PostgreSQL data, snapshots, exports | Operator configuration and scoped fixtures; a supported release layout and backup procedure remain under qualification |
 
 ## Project structure
 
@@ -108,13 +108,15 @@ tools/                Manifest checker, lean CI profile, unit launcher
 
 ## Troubleshooting
 
-The manifest checker reports missing or changed imported files; reviewed changes require explicit per-file exception records (see [import notes](docs/upstream/import-notes.md)). A failed frontend install should be checked against Node 24.14.1 and the committed frontend lockfile. Fixture tests may reveal dependency or import gaps in the lean profile; they do not prove a full engine install. Zep auth/quota and live graph errors belong to the **inherited** runtime. Provider replacement, parse/graph lag handling, migrations and restore will receive operational guidance when qualified.
+The manifest checker reports missing or changed imported files; reviewed changes require explicit per-file exception records (see [import notes](docs/upstream/import-notes.md)). A failed frontend install should be checked against Node 24.14.1 and the committed frontend lockfile. Fixture tests may reveal dependency or import gaps in the lean profile; they do not prove a full engine install. Zep auth/quota errors belong to the **legacy inherited** runtime. Complete operational guidance for the connected workflow, migrations and restore awaits qualification.
 
 ## Current status
 
-U01b ([PR6](https://github.com/desanv01/mirofish-research-lab/pull/6)) and the bounded U02a filesystem patch ([PR7](https://github.com/desanv01/mirofish-research-lab/pull/7)) are also merged. Combined CI and post-merge verification passed 222 Linux tests, 17 real-Neo4j tests with synthetic models, three native Windows/SQLite action tests, source provenance and the frontend build. This is not complete simulation, security or Zep-free application qualification. IPC hardening and investigative-report characterization are in progress.
+As of 2026-10-05, the accepted baseline is `be004ce23bf5425ab28d9540428bea2759a6c4dc` / [PR86](https://github.com/desanv01/nexaweave-research-lab/pull/86). PR81–86 required PR/push/post-merge gates and full logs were reviewed by Main. PR86 delivers bounded graph population, source grounding and native Save, rather than full simulation qualification. Eight broad workstreams and the 44-capability closeout remain open. U07c durable preparation has source authored and local qualification evidence; its combined browser qualification, hosted gates, merge and acceptance remain pending. Native launch, model quality and full release qualification remain open.
 
-U00 merged in [PR2](https://github.com/desanv01/mirofish-research-lab/pull/2): 167 inherited/guard tests, source manifest and frontend build passed. U01a merged in [PR5](https://github.com/desanv01/mirofish-research-lab/pull/5): 17 knowledge tests passed against real Neo4j Community with synthetic model clients; post-merge CI also passed. Simulation characterization and security implementation continue. The ZIP SHA-256 is `d3bef0afea92b99626526ffcce0508414feb3f9e88c3edda1f283ce5f447bf53`; its Git commit remains unknown and is not equated with observed upstream HEAD `39d849138ef254f6c737ab4c4705e5545dbe31d4`. Main records exact revisions and limitations in the [ledger](coordination/ledger.md).
+**Historical milestones:** U01b ([PR6](https://github.com/desanv01/nexaweave-research-lab/pull/6)) and the bounded U02a filesystem patch ([PR7](https://github.com/desanv01/nexaweave-research-lab/pull/7)) merged with 222 Linux tests, 17 real-Neo4j tests using synthetic models, three native Windows/SQLite action tests, source provenance and frontend build checks. These earlier results are retained evidence, not complete simulation, security or Zep-free application qualification.
+
+Earlier U00 merged in [PR2](https://github.com/desanv01/nexaweave-research-lab/pull/2): 167 inherited/guard tests, source manifest and frontend build passed. U01a merged in [PR5](https://github.com/desanv01/nexaweave-research-lab/pull/5): 17 knowledge tests passed against real Neo4j Community with synthetic model clients; post-merge CI also passed. The ZIP SHA-256 is `d3bef0afea92b99626526ffcce0508414feb3f9e88c3edda1f283ce5f447bf53`; its Git commit remains unknown and is not equated with observed upstream HEAD `39d849138ef254f6c737ab4c4705e5545dbe31d4`. Main records exact revisions and limitations in the [ledger](coordination/ledger.md).
 
 ## Roadmap
 
@@ -127,7 +129,7 @@ See [ROADMAP.md](ROADMAP.md) for phase gates. Boxes change only with main accept
 
 ## Security
 
-This imported baseline is not suitable for public exposure. Use synthetic fixtures, keep keys and uploaded documents out of Git, and avoid paid or live jobs without approved limits. Security remediation and scoped access are planned gates. Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md); do not post secrets or exploit data in an issue.
+The source repository is public by the human's 2026-10-05 decision; a public application deployment is not authorized or qualified. Use synthetic fixtures, keep keys and uploaded documents out of Git, and require local credentials plus a concrete total cap for paid calls. Complete security and release qualification remain open. Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md); do not post secrets or exploit data in an issue.
 
 ## Contributing
 
@@ -139,4 +141,4 @@ This is a derived MiroFish project. Imported MiroFish source retains its [GNU AG
 
 ---
 
-*Research Lab status is tied to accepted evidence, not the presence of imported code.*
+*NexaWeave status is tied to accepted evidence, not the presence of imported code.*
