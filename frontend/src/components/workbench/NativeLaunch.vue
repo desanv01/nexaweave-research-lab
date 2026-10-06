@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { nativeLaunchIdentity, nativeReadyPreparation, newNativeLaunchId, validateNativeLaunchResult } from '../../api/nativeLaunch.js'
 import { nativeLaunchCopyFor, nativeLaunchError } from '../../i18n/nativeLaunch.js'
 const props = defineProps({ methods: { type: Object, required: true }, ready: { type: Object, default: null }, displayGraphId: { type: String, default: '' }, connected: Boolean, busy: Boolean, resetVersion: { type: Number, default: 0 }, locale: { type: String, default: 'en' } })
+const emit = defineEmits(['inspect', 'cleared'])
 const copy = computed(() => nativeLaunchCopyFor(props.locale))
 const plan = ref(null), binding = ref(null), history = ref([]), pending = ref(false), attempted = ref(false), error = ref(''), notice = ref(''), feedback = ref(null)
 const started = new Set()
@@ -15,13 +16,24 @@ function retain(value, preparation) {
   const entry = { key: 'durable', value, preparation }, index = history.value.findIndex(record => record.value.request.run_id === value.request.run_id)
   if (index < 0) history.value.push(entry); else history.value[index] = entry
 }
-function clear() { lifetime++; reviewEpoch++; declaration = null; started.clear(); plan.value = null; binding.value = null; history.value = []; attempted.value = false; pending.value = false; error.value = ''; notice.value = ''; props.methods.clear?.() }
+function clear() { lifetime++; reviewEpoch++; declaration = null; started.clear(); plan.value = null; binding.value = null; history.value = []; attempted.value = false; pending.value = false; error.value = ''; notice.value = ''; props.methods.clear?.(); emit('cleared') }
 watch(() => props.resetVersion, clear, { flush: 'sync' })
 watch(() => props.connected, value => { if (!value) clear() }, { flush: 'sync' })
 watch(() => props.displayGraphId, clear, { flush: 'sync' })
-watch(() => props.ready, () => { reviewEpoch++; declaration = null; if (history.value.length) notice.value = 'changed'; plan.value = null; binding.value = null; attempted.value = false; error.value = '' }, { deep: true, flush: 'sync' })
+watch(() => props.ready, () => { reviewEpoch++; emit('cleared'); declaration = null; if (history.value.length) notice.value = 'changed'; plan.value = null; binding.value = null; attempted.value = false; error.value = '' }, { deep: true, flush: 'sync' })
 onBeforeUnmount(clear)
 async function announce() { await nextTick(); feedback.value?.focus() }
+async function inspect(record) {
+  if (locked.value || record.value.state !== 'completed' || record.value.receipt?.outcome !== 'completed') return
+  const life = lifetime, epoch = reviewEpoch, known = JSON.parse(JSON.stringify(record.value)), preparation = JSON.parse(JSON.stringify(record.preparation))
+  pending.value = true; error.value = ''
+  try {
+    const launch = await validateNativeLaunchResult(known, { graph: props.displayGraphId, payload: nativeLaunchIdentity(known), preparation, known })
+    if (life !== lifetime || epoch !== reviewEpoch) return
+    emit('inspect', { launch, preparation })
+  } catch (e) { if (life === lifetime && epoch === reviewEpoch) error.value = e?.code || 'invalid_reply' }
+  finally { if (life === lifetime) { pending.value = false; await announce() } }
+}
 async function review() {
   if (locked.value || !props.ready) return
   if (history.value.length >= 100) { error.value = 'busy'; await announce(); return }
@@ -75,7 +87,7 @@ async function request(method, record) {
       <template v-if="record.value.workflow"><dl><dt>{{ copy.workflow }}</dt><dd class="mono">{{ record.value.workflow.workflow_id }}</dd><dt>{{ copy.temporal }}</dt><dd class="mono">{{ record.value.workflow.temporal_run_id }}</dd></dl></template>
       <template v-if="record.value.receipt"><h4>{{ copy.receipt }}</h4><dl class="receipt"><dt>{{ copy.attempt }}</dt><dd class="mono">{{ record.value.receipt.attempt_id }}</dd><dt>{{ copy.instance }}</dt><dd class="mono">{{ record.value.receipt.instance_id }}</dd><dt>{{ copy.requestDigest }}</dt><dd class="mono">{{ record.value.receipt.request_fingerprint }}</dd><dt>{{ copy.evidence }}</dt><dd class="mono">{{ record.value.receipt.evidence_sha256 }}</dd></dl></template><p v-else class="no-receipt">{{ copy.noReceipt }}</p>
       <p v-if="!record.value.authorization.model_calls_enabled || !record.value.ceiling_microusd" class="limitations">{{ copy.disabled }}</p>
-      <div class="actions"><button v-if="record.key === 'plan'" class="start primary" type="button" :disabled="!canStart" @click="request('start', record)">{{ copy.start }}</button><button class="refresh" type="button" :disabled="locked" @click="request('status', record)">{{ copy.refresh }}</button><button class="cancel" type="button" :disabled="locked || !!record.value.receipt || record.value.cancel_requested" @click="request('cancel', record)">{{ copy.cancel }}</button></div>
+      <div class="actions"><button v-if="record.key === 'plan'" class="start primary" type="button" :disabled="!canStart" @click="request('start', record)">{{ copy.start }}</button><button class="refresh" type="button" :disabled="locked" @click="request('status', record)">{{ copy.refresh }}</button><button class="cancel" type="button" :disabled="locked || !!record.value.receipt || record.value.cancel_requested" @click="request('cancel', record)">{{ copy.cancel }}</button><button v-if="record.value.state === 'completed' && record.value.receipt?.outcome === 'completed'" class="inspect" type="button" :disabled="locked" @click="inspect(record)">{{ copy.inspect }}</button></div>
     </article>
     <div class="actions"><button class="clear" type="button" @click="clear">{{ copy.clear }}</button></div>
   </section>

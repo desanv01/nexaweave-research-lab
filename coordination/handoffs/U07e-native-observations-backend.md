@@ -1,0 +1,41 @@
+# U07e backend source handoff — UNVERIFIED
+
+Accepted-base transfer: `409120adb062fc97d6ebcb8a88682920e4911357`, existing u02 checkout, assigned `task/u07e-native-observations`. Source/test authoring only; no imports, execution, parsers, checks, tests, lint, builds, installations, Git, network, providers, browser, runtime, schedules or other-chat messaging performed. Main owns all qualification and acceptance. Exclusive ownership retained pending explicit correction/release; tools and edits stop after this handoff.
+
+Exact thirteen authored paths:
+
+1. `backend/app/native_observations_api.py`
+2. `backend/app/services/native_observations_client.py`
+3. `backend/app/services/native_observations_facade.py`
+4. `backend/app/services/native_observations_host.py`
+5. `backend/app/services/native_observation_reader.py`
+6. `backend/app/knowledge_read_app.py`
+7. `backend/app/__init__.py`
+8. `backend/tests/test_native_observations_api.py`
+9. `backend/tests/test_native_observations_host.py`
+10. `backend/tests/test_native_observation_reader.py`
+11. `backend/engine_tests/test_connected_native_observations.py`
+12. `docs/architecture/native-observations.md`
+13. `coordination/handoffs/U07e-native-observations-backend.md`
+
+Read authority: Root latest AGENTS/CONTINUATION/STATE, U07E-TRANSFER/CONTRACT/BACKEND-PACKET; accepted u02 launch/preparation clients, facades, routes, durable hosts and model configuration; app factories; execution native request/receipt/store/launch-store/owned-binding; knowledge binding/tombstone and project store; existing preparation/native launch/Temporal/connected/source-bridge fixture sources. No frozen core/preparation/native/budget/migration or existing fixture was edited. No scope or dependency expansion.
+
+The optional cold route and facade use exact request/DTO fields. All authority/source/project/revision/native completion checks precede files. The host never calls `_recover`, `_dto`, runtime status, scheduler, model factory or ledger mutation. It uses existing authorization configuration inspection truthfully, allows generation-disabled reads and marks cleanup unknown. READY inputs are verified twice using existing artifact semantics. Output reader holds descriptors through final authority recheck and verifies paths, hardlinks, reparse/ancestors, file identities and stability. It hashes every output and compares the ordered canonical manifest to the exact native receipt.
+
+Limits: request4096/result262144/envelope128 bytes; facade4 calls; offsets0..10000/limits1..20; native output64MiB/file and256MiB aggregate; action logs8MiB each/10000 records/8192 UTF8 bytes per physical line/eight container levels. Both selected logs receive full strict parsing; full requested-platform counts are returned. Raw line numeric lexemes and exact UTF8 hashes are preserved. Empty files/one final newline admitted, no blank/invalid/duplicate/nonfinite/surrogate/depth overflow skipped. No SQLite query or database creation.
+
+Authored coverage: protected token/Origin/preflight/mode/source scope/cold host; malformed and extra transport/request fields; injected DTO identity/receipt/manifest/order/sizes/pagination/counts/raw SHA mismatches; all noncompleted state refusals and incomplete native identity; authority-before-input/output spies; read reauthorization; model/runtime/ledger forbidden seams; semaphore busy/exception release; strict parser numerics/Unicode/depth/blank/full counts/order/pages; file bounds/missing/manifest/other-platform corruption/hardlinks/races/descriptor closure/ancestor refusal. Real-PG authority tests are `postgres` with lazy guarded fixture imports. Fresh real connected two-platform case is `postgres` + `native_observations_engine`, with native SDK imports inside its body and no generic collection side effects. It proves full-page digests/counts/exact raw bytes, platform isolation, empty/out-of-range paging, disabled-generation reads, authoritative row/ledger/input/output preservation and owned cleanup. Connected graph projection uses existing source-grounded fixture; real Neo/browser validation remains Main-owned.
+
+Main's explicit initial static corrections are incorporated: integer and float tokens both require finite IEEE754 admission while raw lexemes/hashes remain unchanged; literal CR/LF after terminator removal is refused, escaped backslash-r/n remains valid; initial lstat-to-fstat binding compares common device/inode/size/single-link identity while full timestamps stay exact within each same API. Read accepted native-owned-binding and native-recordings/native-experiment portable-file precedents. Added finite integer boundary/overflow, literal/escaped newline and differing path-vs-descriptor timestamp fixtures with independent path/descriptor mutation refusals, plus explicit symlink/reparse/junction inspection negatives. No cross-API timestamp equality is assumed.
+
+Correction1 stable source handoff: changed only `backend/app/services/native_observations_client.py`, `backend/tests/test_native_observations_api.py`, `docs/architecture/native-observations.md` and this handoff within SAME13 ownership. Each of the four count categories now enforces `full_count - page_count <= total_records - page.records.length`, retaining the existing lower correspondence, full-page equality and every bound/assertion. Four independently hashed two-line partial DTO fixtures admit the one-unseen-record boundary and reject an impossible count of two; success/failure cases keep action correspondence valid so their individual count checks are exercised. Manifest/file/raw/evidence hashes remain valid in both cases. These fixtures qualify only wire admission, not native output. Architecture wording now consistently distinguishes common path/descriptor device/inode/size/single-link binding from full SAME-API timestamp stability with final race checks unchanged.
+
+Main reported the original installed unit102/zero-skips pass for preserved combined1; that evidence belongs to Main and does not verify these changed fixtures. Correction1 is UNVERIFIED; no checks/imports/tests/Git/network/execution performed by this worker. Stable source is ready for Main preservation/review/relevant unit qualification. Tools and edits stopped; SAME13 exclusive ownership retained pending explicit correction/release.
+
+Correction2 stable source handoff: changed only `backend/engine_tests/test_connected_native_observations.py` and this handoff within SAME13 ownership. Main retained the initial engine failure64.09s/zero-skips in Root `resume-2026-10-06/u07e-engine-initial/tests.log`; its traceback identified fixture ledger guards persisting into legitimate final `native.retry_cleanup` settlement. The completed native receipt assertion was reached, but no read/engine acceptance is inferred from partial evidence and the original failure remains preserved.
+
+All five ledger mutation guards now use `with monkeypatch.context() as read_phase`. That context encloses construction of the observations host/facade, every two-platform page, raw/hash/count/manifest/receipt/model-disabled assertion, empty/out-of-range page and authoritative row/ledger/model-call/owner/input/output preservation assertion. Normal exit and exceptional exit both restore original ledger methods before leaving the worker context and before outer-finally supervisor close/native retry_cleanup. All existing forbidden seams, assertions,60/180/20second bounds and final cleanup assertions remain. Product/budget/native core and other fixture behavior are unchanged. No guard can mask a read assertion merely by persisting into cleanup; actual independent cleanup failure still fails honestly.
+
+Correction2 is UNVERIFIED, source-only; no worker imports/checks/tests/Git/network/runtime performed. Stable source is ready for Main preservation/review/relevant fresh engine qualification. Tools and edits stopped; SAME13 exclusive ownership retained pending explicit correction/release.
+
+No selected skips, weakened assertions, deadline changes, worker execution evidence, CI acceptance, phase/full44, reporting, semantic or billed-cost claims are made. Main must review and run required installed-package unit/PG/engine/browser and exact hosted gates. Future direct human pause stops work immediately.
