@@ -140,6 +140,8 @@ class NativeOwnedSessionFactory:
                 or tuple(platform for platform in ("twitter", "reddit")
                          if state.get(f"enable_{platform}") is True) != self.platforms):
             raise ValueError("owned native preparation mismatch")
+        from mirofish_execution.native_seed_contracts import validate_native_seed_plan
+        validate_native_seed_plan(config)
 
     def create_session(self, request):
         self.validate(request)

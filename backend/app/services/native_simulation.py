@@ -139,6 +139,8 @@ class NativeSimulationSession:
                                             agents[index]["entity_name"])
                 profiles["reddit"] = rows
             self._controls = parse_execution_controls(config, platforms, agents)
+            from mirofish_execution.native_seed_contracts import validate_native_seed_plan
+            validate_native_seed_plan(config)
             return config, agents, profiles, platforms
         except (OSError, ValueError, TypeError, KeyError, UnicodeError,
                 RecursionError, OverflowError,
@@ -199,11 +201,8 @@ class NativeSimulationSession:
         return self._controls.schedule(agent_config, simulated_minutes, current_hour)
 
     def initial_trace_cursor(self, env):
-        # Controls log successful initial actions in round zero. Do not replay
-        # their traces as autonomous round actions. Preserve inherited cursor
-        # behavior when controls are absent.
-        if self._controls is None:
-            return 0
+        # Initial follow/seed traces belong to initialization even when optional
+        # controls are absent or empty; never replay them as autonomous actions.
         return env.platform.db.execute("SELECT COALESCE(MAX(rowid), 0) FROM trace").fetchone()[0]
 
     async def apply_initial_network(self, platform, env, action_logger, agent_names):

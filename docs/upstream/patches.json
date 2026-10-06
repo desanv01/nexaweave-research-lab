@@ -175,26 +175,26 @@
     {
       "imported_path": "backend/scripts/run_parallel_simulation.py",
       "original_sha256": "e1ee10de9a4599a8b18d01f0678f9f9caf4e0846c2355f302aaf0d56ed95e942",
-      "current_sha256": "096563e53a09902e46fdbcf2f102cce9e3321a5fcf51c0f2007f0f86a1db4c74",
-      "reason": "Delegate file IPC to shared bounded transport, preserving parallel platform selection, interview dispatch and availability status flags. U03m defers native/CLI setup to execution, closes owned environments, and supplies a trusted injected native session without changing inherited action algorithms. U03n uses an explicit trusted neutral Reddit graph seam for honestly partial native profiles; legacy loader remains unchanged. U07a trusted opt-in initial native follows, full-minute local eligibility/probability and initial-event trace cursor; missing controls/direct CLI defaults preserved.",
-      "phase": "U02c/U03m/U03n/U07a",
-      "review_status": "Main source reviewed, actual native35passes/pure41passes; exact-head CI pending"
+      "current_sha256": "b42678da21a368cb4ca1f7e57cb18d16075eaaf3e8594c1db50e0243db98aa40",
+      "reason": "Delegate file IPC to shared bounded transport, preserving parallel platform selection, interview dispatch and availability status flags. U03m defers native/CLI setup to execution, closes owned environments, and supplies a trusted injected native session without changing inherited action algorithms. U03n uses an explicit trusted neutral Reddit graph seam for honestly partial native profiles; legacy loader remains unchanged. U07a trusted opt-in initial native follows, full-minute local eligibility/probability and initial-event trace cursor; missing controls/direct CLI defaults preserved. U07f shared whole-batch seed admission, sequential native response/post/trace-proven execution, exact repeated/interleaved seed preservation and initial trace cursor; autonomous loops/catalogs unchanged; installed execution preferred with trusted legacy fallback.",
+      "phase": "U02c/U03m/U03n/U07a/U07f",
+      "review_status": "Main exact source reviewed; U07f relevant local/hosted qualification pending"
     },
     {
       "imported_path": "backend/scripts/run_reddit_simulation.py",
       "original_sha256": "edd537c023f8169d78054ecc261d7dca28b5a83af27bdd5bf5edcf2df68d361a",
-      "current_sha256": "37e66de6b9adb66c737ddbd6d8268063a8774f1fedbc80e7e373788152e34348",
-      "reason": "Delegate file IPC to shared bounded transport without changing native interview or action dispatch. U03m defers native/CLI setup to execution, closes owned environments, and supplies a trusted injected native session without changing inherited action algorithms.",
-      "phase": "U02c/U03m",
-      "review_status": "Main source reviewed; pending exact-head CI"
+      "current_sha256": "883d38e818b17c8c817f2a2b607d71713ac177f6869ba881057c7b197a61dd55",
+      "reason": "Delegate file IPC to shared bounded transport without changing native interview or action dispatch. U03m defers native/CLI setup to execution, closes owned environments, and supplies a trusted injected native session without changing inherited action algorithms. U07f shared whole-batch seed admission, sequential native response/post/trace-proven execution, exact repeated/interleaved seed preservation and initial trace cursor; autonomous loops/catalogs unchanged; installed execution preferred with trusted legacy fallback.",
+      "phase": "U02c/U03m/U07f",
+      "review_status": "Main exact source reviewed; U07f relevant local/hosted qualification pending"
     },
     {
       "imported_path": "backend/scripts/run_twitter_simulation.py",
       "original_sha256": "cd766f1a55b5cec48a776ce5bb7b072dcfe7a07bd8b0f63f7c1b2b5464b772bf",
-      "current_sha256": "789d5621f177f267013951382eefb629b46c58832b10e51a9728370c0cd8da42",
-      "reason": "Delegate file IPC to shared bounded transport without changing native interview or action dispatch. U03m defers native/CLI setup to execution, closes owned environments, and supplies a trusted injected native session without changing inherited action algorithms.",
-      "phase": "U02c/U03m",
-      "review_status": "Main source reviewed; pending exact-head CI"
+      "current_sha256": "7ae3b7e40517698e1393a6ec6fb164059786b66d52fcc848ea0c0a7b78ec7424",
+      "reason": "Delegate file IPC to shared bounded transport without changing native interview or action dispatch. U03m defers native/CLI setup to execution, closes owned environments, and supplies a trusted injected native session without changing inherited action algorithms. U07f shared whole-batch seed admission, sequential native response/post/trace-proven execution, exact repeated/interleaved seed preservation and initial trace cursor; autonomous loops/catalogs unchanged; installed execution preferred with trusted legacy fallback.",
+      "phase": "U02c/U03m/U07f",
+      "review_status": "Main exact source reviewed; U07f relevant local/hosted qualification pending"
     },
     {
       "imported_path": "backend/pyproject.toml",

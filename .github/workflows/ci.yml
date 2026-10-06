@@ -245,6 +245,14 @@ jobs:
         run: |
           backend/.venv/Scripts/python.exe tools/run_native_observations_tests.py --unit
           if ($LASTEXITCODE -ne 0) { throw 'Native observations offline qualification failed' }
+      - name: Qualify native seed batch and cold pre-model factory gate
+        run: |
+          backend/.venv/Scripts/python.exe tools/run_native_seed_tests.py --unit
+          if ($LASTEXITCODE -ne 0) { throw 'Native seed offline qualification failed' }
+      - name: Qualify actual native seed response, post and trace fidelity
+        run: |
+          backend/.venv/Scripts/python.exe tools/run_native_seed_tests.py --engine
+          if ($LASTEXITCODE -ne 0) { throw 'Native seed engine qualification failed' }
       - name: Qualify actual owned Windows parser and knowledge process trees
         run: |
           backend/.venv/Scripts/python.exe tools/run_owned_process_tests.py
@@ -277,6 +285,8 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw 'Native observations PG authority qualification failed' }
             backend/.venv/Scripts/python.exe tools/run_native_observations_tests.py --engine
             if ($LASTEXITCODE -ne 0) { throw 'Generated native receipt-bound observations qualification failed' }
+            backend/.venv/Scripts/python.exe tools/run_native_seed_tests.py --integration
+            if ($LASTEXITCODE -ne 0) { throw 'Generated PGTemporal native seed fidelity qualification failed' }
           } finally {
             ./tools/native_temporal_ci_server.ps1 -Action stop
           }

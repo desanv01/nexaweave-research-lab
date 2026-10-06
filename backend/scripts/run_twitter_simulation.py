@@ -35,6 +35,10 @@ _backend_dir = os.path.abspath(os.path.join(_scripts_dir, '..'))
 _project_root = os.path.abspath(os.path.join(_backend_dir, '..'))
 sys.path.insert(0, _scripts_dir)
 sys.path.insert(0, _backend_dir)
+# Prefer an installed execution package; retain trusted legacy source fallback.
+sys.path.append(os.path.join(_project_root, "services", "knowledge", "src"))
+
+from native_seed_posts import apply_native_seed_posts, validate_native_seed_plan
 
 from native_dependencies import (ActionTypeNames as ActionType, close_environment,
                                  load_native, setup_legacy_cli)
@@ -490,6 +494,7 @@ class TwitterSimulationRunner:
         Args:
             max_rounds: 最大模拟轮数（可选，用于截断过长的模拟）
         """
+        validate_native_seed_plan(self.config)
         _load_native_engine()
         self.AVAILABLE_ACTIONS = [ActionType(action) for action in self.AVAILABLE_ACTIONS]
         print("=" * 60)
@@ -565,25 +570,9 @@ class TwitterSimulationRunner:
         event_config = self.config.get("event_config", {})
         initial_posts = event_config.get("initial_posts", [])
         
+        seed_result = await apply_native_seed_posts(self.env, self.config, "twitter")
         if initial_posts:
-            print(f"执行初始事件 ({len(initial_posts)}条初始帖子)...")
-            initial_actions = {}
-            for post in initial_posts:
-                agent_id = post.get("poster_agent_id", 0)
-                content = post.get("content", "")
-                try:
-                    agent = self.env.agent_graph.get_agent(agent_id)
-                    initial_actions[agent] = ManualAction(
-                        action_type=ActionType.CREATE_POST,
-                        action_args={"content": content}
-                    )
-                except Exception as e:
-                    print(f"  警告: 无法为Agent {agent_id}创建初始帖子: {e}")
-            
-            if initial_actions:
-                await self.env.step(initial_actions)
-                print(f"  已发布 {len(initial_actions)} 条初始帖子")
-        
+            print(f"  已发布 {seed_result.successful_count} 条初始帖子")
         # 主模拟循环
         print("\n开始模拟循环...")
         start_time = datetime.now()
