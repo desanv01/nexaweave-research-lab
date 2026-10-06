@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, ref } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { createWorkbenchClient, WorkbenchError, awareTimestamp } from '../api/workbench.js'
 import { copyFor, safeError } from '../i18n/workbench.js'
 import EvidenceResults from '../components/workbench/EvidenceResults.vue'
@@ -9,6 +9,7 @@ import ExperimentComparison from '../components/workbench/ExperimentComparison.v
 import PopulationWorkbench from '../components/workbench/PopulationWorkbench.vue'
 import SimulationPreparation from '../components/workbench/SimulationPreparation.vue'
 import NativeLaunch from '../components/workbench/NativeLaunch.vue'
+import NativeObservations from '../components/workbench/NativeObservations.vue'
 import { populationCopyFor } from '../i18n/populationWorkbench.js'
 const locale = ref('en'), copy = computed(() => copyFor(locale.value))
 const origin = ref('http://127.0.0.1:5001'), graph = ref(''), token = ref(''), reveal = ref(false)
@@ -31,6 +32,16 @@ const populationTypes = computed(() => graphData.value?.nodes.flatMap(node => no
 const inspectedSource = ref(null)
 const preparationReset = ref(0)
 const nativeReady = ref(null), nativeReset = ref(0)
+const observationSelection = ref(null), observationReset = ref(0)
+function clearObservations() { observationSelection.value = null; observationReset.value++; client.clearNativeObservations() }
+const observationMethods = Object.freeze({
+  page: async (payload, selection, knownPage) => {
+    try { return await client.nativeObservationsPage(payload, selection, knownPage) }
+    catch (e) { if (['unauthorized', 'origin_denied', 'disconnected'].includes(e?.code)) disconnect(); throw e }
+  },
+  clear: () => client.clearNativeObservations()
+})
+watch([inspectedSource, nativeReady, nativeReset], clearObservations, { deep: true, flush: 'sync' })
 const nativeMethods = Object.freeze({
   plan: (payload, ready) => operation(() => client.nativeLaunchPlan(payload, ready), false, true),
   start: payload => operation(() => client.nativeLaunchStart(payload), false, true),
@@ -65,7 +76,7 @@ const populationMethods = Object.freeze({
 })
 let generation = 0
 const graphEntries = computed(() => graphData.value?.[graphKind.value] || [])
-function clearProtected() { sourceReset.value++; populationReset.value++; preparationReset.value++; nativeReset.value++; nativeReady.value = null; inspectedSource.value = null; graphData.value = null; result.value = null; graphPage.value = 0 }
+function clearProtected() { clearObservations(); sourceReset.value++; populationReset.value++; preparationReset.value++; nativeReset.value++; nativeReady.value = null; inspectedSource.value = null; graphData.value = null; result.value = null; graphPage.value = 0 }
 function disconnect() { generation++; client.disconnect(); token.value = ''; reveal.value = false; connected.value = false; busy.value = false; clearProtected(); errorCode.value = ''; ingestionRequest.value = ''; status.value = 'disconnected' }
 function cancel() { generation++; populationReset.value++; client.cancel(); busy.value = false; status.value = 'cancelled'; errorCode.value = ''; if (!connected.value) { client.disconnect(); token.value = ''; clearProtected() } }
 async function operation(action, connecting = false, source = false, ingestion = '', population = false) {
@@ -129,7 +140,8 @@ onBeforeUnmount(disconnect)
       <ExperimentComparison :methods="experimentMethods" :connected="connected" :busy="busy" :reset-version="sourceReset" :locale="locale" />
       <PopulationWorkbench :methods="populationMethods" :connected="connected" :busy="busy" :reset-version="populationReset" :locale="locale" :type-labels="populationTypes" />
       <SimulationPreparation :methods="preparationMethods" :connected="connected" :busy="busy" :reset-version="preparationReset" :locale="locale" :source="inspectedSource?.source || null" :display-graph-id="graphData?.graph_id || ''" :type-labels="populationTypes" @ready="nativeReady = $event" @cleared="nativeReset++" />
-      <NativeLaunch :methods="nativeMethods" :ready="nativeReady" :connected="connected" :busy="busy" :reset-version="nativeReset" :locale="locale" :display-graph-id="graphData?.graph_id || ''" />
+      <NativeLaunch :methods="nativeMethods" :ready="nativeReady" :connected="connected" :busy="busy" :reset-version="nativeReset" :locale="locale" :display-graph-id="graphData?.graph_id || ''" @inspect="observationSelection = $event" @cleared="clearObservations" />
+      <NativeObservations :methods="observationMethods" :selection="observationSelection" :connected="connected" :busy="busy" :reset-version="observationReset" :locale="locale" :display-graph-id="graphData?.graph_id || ''" />
       <section class="query-section" aria-labelledby="query-title"><h2 id="query-title">{{ copy.research }}</h2>
         <form @submit.prevent="submit"><fieldset :disabled="!connected || busy"><legend>{{ copy.scope }}</legend><div class="choices"><label><input v-model="mode" type="radio" value="research">{{ copy.research }}</label><label><input v-model="mode" type="radio" value="dossier">{{ copy.dossier }}</label></div>
           <label v-if="mode === 'research'" for="question">{{ copy.query }}<textarea id="question" v-model="query" required rows="3" maxlength="4000"></textarea></label>

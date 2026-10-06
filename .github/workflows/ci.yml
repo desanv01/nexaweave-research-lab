@@ -241,6 +241,10 @@ jobs:
         run: |
           backend/.venv/Scripts/python.exe tools/run_native_launch_tests.py --unit
           if ($LASTEXITCODE -ne 0) { throw 'Native launch offline qualification failed' }
+      - name: Qualify receipt-bound native observation contracts and safe reads
+        run: |
+          backend/.venv/Scripts/python.exe tools/run_native_observations_tests.py --unit
+          if ($LASTEXITCODE -ne 0) { throw 'Native observations offline qualification failed' }
       - name: Qualify actual owned Windows parser and knowledge process trees
         run: |
           backend/.venv/Scripts/python.exe tools/run_owned_process_tests.py
@@ -269,6 +273,10 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw 'Connected native launch PG/Temporal qualification failed' }
             backend/.venv/Scripts/python.exe tools/run_native_launch_tests.py --engine
             if ($LASTEXITCODE -ne 0) { throw 'Generated preparation to owned native engine qualification failed' }
+            backend/.venv/Scripts/python.exe tools/run_native_observations_tests.py --integration
+            if ($LASTEXITCODE -ne 0) { throw 'Native observations PG authority qualification failed' }
+            backend/.venv/Scripts/python.exe tools/run_native_observations_tests.py --engine
+            if ($LASTEXITCODE -ne 0) { throw 'Generated native receipt-bound observations qualification failed' }
           } finally {
             ./tools/native_temporal_ci_server.ps1 -Action stop
           }

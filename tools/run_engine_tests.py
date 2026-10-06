@@ -22,11 +22,13 @@ def child() -> int:
     try:
         import pytest
         # Connected preparation/launch requires job-local PostgreSQL and Temporal.
-        # Its unchanged fixture is mandatory in run_native_launch_tests.py --engine
-        # after those services start; this step qualifies SQLite action primitives.
+        # Connected fixtures are mandatory in run_native_launch_tests.py --engine
+        # and run_native_observations_tests.py --engine after those services start;
+        # this earlier step qualifies SQLite action primitives only.
         result = int(pytest.main([
             "-q", "-p", "pytest_asyncio.plugin",
             "--ignore", str(ROOT / "backend" / "engine_tests" / "test_connected_preparation_native_launch.py"),
+            "--ignore", str(ROOT / "backend" / "engine_tests" / "test_connected_native_observations.py"),
             str(ROOT / "backend" / "engine_tests"),
         ]))
     finally:

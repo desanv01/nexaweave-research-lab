@@ -5,6 +5,7 @@ import { experimentSelection, validateExperimentCatalog, validateExperimentCompa
 import { populationOptions, validatePopulationPreview, validatePopulationExport } from './populationWorkbench.js'
 import { preparationPayload, preparationSource, validatePreparationResult, PREPARATION_CODES } from './simulationPreparation.js'
 import { nativeLaunchPayload, validateNativeLaunchResult, NATIVE_LAUNCH_CODES, NATIVE_ERROR_STATUS } from './nativeLaunch.js'
+import { createNativeObservationsChannel } from './nativeObservations.js'
 export class WorkbenchError extends Error {
   constructor(code) { super(code); this.name = 'WorkbenchError'; this.code = code }
 }
@@ -214,14 +215,16 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
   let connection = null, active = null, activeMethod = null, generation = 0, authenticated = false, ingestionScope = null, populationAdmission = null
   const preparationPlans = new Map(), preparationStarted = new Set()
   const nativePlans = new Map(), nativeStarted = new Set()
+  const observations = createNativeObservationsChannel({ fetchImpl, deadlineMs, connection: () => authenticated && connection ? { ...connection } : null, denied: () => disconnect() })
   function cancel(preservePopulation = false) { generation++; active?.abort(); active = null; activeMethod = null; if (!preservePopulation) populationAdmission = null }
   function clearNativeLaunch() {
+    observations.clear()
     // Child resets must not invalidate another section's transport epoch.
     // Native requests retain the shared controller through digest admission.
     if (active && activeMethod?.startsWith('nativeLaunch')) cancel()
     nativePlans.clear()
   }
-  function disconnect() { cancel(); connection = null; authenticated = false; ingestionScope = null; populationAdmission = null; preparationPlans.clear(); preparationStarted.clear(); nativePlans.clear(); nativeStarted.clear() }
+  function disconnect() { observations.clear(); cancel(); connection = null; authenticated = false; ingestionScope = null; populationAdmission = null; preparationPlans.clear(); preparationStarted.clear(); nativePlans.clear(); nativeStarted.clear() }
   async function request(method, payload, ingestionContext) {
     if (!connection || (method !== 'graph' && !authenticated)) fail('disconnected')
     const population = method.startsWith('population')
@@ -424,6 +427,8 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
     nativeLaunchStatus: payload => request('nativeLaunchStatus', payload),
     nativeLaunchCancel: payload => request('nativeLaunchCancel', payload),
     clearNativeLaunch,
+    nativeObservationsPage: (payload, selection, knownPage) => observations.page(payload, selection, knownPage),
+    clearNativeObservations: () => observations.clear(),
     ingestionPlan: (payload, inspected, scope) => request('ingestionPlan', payload, { inspected, scope }),
     ingestionExecute: (payload, known) => request('ingestionExecute', payload, { known, scope: known.scope }),
     ingestionStatus: (payload, known, scope, project) => request('ingestionStatus', payload, { known, scope, project }),

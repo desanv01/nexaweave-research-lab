@@ -225,3 +225,29 @@ test('mounted native clear aborts an actual private native request and rejects l
     await assert.rejects(client.nativeLaunchStatus({ schema_version: 1, launch_id: nativeKnown.request.run_id, launch_sha256: nativeKnown.launch_sha256 }), e => e.code === 'invalid_request')
   } finally { m.cleanup(); client.disconnect() }
 })
+
+test('Inspect emits only a detached completed receipt selection and makes no page or status request', async () => {
+  let known, selected, statusCalls = 0, clears = 0
+  const m = mount({
+    onInspect: value => { selected = value }, onCleared: () => { clears++ },
+    methods: { plan: async (p, ready) => known = planned(p, ready), status: async () => { statusCalls++; return observed(known, 'completed') } }
+  })
+  try {
+    await review(m); assert.equal(m.root.querySelector('.inspect'), null)
+    m.root.querySelector('.refresh').click(); await settle(); assert.equal(statusCalls, 1)
+    const button = m.root.querySelector('.inspect'); assert.ok(button); assert.equal(button.type, 'button'); assert.equal(button.textContent, nativeLaunchCopy.en.inspect)
+    button.focus(); button.click(); await settle(); assert.equal(statusCalls, 1)
+    assert.equal(selected.launch.state, 'completed'); assert.equal(selected.launch.receipt.outcome, 'completed'); assert.equal(selected.preparation.state, 'ready')
+    const originalSource = selected.preparation.source.source_name
+    m.props.ready.source.source_name = 'later mutation'; await settle(); assert.equal(selected.preparation.source.source_name, originalSource); assert.ok(clears >= 1)
+    selected.launch.model_label = 'consumer mutation'; await settle(); assert.equal(m.root.textContent.includes('consumer mutation'), false)
+    m.root.querySelector('.clear').click(); await settle(); assert.ok(clears >= 2); assert.equal(m.root.querySelector('.inspect'), null)
+  } finally { m.cleanup() }
+})
+test('failed, cancelled and uncertain native outcomes never expose completed observation selection', async () => {
+  for (const state of ['running', 'failed', 'cancelled', 'uncertain']) {
+    let known, inspections = 0
+    const m = mount({ onInspect: () => { inspections++ }, methods: { plan: async (p, ready) => known = planned(p, ready), status: async () => observed(known, state) } })
+    try { await review(m); m.root.querySelector('.refresh').click(); await settle(); assert.equal(m.root.querySelector('.inspect'), null); assert.equal(inspections, 0) } finally { m.cleanup() }
+  }
+})
