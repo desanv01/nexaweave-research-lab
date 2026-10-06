@@ -2,7 +2,7 @@
 
 Accepted-base transfer: `409120adb062fc97d6ebcb8a88682920e4911357`, existing u02 checkout, assigned `task/u07e-native-observations`. Source/test authoring only; no imports, execution, parsers, checks, tests, lint, builds, installations, Git, network, providers, browser, runtime, schedules or other-chat messaging performed. Main owns all qualification and acceptance. Exclusive ownership retained pending explicit correction/release; tools and edits stop after this handoff.
 
-Exact thirteen authored paths:
+Exact fourteen authored paths (Main correction3 explicitly added path14; prior13 remain exclusive):
 
 1. `backend/app/native_observations_api.py`
 2. `backend/app/services/native_observations_client.py`
@@ -17,6 +17,7 @@ Exact thirteen authored paths:
 11. `backend/engine_tests/test_connected_native_observations.py`
 12. `docs/architecture/native-observations.md`
 13. `coordination/handoffs/U07e-native-observations-backend.md`
+14. `services/knowledge/tests/test_native_observations_authority.py`
 
 Read authority: Root latest AGENTS/CONTINUATION/STATE, U07E-TRANSFER/CONTRACT/BACKEND-PACKET; accepted u02 launch/preparation clients, facades, routes, durable hosts and model configuration; app factories; execution native request/receipt/store/launch-store/owned-binding; knowledge binding/tombstone and project store; existing preparation/native launch/Temporal/connected/source-bridge fixture sources. No frozen core/preparation/native/budget/migration or existing fixture was edited. No scope or dependency expansion.
 
@@ -37,5 +38,9 @@ Correction2 stable source handoff: changed only `backend/engine_tests/test_conne
 All five ledger mutation guards now use `with monkeypatch.context() as read_phase`. That context encloses construction of the observations host/facade, every two-platform page, raw/hash/count/manifest/receipt/model-disabled assertion, empty/out-of-range page and authoritative row/ledger/model-call/owner/input/output preservation assertion. Normal exit and exceptional exit both restore original ledger methods before leaving the worker context and before outer-finally supervisor close/native retry_cleanup. All existing forbidden seams, assertions,60/180/20second bounds and final cleanup assertions remain. Product/budget/native core and other fixture behavior are unchanged. No guard can mask a read assertion merely by persisting into cleanup; actual independent cleanup failure still fails honestly.
 
 Correction2 is UNVERIFIED, source-only; no worker imports/checks/tests/Git/network/runtime performed. Stable source is ready for Main preservation/review/relevant fresh engine qualification. Tools and edits stopped; SAME13 exclusive ownership retained pending explicit correction/release.
+
+Correction3 stable source handoff: read Root `U07E-BACKEND-CORRECTION3.md`; Main explicitly expanded backend ownership from13 to14 paths only for `services/knowledge/tests/test_native_observations_authority.py`. Changed only that new module, `backend/tests/test_native_observations_host.py`, assigned architecture and this handoff. Moved `pg_factory` and the complete five-parameter actual PG authority test into the dedicated module. Every fault/ID/test body/assertion/expected code/input-output refusal spy/zero-native-row assertion is retained. The only added body imports are `NativeObservationsHost` and `payload`, formerly module-level imports available in the generic host module. New module top level imports only pytest, with lazy selected-body app/backend API/store dependencies and the same guarded fixture. The generic host module's25 pure cases and all their assertions remain unchanged. No skip/ignore/default configuration, fake SDK/database, opt-in failure conversion, product/core/bounds or runner change was authored.
+
+Main reported PR92 exacthead `bdac17d0212bc55d7cb9dcf5e952766ff0550fd3` Python failure1398pass/16inheritedskips/fivePG setup errors and preserved the original failure. Required accounting remains106 observation unit cases, all5 dedicated realPG authority cases/zero skips, and the separate fresh native engine1; runner relocation and every check/Git action belong to Main. Correction3 is UNVERIFIED, authoring-only: no imports/execution/parsers/AST/checks/tests/build/install/Git/network/provider/browser/runtime/other-chat/schedule tools performed. Stable exact source is ready for Main preservation/AST assertion review/relevant installed unit+PG qualification. Tools and edits stopped; SAME14 exclusive ownership retained until explicit correction/release.
 
 No selected skips, weakened assertions, deadline changes, worker execution evidence, CI acceptance, phase/full44, reporting, semantic or billed-cost claims are made. Main must review and run required installed-package unit/PG/engine/browser and exact hosted gates. Future direct human pause stops work immediately.

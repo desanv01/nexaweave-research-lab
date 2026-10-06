@@ -17,6 +17,7 @@ UNIT_TARGETS = tuple(ROOT / 'backend/tests' / name for name in (
     'test_native_observations_api.py', 'test_native_observations_host.py',
     'test_native_observation_reader.py'))
 ENGINE_TARGET = ROOT / 'backend/engine_tests/test_connected_native_observations.py'
+PG_TARGET = ROOT / 'services/knowledge/tests/test_native_observations_authority.py'
 MARKERS = ('postgres: approved disposable PostgreSQL authority\n'
            'native_observations_engine: freshly generated real native receipt-bound observations\n'
            'native_launch_temporal: inherited actual connected Temporal native launch\n'
@@ -40,7 +41,7 @@ def child(mode: str) -> int:
             passed = 0
             skipped = 0
             paths = {}
-            targets = {path.name: 0 for path in (*UNIT_TARGETS, ENGINE_TARGET)}
+            targets = {path.name: 0 for path in (*UNIT_TARGETS, PG_TARGET, ENGINE_TARGET)}
             def pytest_collection_finish(self, session):
                 self.collected = len(session.items)
                 self.paths = {item.nodeid: Path(item.path).name for item in session.items}
@@ -58,9 +59,9 @@ def child(mode: str) -> int:
             selection = 'native_observations_engine'
             required = (ENGINE_TARGET.name,)
         elif mode == 'integration':
-            targets = UNIT_TARGETS
+            targets = (PG_TARGET,)
             selection = 'postgres and not native_observations_engine'
-            required = ('test_native_observations_host.py',)
+            required = (PG_TARGET.name,)
         else:
             targets = UNIT_TARGETS
             selection = 'not postgres and not native_observations_engine'
