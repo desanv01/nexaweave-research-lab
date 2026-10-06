@@ -53,6 +53,10 @@ _backend_dir = os.path.abspath(os.path.join(_scripts_dir, '..'))
 _project_root = os.path.abspath(os.path.join(_backend_dir, '..'))
 sys.path.insert(0, _scripts_dir)
 sys.path.insert(0, _backend_dir)
+# Prefer an installed execution package; retain trusted legacy source fallback.
+sys.path.append(os.path.join(_project_root, "services", "knowledge", "src"))
+
+from native_seed_posts import apply_native_seed_posts, validate_native_seed_plan
 
 from native_dependencies import (ActionTypeNames as ActionType, close_environment,
                                  load_native, setup_legacy_cli)
@@ -1041,6 +1045,7 @@ async def run_twitter_simulation(
     Returns:
         PlatformSimulation: 包含env和agent_graph的结果对象
     """
+    validate_native_seed_plan(config)
     result = PlatformSimulation()
     _load_native_engine()
     
@@ -1113,35 +1118,13 @@ async def run_twitter_simulation(
         initial_action_count = await native_dependencies.apply_initial_network(
             "twitter", result.env, action_logger, agent_names)
         total_actions += initial_action_count
+    seed_result = await apply_native_seed_posts(
+        result.env, config, "twitter", action_logger, agent_names)
+    total_actions += seed_result.successful_count
+    initial_action_count += seed_result.successful_count
+    last_rowid = seed_result.trace_cursor
     if initial_posts:
-        initial_actions = {}
-        for post in initial_posts:
-            agent_id = post.get("poster_agent_id", 0)
-            content = post.get("content", "")
-            try:
-                agent = result.env.agent_graph.get_agent(agent_id)
-                initial_actions[agent] = ManualAction(
-                    action_type=ActionType.CREATE_POST,
-                    action_args={"content": content}
-                )
-                
-                if action_logger:
-                    action_logger.log_action(
-                        round_num=0,
-                        agent_id=agent_id,
-                        agent_name=agent_names.get(agent_id, f"Agent_{agent_id}"),
-                        action_type="CREATE_POST",
-                        action_args={"content": content}
-                    )
-                    total_actions += 1
-                    initial_action_count += 1
-            except Exception:
-                pass
-        
-        if initial_actions:
-            await result.env.step(initial_actions)
-            log_info(f"已发布 {len(initial_actions)} 条初始帖子")
-    
+        log_info(f"已发布 {seed_result.successful_count} 条初始帖子")
     # 记录 round 0 结束
     if action_logger:
         action_logger.log_round_end(0, initial_action_count)
@@ -1249,6 +1232,7 @@ async def run_reddit_simulation(
     Returns:
         PlatformSimulation: 包含env和agent_graph的结果对象
     """
+    validate_native_seed_plan(config)
     result = PlatformSimulation()
     _load_native_engine()
     
@@ -1325,43 +1309,13 @@ async def run_reddit_simulation(
         initial_action_count = await native_dependencies.apply_initial_network(
             "reddit", result.env, action_logger, agent_names)
         total_actions += initial_action_count
+    seed_result = await apply_native_seed_posts(
+        result.env, config, "reddit", action_logger, agent_names)
+    total_actions += seed_result.successful_count
+    initial_action_count += seed_result.successful_count
+    last_rowid = seed_result.trace_cursor
     if initial_posts:
-        initial_actions = {}
-        for post in initial_posts:
-            agent_id = post.get("poster_agent_id", 0)
-            content = post.get("content", "")
-            try:
-                agent = result.env.agent_graph.get_agent(agent_id)
-                if agent in initial_actions:
-                    if not isinstance(initial_actions[agent], list):
-                        initial_actions[agent] = [initial_actions[agent]]
-                    initial_actions[agent].append(ManualAction(
-                        action_type=ActionType.CREATE_POST,
-                        action_args={"content": content}
-                    ))
-                else:
-                    initial_actions[agent] = ManualAction(
-                        action_type=ActionType.CREATE_POST,
-                        action_args={"content": content}
-                    )
-                
-                if action_logger:
-                    action_logger.log_action(
-                        round_num=0,
-                        agent_id=agent_id,
-                        agent_name=agent_names.get(agent_id, f"Agent_{agent_id}"),
-                        action_type="CREATE_POST",
-                        action_args={"content": content}
-                    )
-                    total_actions += 1
-                    initial_action_count += 1
-            except Exception:
-                pass
-        
-        if initial_actions:
-            await result.env.step(initial_actions)
-            log_info(f"已发布 {len(initial_actions)} 条初始帖子")
-    
+        log_info(f"已发布 {seed_result.successful_count} 条初始帖子")
     # 记录 round 0 结束
     if action_logger:
         action_logger.log_round_end(0, initial_action_count)
