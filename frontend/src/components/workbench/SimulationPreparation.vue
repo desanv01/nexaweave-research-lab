@@ -4,6 +4,7 @@ import { preparationIdentity, preparationInteger, preparationOptions, preparatio
 import { populationTypeLabels } from '../../api/populationWorkbench.js'
 import { preparationCopyFor, preparationError } from '../../i18n/simulationPreparation.js'
 const props = defineProps({ methods: { type: Object, required: true }, connected: Boolean, busy: Boolean, resetVersion: { type: Number, default: 0 }, locale: { type: String, default: 'en' }, source: { type: Object, default: null }, displayGraphId: { type: String, default: '' }, typeLabels: { type: Array, default: () => [] } })
+const emit = defineEmits(['ready', 'cleared'])
 const copy = computed(() => preparationCopyFor(props.locale)), labels = computed(() => populationTypeLabels(props.typeLabels))
 const selected = ref([]), maximum = ref('10'), seed = ref('0'), rounds = ref('10'), requirement = ref(''), twitter = ref(true), reddit = ref(false)
 const plan = ref(null), durable = ref(null), pending = ref(false), attempted = ref(false), error = ref(''), notice = ref(''), feedback = ref(null)
@@ -11,7 +12,7 @@ let lifetime = 0, reviewEpoch = 0
 const locked = computed(() => !props.connected || props.busy || pending.value)
 const canStart = computed(() => !locked.value && plan.value?.state === 'planned' && plan.value.authorization.model_calls_enabled && !!plan.value.authorization.ceiling_microusd && !(attempted.value && durable.value?.operation_id === plan.value.operation_id))
 const records = computed(() => [plan.value && { key: 'plan', value: plan.value }, durable.value && durable.value.operation_id !== plan.value?.operation_id && { key: 'durable', value: durable.value }].filter(Boolean))
-function changed() { reviewEpoch++; if (plan.value) notice.value = 'changed'; plan.value = null; error.value = '' }
+function changed() { reviewEpoch++; if (plan.value) notice.value = 'changed'; plan.value = null; error.value = ''; emit('ready', null) }
 watch([selected, maximum, seed, rounds, requirement, twitter, reddit], changed, { deep: true, flush: 'sync' })
 watch(() => props.source, changed, { deep: true, flush: 'sync' })
 watch(() => props.typeLabels, changed, { deep: true, flush: 'sync' })
@@ -19,6 +20,7 @@ function clear() {
   lifetime++; reviewEpoch++; plan.value = null; durable.value = null; attempted.value = false; pending.value = false
   selected.value = []; maximum.value = '10'; seed.value = '0'; rounds.value = '10'; requirement.value = ''; twitter.value = true; reddit.value = false
   error.value = ''; notice.value = ''
+  emit('ready', null); emit('cleared')
 }
 watch(() => props.resetVersion, clear, { flush: 'sync' })
 watch(() => props.connected, connected => { if (!connected) clear() }, { flush: 'sync' })
@@ -50,6 +52,7 @@ async function durableRequest(starting) {
     if (life !== lifetime) return
     durable.value = admitted
     if (plan.value?.operation_id === admitted.operation_id) plan.value = admitted
+    if (admitted.state === 'ready') emit('ready', JSON.parse(JSON.stringify(admitted)))
   } catch (e) {
     if (life === lifetime) {
       if (['unauthorized', 'origin_denied', 'disconnected'].includes(e?.code)) { clear(); error.value = e.code }

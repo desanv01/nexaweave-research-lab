@@ -21,7 +21,14 @@ def child() -> int:
     guard.install()
     try:
         import pytest
-        result = int(pytest.main(["-q", "-p", "pytest_asyncio.plugin", str(ROOT / "backend" / "engine_tests")]))
+        # Connected preparation/launch requires job-local PostgreSQL and Temporal.
+        # Its unchanged fixture is mandatory in run_native_launch_tests.py --engine
+        # after those services start; this step qualifies SQLite action primitives.
+        result = int(pytest.main([
+            "-q", "-p", "pytest_asyncio.plugin",
+            "--ignore", str(ROOT / "backend" / "engine_tests" / "test_connected_preparation_native_launch.py"),
+            str(ROOT / "backend" / "engine_tests"),
+        ]))
     finally:
         guard.restore()
     if guard.blocked_attempts:

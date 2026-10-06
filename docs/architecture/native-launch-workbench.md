@@ -1,0 +1,41 @@
+# Connected native launch workbench
+
+Source-only implementation at accepted PR88 base `0e8676117c63c6ff9d2146055c4832aa3fb439a8`. This document describes authored behavior, not qualification or acceptance. Main owns execution, installed provenance, browser/runtime checks and hosted gates.
+
+`SimulationPreparation` emits `ready` only after its existing complete preparation validator admits a READY reply. The descriptor is a deep detached copy of that exact operation, source, project revision, options and immutable publication manifest. Draft/source/type edits emit null. Clear/reset/disconnect/unmount emit null and `cleared`; lifetime checks prevent late replies from publishing a descriptor. Parent passes this admission to a separate `NativeLaunch` panel. Neither origin nor token is a component prop.
+
+The private workbench client additionally requires the descriptor to equal its own independently validated READY record before sending a plan request. A valid-looking invented READY record cannot confer client admission. Start/status/cancel require an existing private launch context; bare UUID recovery and experiment-manifest adoption are not supported.
+
+## Frozen wire and correspondence
+
+All four routes are explicit protected POSTs: `/api/native-launch/{plan,start,status,cancel}/<display_graph_id>`. Plan body is exactly `{schema_version,launch_id,preparation:{operation_id,plan_sha256}}`; subsequent bodies are exactly `{schema_version,launch_id,launch_sha256}`. Maximum request size is 4096 UTF-8 bytes. Native result is bounded to 65536 bytes; finite envelope allowance is the producer's 128 bytes. Transport uses the existing finite abortable deadline, streaming fatal UTF-8 decode, duplicate-key rejection, strict success/error envelopes and no redirects, ambient credentials, caching or referrer. No storage, polling, automatic fetch, retry, Start or provider access is added.
+
+DTO exact fields are `schema_version,display_graph_id,scope,preparation,request,limits,ceiling_microusd,model_label,launch_sha256,state,error_code,authorization,workflow,receipt,cancel_requested,cleanup`. The first eight fields form immutable launch identity. Independent client digest uses sorted compact Python-compatible ASCII JSON, escaping UTF-16 units including emoji pairs and DEL. Native receipt fingerprint independently hashes the exact inherited `NativeRunRequest.to_wire` fields.
+
+The admitted READY preparation fixes source scope, project/revision, operation/plan, simulation/artifact, platforms, unsigned preparation seed 0..4294967295 and rounds 1..24. The inherited native request accepts signed64 seeds; this connected UI intentionally admits only the exact preparation seed. Native request principal remains printable ASCII 1..128 and nonblank, project revision 1..2147483647, runtime SHA server-captured. Model label is nonblank, at most128 Unicode codepoints, with neither NUL nor lone surrogate. Client input cannot select model, path, runtime, limits, cap or credentials.
+
+Captured positive integer limits are calls≤10000, input bytes≤2097152, output tokens≤4096 and seconds≤600; booleans/coercions are rejected. Ceiling is a canonical positive ASCII signed64 integer string, or null for disabled/unconfigured dispatch. Authorization is exactly `{model_calls_enabled}`. Safe error codes/statuses match the fixed backend table. Auth401/origin403 clear connection; operational409/503 preserve recovery.
+
+Workflow reference requires exact `mf-native-v1-<runUUIDhex>-<requestFingerprint>`, canonical Temporal run UUID and matching native run UUID. Receipt requires exact six fields, matching run/request fingerprint and terminal state/outcome. Completed requires a qualified receipt, matching producer behavior; failed/cancelled without receipt remain explicitly without execution proof. Uncertain never carries a qualified receipt. Previous qualified receipt/workflow and cancellation intent cannot regress or change identity.
+
+Cleanup is exactly `{known,pending,owner_thread_alive}`. Unknown requires both observations null. Known requires actual booleans; the panel separately displays pending cleanup and observed owner-thread liveness, without interpreting workflow completion or cancellation intent as clean ownership.
+
+## Explicit review and recovery
+
+The current `U07D-REVIEW-CLAIM-AMENDMENT.md` supersedes the initial one-plan-per-artifact wording. Successful new explicit reviews choose new UUIDs and capture current immutable operator configuration. A lost Review reply retains its declaration for a same-ID explicit Review recovery. The client retains at most100 launch contexts. The panel preserves up to100 attempted identities separately from the current review; it does not erase an uncertain earlier run when a different reviewed identity is denied. Server authority owns the single artifact claim at queue/dispatch and denies competing launches.
+
+Start is fenced before invoking fetch, including synchronous failures, malformed replies, deadline and lost acknowledgments. Explicit cancellation also conservatively fences Start for that identity before fetch; it can apply to an undispatched review. No automatic redispatch occurs. Known prequeue model/budget denial can be followed by a new explicit review under corrected configuration, while the attempted identity remains fenced and available for explicit Refresh. Draft/source changes remove an unstarted current review but preserve attempted bindings. Clear/reset/auth/disconnect/unmount discard private view context and suppress late replies; these actions do not terminate the server owner. The client keeps spent Start/cancel fences across clear-view until disconnect.
+
+Confirmed model/budget denial shows the safe policy feedback without claiming the reply was lost. The lost-reply notice is reserved for deadline, transport, malformed reply or explicit uncertainty. Every enabled cancellation control invokes the method even before Start; its returned cancellation flag/state is rendered independently of receipt and cleanup proof.
+
+Native context clearing tracks the active method alongside its controller. It aborts/increments the shared request epoch only when the currently owned method is native launch. During graph connection, source reads or another section's request, a native child reset/clear/unmount clears native plan context without aborting or changing that unrelated request's epoch. Global parent cancellation/disconnect retains its existing shared cancellation semantics. Native requests keep ownership through asynchronous digest validation, so a clear during their reply admission still aborts and suppresses late context revival. Spent native Start/cancel fences survive this scoped clear.
+
+EN/ZH/MS vocabulary distinguishes preparation assumptions, native execution receipts, future reports, reservation capacity, cancellation intent and actual/unknown cleanup. Output is interpolation-only inert text. Native buttons have44px minimum height, visible focus and wrapping; responsive grids use min-width0. Static CSS is not browser overflow or zoom qualification.
+
+## Authored qualification fixtures
+
+`native-launch-client.test.mjs` authors independent Node crypto fixture hashes, rehashed bounds and correspondence negatives, exact native fingerprints/workflows/receipts, cleanup and terminal proof, detached async replies, private READY admission, finite transport, lost Start fencing, operational/auth denial, explicit reconfiguration and cancellation recovery.
+
+`native-launch-render.test.mjs` authors mounted actual SFC checks for explicit controls, complete locales, inert hostile text, focus, lost replies, cancellation intent, retained original identities, reset/disconnect/unmount epochs, malformed receipts, disabled/reconfigured reviews and independently hashed producer replies. Preparation render fixtures author detached READY emission and revocation. These fixtures have not been run by this source-only worker.
+
+Correction1 adds real private-client and mounted-native-SFC fixtures for clear/reset/disconnect/unmount during pending graph/source transport (no abort and valid reply admission), plus native pending Start clear (abort, late result discarded, no restored plan and spent fence retained). Main's original parent failures remain evidence; these new fixtures and corrected source await Main execution.

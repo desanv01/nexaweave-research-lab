@@ -20,6 +20,8 @@ from mirofish_storage import ProjectStore
 from mirofish_storage.store import NotFound as ProjectNotFound, StorageError as ProjectStorageError
 from mirofish_storage.validation import InvalidProject, principal_id, uuid_value
 from .preparation_contracts import PreparedBudgetReceipt, PreparationAuthorityError
+from .native_launch_contracts import NativeBudgetReceipt, LaunchAuthorityError, native_budget_fingerprint, native_budget_episode
+from .native_run_contracts import NativeRunRequest, NativeRunReceipt, InvalidNativeRun
 
 MAX_MONEY = 2**63 - 1
 _HEX = re.compile(r"[0-9a-f]{64}\Z")
@@ -69,7 +71,7 @@ class Reservation:
     scope_group_id: str
     episode_id: UUID
     evidence_ids: tuple[UUID, ...]
-    receipt: CompletionReceipt | PreparedBudgetReceipt | None
+    receipt: CompletionReceipt | PreparedBudgetReceipt | NativeBudgetReceipt | None
     error_code: str | None
 
 @dataclass(frozen=True)
@@ -172,7 +174,15 @@ def _reservation(row: tuple) -> Reservation:
             raise ValueError
         saved = None
         if receipt is not None:
-            if type(receipt) is dict and receipt.get('kind') == 'prepared_budget_v1':
+            if episode==native_budget_episode(group,operation) and (type(receipt) is not dict or receipt.get('kind')!='native_run_budget_v1'):
+                raise ValueError
+            if type(receipt) is dict and receipt.get('kind') == 'native_run_budget_v1':
+                saved = NativeBudgetReceipt.from_wire(receipt)
+                if (saved.operation_id != operation or saved.attempt_id != attempt
+                        or saved.fingerprint != fingerprint or evidence_ids
+                        or episode!=native_budget_episode(group,operation)):
+                    raise ValueError
+            elif type(receipt) is dict and receipt.get('kind') == 'prepared_budget_v1':
                 saved = PreparedBudgetReceipt.from_wire(receipt)
                 if (saved.operation_id != operation or saved.attempt_id != attempt
                         or saved.fingerprint != fingerprint or evidence_ids):
@@ -185,7 +195,7 @@ def _reservation(row: tuple) -> Reservation:
                 saved = CompletionReceipt(group, episode, fingerprint, evidence_ids)
         return Reservation(account, operation, _fingerprint(fingerprint), ceiling,
                            ReservationState(state), attempt, group, episode, evidence_ids, saved, error)
-    except (ValueError, TypeError, KeyError, InvalidBudget, PreparationAuthorityError):
+    except (ValueError, TypeError, KeyError, InvalidBudget, PreparationAuthorityError, LaunchAuthorityError):
         raise BudgetUncertain() from None
 
 class BudgetLedger:
@@ -323,6 +333,15 @@ class BudgetLedger:
             raise BudgetUncertain() from None
         if valid.evidence_ids != evidence_ids:
             raise BudgetUncertain()
+        # Immutable reservation binding prevents native/preparation receipt
+        # injection even when a caller supplies the other domain's fingerprint.
+        with _transaction(self._connect) as conn:
+            account = self._account(conn, _principal(principal), _uuid(account_id))
+            prior = self._row(conn, _uuid(account_id), operation_id)
+            if (account[2] != scope.project_id or prior is None or prior.fingerprint != fingerprint
+                    or prior.scope_group_id != scope.group_id or prior.episode_id != scope.episode_uuid(operation_id)
+                    or prior.evidence_ids != evidence_ids):
+                raise BudgetUncertain()
         return self._transition(principal, account_id, operation_id, attempt_id,
                                 ReservationState.started, ReservationState.settled,
                                 receipt=valid.json_value())
@@ -367,3 +386,83 @@ class BudgetLedger:
             conn.execute("UPDATE mf_execution.reservations SET state='settled',receipt=%s,updated_at=now() "
                          "WHERE account_id=%s AND operation_id=%s", (Jsonb(receipt.json_value()), account_id, operation_id))
             return self._row(conn, account_id, operation_id)
+
+    def reserve_native(self, principal, account_id, scope, request, launch_sha256, ceiling_microusd):
+        """Third purpose, same account lock and cap totals; no graph receipt."""
+        try:
+            request = NativeRunRequest.from_wire(request)
+        except InvalidNativeRun:
+            raise InvalidBudget() from None
+        principal, account_id, scope = _principal(principal), _uuid(account_id), _scope(scope)
+        fingerprint, ceiling = native_budget_fingerprint(_fingerprint(launch_sha256)), _money(ceiling_microusd)
+        if request.principal != principal or request.project_id != scope.project_id:
+            raise BudgetDenied()
+        operation = request.run_id
+        group, episode = scope.group_id, native_budget_episode(scope.group_id,operation)
+        with _transaction(self._connect) as conn:
+            account = self._account(conn, principal, account_id, lock=True)
+            if account[2] != scope.project_id:
+                raise BudgetDenied()
+            prior = self._row(conn, account_id, operation)
+            if prior is not None:
+                if (prior.fingerprint != fingerprint or prior.ceiling_microusd != ceiling
+                        or prior.scope_group_id != group or prior.episode_id != episode or prior.evidence_ids):
+                    raise BudgetConflict()
+                return prior
+            accounted, reserved, _ = self._totals(conn, account_id)
+            if ceiling > account[3] - accounted - reserved:
+                raise BudgetDenied()
+            conn.execute("INSERT INTO mf_execution.reservations(account_id,operation_id,fingerprint,ceiling_microusd,state,attempt_id,scope_group_id,episode_id,evidence_ids) VALUES(%s,%s,%s,%s,'reserved',%s,%s,%s,%s)",
+                (account_id,operation,fingerprint,ceiling,uuid4(),group,episode,Jsonb([])))
+            return self._row(conn, account_id, operation)
+
+    def native_reservation(self, principal, account_id, request, launch_sha256):
+        request=NativeRunRequest.from_wire(request)
+        principal,account_id=_principal(principal),_uuid(account_id)
+        with _transaction(self._connect) as conn:
+            account=self._account(conn,principal,account_id)
+            prior=self._row(conn,account_id,request.run_id)
+            if (account[2]!=request.project_id or request.principal!=principal or prior is None
+                    or prior.fingerprint!=native_budget_fingerprint(launch_sha256)
+                    or prior.episode_id!=native_budget_episode(prior.scope_group_id,request.run_id)):
+                raise BudgetDenied()
+            return prior
+
+    def settle_native(self, principal, account_id, scope, request, attempt_id, launch_sha256, receipt):
+        """Settle only the exact authoritative native receipt, at full ceiling.
+
+        Started uncertainty can recover from a subsequently qualified PG/native
+        terminal receipt. Neither cancellation intent nor timeout releases it.
+        """
+        try:
+            request, receipt = NativeRunRequest.from_wire(request), NativeRunReceipt.from_wire(receipt)
+        except InvalidNativeRun:
+            raise BudgetUncertain() from None
+        scope, account_id, attempt_id = _scope(scope), _uuid(account_id), _uuid(attempt_id)
+        principal, launch = _principal(principal), _fingerprint(launch_sha256)
+        if (request.principal != principal or request.project_id != scope.project_id
+                or receipt.run_id != request.run_id or receipt.request_fingerprint != request.fingerprint):
+            raise BudgetUncertain()
+        from .native_run_store import NativeRunStore
+        from .native_run_contracts import NativeRunError
+        try:
+            authoritative = NativeRunStore(self._connect).get(principal, request.run_id)
+            if authoritative.request != request or authoritative.receipt != receipt:
+                raise BudgetUncertain()
+        except NativeRunError:
+            raise BudgetUncertain() from None
+        saved = NativeBudgetReceipt(request.run_id, attempt_id, native_budget_fingerprint(launch), launch, receipt)
+        with _transaction(self._connect) as conn:
+            account = self._account(conn, principal, account_id, lock=True)
+            prior = self._row(conn, account_id, request.run_id)
+            if (account[2] != scope.project_id or prior is None or prior.attempt_id != attempt_id
+                    or prior.fingerprint != saved.fingerprint or prior.scope_group_id != scope.group_id
+                    or prior.episode_id != native_budget_episode(scope.group_id,request.run_id) or prior.evidence_ids):
+                raise BudgetUncertain()
+            if prior.state == ReservationState.settled and prior.receipt == saved:
+                return prior
+            if prior.state not in (ReservationState.started, ReservationState.uncertain):
+                raise BudgetUncertain()
+            conn.execute("UPDATE mf_execution.reservations SET state='settled',receipt=%s,error_code=NULL,updated_at=now() WHERE account_id=%s AND operation_id=%s",
+                (Jsonb(saved.json_value()),account_id,request.run_id))
+            return self._row(conn, account_id, request.run_id)

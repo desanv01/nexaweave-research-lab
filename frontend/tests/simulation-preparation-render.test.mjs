@@ -49,6 +49,24 @@ async function settle() { for (let i = 0; i < 20; i++) { await new Promise(resol
 function input(root, selector, value) { const node = root.querySelector(selector); node.value = value; node.dispatchEvent(new dom.window.Event('input', { bubbles: true })) }
 function submit(root) { root.querySelector('form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true })) }
 function begin(root) { input(root, '#preparation-requirement', 'Study responses 中😀'); submit(root) }
+test('validated READY handoff is deeply detached; edits and reset revoke admission without auto launch', async () => {
+  let known, producer; const emissions = [], cleared = []
+  const m = mount({ onReady: value => emissions.push(value), onCleared: () => cleared.push(true), methods: { plan: async p => known = planned(p), start: async () => producer = ready(known) } })
+  try {
+    begin(m.root); await settle(); assert.equal(emissions.filter(Boolean).length, 0)
+    m.root.querySelector('.start').click(); await settle()
+    const descriptor = emissions.find(Boolean); assert.equal(descriptor.state, 'ready'); assert.equal(descriptor.receipt.artifact_sha256, producer.receipt.artifact_sha256)
+    producer.receipt.files[0].sha256 = 'f'.repeat(64); descriptor.actors[0].name = 'consumer mutation'; await settle()
+    assert.ok(m.root.textContent.includes(hostile)); assert.notEqual(descriptor.receipt.files[0].sha256, producer.receipt.files[0].sha256)
+    input(m.root, '#preparation-seed', '1'); await settle(); assert.equal(emissions.at(-1), null)
+    m.root.querySelector('.clear').click(); await settle(); assert.equal(emissions.at(-1), null); assert.equal(cleared.length, 1)
+  } finally { m.cleanup() }
+})
+test('malformed ready publication emits no native admission', async () => {
+  let known; const emissions = []
+  const m = mount({ onReady: value => emissions.push(value), methods: { plan: async p => known = planned(p), start: async () => { const v = ready(known); v.receipt.artifact_sha256 = hash; return v } } })
+  try { begin(m.root); await settle(); m.root.querySelector('.start').click(); await settle(); assert.equal(emissions.filter(Boolean).length, 0) } finally { m.cleanup() }
+})
 test('actual SFC never fetches on mount/locale change and uses native accessible controls', async () => {
   let calls = 0; const m = mount({ connected: false, methods: { plan: () => { calls++ } } })
   try {
