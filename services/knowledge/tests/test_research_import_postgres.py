@@ -11,9 +11,9 @@ import psycopg
 from psycopg.types.json import Jsonb
 import pytest
 
-from mirofish_storage import Conflict, NotFound, ProjectStore, SourceStore, StorageError
-from mirofish_storage.research_bundle import canonical, decode, export_bundle
-from mirofish_storage.research_import import ResearchImportStore, remap_id
+from nexaweave_storage import Conflict, NotFound, ProjectStore, SourceStore, StorageError
+from nexaweave_storage.research_bundle import canonical, decode, export_bundle
+from nexaweave_storage.research_import import ResearchImportStore, remap_id
 from test_project_store import snapshot
 from test_source_store_postgres import factory
 
@@ -274,7 +274,7 @@ import importlib.abc
 import runpy
 import socket
 import sys
-blocked = ('app', 'flask', 'dotenv', 'openai', 'camel', 'oasis', 'graphiti_core', 'mirofish_knowledge')
+blocked = ('app', 'flask', 'dotenv', 'openai', 'camel', 'oasis', 'graphiti_core', 'nexaweave_knowledge')
 class NoProviders(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
         if any(fullname == name or fullname.startswith(name + '.') for name in blocked):
@@ -296,7 +296,7 @@ def connect(*a, **k):
 psycopg.connect = connect
 status = 97
 try:
-    runpy.run_module('mirofish_storage.research_import_cli', run_name='__main__')
+    runpy.run_module('nexaweave_storage.research_import_cli', run_name='__main__')
 except SystemExit as error:
     status = error.code
 if any(not c.closed for c in connections) or (status == 0 and len(connections) != 1):
@@ -317,9 +317,9 @@ def test_fresh_noneditable_cli_file_to_owned_pg_digest_repeat_denial_and_tamper(
         upper = key.upper()
         if (upper.startswith(("PG", "KNOWLEDGE_")) or "PROXY" in upper
                 or upper.endswith(("API_KEY", "TOKEN", "SECRET"))
-                or upper in {"MIROFISH_APPSTORE_DSN", "PROJECT_STORE_POSTGRES_TEST_DSN", "PYTHONPATH",
+                or upper in {"NEXAWEAVE_APPSTORE_DSN", "PROJECT_STORE_POSTGRES_TEST_DSN", "PYTHONPATH",
                              "LLM_BASE_URL", "OPENAI_BASE_URL", "DEEPSEEK_BASE_URL"}): env.pop(key, None)
-    env["MIROFISH_APPSTORE_DSN"] = os.environ["PROJECT_STORE_POSTGRES_TEST_DSN"]
+    env["NEXAWEAVE_APPSTORE_DSN"] = os.environ["PROJECT_STORE_POSTGRES_TEST_DSN"]
     data = {"operation": "import", "principal": OWNER, "target_project_id": str(project),
             "expected_revision": 2, "input": str(path), "expected_sha256": digest}
     def run(value, environment=None):

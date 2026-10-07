@@ -11,15 +11,15 @@ import pytest
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
-from mirofish_execution.native_run_contracts import (InvalidNativeRun, NativeRunReceipt,
+from nexaweave_execution.native_run_contracts import (InvalidNativeRun, NativeRunReceipt,
     NativeRunRequest, RunState)
-from mirofish_execution.native_run_supervisor import (NativeRunSupervisor,
+from nexaweave_execution.native_run_supervisor import (NativeRunSupervisor,
     SupervisorStatus, SupervisorWaitTimeout)
-from mirofish_execution.temporal_native_activities import (NativeActivityError,
+from nexaweave_execution.temporal_native_activities import (NativeActivityError,
     NativeExecutionActivities)
-from mirofish_execution.temporal_native_contracts import (native_workflow_id,
+from nexaweave_execution.temporal_native_contracts import (native_workflow_id,
     qualified_receipt)
-from mirofish_execution.temporal_native_workflow import (ACTIVITY_NAME, HEARTBEAT_TIMEOUT,
+from nexaweave_execution.temporal_native_workflow import (ACTIVITY_NAME, HEARTBEAT_TIMEOUT,
     SCHEDULE_TO_CLOSE, START_TO_CLOSE, NativeExecutionWorkflow)
 
 
@@ -91,7 +91,7 @@ def test_pure_workflow_identity_and_receipt_binding():
 
 @pytest.mark.asyncio
 async def test_workflow_single_attempt_timeouts_and_terminal_validation(monkeypatch):
-    from mirofish_execution import temporal_native_workflow as module
+    from nexaweave_execution import temporal_native_workflow as module
     req = request()
     captured = {}
     async def execute(name, wire, **options):

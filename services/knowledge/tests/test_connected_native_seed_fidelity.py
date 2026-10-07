@@ -27,11 +27,11 @@ async def test_generated_interleaved_repeated_seeds_preserved_with_actual_receip
     from test_native_launch_store import migrate_all,launch_host,declaration
     from test_native_launch_api import reference
     from test_temporal_connected_launch import loopback_client,temporal_bridge
-    from mirofish_execution.temporal_preparation_host import TemporalPreparationHost
-    from mirofish_execution.temporal_native_host import TemporalNativeHost,NativeWorkflowRef
-    from mirofish_execution.native_run_store import NativeRunStore
-    from mirofish_execution.native_launch_store import NativeLaunchStore
-    from mirofish_execution.native_launch_contracts import NativeBudgetReceipt
+    from nexaweave_execution.temporal_preparation_host import TemporalPreparationHost
+    from nexaweave_execution.temporal_native_host import TemporalNativeHost,NativeWorkflowRef
+    from nexaweave_execution.native_run_store import NativeRunStore
+    from nexaweave_execution.native_launch_store import NativeLaunchStore
+    from nexaweave_execution.native_launch_contracts import NativeBudgetReceipt
 
     class SeedChat(RichConnectedChat):
         def create(self,**kwargs):

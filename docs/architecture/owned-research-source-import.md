@@ -1,6 +1,6 @@
 # Owned selected-source import
 
-The installed `mirofish_storage.research_import_cli` command imports a v1
+The installed `nexaweave_storage.research_import_cli` command imports a v1
 retained-source bundle into an explicitly chosen **existing** owned PostgreSQL
 project. The operator supplies principal, target UUID, expected current revision,
 absolute local input path and trusted whole-file SHA256 independently of bundle
@@ -11,9 +11,9 @@ publisher or establish semantic truth.
 {"operation":"import","principal":"local-owner","target_project_id":"00000000-0000-0000-0000-000000000011","expected_revision":2,"input":"/absolute/private/bundle.json","expected_sha256":"<64 lowercase hexadecimal characters>"}
 ```
 
-Supply one bounded stdin JSON request to `python -I -m
-mirofish_storage.research_import_cli`. The trusted local environment provides
-`MIROFISH_APPSTORE_DSN`; request fields cannot supply a DSN. All ambient `PG*`
+Supply one bounded stdin JSON request to
+`python -I -m nexaweave_storage.research_import_cli`. The trusted local environment provides
+`NEXAWEAVE_APPSTORE_DSN`; request fields cannot supply a DSN. All ambient `PG*`
 variables and DSN service/servicefile/passfile options are rejected; default
 password-file discovery is disabled and connection timeout is three seconds.
 The existing reviewed local-file reader rejects links/reparse points, checks

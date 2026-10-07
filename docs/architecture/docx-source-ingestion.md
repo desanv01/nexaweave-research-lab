@@ -89,7 +89,7 @@ python -I backend/app/services/document_source_cli.py ingest-docx
   --expected-document-sha256 <lowercase-64-hex>
 ```
 
-`MIROFISH_APPSTORE_DSN` supplies the local configured PostgreSQL connection. The
+`NEXAWEAVE_APPSTORE_DSN` supplies the local configured PostgreSQL connection. The
 storage package is bootstrapped from a fixed repository-relative location and the
 extractor from its fixed utils sibling; the app, engine and providers are not
 loaded. The trusted launcher remains responsible for restricting local principal

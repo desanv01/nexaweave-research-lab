@@ -10,7 +10,7 @@ from uuid import uuid4
 import pymupdf
 import pytest
 
-from mirofish_storage.pdf import extract_pdf, PdfError
+from nexaweave_storage.pdf import extract_pdf, PdfError
 
 
 def pdf_bytes(pages):
@@ -98,7 +98,7 @@ def repeated_text_pdf(page_count, repeats):
 
 
 def test_actual_native_page_and_total_text_quotas():
-    from mirofish_storage.pdf import MAX_INPUT_BYTES, MAX_PAGE_BYTES, MAX_TEXT_BYTES
+    from nexaweave_storage.pdf import MAX_INPUT_BYTES, MAX_PAGE_BYTES, MAX_TEXT_BYTES
     page_binary = repeated_text_pdf(1, 420)
     total_binary = repeated_text_pdf(36, 380)
     assert len(page_binary) <= MAX_INPUT_BYTES and len(total_binary) <= MAX_INPUT_BYTES

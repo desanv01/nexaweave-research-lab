@@ -25,8 +25,8 @@ def factory():
 def journal_fixture(factory, tmp_path, *, cap=20):
     from test_native_launch_store import ready_host, launch_host, declaration
     from test_connected_report_client import fixture_context
-    from mirofish_execution.report_store import ReportStore, migrate
-    from mirofish_execution.report_contracts import DEFAULT_LIMITS, digest
+    from nexaweave_execution.report_store import ReportStore, migrate
+    from nexaweave_execution.report_contracts import DEFAULT_LIMITS, digest
     from psycopg.types.json import Jsonb
     prep, scope, ready = ready_host(factory, tmp_path, cap=cap)
     launch = launch_host(prep, factory)
@@ -84,9 +84,9 @@ def test_actual_planned_cancel_has_safe_code_without_dispatch_or_budget(factory,
 
 
 def test_real_pg_same_id_race_and_lost_reply_one_dispatch(factory, tmp_path):
-    from mirofish_execution.report_store import ReportStore
-    from mirofish_execution.report_contracts import ReportError
-    from mirofish_execution.budget import ReservationState
+    from nexaweave_execution.report_store import ReportStore
+    from nexaweave_execution.report_contracts import ReportError
+    from nexaweave_execution.budget import ReservationState
     store, prep, scope, review = journal_fixture(factory, tmp_path)
     row = review()
     def queue(_):
@@ -113,7 +113,7 @@ def test_real_pg_same_id_race_and_lost_reply_one_dispatch(factory, tmp_path):
 
 
 def test_distinct_reports_share_existing_capacity_lock(factory, tmp_path):
-    from mirofish_execution.report_contracts import ReportError
+    from nexaweave_execution.report_contracts import ReportError
     store, prep, scope, review = journal_fixture(factory, tmp_path, cap=9)
     rows = [review(), review()]
     def queue(row):
@@ -130,7 +130,7 @@ def test_distinct_reports_share_existing_capacity_lock(factory, tmp_path):
 
 @pytest.mark.parametrize('first_possible', [False, True])
 def test_known_cleanup_no_call_release_or_unknown_spend_hold(factory, tmp_path, first_possible):
-    from mirofish_execution.budget import ReservationState
+    from nexaweave_execution.budget import ReservationState
     store, prep, scope, review = journal_fixture(factory, tmp_path)
     row = review()
     row, _ = store.queue('owner', row.report_id, row.plan_sha256, scope, prep.account_id)
@@ -146,7 +146,7 @@ def test_known_cleanup_no_call_release_or_unknown_spend_hold(factory, tmp_path, 
 
 
 def test_restart_expiry_is_uncertain_and_never_resumes_partial_work(factory, tmp_path):
-    from mirofish_execution.report_contracts import ReportError
+    from nexaweave_execution.report_contracts import ReportError
     store, prep, scope, review = journal_fixture(factory, tmp_path)
     row=review();row,_=store.queue('owner',row.report_id,row.plan_sha256,scope,prep.account_id)
     store.claim('owner',wire(row))
@@ -158,7 +158,7 @@ def test_restart_expiry_is_uncertain_and_never_resumes_partial_work(factory, tmp
 
 
 def test_corrupt_immutable_context_is_not_recovered_as_valid(factory,tmp_path):
-    from mirofish_execution.report_contracts import ReportError
+    from nexaweave_execution.report_contracts import ReportError
     store,prep,scope,review=journal_fixture(factory,tmp_path);row=review()
     with factory() as conn:
         conn.execute("UPDATE mf_report.plans SET frozen=jsonb_set(frozen,'{context,source_text}','\"changed\"'::jsonb) WHERE report_id=%s",(row.report_id,))
@@ -167,8 +167,8 @@ def test_corrupt_immutable_context_is_not_recovered_as_valid(factory,tmp_path):
 
 
 def test_owned_catalog_drift_and_checksum_refused_without_changing_accepted_schema(factory):
-    from mirofish_execution.report_store import migrate, _catalog
-    from mirofish_execution.report_contracts import ReportError
+    from nexaweave_execution.report_store import migrate, _catalog
+    from nexaweave_execution.report_contracts import ReportError
     with factory() as conn:
         migrate(conn);before=_catalog(conn)
         with conn.transaction(force_rollback=True):
@@ -183,7 +183,7 @@ def test_owned_catalog_drift_and_checksum_refused_without_changing_accepted_sche
 
 def completed_artifact_proof(row, tmp_path):
     """Actual file/hash proof for PG settlement; not an inherited-agent claim."""
-    from mirofish_execution.report_contracts import encoded, digest
+    from nexaweave_execution.report_contracts import encoded, digest
     from app.services.report_process import output_manifest, report_files
     from app.services.connected_report_context import validate_references
     context, identity = row.frozen['context'], row.frozen['identity']
@@ -208,8 +208,8 @@ def completed_artifact_proof(row, tmp_path):
 
 
 def test_actual_completed_report_settles_typed_proof_on_same_twelve_cap(factory, tmp_path):
-    from mirofish_execution.report_contracts import ReportBudgetReceipt, budget_episode, budget_fingerprint, digest, ReportError
-    from mirofish_execution.budget import ReservationState
+    from nexaweave_execution.report_contracts import ReportBudgetReceipt, budget_episode, budget_fingerprint, digest, ReportError
+    from nexaweave_execution.budget import ReservationState
     store, prep, scope, review = journal_fixture(factory, tmp_path, cap=12)
     sibling = prep.budget.reserve_prepared('owner', prep.account_id, scope, uuid4(), 'a'*64, 4)
     row = review(); row, won = store.queue('owner', row.report_id, row.plan_sha256, scope, prep.account_id)
@@ -250,8 +250,8 @@ def test_actual_completed_report_settles_typed_proof_on_same_twelve_cap(factory,
 @pytest.mark.parametrize('fault', ['receipt-context', 'receipt-manifest', 'wrong-attempt', 'file-proof'],
                          ids=['context', 'manifest', 'attempt', 'file'])
 def test_invalid_report_settlement_proof_rolls_back_journal_and_budget(factory, tmp_path, fault):
-    from mirofish_execution.report_contracts import ReportError
-    from mirofish_execution.budget import ReservationState
+    from nexaweave_execution.report_contracts import ReportError
+    from nexaweave_execution.budget import ReservationState
     store, prep, scope, review = journal_fixture(factory, tmp_path)
     row = review(); row, _ = store.queue('owner', row.report_id, row.plan_sha256, scope, prep.account_id)
     row = store.claim('owner', wire(row)); store.first_request('owner', wire(row))
@@ -276,11 +276,11 @@ def test_invalid_report_settlement_proof_rolls_back_journal_and_budget(factory, 
 
 def test_existing_settlement_apis_cannot_inject_other_domains_into_report_reservation(factory, tmp_path):
     from dataclasses import replace
-    from mirofish_execution.budget import BudgetUncertain, BudgetConflict, BudgetDenied
-    from mirofish_knowledge.operations import CompletionReceipt
-    from mirofish_execution.native_launch_store import NativeLaunchStore
-    from mirofish_execution.native_run_contracts import NativeRunReceipt
-    from mirofish_execution.report_contracts import budget_fingerprint
+    from nexaweave_execution.budget import BudgetUncertain, BudgetConflict, BudgetDenied
+    from nexaweave_knowledge.operations import CompletionReceipt
+    from nexaweave_execution.native_launch_store import NativeLaunchStore
+    from nexaweave_execution.native_run_contracts import NativeRunReceipt
+    from nexaweave_execution.report_contracts import budget_fingerprint
     store, prep, scope, review = journal_fixture(factory, tmp_path)
     row = review(); row, _ = store.queue('owner', row.report_id, row.plan_sha256, scope, prep.account_id)
     with factory() as conn:
@@ -313,8 +313,8 @@ def test_existing_settlement_apis_cannot_inject_other_domains_into_report_reserv
 @pytest.mark.parametrize('kind', ['source', 'preparation', 'native'], ids=['source', 'preparation', 'native'])
 def test_actual_report_episode_refuses_injected_foreign_receipt_with_rollback(factory, tmp_path, kind):
     from psycopg.types.json import Jsonb
-    from mirofish_execution.budget import BudgetUncertain
-    from mirofish_execution.report_contracts import budget_fingerprint
+    from nexaweave_execution.budget import BudgetUncertain
+    from nexaweave_execution.report_contracts import budget_fingerprint
     store, prep, scope, review = journal_fixture(factory, tmp_path)
     row = review(); row, _ = store.queue('owner', row.report_id, row.plan_sha256, scope, prep.account_id)
     with factory() as conn:
@@ -336,11 +336,11 @@ def test_actual_report_episode_refuses_injected_foreign_receipt_with_rollback(fa
 def rollback_snapshot(conn):
     """Small witnesses for retained rows and every accepted execution catalog."""
     from psycopg import sql
-    from mirofish_execution.report_store import _catalog as report_catalog
-    from mirofish_execution.preparation_store import _catalog as preparation_catalog
-    from mirofish_execution.native_run_store import _catalog as native_catalog
-    from mirofish_execution.native_launch_store import _catalog as launch_catalog
-    from mirofish_execution.budget import _catalog as budget_catalog
+    from nexaweave_execution.report_store import _catalog as report_catalog
+    from nexaweave_execution.preparation_store import _catalog as preparation_catalog
+    from nexaweave_execution.native_run_store import _catalog as native_catalog
+    from nexaweave_execution.native_launch_store import _catalog as launch_catalog
+    from nexaweave_execution.budget import _catalog as budget_catalog
     catalogs = dict(mf_preparation=preparation_catalog, mf_native_execution=native_catalog,
                     mf_native_launch=launch_catalog, mf_execution=budget_catalog)
     accepted = {}
@@ -362,8 +362,8 @@ def insert_rollback_state(conn, state):
     """Transaction-local journal state only; never a native/model execution claim."""
     from psycopg.types.json import Jsonb
     from test_connected_report_client import public_result, fixture_context, declaration
-    from mirofish_execution.report_contracts import IDENTITY, digest
-    from mirofish_execution.report_store import ReportStore
+    from nexaweave_execution.report_contracts import IDENTITY, digest
+    from nexaweave_execution.report_store import ReportStore
     public, _ = public_result()
     identity = {key: deepcopy(public[key]) for key in IDENTITY}
     report_id = uuid4()
@@ -382,8 +382,8 @@ def insert_rollback_state(conn, state):
 
 @pytest.mark.parametrize('state', ['queued', 'generating', 'uncertain'], ids=['queued', 'generating', 'uncertain'])
 def test_actual_rollback_refuses_each_active_state_and_preserves_catalog_rows(factory, state):
-    from mirofish_execution.report_store import migrate, rollback
-    from mirofish_execution.report_contracts import ReportError
+    from nexaweave_execution.report_store import migrate, rollback
+    from nexaweave_execution.report_contracts import ReportError
     with factory() as conn:
         before = rollback_snapshot(conn)
         with conn.transaction(force_rollback=True):
@@ -405,7 +405,7 @@ def test_actual_rollback_refuses_each_active_state_and_preserves_catalog_rows(fa
 
 
 def test_actual_quiescent_rollback_up_roundtrip_removes_only_report_and_restores_history(factory):
-    from mirofish_execution.report_store import migrate, rollback, _catalog
+    from nexaweave_execution.report_store import migrate, rollback, _catalog
     with factory() as conn:
         before = rollback_snapshot(conn)
         with conn.transaction(force_rollback=True):

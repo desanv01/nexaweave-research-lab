@@ -100,10 +100,10 @@ async def test_actual_native_receipt_to_inherited_report_preserves_inputs_and_di
     from test_native_launch_store import migrate_all, launch_host, declaration
     from test_native_launch_api import reference as native_reference
     from test_temporal_connected_launch import loopback_client, temporal_bridge
-    from mirofish_execution.temporal_preparation_host import TemporalPreparationHost
-    from mirofish_execution.temporal_native_host import TemporalNativeHost, NativeWorkflowRef
-    from mirofish_execution.temporal_report import TemporalReportHost
-    from mirofish_execution.report_store import migrate as migrate_reports
+    from nexaweave_execution.temporal_preparation_host import TemporalPreparationHost
+    from nexaweave_execution.temporal_native_host import TemporalNativeHost, NativeWorkflowRef
+    from nexaweave_execution.temporal_report import TemporalReportHost
+    from nexaweave_execution.report_store import migrate as migrate_reports
     from app.services.durable_report_host import DurableReportHost
     from app.services.report_models import BoundedReportModelFactory
     from app.services.connected_report_client import digest, validate_read, validate_download, ReportError
@@ -232,8 +232,8 @@ async def test_actual_native_receipt_to_inherited_report_preserves_inputs_and_di
                 history = await temporal.get_workflow_handle(row.workflow['workflow_id']).fetch_history()
                 assert not any(event.event_type == EventType.EVENT_TYPE_ACTIVITY_TASK_TIMED_OUT
                                for event in history.events)
-            from mirofish_execution.report_contracts import ReportBudgetReceipt, budget_episode, budget_fingerprint
-            from mirofish_execution.budget import ReservationState
+            from nexaweave_execution.report_contracts import ReportBudgetReceipt, budget_episode, budget_fingerprint
+            from nexaweave_execution.budget import ReservationState
             with factory() as conn:
                 report_capacity = native_host.budget._row(conn, prep.account_id, row.report_id)
             assert report_capacity.state == ReservationState.settled and type(report_capacity.receipt) is ReportBudgetReceipt

@@ -717,7 +717,7 @@ BACKEND_CLIENT = Path(__file__).resolve().parents[1] / "app" / "services" / "kno
 @pytest.fixture
 def transport():
     # This fixed source-load imports only transport and its trusted stdlib helper.
-    # No mirofish_knowledge/Graphiti SDK/app startup is needed for collection.
+    # No nexaweave_knowledge/Graphiti SDK/app startup is needed for collection.
     spec = importlib.util.spec_from_file_location("standalone_owned_knowledge_transport", BACKEND_CLIENT)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -814,7 +814,7 @@ def test_windows_knowledge_descendant_cleanup_and_lock_reuse(tmp_path, monkeypat
         assert owner.process.stdin.closed and owner.process.stdout.closed and owner.process._handle.closed
         assert not owner.directory.exists()
         assert not client._lock.locked()
-        assert not any(thread.name.startswith('mirofish-knowledge-') for thread in threading.enumerate())
+        assert not any(thread.name.startswith('nexaweave-knowledge-') for thread in threading.enumerate())
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows handled suspended startup failure")
@@ -899,7 +899,7 @@ sys.stdout.buffer.flush()
         owner = owners[-1]
         assert owner.closed and owner.process.poll() is not None
         assert not owner.directory.exists() and not client._lock.locked()
-        assert not any(thread.name.startswith('mirofish-knowledge-') for thread in threading.enumerate())
+        assert not any(thread.name.startswith('nexaweave-knowledge-') for thread in threading.enumerate())
 
 
 def test_knowledge_cleanup_failure_overrides_cooperative_abort(tmp_path, monkeypatch, transport):

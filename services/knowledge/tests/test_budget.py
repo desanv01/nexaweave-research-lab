@@ -3,7 +3,7 @@ from uuid import uuid4
 
 import pytest
 
-from mirofish_execution.budget import InvalidBudget, _fingerprint, _money, _uuid
+from nexaweave_execution.budget import InvalidBudget, _fingerprint, _money, _uuid
 
 
 @pytest.mark.parametrize("value", [None, True, False, 0, -1, 1.0, "1", 2**63])

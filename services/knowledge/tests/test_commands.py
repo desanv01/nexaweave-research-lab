@@ -9,14 +9,14 @@ from uuid import uuid4
 
 import pytest
 
-from mirofish_knowledge.commands import KnowledgeCommandDispatcher
-from mirofish_knowledge.contracts import (FactResult, GraphPage, KnowledgeScope, Layer,
+from nexaweave_knowledge.commands import KnowledgeCommandDispatcher
+from nexaweave_knowledge.contracts import (FactResult, GraphPage, KnowledgeScope, Layer,
                                           OntologySpec, SearchResult, SourceEnvelope)
-from mirofish_knowledge.graph_reads import ResultTooLarge
-from mirofish_knowledge.ingestion import IngestionUncertain
-from mirofish_knowledge.operations import (Busy, CompletionReceipt, Conflict, NotFound,
+from nexaweave_knowledge.graph_reads import ResultTooLarge
+from nexaweave_knowledge.ingestion import IngestionUncertain
+from nexaweave_knowledge.operations import (Busy, CompletionReceipt, Conflict, NotFound,
                                            Tombstoned, request_fingerprint)
-from mirofish_knowledge.provider import UnsupportedCapability
+from nexaweave_knowledge.provider import UnsupportedCapability
 
 
 def fixture_request():

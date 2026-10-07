@@ -1,6 +1,6 @@
 # Model-free retained evidence dossiers (U09a)
 
-`mirofish_knowledge.evidence_dossier.EvidenceDossierService` connects ordered
+`nexaweave_knowledge.evidence_dossier.EvidenceDossierService` connects ordered
 research sections to the accepted U06 `EvidenceResearchService`. Trusted host
 construction supplies principal, PostgreSQL/Neo4j factories and an optional
 exact graph anchor; requests supply persisted display IDs, title, 1–6 ordered
@@ -9,7 +9,7 @@ data never selects credentials, scope, tools, model, filesystem paths or queries
 in database languages. Free text is passed only to the accepted lexical ranking
 operation; it is never executed as SQL/Cypher/tool instructions.
 
-The local entry point is `python -m mirofish_knowledge.dossier_cli`. It reads one
+The local entry point is `python -m nexaweave_knowledge.dossier_cli`. It reads one
 UTF-8 JSON request, at most 32 KiB, and returns one JSON line, at most 4 MiB
 including its newline, using the existing `ReadSettings` trusted environment.
 Duplicate keys, extra fields, nonfinite JSON, naive timestamps and invalid bounds

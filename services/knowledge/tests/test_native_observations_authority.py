@@ -16,8 +16,8 @@ def test_real_pg_current_authority_denies_before_reader(pg_factory, tmp_path, fa
     from app.services.native_observations_host import NativeObservationsHost
     from test_native_observations_api import payload
     from test_native_launch_store import ready_host, launch_host, declaration
-    from mirofish_storage import ProjectStore
-    from mirofish_knowledge.operations import Ledger
+    from nexaweave_storage import ProjectStore
+    from nexaweave_knowledge.operations import Ledger
     from test_project_store import snapshot
     prep, scope, plan = ready_host(pg_factory, tmp_path)
     launch = launch_host(prep, pg_factory, enabled=False)

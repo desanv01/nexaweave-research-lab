@@ -12,7 +12,7 @@ from ..utils.logger import get_logger
 from ..utils.zep_paging import fetch_all_nodes, fetch_all_edges
 from ..utils.zep import call_zep_read_with_retry, get_zep_client
 
-logger = get_logger('mirofish.zep_entity_reader')
+logger = get_logger('nexaweave.zep_entity_reader')
 
 # 用于泛型返回类型
 T = TypeVar('T')

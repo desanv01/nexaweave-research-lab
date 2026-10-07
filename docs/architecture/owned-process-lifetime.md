@@ -149,7 +149,7 @@ Correction1 places the seven new real Windows knowledge cases (five lifecycle
 modes and two startup seams) in `backend/tests/test_owned_process.py`, alongside
 the real helper kernel/descendant-observer cases. A fixed trusted-file transport
 fixture and stdlib JSON/UUID/child/echo helpers let this backend gate collect
-without importing `mirofish_knowledge`, Graphiti SDK or providers. Every moved
+without importing `nexaweave_knowledge`, Graphiti SDK or providers. Every moved
 lifecycle/startup assertion and its deadlines remain intact. The original
 `services/knowledge/tests/test_stdio_transport.py` retains its standalone shared
 helper-origin assertion and every inherited knowledge case/deadline. Main owns

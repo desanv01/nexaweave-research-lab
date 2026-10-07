@@ -37,10 +37,10 @@ def child():
 def main():
     if sys.argv[1:] == ['--child']:
         return child()
-    with tempfile.TemporaryDirectory(prefix='mirofish-native-recording-') as directory:
+    with tempfile.TemporaryDirectory(prefix='nexaweave-native-recording-') as directory:
         env = _unit_environment(Path(directory))
         env['PYTHONPATH'] += os.pathsep + str(ROOT / 'services/knowledge/src')
-        env.update(MIROFISH_NATIVE_TEST_OFFLINE='1', HF_HUB_OFFLINE='1',
+        env.update(NEXAWEAVE_NATIVE_TEST_OFFLINE='1', HF_HUB_OFFLINE='1',
                    TRANSFORMERS_OFFLINE='1', HF_HUB_DISABLE_TELEMETRY='1', DO_NOT_TRACK='1')
         try:
             return subprocess.run([sys.executable, str(Path(__file__).resolve()), '--child'],

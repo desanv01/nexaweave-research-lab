@@ -8,12 +8,12 @@ from uuid import uuid4
 
 import pytest
 
-from mirofish_knowledge.bindings import BindingRecord
-from mirofish_knowledge.contracts import KnowledgeScope, Layer, OntologySpec
-from mirofish_knowledge.ingestion import KnowledgeIngestionCoordinator
-from mirofish_knowledge.source_bridge import (BridgeDenied, BridgeInvalid,
+from nexaweave_knowledge.bindings import BindingRecord
+from nexaweave_knowledge.contracts import KnowledgeScope, Layer, OntologySpec
+from nexaweave_knowledge.ingestion import KnowledgeIngestionCoordinator
+from nexaweave_knowledge.source_bridge import (BridgeDenied, BridgeInvalid,
                                                BridgeNotFound, SourceIngestionBridge)
-from mirofish_storage.source import PassageRecord, SourceRecord
+from nexaweave_storage.source import PassageRecord, SourceRecord
 
 
 def ontology():

@@ -4,7 +4,7 @@ $ErrorActionPreference = 'Stop'
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_OS -ne 'Windows' -or
     -not $env:RUNNER_TEMP) { throw 'Requires a hosted Windows Actions job' }
 $runnerTemp = [IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd('\')
-$fixtureRoot = [IO.Path]::GetFullPath((Join-Path $runnerTemp 'mirofish-native-temporal'))
+$fixtureRoot = [IO.Path]::GetFullPath((Join-Path $runnerTemp 'nexaweave-native-temporal'))
 if (-not $fixtureRoot.StartsWith($runnerTemp + '\', [StringComparison]::OrdinalIgnoreCase)) {
     throw 'Fixture directory escapes job temporary directory'
 }

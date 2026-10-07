@@ -117,7 +117,7 @@ around the bounded no-follow read. Windows cross-API identity excludes ctime
 because its path/fstat meanings differ, while full same-API checks are retained.
 
 Launch the saved `backend/app/services/native_experiment_cli.py` using the
-approved environment and trusted `MIROFISH_APPSTORE_DSN`. It bootstraps only the
+approved environment and trusted `NEXAWEAVE_APPSTORE_DSN`. It bootstraps only the
 fixed sibling modules and repository knowledge storage package; it avoids
 Flask/engine/provider initialization. The store uses actual psycopg connections
 and existing database conventions; no migration is implicit. Supply one bounded

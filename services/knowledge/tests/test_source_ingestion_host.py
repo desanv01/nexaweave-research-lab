@@ -11,14 +11,14 @@ from uuid import uuid4
 
 import pytest
 
-from mirofish_knowledge.contracts import KnowledgeScope, Layer, SourceEnvelope, OntologySpec
-from mirofish_knowledge.operations import CompletionReceipt, NotFound, request_fingerprint
-from mirofish_knowledge.source_bridge import IngestionPlan
-from mirofish_knowledge.source_library import SourceSettings, SourceError, encoded
-from mirofish_knowledge.source_ingestion_host import (IngestionSettings, SourceIngestionHost,
+from nexaweave_knowledge.contracts import KnowledgeScope, Layer, SourceEnvelope, OntologySpec
+from nexaweave_knowledge.operations import CompletionReceipt, NotFound, request_fingerprint
+from nexaweave_knowledge.source_bridge import IngestionPlan
+from nexaweave_knowledge.source_library import SourceSettings, SourceError, encoded
+from nexaweave_knowledge.source_ingestion_host import (IngestionSettings, SourceIngestionHost,
     LazyGraphitiProvider, validate_payload, plan_result, MAX_BYTES)
-from mirofish_knowledge.source_ingestion_bootstrap import serve_once
-from mirofish_knowledge.stdio import PipeProtocolError
+from nexaweave_knowledge.source_ingestion_bootstrap import serve_once
+from nexaweave_knowledge.stdio import PipeProtocolError
 
 
 def configured():
@@ -164,7 +164,7 @@ def test_bootstrap_single_frame_and_limits():
 
 def production_adapter_module(monkeypatch, events, *, failure=None, close_failure=False):
     """Pin the production import to a lifecycle adapter, without loading SDKs."""
-    module = ModuleType("mirofish_knowledge.provider")
+    module = ModuleType("nexaweave_knowledge.provider")
     config = object()
     class Config:
         @classmethod
@@ -199,7 +199,7 @@ def production_adapter_module(monkeypatch, events, *, failure=None, close_failur
             if close_failure:
                 raise RuntimeError("private cleanup failure")
     module.ProviderConfig, module.GraphitiKnowledgeProvider = Config, Adapter
-    monkeypatch.setitem(sys.modules, "mirofish_knowledge.provider", module)
+    monkeypatch.setitem(sys.modules, "nexaweave_knowledge.provider", module)
     return module
 
 

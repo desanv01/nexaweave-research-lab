@@ -13,12 +13,12 @@ import pytest
 from psycopg.conninfo import conninfo_to_dict
 from psycopg.types.json import Jsonb
 
-from mirofish_storage import (Conflict, MigrationMismatch, NotFound, ProjectStore,
+from nexaweave_storage import (Conflict, MigrationMismatch, NotFound, ProjectStore,
                               SourceStore, StorageError, migrate)
-from mirofish_storage.__main__ import main as cli_main
-from mirofish_storage.store import _catalog
-from mirofish_storage.validation import canonical_payload
-import mirofish_storage.store as store_module
+from nexaweave_storage.__main__ import main as cli_main
+from nexaweave_storage.store import _catalog
+from nexaweave_storage.validation import canonical_payload
+import nexaweave_storage.store as store_module
 from test_project_store import snapshot
 
 pytestmark = pytest.mark.postgres
@@ -130,7 +130,7 @@ def test_v1_upgrade_preserves_rows_and_rolls_back_failed_v2(factory, monkeypatch
         with pytest.raises(RollbackFixture):
             with conn.transaction():
                 conn.execute("DROP SCHEMA mf_app CASCADE")
-                sql1 = files("mirofish_storage").joinpath("migrations", "0001_project_revisions.sql").read_text("utf-8")
+                sql1 = files("nexaweave_storage").joinpath("migrations", "0001_project_revisions.sql").read_text("utf-8")
                 conn.execute(sql1)
                 conn.execute("INSERT INTO mf_app.schema_migrations VALUES (1,%s,%s)",
                              (hashlib.sha256(sql1.encode("utf-8")).hexdigest(), _catalog(conn)))
@@ -179,7 +179,7 @@ def test_fresh_v3_install_and_sql_checksum_denial(factory):
 
 def test_cli_unicode_import_resolve_and_exclusive_output(factory, tmp_path, monkeypatch, capsys):
     owner_project, revision, evidence = project(factory), uuid4(), uuid4()
-    monkeypatch.setenv("MIROFISH_APPSTORE_DSN", os.environ["PROJECT_STORE_POSTGRES_TEST_DSN"])
+    monkeypatch.setenv("NEXAWEAVE_APPSTORE_DSN", os.environ["PROJECT_STORE_POSTGRES_TEST_DSN"])
     text_path = tmp_path / "source.txt"
     text_path.write_bytes("A😀猫\r\n".encode("utf-8"))
     passages_path = tmp_path / "passages.json"

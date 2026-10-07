@@ -23,8 +23,8 @@ pytestmark = pytest.mark.postgres
 def connection_factory():
     import psycopg
     from psycopg.conninfo import conninfo_to_dict
-    from mirofish_execution.native_run_store import migrate_native_runs
-    from mirofish_storage import migrate
+    from nexaweave_execution.native_run_store import migrate_native_runs
+    from nexaweave_storage import migrate
 
     if os.getenv("PROJECT_STORE_POSTGRES_INTEGRATION") != "1":
         pytest.skip("disposable PostgreSQL integration disabled")
@@ -72,9 +72,9 @@ def _snapshot():
 
 
 def _prepared_binding(connection_factory, tmp_path):
-    from mirofish_execution.native_owned_binding import NativeOwnedSessionFactory, _manifest
-    from mirofish_execution.native_run_contracts import NativeRunRequest
-    from mirofish_storage import ProjectStore
+    from nexaweave_execution.native_owned_binding import NativeOwnedSessionFactory, _manifest
+    from nexaweave_execution.native_run_contracts import NativeRunRequest
+    from nexaweave_storage import ProjectStore
 
     root = prepared(tmp_path)
     project_id = uuid4()
@@ -144,16 +144,16 @@ async def _failure_cleanup(host, request, retained):
 @pytest.mark.asyncio
 async def test_actual_both_platforms_temporal_pg_replay_and_fresh_result(
         connection_factory, tmp_path, monkeypatch):
-    from mirofish_execution.native_process_driver import NativeProcessDriver
-    from mirofish_execution.native_run_contracts import RunState
-    from mirofish_execution.native_run_store import NativeRunStore
-    from mirofish_execution.temporal_native_host import NativeTemporalHostError
-    from mirofish_execution.temporal_native_workflow import NativeExecutionWorkflow
+    from nexaweave_execution.native_process_driver import NativeProcessDriver
+    from nexaweave_execution.native_run_contracts import RunState
+    from nexaweave_execution.native_run_store import NativeRunStore
+    from nexaweave_execution.temporal_native_host import NativeTemporalHostError
+    from nexaweave_execution.temporal_native_workflow import NativeExecutionWorkflow
     from temporalio.worker import Replayer
 
     client = await _client()
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("MIROFISH_NATIVE_TEST_OFFLINE", "1")
+    monkeypatch.setenv("NEXAWEAVE_NATIVE_TEST_OFFLINE", "1")
     root, request, binding, frozen = _prepared_binding(connection_factory, tmp_path)
     host = _host(client, connection_factory, request, binding)
     store = NativeRunStore(connection_factory)
@@ -216,9 +216,9 @@ async def test_actual_both_platforms_temporal_pg_replay_and_fresh_result(
 @pytest.mark.asyncio
 async def test_disabled_foreign_and_missing_revision_never_reach_binding(
         connection_factory, tmp_path, monkeypatch):
-    from mirofish_execution.native_run_contracts import NativeRunDenied
-    from mirofish_execution.native_run_store import NativeRunStore
-    from mirofish_execution.temporal_native_host import NativeTemporalHostError
+    from nexaweave_execution.native_run_contracts import NativeRunDenied
+    from nexaweave_execution.native_run_store import NativeRunStore
+    from nexaweave_execution.temporal_native_host import NativeTemporalHostError
 
     client = await _client()
     monkeypatch.chdir(tmp_path)
@@ -267,8 +267,8 @@ async def test_disabled_foreign_and_missing_revision_never_reach_binding(
 @pytest.mark.asyncio
 async def test_cancel_during_authorized_binding_is_prelaunch_intent(
         connection_factory, tmp_path, monkeypatch):
-    from mirofish_execution.native_run_store import NativeRunStore
-    from mirofish_execution.temporal_native_host import NativeTemporalHostError
+    from nexaweave_execution.native_run_store import NativeRunStore
+    from nexaweave_execution.temporal_native_host import NativeTemporalHostError
 
     client = await _client()
     monkeypatch.chdir(tmp_path)
@@ -313,9 +313,9 @@ async def test_cancel_during_authorized_binding_is_prelaunch_intent(
 @pytest.mark.asyncio
 async def test_prior_uncertain_attempt_never_relaunches_native(
         connection_factory, tmp_path, monkeypatch):
-    from mirofish_execution.native_run_contracts import RunState
-    from mirofish_execution.native_run_store import NativeRunStore
-    from mirofish_execution.temporal_native_host import NativeTemporalHostError
+    from nexaweave_execution.native_run_contracts import RunState
+    from nexaweave_execution.native_run_store import NativeRunStore
+    from nexaweave_execution.temporal_native_host import NativeTemporalHostError
 
     client = await _client()
     monkeypatch.chdir(tmp_path)

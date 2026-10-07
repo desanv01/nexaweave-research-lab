@@ -9,10 +9,10 @@ from uuid import uuid4
 
 import pytest
 
-from mirofish_execution.budget import BudgetLedger, BudgetUnavailable, migrate
-from mirofish_knowledge.operations import Ledger
-from mirofish_knowledge.source_library import SourceSettings, encoded
-from mirofish_knowledge.source_ingestion_host import SourceIngestionHost, IngestionSettings
+from nexaweave_execution.budget import BudgetLedger, BudgetUnavailable, migrate
+from nexaweave_knowledge.operations import Ledger
+from nexaweave_knowledge.source_library import SourceSettings, encoded
+from nexaweave_knowledge.source_ingestion_host import SourceIngestionHost, IngestionSettings
 from test_source_bridge_postgres import FakeProvider, factory, ontology, owned_fixture
 from test_source_ingestion_host import configured
 
@@ -135,7 +135,7 @@ def test_concurrent_operation_constructs_only_winner(factory):
 def test_started_without_response_is_held_without_redispatch(factory):
     host, payload, provider, constructed, _ = setup(factory)
     from uuid import UUID
-    from mirofish_knowledge.source_ingestion_host import validate_payload
+    from nexaweave_knowledge.source_ingestion_host import validate_payload
     operation, revision, spec = validate_payload("execute", payload)
     plan = host.bridge.plan("owner", host.settings.source.display_graph_id, revision, operation, spec)
     row = host.budget.reserve("owner", host.settings.account_id, plan.scope, operation,
@@ -208,9 +208,9 @@ def test_production_lifecycle_after_durable_admission(factory, monkeypatch, fail
             events.append("close")
             self.closed = True
             self.resources.clear()
-    module = ModuleType("mirofish_knowledge.provider")
+    module = ModuleType("nexaweave_knowledge.provider")
     module.ProviderConfig, module.GraphitiKnowledgeProvider = Config, Adapter
-    monkeypatch.setitem(sys.modules, "mirofish_knowledge.provider", module)
+    monkeypatch.setitem(sys.modules, "nexaweave_knowledge.provider", module)
     assert reply(host, "plan", payload)["ok"] and not events
     outcome = reply(host, "execute", payload)
     assert not constructed  # Explicit factory seam was never selected.

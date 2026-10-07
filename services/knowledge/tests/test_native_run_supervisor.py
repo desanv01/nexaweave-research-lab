@@ -8,13 +8,13 @@ from uuid import uuid4
 
 import pytest
 
-from mirofish_execution import native_run_supervisor as supervisor_module
-from mirofish_execution.native_run_contracts import (InvalidNativeRun,
+from nexaweave_execution import native_run_supervisor as supervisor_module
+from nexaweave_execution.native_run_contracts import (InvalidNativeRun,
     NativeChildIdentity, NativeObservation, NativeRunBusy, NativeRunDenied,
     NativeRunReceipt, NativeRunRequest, NativeRunUncertain, RunState)
-from mirofish_execution.native_run_coordinator import NativeRunCoordinator
-from mirofish_execution.native_run_store import NativeRunRecord, NativeRunStore
-from mirofish_execution.native_run_supervisor import (NativeRunSupervisor,
+from nexaweave_execution.native_run_coordinator import NativeRunCoordinator
+from nexaweave_execution.native_run_store import NativeRunRecord, NativeRunStore
+from nexaweave_execution.native_run_supervisor import (NativeRunSupervisor,
     SupervisorBusy, SupervisorClosed, SupervisorThreadUnavailable,
     SupervisorWaitTimeout)
 

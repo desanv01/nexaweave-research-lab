@@ -1,4 +1,4 @@
-"""Verify the 128-file archived MiroFish snapshot retained by this repository.
+"""Verify the 128-file archived NexaWeave snapshot retained by this repository.
 
 Run from any working directory. Reviewed source edits must be recorded in
 docs/upstream/patches.json; an absent file means strict byte equality.

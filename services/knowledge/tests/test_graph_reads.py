@@ -8,9 +8,9 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from mirofish_knowledge.contracts import FactResult, GraphPage, GraphPageRequest, KnowledgeScope, Layer
-from mirofish_knowledge.graph_reads import GraphReadViolation, ResultTooLarge
-from mirofish_knowledge.provider import GraphitiKnowledgeProvider, ReconciliationRequired
+from nexaweave_knowledge.contracts import FactResult, GraphPage, GraphPageRequest, KnowledgeScope, Layer
+from nexaweave_knowledge.graph_reads import GraphReadViolation, ResultTooLarge
+from nexaweave_knowledge.provider import GraphitiKnowledgeProvider, ReconciliationRequired
 
 
 def scope():

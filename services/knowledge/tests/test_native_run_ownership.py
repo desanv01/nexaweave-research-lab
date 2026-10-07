@@ -8,9 +8,9 @@ from uuid import uuid4
 
 import pytest
 
-from mirofish_execution.native_run_contracts import (InvalidNativeRun, NativeChildIdentity,
+from nexaweave_execution.native_run_contracts import (InvalidNativeRun, NativeChildIdentity,
     NativeRunReceipt, NativeRunRequest)
-from mirofish_execution.native_run_coordinator import NativeObservation
+from nexaweave_execution.native_run_coordinator import NativeObservation
 
 
 def request(**changes):
@@ -65,7 +65,7 @@ def test_unknown_wire_key_and_receipt_shape_rejected():
 
 
 def test_plain_contract_import_does_not_load_runtime_dependencies():
-    code = ("import sys; import mirofish_execution.native_run_contracts; "
+    code = ("import sys; import nexaweave_execution.native_run_contracts; "
             "forbidden = {'psycopg', 'temporalio', 'graphiti_core', 'oasis', 'camel'}; "
             "assert not (forbidden & set(sys.modules))")
     result = subprocess.run([sys.executable, "-c", code], capture_output=True,

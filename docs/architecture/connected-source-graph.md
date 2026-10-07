@@ -9,7 +9,7 @@ phase. Vue, Flask, OASIS/CAMEL and Graphiti with self-hosted Neo4j remain the st
 
 Use the existing isolated installed knowledge interpreter and `ReadHostSettings`
 configuration. The read bootstrap must be the trusted installed
-`site-packages/mirofish_knowledge/read_bootstrap.py`; the ingestion client selects
+`site-packages/nexaweave_knowledge/read_bootstrap.py`; the ingestion client selects
 only its fixed sibling `source_ingestion_bootstrap.py`, launched through the
 existing owned transport with `-I`. There is no request-selected script,
 interpreter, environment, endpoint, account, principal, project or ceiling.

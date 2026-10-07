@@ -13,12 +13,12 @@ from uuid import uuid4
 
 import pytest
 
-from mirofish_execution import native_process_driver as driver_module
-from mirofish_execution.native_owned_binding import _manifest
-from mirofish_execution.native_process_driver import NativeProcessDriver
-from mirofish_execution.native_process_worker import (MAX_MESSAGE, decode_message,
+from nexaweave_execution import native_process_driver as driver_module
+from nexaweave_execution.native_owned_binding import _manifest
+from nexaweave_execution.native_process_driver import NativeProcessDriver
+from nexaweave_execution.native_process_worker import (MAX_MESSAGE, decode_message,
                                                      encode_message)
-from mirofish_execution.native_run_contracts import (InvalidNativeRun,
+from nexaweave_execution.native_run_contracts import (InvalidNativeRun,
     NativeRunRequest, NativeRunUnavailable)
 
 
@@ -234,7 +234,7 @@ def test_child_scrubs_secrets_and_proxy_without_mutating_parent(tmp_path, monkey
 
 
 def test_offline_child_denies_external_socket_before_connect(tmp_path, monkeypatch):
-    monkeypatch.setenv("MIROFISH_NATIVE_TEST_OFFLINE", "1")
+    monkeypatch.setenv("NEXAWEAVE_NATIVE_TEST_OFFLINE", "1")
     marker = str(tmp_path / "socket")
     driver = NativeProcessDriver(ExternalSocketFactory(marker))
     value, attempt = request(), uuid4()

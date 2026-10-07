@@ -21,8 +21,8 @@ pytestmark = pytest.mark.postgres
 def connection_factory():
     import psycopg
     from psycopg.conninfo import conninfo_to_dict
-    from mirofish_execution.native_run_store import migrate_native_runs
-    from mirofish_storage import migrate
+    from nexaweave_execution.native_run_store import migrate_native_runs
+    from nexaweave_storage import migrate
 
     if os.getenv("PROJECT_STORE_POSTGRES_INTEGRATION") != "1":
         pytest.skip("disposable PostgreSQL integration disabled")
@@ -61,9 +61,9 @@ def _snapshot():
 
 def _prepared_host(connection_factory, tmp_path, *, dispatch=True):
     from app.services.native_prepared_host import NativePreparedHost
-    from mirofish_execution.native_owned_binding import NativeOwnedSessionFactory, _manifest
-    from mirofish_execution.native_run_contracts import NativeRunRequest
-    from mirofish_storage import ProjectStore
+    from nexaweave_execution.native_owned_binding import NativeOwnedSessionFactory, _manifest
+    from nexaweave_execution.native_run_contracts import NativeRunRequest
+    from nexaweave_storage import ProjectStore
 
     root = prepared(tmp_path)
     project_id = uuid4()
@@ -107,8 +107,8 @@ def _close(host):
 ])
 def test_host_rejects_unpromised_or_nonfinite_driver_bounds(bounds, tmp_path):
     from app.services.native_prepared_host import NativePreparedHost
-    from mirofish_execution.native_owned_binding import NativeOwnedSessionFactory
-    from mirofish_execution.native_run_contracts import InvalidNativeRun, NativeRunRequest
+    from nexaweave_execution.native_owned_binding import NativeOwnedSessionFactory
+    from nexaweave_execution.native_run_contracts import InvalidNativeRun, NativeRunRequest
 
     project = uuid4()
     binding = NativeOwnedSessionFactory(str(tmp_path / "unread"), "graph-fixture",
@@ -126,11 +126,11 @@ def test_host_rejects_unpromised_or_nonfinite_driver_bounds(bounds, tmp_path):
 
 def test_both_platforms_durable_attachment_and_exact_terminal_recovery(
         connection_factory, tmp_path, monkeypatch):
-    from mirofish_execution.native_run_contracts import RunState
-    from mirofish_execution.native_run_store import NativeRunStore
+    from nexaweave_execution.native_run_contracts import RunState
+    from nexaweave_execution.native_run_store import NativeRunStore
 
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("MIROFISH_NATIVE_TEST_OFFLINE", "1")
+    monkeypatch.setenv("NEXAWEAVE_NATIVE_TEST_OFFLINE", "1")
     root, _, request, original, new_host = _prepared_host(connection_factory, tmp_path)
     host = new_host()
     attached_before_go = []
@@ -182,7 +182,7 @@ def test_both_platforms_durable_attachment_and_exact_terminal_recovery(
 def test_dispatch_off_and_foreign_revision_denied_before_artifacts(
         connection_factory, tmp_path, monkeypatch):
     from app.services.native_prepared_host import NativePreparedHost
-    from mirofish_execution.native_run_store import NativeRunStore
+    from nexaweave_execution.native_run_store import NativeRunStore
 
     monkeypatch.chdir(tmp_path)
     root, binding, request, _, new_host = _prepared_host(connection_factory, tmp_path)
@@ -216,7 +216,7 @@ def test_dispatch_off_and_foreign_revision_denied_before_artifacts(
             assert not (root / ".native_prepared_start_claim").exists()
         finally:
             _close(denied)
-    from mirofish_execution.native_run_contracts import NativeRunDenied
+    from nexaweave_execution.native_run_contracts import NativeRunDenied
     with pytest.raises(NativeRunDenied):
         NativePreparedHost(principal="owner", request=replace(request,
             project_revision=2, run_id=uuid4()), session_factory=binding,
@@ -226,11 +226,11 @@ def test_dispatch_off_and_foreign_revision_denied_before_artifacts(
 @pytest.mark.parametrize("change", ["artifact", "runtime", "changed-input"])
 def test_mismatch_fences_without_native_side_effects(connection_factory, tmp_path,
                                                       monkeypatch, change):
-    from mirofish_execution.native_run_contracts import RunState
-    from mirofish_execution.native_run_store import NativeRunStore
+    from nexaweave_execution.native_run_contracts import RunState
+    from nexaweave_execution.native_run_store import NativeRunStore
 
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("MIROFISH_NATIVE_TEST_OFFLINE", "1")
+    monkeypatch.setenv("NEXAWEAVE_NATIVE_TEST_OFFLINE", "1")
     root, _, request, original, new_host = _prepared_host(connection_factory, tmp_path)
     wrong = (replace(request, artifact_sha256="a" * 64) if change == "artifact"
              else replace(request, runtime_sha256="c" * 64) if change == "runtime"
@@ -261,8 +261,8 @@ def test_mismatch_fences_without_native_side_effects(connection_factory, tmp_pat
 def test_cancel_during_dispatch_gate_prevents_claim_and_native_launch(
         connection_factory, tmp_path, monkeypatch):
     from app.services.native_prepared_host import NativePreparedHost
-    from mirofish_execution.native_run_store import NativeRunStore
-    from mirofish_execution.native_run_supervisor import SupervisorWaitTimeout
+    from nexaweave_execution.native_run_store import NativeRunStore
+    from nexaweave_execution.native_run_supervisor import SupervisorWaitTimeout
 
     monkeypatch.chdir(tmp_path)
     root, binding, request, _, _ = _prepared_host(connection_factory, tmp_path)

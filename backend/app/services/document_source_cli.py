@@ -29,7 +29,7 @@ class _Parser(argparse.ArgumentParser):
 
 def _load_extractor():
     source = Path(__file__).resolve().parents[1] / "utils" / "docx_extraction.py"
-    name = "_mirofish_document_source_extractor"
+    name = "_nexaweave_document_source_extractor"
     spec = importlib.util.spec_from_file_location(name, source)
     if spec is None or spec.loader is None:
         raise DocumentSourceError("parser_unavailable")
@@ -48,7 +48,7 @@ def _binding(argv):
     args = parser.parse_args(argv)
     # Fixed repository storage package; no caller or wire path enters sys.path.
     sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "services" / "knowledge" / "src"))
-    from mirofish_storage.validation import principal_id, uuid_value
+    from nexaweave_storage.validation import principal_id, uuid_value
     try:
         args.principal = principal_id(args.principal)
         args.project_id = uuid_value(args.project_id)
@@ -141,10 +141,22 @@ def _canonical(value):
                       separators=(",", ":")).encode("utf-8")
 
 
+def _appstore_dsn():
+    # This CLI runs as a saved script, so load the shared resolver without
+    # importing the Flask application or accepting a caller-supplied path.
+    source = Path(__file__).resolve().parents[1] / "utils" / "branding.py"
+    spec = importlib.util.spec_from_file_location("_nexaweave_cli_branding", source)
+    if spec is None or spec.loader is None:
+        raise DocumentSourceError("authority_unavailable")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.appstore_dsn()
+
+
 def _ingest(args):
     import psycopg
-    from mirofish_storage import Conflict, NotFound, ProjectStore, SourceStore
-    dsn = os.environ.get("MIROFISH_APPSTORE_DSN")
+    from nexaweave_storage import Conflict, NotFound, ProjectStore, SourceStore
+    dsn = _appstore_dsn()
     if not dsn:
         raise DocumentSourceError("authority_unavailable")
     def connect():

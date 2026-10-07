@@ -10,7 +10,7 @@ statement/lock timeouts.
 
 ## Local request and construction
 
-Run `python -m mirofish_knowledge.research_cli` with one UTF-8 JSON document on
+Run `python -m nexaweave_knowledge.research_cli` with one UTF-8 JSON document on
 stdin. Example:
 
 ```json

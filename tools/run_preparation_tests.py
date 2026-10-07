@@ -34,7 +34,7 @@ def child(integration: bool) -> int:
         # Qualification must consume the noneditable installed package. Backend
         # app source remains explicit; no credential/env-selected import path.
         installed = Path(sys.prefix).resolve()
-        for package in ('mirofish_execution', 'mirofish_storage', 'mirofish_knowledge'):
+        for package in ('nexaweave_execution', 'nexaweave_storage', 'nexaweave_knowledge'):
             spec = importlib.util.find_spec(package)
             if (spec is None or spec.origin is None
                     or not Path(spec.origin).resolve().is_relative_to(installed)
@@ -112,14 +112,14 @@ def main() -> int:
     spec = importlib.util.spec_from_file_location('_preparation_owned_process', ROOT / 'backend/app/utils/owned_process.py')
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
-    directory = tempfile.TemporaryDirectory(prefix='mirofish-preparation-')
+    directory = tempfile.TemporaryDirectory(prefix='nexaweave-preparation-')
     owner = helper.OwnedProcess()
     owner.bind_private_directory(directory)
     try:
         env = _unit_environment(Path(directory.name))
         env['PYTHONPATH'] = os.pathsep.join((str(ROOT), str(ROOT / 'backend'), str(ROOT / 'backend/tests'), str(ROOT / 'services/knowledge/tests')))
         env.update(HF_HUB_OFFLINE='1', TRANSFORMERS_OFFLINE='1', HF_HUB_DISABLE_TELEMETRY='1',
-                   DO_NOT_TRACK='1', MIROFISH_NATIVE_TEST_OFFLINE='1')
+                   DO_NOT_TRACK='1', NEXAWEAVE_NATIVE_TEST_OFFLINE='1')
         if args.integration:
             from psycopg.conninfo import make_conninfo
             env.update(PROJECT_STORE_POSTGRES_INTEGRATION='1', KNOWLEDGE_POSTGRES_INTEGRATION='1',

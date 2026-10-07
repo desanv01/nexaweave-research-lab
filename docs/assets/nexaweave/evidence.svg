@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 520 300" role="img" aria-labelledby="title desc">
+<title id="title">Evidence and graph illustration</title>
+<desc id="desc">Two source cards connect to claim and relationship nodes, illustrating traceability.</desc>
+<rect width="520" height="300" rx="18" fill="#E9F1EC"/>
+<text x="26" y="36" fill="#174B58" font-family="Arial, sans-serif" font-size="14" font-weight="700" letter-spacing="2">SOURCE → GRAPH</text>
+<rect x="28" y="70" width="174" height="184" rx="13" fill="#FFFFFF"/>
+<rect x="46" y="89" width="70" height="9" rx="4" fill="#1D8B85"/>
+<path d="M46 119h135M46 135h112M46 151h128M46 198h135M46 214h92" stroke="#A5BDBA" stroke-width="5" stroke-linecap="round"/>
+<rect x="46" y="168" width="77" height="16" rx="8" fill="#F0DAB3"/>
+<path d="M202 160h68M270 160l50-55M270 160l50 89M320 105h55M320 249h55" stroke="#5B9290" stroke-width="3" fill="none"/>
+<circle cx="270" cy="160" r="19" fill="#1D8B85"/>
+<circle cx="330" cy="105" r="16" fill="#E3B86F"/><circle cx="330" cy="249" r="16" fill="#E3B86F"/>
+<rect x="374" y="78" width="120" height="54" rx="10" fill="#FFFFFF"/><text x="390" y="111" fill="#102A3B" font-family="Arial, sans-serif" font-size="15" font-weight="700">Claim</text>
+<rect x="374" y="221" width="120" height="54" rx="10" fill="#FFFFFF"/><text x="390" y="254" fill="#102A3B" font-family="Arial, sans-serif" font-size="15" font-weight="700">Relation</text>
+</svg>

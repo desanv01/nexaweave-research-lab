@@ -14,7 +14,7 @@ def _uid(number):
 
 def test_readonly_cold_start_blocks_legacy_imports_without_model_keys(tmp_path):
     backend = Path(__file__).resolve().parents[1]
-    bootstrap = tmp_path / "site-packages" / "mirofish_knowledge" / "read_bootstrap.py"
+    bootstrap = tmp_path / "site-packages" / "nexaweave_knowledge" / "read_bootstrap.py"
     bootstrap.parent.mkdir(parents=True)
     bootstrap.write_text("# trusted installed-layout fixture\n", encoding="utf-8")
     scope = {"schema_version": 1, "workspace_id": _uid(1), "project_id": _uid(2),
@@ -25,7 +25,7 @@ def test_readonly_cold_start_blocks_legacy_imports_without_model_keys(tmp_path):
                  "PGPASSFILE", "PGOPTIONS"):
         environment.pop(name, None)
     environment.update({
-        "TEST_BACKEND": str(backend), "MIROFISH_APP_MODE": "graphiti_readonly",
+        "TEST_BACKEND": str(backend), "NEXAWEAVE_APP_MODE": "graphiti_readonly",
         "PYTHON_DOTENV_DISABLED": "1",
         "FLASK_HOST": "127.0.0.1", "KNOWLEDGE_PYTHON": sys.executable,
         "KNOWLEDGE_BOOTSTRAP_SCRIPT": str(bootstrap),

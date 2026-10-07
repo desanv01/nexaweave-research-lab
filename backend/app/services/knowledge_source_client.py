@@ -321,7 +321,7 @@ class KnowledgeSourceProcessClient(KnowledgeProcessClient):
     def __init__(self, settings):
         self._scope = dict(settings.scope)
         script = Path(settings.bootstrap).with_name("source_bootstrap.py")
-        if (script.parent.name != "mirofish_knowledge" or "site-packages" not in script.parts
+        if (script.parent.name != "nexaweave_knowledge" or "site-packages" not in script.parts
                 or Path(settings.bootstrap).name != "read_bootstrap.py"):
             raise ValueError("invalid source configuration")
         super().__init__(settings.python, str(script), timeout_seconds=60,

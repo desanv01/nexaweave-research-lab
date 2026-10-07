@@ -71,7 +71,7 @@ def reference(result):
 
 
 def report_budget_wire():
-    from mirofish_execution.report_contracts import budget_fingerprint, digest
+    from nexaweave_execution.report_contracts import budget_fingerprint, digest
     result, _ = public_result('completed')
     return dict(kind='connected_report_budget_v1', operation_id=result['report_id'], attempt_id=str(UUID(int=99)),
         fingerprint=budget_fingerprint(result['plan_sha256']), plan_sha256=result['plan_sha256'],
@@ -81,7 +81,7 @@ def report_budget_wire():
 def test_report_budget_receipt_roundtrip_has_no_mutable_alias_and_distinct_episode():
     from dataclasses import FrozenInstanceError
     from uuid import uuid5, NAMESPACE_URL
-    from mirofish_execution.report_contracts import ReportBudgetReceipt, budget_episode
+    from nexaweave_execution.report_contracts import ReportBudgetReceipt, budget_episode
     wire = report_budget_wire(); receipt = ReportBudgetReceipt.from_wire(wire)
     assert receipt.json_value() == wire
     assert receipt.operation_id == UUID(wire['operation_id']) and receipt.attempt_id == UUID(wire['attempt_id'])
@@ -113,7 +113,7 @@ def test_report_budget_receipt_roundtrip_has_no_mutable_alias_and_distinct_episo
     ids=['extra', 'foreign-kind', 'bool-id', 'foreign-id', 'attempt', 'fingerprint', 'plan', 'digest',
          'bool-version', 'proof-extra', 'proof-report', 'context', 'manifest', 'language', 'integrity', 'semantic'])
 def test_report_budget_proof_refuses_mutations_even_with_rehashed_nested_proof(change):
-    from mirofish_execution.report_contracts import ReportBudgetReceipt, ReportError, digest
+    from nexaweave_execution.report_contracts import ReportBudgetReceipt, ReportError, digest
     wire = report_budget_wire(); change(wire)
     if wire['report_receipt_sha256'] != '0'*64:
         wire['report_receipt_sha256'] = digest(wire['report_receipt'])

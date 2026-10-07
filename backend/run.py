@@ -1,5 +1,5 @@
 """
-MiroFish Backend 启动入口
+NexaWeave Backend 启动入口
 """
 
 import os
@@ -20,12 +20,16 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from app import create_app
 from app.config import Config
+from app.utils.branding import app_mode
 
 
 def main():
     """主函数"""
     # 验证配置
-    mode = os.environ.get('MIROFISH_APP_MODE', 'legacy')
+    try:
+        mode = app_mode(Config, Config)
+    except ValueError:
+        mode = None
     if mode in {'graphiti_readonly', 'research_local'}:
         errors = Config.validate_readonly()
     elif mode == 'legacy':

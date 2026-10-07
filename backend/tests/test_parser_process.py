@@ -50,7 +50,7 @@ def _assert_owned_cleanup(owned_processes):
     assert all(process.poll() is not None for process in owned_processes)
     assert not [
         thread for thread in threading.enumerate()
-        if thread.name.startswith("mirofish-parser-")
+        if thread.name.startswith("nexaweave-parser-")
     ]
 
 
@@ -79,7 +79,7 @@ def test_private_directory_cleanup_failure_maps_fixed_parser_error_and_preserves
 
         def interrupt_reader_start(thread):
             real_start(thread)
-            if thread.name == "mirofish-parser-reader":
+            if thread.name == "nexaweave-parser-reader":
                 raise interrupt()
 
         monkeypatch.setattr(parser_process.threading.Thread, "start", interrupt_reader_start)
@@ -299,14 +299,14 @@ def test_invalid_path_limits_and_request_size_before_spawn(tmp_path, monkeypatch
 
 
 def test_private_environment_pid_and_temp_cleanup(tmp_path, monkeypatch, owned_processes):
-    monkeypatch.setenv("MIROFISH_SECRET_SENTINEL", "private-token")
+    monkeypatch.setenv("NEXAWEAVE_SECRET_SENTINEL", "private-token")
     monkeypatch.setenv("HTTPS_PROXY", "private-proxy")
     _synthetic_worker(
         tmp_path,
         monkeypatch,
         "sys.stdin.buffer.read()\n"
         "text = '|'.join((str(os.getpid()), os.getcwd(), "
-        "str('MIROFISH_SECRET_SENTINEL' in os.environ), "
+        "str('NEXAWEAVE_SECRET_SENTINEL' in os.environ), "
         "str('HTTPS_PROXY' in os.environ), str('app' in sys.modules), "
         "str('PYTHONPATH' in os.environ)))\n"
         "sys.stdout.buffer.write(json.dumps({'version': 1, 'text': text}).encode())\n",
@@ -433,7 +433,7 @@ def test_cancellation_after_spawn_reaps_owned_child(
 
     def interrupt_after_start(thread):
         real_start(thread)
-        if thread.name == "mirofish-parser-reader":
+        if thread.name == "nexaweave-parser-reader":
             raise KeyboardInterrupt()
 
     monkeypatch.setattr(parser_process.threading.Thread, "start", interrupt_after_start)
@@ -451,7 +451,7 @@ def test_second_io_thread_start_failure_reaps_owned_child(
     real_start = threading.Thread.start
 
     def fail_reader_start(thread):
-        if thread.name == "mirofish-parser-reader":
+        if thread.name == "nexaweave-parser-reader":
             raise RuntimeError("reader start failed")
         real_start(thread)
 
@@ -499,9 +499,9 @@ def test_fixed_worker_run_does_not_start_app_or_load_dotenv(tmp_path, monkeypatc
     source = tmp_path / "source.txt"
     source.write_bytes("雪".encode("utf-8"))
     (tmp_path / ".env").write_text(
-        "MIROFISH_SECRET_SENTINEL=dotenv-secret\n", encoding="utf-8"
+        "NEXAWEAVE_SECRET_SENTINEL=dotenv-secret\n", encoding="utf-8"
     )
-    monkeypatch.setenv("MIROFISH_SECRET_SENTINEL", "parent-secret")
+    monkeypatch.setenv("NEXAWEAVE_SECRET_SENTINEL", "parent-secret")
     wrapper = tmp_path / "inspect fixed worker.py"
     wrapper.write_text(
         "import importlib.util, json, os, sys\n"
@@ -514,7 +514,7 @@ def test_fixed_worker_run_does_not_start_app_or_load_dotenv(tmp_path, monkeypatc
         "imports = [name for name in sys.modules if any("
         "name == item or name.startswith(item + '.') for item in blocked)]\n"
         "report = {'result': result, 'imports': imports, "
-        "'secret': os.environ.get('MIROFISH_SECRET_SENTINEL')}\n"
+        "'secret': os.environ.get('NEXAWEAVE_SECRET_SENTINEL')}\n"
         "sys.stdout.buffer.write(json.dumps(report, ensure_ascii=False).encode('utf-8'))\n",
         encoding="utf-8",
     )

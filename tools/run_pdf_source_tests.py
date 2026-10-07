@@ -36,7 +36,7 @@ if sys.argv[1:] == ['--child']:
 spec = importlib.util.spec_from_file_location('main_pdf_owner', REPO / 'backend/app/utils/owned_process.py')
 helper = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(helper)
-directory = tempfile.TemporaryDirectory(prefix='mirofish-pdf-profile-unit-')
+directory = tempfile.TemporaryDirectory(prefix='nexaweave-pdf-profile-unit-')
 owner = helper.OwnedProcess()
 owner.bind_private_directory(directory)
 threads, errors = [], []

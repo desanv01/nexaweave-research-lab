@@ -48,7 +48,7 @@ def _reject_constant(_value):
 
 def _load_file_parser():
     source = Path(__file__).with_name("file_parser.py")
-    spec = importlib.util.spec_from_file_location("_mirofish_file_parser", source)
+    spec = importlib.util.spec_from_file_location("_nexaweave_file_parser", source)
     if spec is None or spec.loader is None:
         raise ImportError("parser module unavailable")
     module = importlib.util.module_from_spec(spec)

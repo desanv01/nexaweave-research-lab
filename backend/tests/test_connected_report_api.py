@@ -31,12 +31,12 @@ def test_research_local_registration_health_and_report_metadata_stay_execution_c
     settings = ReadHostSettings('python', 'read_bootstrap.py', '0123456789abcdef' * 4,
         'owner', 'display-1', scope, {})
     monkeypatch.setattr(ReadHostSettings, 'from_config', classmethod(lambda cls, config: settings))
-    monkeypatch.setenv('MIROFISH_APP_MODE', 'research_local')
+    monkeypatch.setenv('NEXAWEAVE_APP_MODE', 'research_local')
     monkeypatch.delenv('FLASK_HOST', raising=False)
     original = builtins.__import__
     def block(name, *args, **kwargs):
         root = name.lstrip('.').split('.')[0]
-        if (root in {'mirofish_execution', 'mirofish_storage', 'mirofish_knowledge',
+        if (root in {'nexaweave_execution', 'nexaweave_storage', 'nexaweave_knowledge',
                      'openai', 'graphiti_core', 'camel', 'neo4j', 'temporalio'}
                 or name.endswith(('connected_report_client', 'connected_report_facade'))):
             pytest.fail('generic HTTP startup imported report execution or provider runtime')
@@ -64,7 +64,7 @@ def test_missing_pure_report_codec_only_refuses_report_operation(monkeypatch):
     original = builtins.__import__
     def missing(name, *args, **kwargs):
         if name.endswith('connected_report_client'):
-            raise ModuleNotFoundError('mirofish_execution')
+            raise ModuleNotFoundError('nexaweave_execution')
         return original(name, *args, **kwargs)
     monkeypatch.setattr(builtins, '__import__', missing)
     assert app.test_client().get('/health').json == {'ok': True}

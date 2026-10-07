@@ -496,6 +496,6 @@ def test_installed_sdk_serializes_the_batch_325_contract():
         "data_type": "text",
         "graph_id": "graph-id",
         "metadata": add_payload["items"][0]["metadata"],
-        "source_description": "MiroFish source document chunk",
+        "source_description": "NexaWeave source document chunk",
         "type": "graph_episode",
     }

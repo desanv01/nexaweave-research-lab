@@ -21,10 +21,10 @@ def factory():
 @pytest.mark.asyncio
 async def test_fresh_two_platform_completed_outputs_read_without_models_or_budget_mutation(factory, tmp_path, monkeypatch):
     # Keep native and CAMEL-bearing imports out of generic collection/spawn entry.
-    from mirofish_execution.temporal_preparation_host import TemporalPreparationHost
-    from mirofish_execution.temporal_native_host import TemporalNativeHost, NativeWorkflowRef
-    from mirofish_execution.native_run_store import NativeRunStore
-    from mirofish_execution.native_launch_store import NativeLaunchStore
+    from nexaweave_execution.temporal_preparation_host import TemporalPreparationHost
+    from nexaweave_execution.temporal_native_host import TemporalNativeHost, NativeWorkflowRef
+    from nexaweave_execution.native_run_store import NativeRunStore
+    from nexaweave_execution.native_launch_store import NativeLaunchStore
     from test_connected_preparation_native_launch import RichConnectedChat
     from test_preparation_store import real_host, request, reference as preparation_reference
     from test_native_launch_store import migrate_all, launch_host, declaration

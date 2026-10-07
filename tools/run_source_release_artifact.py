@@ -31,7 +31,7 @@ def main() -> int:
             capture_output=True, timeout=15, check=True).stdout.decode("ascii").strip()
         if not EXPECTED.fullmatch(revision):
             raise ValueError
-        with tempfile.TemporaryDirectory(prefix="mirofish-source-artifact-") as folder:
+        with tempfile.TemporaryDirectory(prefix="nexaweave-source-artifact-") as folder:
             directory = Path(folder).resolve()
             command = [sys.executable, "-I", str(CLI)]
             reports = []

@@ -15,8 +15,8 @@ from uuid import uuid4
 
 import pytest
 
-from mirofish_knowledge.stdio import serve_once
-from mirofish_knowledge import commands
+from nexaweave_knowledge.stdio import serve_once
+from nexaweave_knowledge import commands
 
 
 BACKEND_CLIENT = Path(__file__).resolve().parents[3] / "backend" / "app" / "services" / "knowledge_transport.py"
@@ -196,9 +196,9 @@ import os
 import sys
 from uuid import uuid4
 sys.path.insert(0, {str(KNOWLEDGE_SOURCE)!r})
-from mirofish_knowledge.commands import KnowledgeCommandDispatcher
-from mirofish_knowledge.contracts import FactResult, GraphPage, SearchResult
-from mirofish_knowledge.stdio import serve_once
+from nexaweave_knowledge.commands import KnowledgeCommandDispatcher
+from nexaweave_knowledge.contracts import FactResult, GraphPage, SearchResult
+from nexaweave_knowledge.stdio import serve_once
 
 class Provider:
     async def page(self, scope, request):
@@ -301,7 +301,7 @@ def test_partial_thread_startup_cleans_child_threads_temp_and_reuses_lock(tmp_pa
         return process
 
     def fail_reader_start(thread):
-        if thread.name == "mirofish-knowledge-reader":
+        if thread.name == "nexaweave-knowledge-reader":
             raise RuntimeError("private startup detail")
         return original_start(thread)
 
@@ -311,7 +311,7 @@ def test_partial_thread_startup_cleans_child_threads_temp_and_reuses_lock(tmp_pa
         client.call(request())
     assert caught.value.outcome_unknown and "private" not in str(caught.value)
     assert len(owned) == 1 and owned[0][0].poll() is not None and not owned[0][1].exists()
-    assert not any(thread.name.startswith("mirofish-knowledge-") for thread in threading.enumerate())
+    assert not any(thread.name.startswith("nexaweave-knowledge-") for thread in threading.enumerate())
     assert not client._lock.locked()
     monkeypatch.setattr(transport.threading.Thread, "start", original_start)
     assert json.loads(client.call(request()))["ok"] is True
@@ -441,9 +441,9 @@ def test_blocked_stdin_writer_is_bounded_and_owned_threads_stop(tmp_path, transp
     assert caught.value.outcome_unknown
     assert not client._lock.locked()
     deadline = time.monotonic() + 2
-    while any(thread.name.startswith("mirofish-knowledge-") for thread in threading.enumerate()) and time.monotonic() < deadline:
+    while any(thread.name.startswith("nexaweave-knowledge-") for thread in threading.enumerate()) and time.monotonic() < deadline:
         time.sleep(0.01)
-    assert not any(thread.name.startswith("mirofish-knowledge-") for thread in threading.enumerate())
+    assert not any(thread.name.startswith("nexaweave-knowledge-") for thread in threading.enumerate())
 
 
 def test_lock_busy_and_restoration(tmp_path, transport):
@@ -508,4 +508,4 @@ def test_caller_interrupt_releases_owned_child_and_lock(tmp_path, transport, mon
     monkeypatch.setattr(queue.Queue, "get", original_get)
     assert not client._lock.locked()
     assert len(owned) == 1 and owned[0][0].poll() is not None and not owned[0][1].exists()
-    assert not any(thread.name.startswith("mirofish-knowledge-") for thread in threading.enumerate())
+    assert not any(thread.name.startswith("nexaweave-knowledge-") for thread in threading.enumerate())

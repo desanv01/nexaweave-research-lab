@@ -48,7 +48,7 @@ Flask/backend generator requirements. It uses the installed knowledge package, w
 source-module loading or another knowledge stack. Main owns installation and
 qualification; this packet adds no dependencies or automatic installation.
 
-The operator explicitly runs `mirofish_execution.preparation_store.migrate(conn)`
+The operator explicitly runs `nexaweave_execution.preparation_store.migrate(conn)`
 after the accepted application, knowledge and budget migrations. It owns a separate
 namespace, SQL checksum, advisory lock and catalog drift checks. It does not alter
 the accepted `mf_execution` migration/catalog. `BudgetLedger.reserve_prepared`

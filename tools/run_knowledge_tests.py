@@ -23,7 +23,8 @@ def child(integration: bool) -> int:
     try:
         import pytest
         files = ["tests/test_contracts.py", "tests/test_graph_reads.py", "tests/test_commands.py",
-                 "tests/test_stdio_transport.py", "tests/test_read_runtime.py"]
+                 "tests/test_stdio_transport.py", "tests/test_read_runtime.py",
+                 "tests/test_branding_compatibility.py"]
         if integration:
             files.append("tests/test_integration_neo4j.py")
         result = int(pytest.main(["-q", "-p", "pytest_asyncio.plugin", *files]))
@@ -42,7 +43,7 @@ def main() -> int:
     args = parser.parse_args()
     if args.child:
         return child(args.neo4j)
-    with tempfile.TemporaryDirectory(prefix="mirofish-knowledge-tests-") as directory:
+    with tempfile.TemporaryDirectory(prefix="nexaweave-knowledge-tests-") as directory:
         env = _unit_environment(Path(directory))
         env["GRAPHITI_TELEMETRY_ENABLED"] = "false"
         if args.neo4j:

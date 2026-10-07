@@ -9,13 +9,13 @@ from temporalio.client import Client
 from temporalio import activity
 from temporalio.worker import Replayer, Worker
 
-from mirofish_execution import BudgetBusy, BudgetLedger, migrate as migrate_budget
-from mirofish_execution.temporal_host import TemporalHostError, TemporalIngestionHost
-from mirofish_execution.temporal_workflow import ACTIVITY_NAME, SourceIngestionWorkflow
-from mirofish_execution.budgeted_ingestion import BudgetedIngestion
-from mirofish_knowledge.ingestion import KnowledgeIngestionCoordinator
-from mirofish_knowledge.operations import Ledger
-from mirofish_knowledge.source_bridge import SourceIngestionBridge
+from nexaweave_execution import BudgetBusy, BudgetLedger, migrate as migrate_budget
+from nexaweave_execution.temporal_host import TemporalHostError, TemporalIngestionHost
+from nexaweave_execution.temporal_workflow import ACTIVITY_NAME, SourceIngestionWorkflow
+from nexaweave_execution.budgeted_ingestion import BudgetedIngestion
+from nexaweave_knowledge.ingestion import KnowledgeIngestionCoordinator
+from nexaweave_knowledge.operations import Ledger
+from nexaweave_knowledge.source_bridge import SourceIngestionBridge
 from test_source_bridge_postgres import (FakeProvider, factory, ontology,
                                          owned_fixture)
 

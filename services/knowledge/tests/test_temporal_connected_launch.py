@@ -137,11 +137,11 @@ def await_gate_file(path,created,seconds=10):
 
 
 def gate_constructor(host,factory,scope,root,created):
-    from mirofish_execution.native_run_store import NativeRunStore
-    from mirofish_execution.native_run_coordinator import NativeRunCoordinator
-    from mirofish_execution.native_process_driver import NativeProcessDriver
-    from mirofish_execution.budgeted_native_supervisor import BudgetedNativeSupervisor
-    from mirofish_execution.native_launch_contracts import LaunchAuthorityError
+    from nexaweave_execution.native_run_store import NativeRunStore
+    from nexaweave_execution.native_run_coordinator import NativeRunCoordinator
+    from nexaweave_execution.native_process_driver import NativeProcessDriver
+    from nexaweave_execution.budgeted_native_supervisor import BudgetedNativeSupervisor
+    from nexaweave_execution.native_launch_contracts import LaunchAuthorityError
     def construct(request):
         row=host.store.get('owner',request.run_id)
         host._current(row)
@@ -161,8 +161,8 @@ def gate_constructor(host,factory,scope,root,created):
 @pytest.mark.asyncio
 async def test_real_temporal_pg_completion_exact_recovery_and_owner_cleanup(factory,tmp_path):
     from temporalio.worker import Replayer
-    from mirofish_execution.temporal_native_host import TemporalNativeHost,NativeWorkflowRef
-    from mirofish_execution.temporal_native_workflow import NativeExecutionWorkflow
+    from nexaweave_execution.temporal_native_host import TemporalNativeHost,NativeWorkflowRef
+    from nexaweave_execution.temporal_native_workflow import NativeExecutionWorkflow
     from test_native_launch_store import ready_host,launch_host,declaration
     from test_native_launch_api import reference
     temporal=await loopback_client()
@@ -198,8 +198,8 @@ async def test_real_temporal_pg_completion_exact_recovery_and_owner_cleanup(fact
 
 @pytest.mark.asyncio
 async def test_real_lost_ack_has_no_second_run_and_durable_cancel_receipt(factory,tmp_path):
-    from mirofish_execution.temporal_native_host import TemporalNativeHost
-    from mirofish_execution.native_launch_contracts import LaunchAuthorityError
+    from nexaweave_execution.temporal_native_host import TemporalNativeHost
+    from nexaweave_execution.native_launch_contracts import LaunchAuthorityError
     from test_native_launch_store import ready_host,launch_host,declaration
     from test_native_launch_api import reference
     temporal=await loopback_client();prep,scope,plan=await asyncio.to_thread(ready_host,factory,tmp_path)

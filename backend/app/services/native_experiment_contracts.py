@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 import stat
 
-from mirofish_execution.native_run_contracts import NativeRunRequest, principal_id
+from nexaweave_execution.native_run_contracts import NativeRunRequest, principal_id
 
 try:
     from .native_recording_contracts import (RecordingAnchors, RecordingError,

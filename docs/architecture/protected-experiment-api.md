@@ -88,7 +88,7 @@ The new contract/API/process tests are source-authored mock evidence only until
 Main runs them. Native integration sources reuse accepted offline actual-run
 and PostgreSQL fixtures with the actual fixed child and a Flask test client.
 They do not qualify a separate lean socket HTTP runtime; Main supplies that
-proof separately. `MIROFISH_EXPERIMENT_TEST_PYTHON` must explicitly name an
+proof separately. `NEXAWEAVE_EXPERIMENT_TEST_PYTHON` must explicitly name an
 absolute installed knowledge interpreter executable. Missing or invalid values
 fail the fixture clearly, with no skip, test-runner interpreter fallback,
 source-package injection, or installation. The child remains isolated with

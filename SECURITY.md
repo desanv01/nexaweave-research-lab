@@ -1,13 +1,13 @@
 # Security policy
 
-## Current support status
+## Current support
 
-U00 is a source-import stage. No Research Lab release or shared deployment is supported. The inherited app remains Zep-backed and has not passed the access, request, provider and data-isolation gates. Keep any exploratory run isolated on a local machine with synthetic data; do not expose the baseline publicly. A future release policy will identify supported versions once qualified.
+NexaWeave is public source in active development, with no qualified release or public app deployment. The complete access, provider, data isolation and operational security gates remain open. Use synthetic data for development checks. Do not expose an exploratory service to others or submit private documents.
 
-## Reporting a vulnerability
+## Report a vulnerability
 
-Use this repository's [private vulnerability reporting](https://github.com/desanv01/mirofish-research-lab/security/advisories/new) when available, or contact the repository owner privately through GitHub. Include the affected revision, reproduction steps, impact and any suggested fix. Do not put exploit details, credentials, private documents or model payloads in public issues. An issue may describe a non-sensitive symptom after coordination.
+Use [private vulnerability reporting for this repository](https://github.com/desanv01/nexaweave-research-lab/security/advisories/new) when available. If that route is unavailable, contact the repository owner privately through GitHub. Include the affected revision, steps to reproduce, impact and a suggested fix if known. Keep exploit details, credentials, private documents and model payloads out of public issues.
 
-## Handling data and credentials
+## Protect data and credentials
 
-Use `.env.example` only as a template and keep filled `.env` files untracked. CI must use synthetic fixtures and no paid provider keys. Graph partitions alone are not authorization. Planned Graphiti/Neo4j and application access controls must be qualified before a shared service is offered. The initial model target and any spending limits are not yet configured.
+Treat .env.example as a template and keep filled .env files untracked. Development checks use synthetic fixtures; they do not need paid provider keys. Graph partitions alone do not grant authorization. Paid model calls require actual local credentials and a concrete total spending cap. A fully local, no-egress mode and public deployment require separate qualification.

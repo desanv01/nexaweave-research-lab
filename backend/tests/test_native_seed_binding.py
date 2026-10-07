@@ -10,8 +10,8 @@ class ModelFactoryReached(Exception):
 
 
 def prepared_binding(tmp_path, posts, actors=None):
-    from mirofish_execution.native_owned_binding import NativeOwnedSessionFactory, _manifest
-    from mirofish_execution.native_run_contracts import NativeRunRequest
+    from nexaweave_execution.native_owned_binding import NativeOwnedSessionFactory, _manifest
+    from nexaweave_execution.native_run_contracts import NativeRunRequest
     root = tmp_path / 'prepared'
     root.mkdir()
     state = dict(status='ready', graph_id='seed-graph', simulation_id='seed-sim',

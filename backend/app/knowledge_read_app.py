@@ -16,6 +16,7 @@ from .services.knowledge_read_facade import KnowledgeReadFacade, ReadHostSetting
 from .services.knowledge_reader import KnowledgeReadError
 from .services.knowledge_transport import KnowledgeTransportError
 from .utils.browser_origins import parse_allowed_origins
+from .utils.branding import allowed_origins as configured_allowed_origins
 
 
 _STATUS = {"invalid_request": 400, "invalid_reply": 502, "not_found": 404,
@@ -85,15 +86,13 @@ def create_read_app(config_class, *, facade=None, evidence_facade=None, source_f
         raise ValueError("invalid application mode")
     app = Flask(__name__)
     app.config.from_object(config_class)
+    app.config['NEXAWEAVE_APP_MODE'] = mode
+    app.config['MIROFISH_APP_MODE'] = mode
     if app.config.get("DEBUG") or os.environ.get("FLASK_HOST", "127.0.0.1") not in {"127.0.0.1", "::1", "localhost"}:
         raise ValueError("invalid read-only server configuration")
-    configured = app.config.get("MIROFISH_ALLOWED_ORIGINS")
-    class_override = any("MIROFISH_ALLOWED_ORIGINS" in vars(candidate)
-                         for candidate in getattr(config_class, "__mro__", ())
-                         if candidate not in (Config, object))
-    if not class_override and "MIROFISH_ALLOWED_ORIGINS" in os.environ:
-        configured = os.environ["MIROFISH_ALLOWED_ORIGINS"]
-    origins = frozenset(parse_allowed_origins(configured))
+    origins = frozenset(parse_allowed_origins(configured_allowed_origins(config_class, Config)))
+    app.config['NEXAWEAVE_ALLOWED_ORIGINS'] = tuple(sorted(origins))
+    app.config['MIROFISH_ALLOWED_ORIGINS'] = tuple(sorted(origins))
     settings = ReadHostSettings.from_config(config_class)
     if mode == "research_local":
         from .source_library_api import register_source_routes

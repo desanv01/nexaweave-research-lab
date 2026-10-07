@@ -79,9 +79,9 @@ class InjectedClient:
 
 @pytest.fixture
 def host(monkeypatch):
-    monkeypatch.setenv("MIROFISH_APP_MODE", "research_local")
+    monkeypatch.setenv("NEXAWEAVE_APP_MODE", "research_local")
     monkeypatch.delenv("FLASK_HOST", raising=False)
-    monkeypatch.delenv("MIROFISH_ALLOWED_ORIGINS", raising=False)
+    monkeypatch.delenv("NEXAWEAVE_ALLOWED_ORIGINS", raising=False)
     token = "0123456789abcdef" * 4
     settings = ReadHostSettings("python", "read_bootstrap.py", token, "owner", "display-1", scope(), {})
     monkeypatch.setattr(ReadHostSettings, "from_config", classmethod(lambda cls, config: settings))
@@ -97,7 +97,7 @@ def test_explicit_mode_and_readonly_absence(host, monkeypatch):
     health = http.get("/health").json
     assert health["mode"] == "research_local"
     assert health["capabilities"][-2:] == ["source_library", "source_retention"]
-    monkeypatch.setenv("MIROFISH_APP_MODE", "graphiti_readonly")
+    monkeypatch.setenv("NEXAWEAVE_APP_MODE", "graphiti_readonly")
     readonly = create_app(source_facade=object()).test_client()
     assert readonly.get("/api/source/library/display-1", headers=headers).status_code == 404
     assert "source_retention" not in readonly.get("/health").json["capabilities"]
@@ -105,7 +105,7 @@ def test_explicit_mode_and_readonly_absence(host, monkeypatch):
 
 
 def test_injected_facade_does_not_skip_settings_validation(monkeypatch):
-    monkeypatch.setenv("MIROFISH_APP_MODE", "research_local")
+    monkeypatch.setenv("NEXAWEAVE_APP_MODE", "research_local")
     def denied(cls, config):
         raise ValueError("invalid knowledge read configuration")
     monkeypatch.setattr(ReadHostSettings, "from_config", classmethod(denied))
@@ -114,11 +114,11 @@ def test_injected_facade_does_not_skip_settings_validation(monkeypatch):
 
 
 def test_default_legacy_has_no_source_library(monkeypatch):
-    monkeypatch.delenv("MIROFISH_APP_MODE", raising=False)
-    monkeypatch.delenv("MIROFISH_ALLOWED_ORIGINS", raising=False)
+    monkeypatch.delenv("NEXAWEAVE_APP_MODE", raising=False)
+    monkeypatch.delenv("NEXAWEAVE_ALLOWED_ORIGINS", raising=False)
     class LegacyConfig(Config):
         DEBUG = True
-        MIROFISH_APP_MODE = "legacy"
+        NEXAWEAVE_APP_MODE = "legacy"
     # Only unrelated legacy registration is replaced here; this is a factory
     # mode test, not qualification of legacy simulation behavior.
     monkeypatch.setitem(sys.modules, "app.services.simulation_runner", SimpleNamespace(
@@ -127,7 +127,7 @@ def test_default_legacy_has_no_source_library(monkeypatch):
         graph_bp=Blueprint("legacy_graph", __name__), simulation_bp=Blueprint("legacy_sim", __name__),
         report_bp=Blueprint("legacy_report", __name__)))
     app = create_app(LegacyConfig, source_facade=object()).test_client()
-    assert app.get("/health").json["service"] == "MiroFish Backend"
+    assert app.get("/health").json["service"] == "NexaWeave Backend"
     assert app.get("/api/source/library/display-1").status_code == 404
 
 
@@ -437,10 +437,10 @@ def protected_entrypoint(monkeypatch, tmp_path):
     from pathlib import Path
     from flask import Flask
     monkeypatch.delenv("FLASK_HOST", raising=False)
-    monkeypatch.delenv("MIROFISH_ALLOWED_ORIGINS", raising=False)
+    monkeypatch.delenv("NEXAWEAVE_ALLOWED_ORIGINS", raising=False)
     for key in ("PGHOSTADDR", "PGSERVICE", "PGSERVICEFILE", "PGPASSFILE", "PGOPTIONS"):
         monkeypatch.delenv(key, raising=False)
-    script = tmp_path / "site-packages" / "mirofish_knowledge" / "read_bootstrap.py"
+    script = tmp_path / "site-packages" / "nexaweave_knowledge" / "read_bootstrap.py"
     script.parent.mkdir(parents=True)
     script.write_text("# Path validation fixture; never launched.\n", encoding="utf-8")
     values = {"KNOWLEDGE_PYTHON": str(Path(sys.executable).absolute()),
@@ -475,7 +475,7 @@ def protected_entrypoint(monkeypatch, tmp_path):
 @pytest.mark.parametrize("mode", ["research_local", "graphiti_readonly"])
 def test_actual_protected_entrypoint_uses_validated_loopback_defaults(protected_entrypoint, monkeypatch, mode):
     entrypoint, launches = protected_entrypoint
-    monkeypatch.setenv("MIROFISH_APP_MODE", mode)
+    monkeypatch.setenv("NEXAWEAVE_APP_MODE", mode)
     assert Config.validate()  # No legacy model/Zep credentials configured.
     assert Config.validate_readonly() == []
     entrypoint.main()
@@ -490,7 +490,7 @@ def test_actual_protected_entrypoint_uses_validated_loopback_defaults(protected_
 @pytest.mark.parametrize("unsafe", ["debug", "host"])
 def test_actual_research_entrypoint_rejects_unsafe_configuration(protected_entrypoint, monkeypatch, unsafe):
     entrypoint, launches = protected_entrypoint
-    monkeypatch.setenv("MIROFISH_APP_MODE", "research_local")
+    monkeypatch.setenv("NEXAWEAVE_APP_MODE", "research_local")
     if unsafe == "debug":
         monkeypatch.setattr(Config, "DEBUG", True)
     else:
@@ -557,7 +557,7 @@ def test_pdf_http_wire_admission_and_receipt_use_fixed_child_without_native_back
     http, child, headers, _ = host
     original = builtins.__import__
     def imports(name, *args, **kwargs):
-        if name.split(".")[0] in {"pymupdf", "fitz", "mirofish_storage"}:
+        if name.split(".")[0] in {"pymupdf", "fitz", "nexaweave_storage"}:
             raise AssertionError("PDF runtime entered Flask")
         return original(name, *args, **kwargs)
     monkeypatch.setattr(builtins, "__import__", imports)

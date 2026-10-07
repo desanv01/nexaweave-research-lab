@@ -68,7 +68,7 @@ def main() -> int:
         parser.error("approved disposable PostgreSQL fixture password required")
     from psycopg.conninfo import make_conninfo
 
-    with tempfile.TemporaryDirectory(prefix="mirofish-native-store-") as directory:
+    with tempfile.TemporaryDirectory(prefix="nexaweave-native-store-") as directory:
         env = _unit_environment(Path(directory))
         env["PYTHONPATH"] = os.pathsep.join([
             str(ROOT), str(ROOT / "backend"),
@@ -77,12 +77,12 @@ def main() -> int:
             str(ROOT / "backend" / "engine_tests"),
             str(ROOT / "backend" / "native_store_tests"),
         ])
-        env.update(MIROFISH_NATIVE_TEST_OFFLINE="1", HF_HUB_OFFLINE="1",
+        env.update(NEXAWEAVE_NATIVE_TEST_OFFLINE="1", HF_HUB_OFFLINE="1",
                    TRANSFORMERS_OFFLINE="1", HF_HUB_DISABLE_TELEMETRY="1",
                    DO_NOT_TRACK="1", PROJECT_STORE_POSTGRES_INTEGRATION="1")
-        for name in ('MIROFISH_EXPERIMENT_TEST_PYTHON',
-                     'MIROFISH_EXPERIMENT_TEST_HTTP_PYTHON',
-                     'MIROFISH_EXPERIMENT_TEST_BOOTSTRAP'):
+        for name in ('NEXAWEAVE_EXPERIMENT_TEST_PYTHON',
+                     'NEXAWEAVE_EXPERIMENT_TEST_HTTP_PYTHON',
+                     'NEXAWEAVE_EXPERIMENT_TEST_BOOTSTRAP'):
             value = os.environ.get(name)
             if not value or not Path(value).is_absolute() or not Path(value).is_file():
                 parser.error('explicit installed experiment test runtimes required')

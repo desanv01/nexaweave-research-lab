@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 470" role="img" aria-labelledby="title desc">
+<title id="title">NexaWeave research architecture</title>
+<desc id="desc">A source document leads to an evidence graph, two bounded simulation lanes and an evidence-linked research report.</desc>
+<rect width="1200" height="470" rx="24" fill="#102A3B"/>
+<path d="M0 368C220 300 334 423 574 357S975 283 1200 354V470H0Z" fill="#17394A"/>
+<text x="54" y="58" fill="#79D6C9" font-family="Arial, sans-serif" font-size="17" font-weight="700" letter-spacing="3">NEXAWEAVE  /  RESEARCH SYSTEM</text>
+<text x="54" y="104" fill="#F7F3E9" font-family="Arial, sans-serif" font-size="34" font-weight="700">Follow the evidence. Observe the system.</text>
+<path d="M296 249H353M583 249H642M849 249H903" stroke="#79D6C9" stroke-width="4" stroke-linecap="round"/>
+<path d="m346 242 9 7-9 7m288-14 9 7-9 7m254-14 9 7-9 7" fill="none" stroke="#79D6C9" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+<rect x="54" y="169" width="242" height="161" rx="17" fill="#F7F3E9"/>
+<text x="76" y="200" fill="#174B58" font-family="Arial, sans-serif" font-size="13" font-weight="700" letter-spacing="1.7">01  SOURCE</text>
+<rect x="77" y="217" width="74" height="89" rx="8" fill="#D6E5E1"/>
+<path d="M92 236h44M92 250h35M92 264h44M92 278h27" stroke="#49707A" stroke-width="3" stroke-linecap="round"/>
+<text x="165" y="244" fill="#102A3B" font-family="Arial, sans-serif" font-size="19" font-weight="700">Collect</text>
+<text x="165" y="269" fill="#49707A" font-family="Arial, sans-serif" font-size="15">documents</text>
+<text x="165" y="290" fill="#49707A" font-family="Arial, sans-serif" font-size="15">and claims</text>
+<rect x="354" y="169" width="229" height="161" rx="17" fill="#E5F0E9"/>
+<text x="376" y="200" fill="#174B58" font-family="Arial, sans-serif" font-size="13" font-weight="700" letter-spacing="1.7">02  EVIDENCE GRAPH</text>
+<path d="M414 246 466 227 520 256 459 287Z" fill="none" stroke="#467C7C" stroke-width="3"/>
+<circle cx="414" cy="246" r="9" fill="#1D8B85"/><circle cx="466" cy="227" r="9" fill="#E3B86F"/><circle cx="520" cy="256" r="9" fill="#1D8B85"/><circle cx="459" cy="287" r="9" fill="#1D8B85"/>
+<rect x="643" y="169" width="207" height="161" rx="17" fill="#F5E9D1"/>
+<text x="665" y="200" fill="#765727" font-family="Arial, sans-serif" font-size="13" font-weight="700" letter-spacing="1.7">03  SIMULATION</text>
+<rect x="665" y="222" width="162" height="37" rx="9" fill="#F7F3E9"/><circle cx="684" cy="240" r="6" fill="#1D8B85"/>
+<text x="700" y="246" fill="#102A3B" font-family="Arial, sans-serif" font-size="16" font-weight="700">Twitter</text>
+<rect x="665" y="271" width="162" height="37" rx="9" fill="#F7F3E9"/><circle cx="684" cy="289" r="6" fill="#C37D52"/>
+<text x="700" y="295" fill="#102A3B" font-family="Arial, sans-serif" font-size="16" font-weight="700">Reddit</text>
+<rect x="904" y="169" width="242" height="161" rx="17" fill="#F7F3E9"/>
+<text x="926" y="200" fill="#174B58" font-family="Arial, sans-serif" font-size="13" font-weight="700" letter-spacing="1.7">04  INVESTIGATION</text>
+<rect x="926" y="216" width="198" height="90" rx="9" fill="#E5F0E9"/>
+<path d="M942 279h61l22-38 20 20 17-12 19 30h26" fill="none" stroke="#1D8B85" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="1025" cy="241" r="6" fill="#E3B86F"/>
+<text x="54" y="399" fill="#BDD6D4" font-family="Arial, sans-serif" font-size="17">Architecture illustration · bounded results are documented separately</text>
+</svg>

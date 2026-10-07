@@ -8,7 +8,7 @@ IPC, lifecycle and existing execution limits.
 
 ## Admission
 
-`mirofish_execution.native_seed_contracts.validate_native_seed_plan` is a
+`nexaweave_execution.native_seed_contracts.validate_native_seed_plan` is a
 standard-library-only boundary. Owned factory validation calls it before the
 model factory; native session preflight and all inherited runners use the same
 contract. Admission snapshots the entire batch before seed effects. A nonempty

@@ -59,7 +59,7 @@ def main() -> int:
     args = parser.parse_args()
     if args.child:
         return child(args.integration)
-    with tempfile.TemporaryDirectory(prefix="mirofish-temporal-tests-") as directory:
+    with tempfile.TemporaryDirectory(prefix="nexaweave-temporal-tests-") as directory:
         env = _unit_environment(Path(directory))
         env["GRAPHITI_TELEMETRY_ENABLED"] = "false"
         if args.integration:

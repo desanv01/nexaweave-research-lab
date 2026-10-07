@@ -56,7 +56,7 @@ def main():
         return child('--neo4j' in args, '--integration-only' in args)
     if args not in ([], ['--neo4j'], ['--neo4j', '--integration-only']):
         raise SystemExit('only --neo4j [--integration-only] accepted')
-    with tempfile.TemporaryDirectory(prefix='mirofish-local-provider-') as directory:
+    with tempfile.TemporaryDirectory(prefix='nexaweave-local-provider-') as directory:
         env = _unit_environment(Path(directory))
         env['PYTHONPATH'] += os.pathsep + str(ROOT / 'services/knowledge/src')
         env['GRAPHITI_TELEMETRY_ENABLED'] = 'false'

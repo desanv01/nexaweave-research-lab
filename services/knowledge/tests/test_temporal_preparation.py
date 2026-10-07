@@ -11,11 +11,11 @@ from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 from temporalio.worker import Replayer
 
-from mirofish_execution.preparation_contracts import (PreparationAuthorityError,
+from nexaweave_execution.preparation_contracts import (PreparationAuthorityError,
     PreparationDispatch, PreparedBudgetReceipt)
-from mirofish_execution.temporal_preparation_workflow import (PreparationWorkflow,
+from nexaweave_execution.temporal_preparation_workflow import (PreparationWorkflow,
     ACTIVITY_NAME, START_TO_CLOSE, SCHEDULE_TO_CLOSE, HEARTBEAT_TIMEOUT, result_identifiers)
-from mirofish_execution.temporal_preparation_host import TemporalPreparationHost
+from nexaweave_execution.temporal_preparation_host import TemporalPreparationHost
 from test_source_bridge_postgres import factory
 
 
@@ -48,7 +48,7 @@ async def test_workflow_uses_one_attempt_and_finite_identifier_activity(monkeypa
     async def execute(name, wire, **kwargs):
         observed.append((name, wire, kwargs))
         return receipt(request)
-    from mirofish_execution import temporal_preparation_workflow as module
+    from nexaweave_execution import temporal_preparation_workflow as module
     monkeypatch.setattr(module.workflow, 'execute_activity', execute)
     assert await PreparationWorkflow().run(request.to_wire()) == receipt(request)
     name, wire, kwargs = observed[0]
@@ -89,8 +89,8 @@ async def test_real_temporal_pg_inherited_artifacts_restart_history_and_cleanup(
     address = os.getenv('TEMPORAL_TEST_ADDRESS')
     if address != '127.0.0.1:17233':
         pytest.fail('approved loopback Temporal address required')
-    from mirofish_execution.budget import migrate as migrate_budget
-    from mirofish_execution.preparation_store import migrate, PreparationStore
+    from nexaweave_execution.budget import migrate as migrate_budget
+    from nexaweave_execution.preparation_store import migrate, PreparationStore
     from test_preparation_store import real_host, request, reference
     with factory() as conn:
         migrate_budget(conn)

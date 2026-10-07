@@ -19,10 +19,10 @@ class DurableNativeLaunchHost:
                  model_label='unconfigured', limits=None, model_factory=None,
                  account_id=None, ceiling_microusd=None, authorize=None,
                  temporal_host=None, temporal_call=None):
-        from mirofish_execution.native_launch_store import NativeLaunchStore
-        from mirofish_execution.native_run_store import NativeRunStore
-        from mirofish_execution.budget import BudgetLedger
-        from mirofish_execution.native_run_contracts import sha256
+        from nexaweave_execution.native_launch_store import NativeLaunchStore
+        from nexaweave_execution.native_run_store import NativeRunStore
+        from nexaweave_execution.budget import BudgetLedger
+        from nexaweave_execution.native_run_contracts import sha256
         from .durable_preparation_host import DurablePreparationHost
         if not isinstance(preparation_host,DurablePreparationHost) or not callable(connection_factory):
             raise NativeLaunchError('native_launch_unavailable')
@@ -44,7 +44,7 @@ class DurableNativeLaunchHost:
             self.attach_temporal(temporal_host,temporal_call)
 
     def attach_temporal(self, host, call):
-        from mirofish_execution.temporal_native_host import TemporalNativeHost
+        from nexaweave_execution.temporal_native_host import TemporalNativeHost
         if not isinstance(host,TemporalNativeHost) or host._principal != self.principal or not callable(call):
             raise NativeLaunchError('native_launch_unavailable')
         if self.temporal is not None:
@@ -109,7 +109,7 @@ class DurableNativeLaunchHost:
             try:
                 local = self.temporal_call('local_status',row.request,None)
                 # Only the actual retained local registry can qualify cleanup.
-                from mirofish_execution.temporal_native_activities import LocalNativeStatus
+                from nexaweave_execution.temporal_native_activities import LocalNativeStatus
                 if isinstance(local,LocalNativeStatus) and local.run_id==row.run_id:
                     cleanup = {'known':True,'pending':local.cleanup_pending,'owner_thread_alive':local.owner_thread_alive}
             except Exception:
@@ -121,7 +121,7 @@ class DurableNativeLaunchHost:
         return validate_result(data,self.display_graph_id,self.scope_dto,payload,method)
 
     def plan(self,payload):
-        from mirofish_execution.native_launch_contracts import LaunchAuthorityError
+        from nexaweave_execution.native_launch_contracts import LaunchAuthorityError
         payload = validate_payload('plan',payload)
         prep,ref = self._preparation(payload['preparation'])
         try:
@@ -146,8 +146,8 @@ class DurableNativeLaunchHost:
         return self._dto(self.store.put(self.principal,payload,identity,configuration=self._configuration()),'plan',payload)
 
     def start(self,payload):
-        from mirofish_knowledge.contracts import KnowledgeScope
-        from mirofish_execution.budget import ReservationState
+        from nexaweave_knowledge.contracts import KnowledgeScope
+        from nexaweave_execution.budget import ReservationState
         payload = validate_payload('start',payload)
         row = self._row(payload)
         self._current(row)
@@ -183,7 +183,7 @@ class DurableNativeLaunchHost:
             # an unacknowledged scheduler call keeps the full ceiling held.
             self.budget.start(self.principal,self.account_id,row.run_id,reservation.attempt_id)
             ref = self.temporal_call('start',row.request,None)
-            from mirofish_execution.temporal_native_host import NativeWorkflowRef
+            from nexaweave_execution.temporal_native_host import NativeWorkflowRef
             if not isinstance(ref,NativeWorkflowRef):
                 raise NativeLaunchError('native_launch_uncertain')
             row = self.store.workflow(self.principal,row.run_id,row.launch_sha256,asdict(ref))
@@ -200,8 +200,8 @@ class DurableNativeLaunchHost:
         return self._dto(self._recover(row),'start',payload)
 
     def _recover(self,row):
-        from mirofish_execution.native_run_contracts import NativeRunDenied
-        from mirofish_knowledge.contracts import KnowledgeScope
+        from nexaweave_execution.native_run_contracts import NativeRunDenied
+        from nexaweave_knowledge.contracts import KnowledgeScope
         if row.state in {'planned','cancelled'} and row.budget_attempt_id is None:
             return row
         try:
@@ -223,7 +223,7 @@ class DurableNativeLaunchHost:
         return self._dto(self._recover(row),'status',payload)
 
     def cancel(self,payload):
-        from mirofish_execution.native_run_contracts import NativeRunDenied
+        from nexaweave_execution.native_run_contracts import NativeRunDenied
         payload = validate_payload('cancel',payload)
         row = self._row(payload)
         self._current(row)
@@ -235,7 +235,7 @@ class DurableNativeLaunchHost:
                 pass
             if row.workflow is not None and self.temporal_call is not None:
                 try:
-                    from mirofish_execution.temporal_native_host import NativeWorkflowRef
+                    from nexaweave_execution.temporal_native_host import NativeWorkflowRef
                     self.temporal_call('cancel',row.request,NativeWorkflowRef(**row.workflow))
                 except Exception:
                     # Persisted intent survives unavailable remote owner.
@@ -244,9 +244,9 @@ class DurableNativeLaunchHost:
 
     def supervisor_factory(self,request):
         """Trusted Temporal callback: authorize frozen PG row before files."""
-        from mirofish_execution.native_run_contracts import NativeRunRequest
-        from mirofish_execution.budgeted_native_supervisor import BudgetedNativeSupervisor
-        from mirofish_knowledge.contracts import KnowledgeScope
+        from nexaweave_execution.native_run_contracts import NativeRunRequest
+        from nexaweave_execution.budgeted_native_supervisor import BudgetedNativeSupervisor
+        from nexaweave_knowledge.contracts import KnowledgeScope
         from .native_prepared_host import NativePreparedHost
         request = NativeRunRequest.from_wire(request)
         row = self.store.get(self.principal,request.run_id)
@@ -256,8 +256,8 @@ class DurableNativeLaunchHost:
         if row.cancel_requested or not self.authorization(row)['model_calls_enabled']:
             raise NativeLaunchError('model_calls_disabled')
         reservation = self.budget.native_reservation(self.principal,self.account_id,request,row.launch_sha256)
-        from mirofish_execution.budget import ReservationState
-        from mirofish_execution.native_launch_contracts import native_budget_fingerprint
+        from nexaweave_execution.budget import ReservationState
+        from nexaweave_execution.native_launch_contracts import native_budget_fingerprint
         if (reservation is None or reservation.attempt_id!=row.budget_attempt_id
                 or reservation.fingerprint!=native_budget_fingerprint(row.launch_sha256)
                 or reservation.state not in {ReservationState.started,ReservationState.uncertain}):

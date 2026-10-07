@@ -31,14 +31,14 @@ The child scrubs inherited provider-key prefixes, proxy settings and Python
 startup hooks before calling the trusted session factory, then sets
 `PYTHON_DOTENV_DISABLED=1` so the inherited backend `app.config` import does
 not refill secrets from a local `.env`. With the exact trusted test flag
-`MIROFISH_NATIVE_TEST_OFFLINE=1`, the child also sets the Hugging Face and
+`NEXAWEAVE_NATIVE_TEST_OFFLINE=1`, the child also sets the Hugging Face and
 Transformers offline flags and rejects non-loopback socket connections, DNS
 lookups and datagrams. That guard is test-only; it is not a production
 network policy or paid-call authorization. This does not create
 a paid-client authorization path. A future live host needs its own secret and
 spend-cap policy. `PATH`, operating-system directories, temporary directories
 and the installed runtime remain available. The host must make both
-`mirofish_execution` and backend `app` importable in the spawned interpreter;
+`nexaweave_execution` and backend `app` importable in the spawned interpreter;
 the driver has no module-path or executable selection from request data. The
 pickled binding class lives in a standard-library-only execution module so
 unpickling does not import the backend app before environment scrubbing.

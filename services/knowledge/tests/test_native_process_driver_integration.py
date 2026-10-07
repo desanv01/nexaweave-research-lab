@@ -8,11 +8,11 @@ from uuid import uuid4
 
 import pytest
 
-from mirofish_execution.native_process_driver import NativeProcessDriver
-from mirofish_execution.native_run_contracts import NativeRunBusy, NativeRunRequest, RunState
-from mirofish_execution.native_run_coordinator import NativeRunCoordinator
-from mirofish_execution.native_run_store import NativeRunStore, migrate_native_runs
-from mirofish_storage import ProjectStore
+from nexaweave_execution.native_process_driver import NativeProcessDriver
+from nexaweave_execution.native_run_contracts import NativeRunBusy, NativeRunRequest, RunState
+from nexaweave_execution.native_run_coordinator import NativeRunCoordinator
+from nexaweave_execution.native_run_store import NativeRunStore, migrate_native_runs
+from nexaweave_storage import ProjectStore
 from test_native_process_driver import FileFactory
 from test_project_store import snapshot
 from test_project_store_postgres import factory  # guarded port 15432

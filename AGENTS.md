@@ -2,7 +2,7 @@
 
 Latest direct human decision 2026-10-05 resumes implementation and authorizes PUBLIC
 desanv01/nexaweave-research-lab and visible NexaWeave branding. Preserve upstream
-MiroFish attribution and existing package/persisted/runtime compatibility identifiers.
+authorship and existing package/persisted/runtime compatibility identifiers.
 Public application deployment is separately scoped; any later direct human pause
 immediately stops Main, workers and the sole existing schedule.
 

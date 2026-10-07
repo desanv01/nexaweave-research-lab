@@ -11,8 +11,8 @@ from openai import APIConnectionError
 
 from graphiti_core.llm_client.config import ModelSize
 from graphiti_core.prompts import Message
-from mirofish_knowledge.provider import Endpoint, GraphitiKnowledgeProvider, ProviderConfig
-from mirofish_knowledge.local_transport import LocalPolicyViolation
+from nexaweave_knowledge.provider import Endpoint, GraphitiKnowledgeProvider, ProviderConfig
+from nexaweave_knowledge.local_transport import LocalPolicyViolation
 
 
 class Answer(BaseModel):
@@ -91,7 +91,7 @@ def messages():
 
 @pytest.fixture
 def captured_graph(monkeypatch):
-    import mirofish_knowledge.provider as module
+    import nexaweave_knowledge.provider as module
     class Driver:
         def __init__(self, *args):
             pass

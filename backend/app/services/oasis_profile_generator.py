@@ -24,7 +24,7 @@ from ..utils.openai_chat_compat import create_chat_completion, extract_chat_comp
 if TYPE_CHECKING:
     from .zep_entity_reader import EntityNode
 
-logger = get_logger('mirofish.oasis_profile')
+logger = get_logger('nexaweave.oasis_profile')
 
 
 def _coerce_to_str(value: Any) -> str:

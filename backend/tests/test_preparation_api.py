@@ -31,9 +31,9 @@ def planned(payload):
 
 @pytest.fixture
 def api(monkeypatch):
-    monkeypatch.setenv('MIROFISH_APP_MODE', 'research_local')
+    monkeypatch.setenv('NEXAWEAVE_APP_MODE', 'research_local')
     monkeypatch.delenv('FLASK_HOST', raising=False)
-    monkeypatch.delenv('MIROFISH_ALLOWED_ORIGINS', raising=False)
+    monkeypatch.delenv('NEXAWEAVE_ALLOWED_ORIGINS', raising=False)
     token = '0123456789abcdef' * 4
     settings = ReadHostSettings('python', 'read_bootstrap.py', token, 'owner', 'display-1', SCOPE, {})
     monkeypatch.setattr(ReadHostSettings, 'from_config', classmethod(lambda cls, config: settings))
@@ -151,7 +151,7 @@ def test_unconfigured_host_is_honest_and_cold(api):
 
 def test_preparation_absent_from_readonly_mode(api, monkeypatch):
     _, _, headers, settings = api
-    monkeypatch.setenv('MIROFISH_APP_MODE', 'graphiti_readonly')
+    monkeypatch.setenv('NEXAWEAVE_APP_MODE', 'graphiti_readonly')
     reply = create_app().test_client().post('/api/preparation/display-1/plan', json=plan_request(), headers=headers)
     assert reply.status_code == 404
 
@@ -161,7 +161,7 @@ def test_cold_preparation_surface_does_not_import_optional_engines():
 import builtins
 original = builtins.__import__
 def guarded(name, *args, **kwargs):
-    if name.split('.')[0] in {'temporalio','psycopg','openai','camel','oasis','zep_cloud','mirofish_execution','mirofish_storage'}:
+    if name.split('.')[0] in {'temporalio','psycopg','openai','camel','oasis','zep_cloud','nexaweave_execution','nexaweave_storage'}:
         raise AssertionError('cold optional dependency: ' + name)
     return original(name, *args, **kwargs)
 builtins.__import__ = guarded

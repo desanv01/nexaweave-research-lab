@@ -227,7 +227,7 @@ def extract_text_isolated(file_path, *, limits=None, timeout_seconds=30) -> str:
     events = queue.Queue()
 
     try:
-        private_directory = tempfile.TemporaryDirectory(prefix="mirofish-parser-")
+        private_directory = tempfile.TemporaryDirectory(prefix="nexaweave-parser-")
         owner.bind_private_directory(private_directory)
     except OSError:
         raise ParserFailedError() from None
@@ -251,13 +251,13 @@ def extract_text_isolated(file_path, *, limits=None, timeout_seconds=30) -> str:
                 target=_send_request,
                 args=(process.stdin, payload, events),
                 daemon=True,
-                name="mirofish-parser-writer",
+                name="nexaweave-parser-writer",
             )
             reader = threading.Thread(
                 target=_read_response,
                 args=(process.stdout, byte_limit, events),
                 daemon=True,
-                name="mirofish-parser-reader",
+                name="nexaweave-parser-reader",
             )
             threads = [writer, reader]
             writer.start()

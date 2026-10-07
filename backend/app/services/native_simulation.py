@@ -139,7 +139,7 @@ class NativeSimulationSession:
                                             agents[index]["entity_name"])
                 profiles["reddit"] = rows
             self._controls = parse_execution_controls(config, platforms, agents)
-            from mirofish_execution.native_seed_contracts import validate_native_seed_plan
+            from nexaweave_execution.native_seed_contracts import validate_native_seed_plan
             validate_native_seed_plan(config)
             return config, agents, profiles, platforms
         except (OSError, ValueError, TypeError, KeyError, UnicodeError,

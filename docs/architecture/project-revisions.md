@@ -1,6 +1,6 @@
 # Project metadata revisions, first slice
 
-`mirofish_storage` is an isolated Python package in the existing knowledge distribution. It has no import-time database activity and does not import Flask, Graphiti, or `mirofish_knowledge`. The host authenticates a printable ASCII principal (1–128 characters, internal spaces allowed, not all spaces) and supplies workspace and project UUIDs. The display project ID is an ASCII alphanumeric, underscore, or hyphen token (1–128 characters). These are persisted separately using case-sensitive C collation. The store does not authenticate the principal.
+`nexaweave_storage` is an isolated Python package in the existing knowledge distribution. It has no import-time database activity and does not import Flask, Graphiti, or `nexaweave_knowledge`. The host authenticates a printable ASCII principal (1–128 characters, internal spaces allowed, not all spaces) and supplies workspace and project UUIDs. The display project ID is an ASCII alphanumeric, underscore, or hyphen token (1–128 characters). These are persisted separately using case-sensitive C collation. The store does not authenticate the principal.
 
 ## Snapshot v1
 
@@ -14,12 +14,12 @@ Explicit `migrate(connection)` installs `mf_app` version 1 under a dedicated tra
 
 ## Local explicit command
 
-Set `MIROFISH_APPSTORE_DSN` in the local environment. The CLI has no DSN argument and emits fixed error codes without database diagnostics.
+Set `NEXAWEAVE_APPSTORE_DSN` in the local environment. The CLI has no DSN argument and emits fixed error codes without database diagnostics.
 
 ```text
-python -m mirofish_storage migrate
-python -m mirofish_storage import-project --principal OWNER --workspace-id UUID --project-id UUID --display-id proj_1 --input project.json
-python -m mirofish_storage export-project --principal OWNER --workspace-id UUID --project-id UUID --display-id proj_1 --revision 1 --output new-export.json
+python -m nexaweave_storage migrate
+python -m nexaweave_storage import-project --principal OWNER --workspace-id UUID --project-id UUID --display-id proj_1 --input project.json
+python -m nexaweave_storage export-project --principal OWNER --workspace-id UUID --project-id UUID --display-id proj_1 --revision 1 --output new-export.json
 ```
 
 Import accepts a bounded regular JSON file containing either a legacy snapshot v1 or a versioned export envelope. Versioned import accepts **revision 1 only**, requires exact identity arguments and a matching digest, and does not reconstruct multi-revision histories. Export defaults to the current revision, may select a history revision explicitly, writes to stdout by default, or creates a new output file exclusively. An export of revision 2 or later is not currently importable. The envelope declares `binary_migration: false`. Commands do not follow paths embedded in JSON and never alter original metadata files.

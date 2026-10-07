@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 520 300" role="img" aria-labelledby="title desc">
+<title id="title">Bounded social simulation illustration</title>
+<desc id="desc">Twitter and Reddit simulation lanes share an owner and a bounded budget, leading to recorded events.</desc>
+<rect width="520" height="300" rx="18" fill="#E9F1EC"/>
+<text x="26" y="36" fill="#174B58" font-family="Arial, sans-serif" font-size="14" font-weight="700" letter-spacing="2">TWO NATIVE LANES</text>
+<rect x="28" y="70" width="464" height="75" rx="12" fill="#FFFFFF"/>
+<circle cx="64" cy="108" r="16" fill="#1D8B85"/><text x="95" y="114" fill="#102A3B" font-family="Arial, sans-serif" font-size="19" font-weight="700">Twitter</text>
+<circle cx="310" cy="108" r="9" fill="#6FC7BB"/><circle cx="356" cy="108" r="9" fill="#6FC7BB"/><circle cx="402" cy="108" r="9" fill="#6FC7BB"/>
+<path d="M319 108h28m18 0h28" stroke="#5B9290" stroke-width="3"/>
+<rect x="28" y="158" width="464" height="75" rx="12" fill="#FFFFFF"/>
+<circle cx="64" cy="196" r="16" fill="#C37D52"/><text x="95" y="202" fill="#102A3B" font-family="Arial, sans-serif" font-size="19" font-weight="700">Reddit</text>
+<circle cx="310" cy="196" r="9" fill="#E3B86F"/><circle cx="356" cy="196" r="9" fill="#E3B86F"/><circle cx="402" cy="196" r="9" fill="#E3B86F"/>
+<path d="M319 196h28m18 0h28" stroke="#947D5B" stroke-width="3"/>
+<rect x="28" y="246" width="220" height="35" rx="9" fill="#17394A"/><text x="45" y="269" fill="#F7F3E9" font-family="Arial, sans-serif" font-size="14" font-weight="700">One durable owner</text>
+<rect x="260" y="246" width="232" height="35" rx="9" fill="#17394A"/><text x="277" y="269" fill="#F7F3E9" font-family="Arial, sans-serif" font-size="14" font-weight="700">Shared bounded budget</text>
+</svg>

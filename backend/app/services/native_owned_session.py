@@ -6,7 +6,7 @@ backend application. Its create_session method imports NativeSimulationSession
 only after the child has scrubbed inherited provider settings.
 """
 
-from mirofish_execution.native_owned_binding import (NativeOwnedSessionFactory,
+from nexaweave_execution.native_owned_binding import (NativeOwnedSessionFactory,
     _manifest)
 
 __all__ = ["NativeOwnedSessionFactory"]

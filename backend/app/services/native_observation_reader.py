@@ -181,7 +181,7 @@ class NativeObservationReader:
                     from .connected_report_client import CONTEXT_BYTES, encoded
                     selected, coverage = {}, []
                     if selection is not None:
-                        from mirofish_execution.report_contracts import windows
+                        from nexaweave_execution.report_contracts import windows
                         windows(selection)
                         if any(w['platform'] not in platforms for w in selection):
                             raise NativeObservationsError('invalid_request')

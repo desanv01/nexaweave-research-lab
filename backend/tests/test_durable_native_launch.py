@@ -10,10 +10,10 @@ import pytest
 from app.services.durable_native_launch_host import DurableNativeLaunchHost
 from app.services.native_launch_models import BoundedNativeModelFactory,SharedCallBoundary,NativeModelBoundExceeded,validate_transport
 from app.services.native_launch_client import NativeLaunchError,digest
-from mirofish_execution.native_launch_contracts import LaunchAuthorityError
-from mirofish_execution.native_launch_store import LaunchRecord,_record
-from mirofish_execution.native_run_contracts import NativeRunDenied
-from mirofish_execution.budget import ReservationState
+from nexaweave_execution.native_launch_contracts import LaunchAuthorityError
+from nexaweave_execution.native_launch_store import LaunchRecord,_record
+from nexaweave_execution.native_run_contracts import NativeRunDenied
+from nexaweave_execution.budget import ReservationState
 from test_durable_preparation import offline_host,plan_request,status_request
 from test_native_launch_api import reference
 
@@ -144,7 +144,7 @@ def host_fixture(tmp_path):
     def bridge(method,request,ref):
         if method=='local_status':
             raise NativeLaunchError('native_launch_unavailable')
-        from mirofish_execution.temporal_native_host import NativeWorkflowRef
+        from nexaweave_execution.temporal_native_host import NativeWorkflowRef
         calls.append(request)
         return NativeWorkflowRef('mf-native-v1-'+request.run_id.hex+'-'+request.fingerprint,str(uuid4()),str(request.run_id))
     host.temporal_call=bridge

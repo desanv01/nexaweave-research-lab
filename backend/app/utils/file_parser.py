@@ -193,7 +193,7 @@ class FileParser:
 
         resolved = _limits_or_default(limits)
         source = Path(__file__).with_name("docx_extraction.py")
-        name = "_mirofish_docx_extraction"
+        name = "_nexaweave_docx_extraction"
         module = sys.modules.get(name)
         if module is None:
             spec = importlib.util.spec_from_file_location(name, source)

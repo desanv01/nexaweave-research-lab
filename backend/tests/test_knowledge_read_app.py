@@ -57,8 +57,8 @@ class MemoryClient:
 
 @pytest.fixture
 def read_app(monkeypatch):
-    monkeypatch.setenv("MIROFISH_APP_MODE", "graphiti_readonly")
-    monkeypatch.delenv("MIROFISH_ALLOWED_ORIGINS", raising=False)
+    monkeypatch.setenv("NEXAWEAVE_APP_MODE", "graphiti_readonly")
+    monkeypatch.delenv("NEXAWEAVE_ALLOWED_ORIGINS", raising=False)
     monkeypatch.delenv("FLASK_HOST", raising=False)
     token = "0123456789abcdef" * 4
     settings = ReadHostSettings("python", "read_bootstrap.py", token, "owner", "display-1",
@@ -127,7 +127,7 @@ def test_transport_errors_are_fixed_and_no_empty_success(read_app):
 
 
 def test_readonly_debug_and_public_bind_refused(monkeypatch):
-    monkeypatch.setenv("MIROFISH_APP_MODE", "graphiti_readonly")
+    monkeypatch.setenv("NEXAWEAVE_APP_MODE", "graphiti_readonly")
     monkeypatch.setenv("FLASK_HOST", "0.0.0.0")
     with pytest.raises(ValueError):
         create_app()
@@ -139,13 +139,13 @@ def test_readonly_debug_and_public_bind_refused(monkeypatch):
 
 
 def test_legacy_default_and_readonly_validation_are_separate(monkeypatch):
-    monkeypatch.delenv("MIROFISH_APP_MODE", raising=False)
-    monkeypatch.delenv("MIROFISH_ALLOWED_ORIGINS", raising=False)
+    monkeypatch.delenv("NEXAWEAVE_APP_MODE", raising=False)
+    monkeypatch.delenv("NEXAWEAVE_ALLOWED_ORIGINS", raising=False)
     from app.services.simulation_runner import SimulationRunner
     monkeypatch.setattr(SimulationRunner, "register_cleanup", classmethod(lambda cls: None))
     legacy = create_app()
     assert any(rule.rule.startswith("/api/simulation/") for rule in legacy.url_map.iter_rules())
-    monkeypatch.setenv("MIROFISH_APP_MODE", "graphiti_readonly")
+    monkeypatch.setenv("NEXAWEAVE_APP_MODE", "graphiti_readonly")
     monkeypatch.delenv("KNOWLEDGE_READ_TOKEN", raising=False)
     assert Config.validate_readonly() == ["Invalid graph-read configuration"]
 

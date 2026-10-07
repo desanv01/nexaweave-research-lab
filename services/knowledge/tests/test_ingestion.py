@@ -10,9 +10,9 @@ from uuid import uuid4
 
 import pytest
 
-from mirofish_knowledge.contracts import FactResult, IngestResult, KnowledgeScope, Layer, OntologySpec, SourceEnvelope
-from mirofish_knowledge.ingestion import IngestionUncertain, KnowledgeIngestionCoordinator
-from mirofish_knowledge.operations import Busy, Claim, CompletionReceipt, Conflict, OperationRecord, OperationState, request_fingerprint
+from nexaweave_knowledge.contracts import FactResult, IngestResult, KnowledgeScope, Layer, OntologySpec, SourceEnvelope
+from nexaweave_knowledge.ingestion import IngestionUncertain, KnowledgeIngestionCoordinator
+from nexaweave_knowledge.operations import Busy, Claim, CompletionReceipt, Conflict, OperationRecord, OperationState, request_fingerprint
 
 
 def request():

@@ -30,8 +30,8 @@ def server(settings, manifest, raw, tmp_path, *, bound=True):
     from app.services.native_experiment_contracts import sha
     from app.utils.owned_process import OwnedProcess
     from tools.run_unit_tests import _unit_environment
-    python = os.environ.get('MIROFISH_EXPERIMENT_TEST_HTTP_PYTHON')
-    bootstrap = os.environ.get('MIROFISH_EXPERIMENT_TEST_BOOTSTRAP')
+    python = os.environ.get('NEXAWEAVE_EXPERIMENT_TEST_HTTP_PYTHON')
+    bootstrap = os.environ.get('NEXAWEAVE_EXPERIMENT_TEST_BOOTSTRAP')
     assert python and Path(python).is_absolute() and Path(python).is_file()
     assert bootstrap and Path(bootstrap).is_absolute() and Path(bootstrap).is_file()
     assert Path(bootstrap).name == 'read_bootstrap.py' and 'site-packages' in Path(bootstrap).parts
@@ -40,7 +40,7 @@ def server(settings, manifest, raw, tmp_path, *, bound=True):
     tree = ast.parse((ROOT/'services/knowledge/tests/test_workbench_http_integration.py').read_text(encoding='utf-8'))
     source = next(ast.literal_eval(n.value) for n in tree.body if isinstance(n, ast.Assign)
         and any(isinstance(t, ast.Name) and t.id == '_HTTP_CHILD' for t in n.targets))
-    source = source.replace("blocked=('mirofish_knowledge'", "blocked=('mirofish_execution','mirofish_storage','mirofish_knowledge'")
+    source = source.replace("blocked=('nexaweave_knowledge'", "blocked=('nexaweave_execution','nexaweave_storage','nexaweave_knowledge'")
     source = source.replace("Path(arguments[3]).name in {'read_bootstrap.py','evidence_bootstrap.py'}\n                  and 'site-packages' in Path(arguments[3]).parts",
         "Path(arguments[3]).resolve()==(Path(os.environ['WORKBENCH_TEST_ROOT'])/'backend/app/services/native_experiment_http_child.py').resolve()")
     start = source.index('and all(k in allowed or k in {')
@@ -54,9 +54,9 @@ def server(settings, manifest, raw, tmp_path, *, bound=True):
         if key.startswith(('KNOWLEDGE_', 'LLM_', 'OPENAI_', 'DEEPSEEK_', 'ZEP_')) or key.upper() in {
                 'PYTHONPATH','PYTHONHOME','HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','NO_PROXY'}:
             env.pop(key, None)
-    env.update(WORKBENCH_TEST_ROOT=str(ROOT), MIROFISH_APP_MODE='research_local',
+    env.update(WORKBENCH_TEST_ROOT=str(ROOT), NEXAWEAVE_APP_MODE='research_local',
         FLASK_HOST='127.0.0.1', FLASK_DEBUG='0', PYTHON_DOTENV_DISABLED='1',
-        MIROFISH_ALLOWED_ORIGINS='http://localhost:3000', KNOWLEDGE_READ_TOKEN=settings.token,
+        NEXAWEAVE_ALLOWED_ORIGINS='http://localhost:3000', KNOWLEDGE_READ_TOKEN=settings.token,
         KNOWLEDGE_PYTHON=settings.python, KNOWLEDGE_BOOTSTRAP_SCRIPT=bootstrap,
         KNOWLEDGE_PRINCIPAL=settings.principal, KNOWLEDGE_DISPLAY_GRAPH_ID=settings.display_graph_id,
         KNOWLEDGE_BOUND_SCOPE_JSON=json.dumps(settings.scope), KNOWLEDGE_NEO4J_URI='bolt://127.0.0.1:17687',
@@ -111,7 +111,7 @@ def exchange(port, method, path, *, token=None, origin=None, value=None):
 
 def test_actual_separate_http_native_comparison_and_restart(protected_fixture, connection_factory, tmp_path):
     from app.services.native_experiment_http_client import catalog, comparison
-    from mirofish_execution.native_run_store import NativeRunStore
+    from nexaweave_execution.native_run_store import NativeRunStore
     settings,_,cohort,runs,manifest,raw=protected_fixture
     store=NativeRunStore(connection_factory)
     before=[store.get('owner',m.request.run_id) for m in cohort.members]

@@ -1,11 +1,15 @@
 # Contributing to NexaWeave
 
-NexaWeave is an attributed MiroFish derivative under active, gated development at [desanv01/nexaweave-research-lab](https://github.com/desanv01/nexaweave-research-lab). Open an issue for a focused defect or capability, then use a small PR with the affected capability IDs from `docs/plan/CAPABILITY-REGISTER.md`. Explain behavior, migration and rollback impact, original source/patch provenance, dependencies, and what was actually checked. Do not label a mock-only check as live provider qualification.
+NexaWeave is a public source research workbench under active development. Contributions that make evidence, simulation behavior and investigative results easier to verify are welcome.
 
-The main maintainer controls review, tests, CI interpretation, commits, merges and acceptance of an exact revision. Worker handoffs are explicitly unverified. The human authorized public source visibility and the NexaWeave name on 2026-10-05; this does not authorize public application deployment. Historically, private-branch protection was unavailable on the account's plan. Main applied and read back public main-branch protection on 2026-10-05: the existing eight GitHub Actions checks, an up-to-date branch, PR changes, administrator enforcement, resolved conversations, and blocked force pushes/deletions. The required approving-review count is zero for the single-account workflow; Main exact-source/full-log acceptance remains a process control, not an independent second-person approval. Exact reviewed-head PR/push gates and full-log review precede merge; exact post-merge gates and full logs precede acceptance. Keep changes to imported application behavior separate from documentation/bootstrap changes where practical.
+## Before a pull request
 
-Use [development notes](docs/development.md) for the current limited checks. Preserve imported notices and the baseline manifest. When changing an imported file, record an explicit original/current SHA-256 exception with a reason in `docs/upstream/patches.json`; do not rewrite the archive inventory. Tests should cover meaningful behavior and report provider/database assumptions. Never include credentials, uploaded documents, model payloads or runtime data in a PR.
+Choose a focused change and refer to relevant IDs in the [capability register](docs/plan/CAPABILITY-REGISTER.md). Explain the behavior, data or migration impact, source provenance and what you actually checked. Keep synthetic fixture results separate from real database, browser and provider qualification. Do not claim a mock run proves live model behavior.
 
-Preserve upstream MiroFish attribution, archive identity and imported notices. Existing package namespaces, API/persisted identifiers, environment variables and runtime paths remain compatibility identifiers despite the visible NexaWeave name; branding does not authorize data migration.
+For the currently supported source checks, follow [development instructions](docs/product/development.md). Include meaningful tests for changed behavior where appropriate. Main reviews the exact source and complete CI logs before accepting a revision; a worker handoff alone is unverified.
 
-Security reports follow [SECURITY.md](SECURITY.md). Public deployment requires separate authorization and qualification; paid live evaluations require local credentials and a concrete total spending cap.
+## Source and data care
+
+Preserve the [license](LICENSE), [third-party notices](THIRD_PARTY_NOTICES.md) and imported source provenance. Record approved changes to imported files with original and current hashes in docs/upstream/patches.json; do not rewrite the archive manifest. Ordinary visible branding is NexaWeave, while package names, persisted identifiers and environment names remain compatibility interfaces until a separately qualified migration.
+
+Never put credentials, uploads, private documents, database files or raw model payloads in a PR. Public source visibility does not authorize app deployment. Paid evaluations require actual local credentials and a concrete total spending cap. Send sensitive security reports through [private reporting](SECURITY.md).

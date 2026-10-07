@@ -43,7 +43,7 @@ def main():
         return child()
     if sys.argv[1:]:
         raise SystemExit('no arguments accepted')
-    with tempfile.TemporaryDirectory(prefix='mirofish-workbench-backend-') as directory:
+    with tempfile.TemporaryDirectory(prefix='nexaweave-workbench-backend-') as directory:
         try:
             return subprocess.run([sys.executable, str(Path(__file__).resolve()), '--child'],
                                   env=_unit_environment(Path(directory)), cwd=directory,

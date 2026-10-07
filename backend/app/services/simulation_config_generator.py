@@ -25,7 +25,7 @@ from ..utils.openai_chat_compat import create_chat_completion, extract_chat_comp
 if TYPE_CHECKING:
     from .knowledge_reader import EntityNode
 
-logger = get_logger('mirofish.simulation_config')
+logger = get_logger('nexaweave.simulation_config')
 
 # 中国作息时间配置（北京时间）
 CHINA_TIMEZONE_CONFIG = {

@@ -10,10 +10,10 @@ from uuid import UUID
 
 import pytest
 
-from mirofish_storage.research_bundle import (BundleError, MAX_ARTIFACT_BYTES,
+from nexaweave_storage.research_bundle import (BundleError, MAX_ARTIFACT_BYTES,
     canonical, decode, export_bundle, inspect_bundle)
-from mirofish_storage.research_bundle_cli import main, parse_request
-from mirofish_storage.validation import canonical_payload
+from nexaweave_storage.research_bundle_cli import main, parse_request
+from nexaweave_storage.validation import canonical_payload
 from test_project_store import snapshot
 
 PROJECT = "00000000-0000-0000-0000-000000000001"
@@ -110,7 +110,7 @@ def test_export_stops_source_reads_immediately_after_actual_utf8_cap(monkeypatch
         # actual UTF-8 bytes. The store double is only a pure control-flow test.
         return SimpleNamespace(**dict(vars(source), source_revision=UUID(revision),
                                       text=text, byte_length=1, passages=()))
-    import mirofish_storage.research_bundle as bundle_module
+    import nexaweave_storage.research_bundle as bundle_module
     def no_artifact_assembly(value):
         raise AssertionError("oversized export must stop before artifact encoding")
     monkeypatch.setattr(bundle_module, "canonical", no_artifact_assembly)
@@ -204,13 +204,13 @@ def test_aggregate_and_individual_text_caps():
 
 
 def test_cli_inspect_without_authority_and_exclusive_output(tmp_path, monkeypatch):
-    monkeypatch.delenv("MIROFISH_APPSTORE_DSN", raising=False)
+    monkeypatch.delenv("NEXAWEAVE_APPSTORE_DSN", raising=False)
     path = tmp_path / "bundle.json"
     path.write_bytes(artifact())
     stdout = StringIO()
     assert main(stdin=BytesIO(canonical({"operation": "inspect", "input": str(path)})), stdout=stdout) == 0
     assert json.loads(stdout.getvalue())["ok"] is True
-    from mirofish_storage.research_bundle_cli import _write_new
+    from nexaweave_storage.research_bundle_cli import _write_new
     with pytest.raises(FileExistsError):
         _write_new(path, b"replacement")
     assert path.read_bytes() == artifact()
@@ -236,7 +236,7 @@ def test_link_input_and_ancestor_denied(tmp_path):
         link.symlink_to(target)
     except OSError:
         pytest.skip("symlink creation unavailable")
-    from mirofish_storage.research_bundle_cli import _read
+    from nexaweave_storage.research_bundle_cli import _read
     with pytest.raises(BundleError):
         _read(link)
     directory = tmp_path / "dir"
@@ -255,7 +255,7 @@ def test_link_input_and_ancestor_denied(tmp_path):
 ])
 def test_read_compares_ctime_within_stat_api(
         monkeypatch, path_final_ctime, descriptor_final_ctime, denied):
-    import mirofish_storage.research_bundle_cli as cli_module
+    import nexaweave_storage.research_bundle_cli as cli_module
     raw = b"controlled immutable file bytes"
     def metadata(ctime):
         return SimpleNamespace(st_dev=1, st_ino=2, st_mode=stat.S_IFREG | 0o600,

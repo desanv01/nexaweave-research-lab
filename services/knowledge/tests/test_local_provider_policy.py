@@ -4,8 +4,8 @@ import httpx
 import pytest
 from pydantic import SecretStr, ValidationError
 
-from mirofish_knowledge.local_transport import LocalPolicyViolation, LocalTransport, local_endpoint
-from mirofish_knowledge.provider import Endpoint, GraphitiKnowledgeProvider, ProviderConfig
+from nexaweave_knowledge.local_transport import LocalPolicyViolation, LocalTransport, local_endpoint
+from nexaweave_knowledge.provider import Endpoint, GraphitiKnowledgeProvider, ProviderConfig
 
 
 def config(**updates):
@@ -125,7 +125,7 @@ async def test_normalized_default_port_keeps_configured_origin(monkeypatch):
 
 
 async def test_initialization_failure_closes_all_and_preserves_error(monkeypatch):
-    import mirofish_knowledge.provider as module
+    import nexaweave_knowledge.provider as module
     closed = []
     class Driver:
         def __init__(self, *args):
@@ -185,7 +185,7 @@ def test_cloud_key_cannot_supply_missing_explicit_key(monkeypatch, name):
 
 
 async def test_client_construction_failure_closes_created_http(monkeypatch):
-    import mirofish_knowledge.provider as module
+    import nexaweave_knowledge.provider as module
     original = module.httpx.AsyncClient
     created = []
     class CaptureHTTP(original):
@@ -205,7 +205,7 @@ async def test_client_construction_failure_closes_created_http(monkeypatch):
 
 
 async def test_index_failure_cleanup_preserves_original(monkeypatch):
-    import mirofish_knowledge.provider as module
+    import nexaweave_knowledge.provider as module
     closed, http_created = [], []
     original_http = module.httpx.AsyncClient
     class CaptureHTTP(original_http):

@@ -7,7 +7,7 @@ import asyncio
 import json
 from dataclasses import dataclass
 
-from mirofish_execution.native_seed_contracts import validate_native_seed_plan
+from nexaweave_execution.native_seed_contracts import validate_native_seed_plan
 
 
 class NativeSeedError(RuntimeError):

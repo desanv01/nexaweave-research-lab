@@ -43,14 +43,14 @@ def main():
     if sys.argv[1:]: raise SystemExit('no user-selected fixture arguments supported')
     password = os.environ.get('PROJECT_STORE_TEST_PASSWORD')
     neo_password = os.environ.get('KNOWLEDGE_TEST_PASSWORD')
-    backend = os.environ.get('MIROFISH_WORKBENCH_BACKEND_PYTHON')
+    backend = os.environ.get('NEXAWEAVE_WORKBENCH_BACKEND_PYTHON')
     if not password or not neo_password or not backend or not Path(backend).is_absolute() or not Path(backend).is_file():
         raise SystemExit('approved fixture secrets and locked HTTP backend required')
     from psycopg.conninfo import make_conninfo
     spec = importlib.util.spec_from_file_location('main_source_ingestion_runner_owner',
                                                  ROOT/'backend/app/utils/owned_process.py')
     helper = importlib.util.module_from_spec(spec); spec.loader.exec_module(helper)
-    directory = tempfile.TemporaryDirectory(prefix='mirofish-ingestion-qualified-')
+    directory = tempfile.TemporaryDirectory(prefix='nexaweave-ingestion-qualified-')
     owner = helper.OwnedProcess(); owner.bind_private_directory(directory)
     threads, read_errors = [], []
     def forward(pipe):
@@ -65,14 +65,14 @@ def main():
         env['PYTHONPATH'] = os.pathsep.join([str(ROOT), str(ROOT/'services/knowledge/tests')])
         env['GRAPHITI_TELEMETRY_ENABLED'] = 'false'
         installed = subprocess.run([sys.executable,'-I','-c',
-            "import mirofish_knowledge.source_ingestion_bootstrap as m; from pathlib import Path; "
+            "import nexaweave_knowledge.source_ingestion_bootstrap as m; from pathlib import Path; "
             "p=Path(m.__file__).resolve(); assert 'site-packages' in p.parts; "
             "print(p.with_name('read_bootstrap.py'))"], env=env, cwd=directory.name,
             capture_output=True, timeout=30, check=False)
         if installed.returncode or installed.stderr:
             raise SystemExit('fresh non-editable installed ingestion candidate required')
         env.update(PROJECT_STORE_POSTGRES_INTEGRATION='1', KNOWLEDGE_INTEGRATION='1',
-            KNOWLEDGE_TEST_PASSWORD=neo_password, MIROFISH_WORKBENCH_BACKEND_PYTHON=backend,
+            KNOWLEDGE_TEST_PASSWORD=neo_password, NEXAWEAVE_WORKBENCH_BACKEND_PYTHON=backend,
             KNOWLEDGE_PYTHON=str(Path(sys.executable).absolute()),
             KNOWLEDGE_BOOTSTRAP_SCRIPT=installed.stdout.decode().strip(),
             PROJECT_STORE_POSTGRES_TEST_DSN=make_conninfo(host='127.0.0.1',port=15432,

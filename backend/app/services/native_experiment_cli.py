@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import argparse
-import os
+import importlib.util
 from pathlib import Path
 import sys
 
@@ -23,6 +23,17 @@ class _Parser(argparse.ArgumentParser):
         raise ExperimentError("invalid_binding")
 
 
+def _appstore_dsn():
+    # Saved-script entry: use the fixed shared resolver without Flask startup.
+    source = Path(__file__).resolve().parents[1] / "utils" / "branding.py"
+    spec = importlib.util.spec_from_file_location("_nexaweave_cli_branding", source)
+    if spec is None or spec.loader is None:
+        raise ExperimentError("authority_unavailable")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.appstore_dsn()
+
+
 def main(argv=None):
     try:
         parser = _Parser(description="Compare existing owned native runs", add_help=False)
@@ -34,7 +45,7 @@ def main(argv=None):
         raw = sys.stdin.buffer.read(MAX_REQUEST + 1)
         if not raw or len(raw) > MAX_REQUEST:
             raise ExperimentError("invalid_request")
-        dsn = os.environ.get("MIROFISH_APPSTORE_DSN")
+        dsn = _appstore_dsn()
         if not dsn:
             raise ExperimentError("authority_unavailable")
         import psycopg

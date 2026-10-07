@@ -9,9 +9,9 @@ from test_connected_report_client import fixture_context
 def test_actual_budget_parser_report_proof_and_cross_domain_refusal():
     from uuid import UUID, uuid5, NAMESPACE_URL
     from test_connected_report_client import report_budget_wire
-    from mirofish_execution.budget import _reservation, BudgetUncertain
-    from mirofish_execution.report_contracts import ReportBudgetReceipt, budget_episode
-    from mirofish_execution.native_launch_contracts import native_budget_episode
+    from nexaweave_execution.budget import _reservation, BudgetUncertain
+    from nexaweave_execution.report_contracts import ReportBudgetReceipt, budget_episode
+    from nexaweave_execution.native_launch_contracts import native_budget_episode
     wire = report_budget_wire()
     operation, attempt, group = UUID(wire['operation_id']), UUID(wire['attempt_id']), 'mf1_' + 'a'*64
     row = (UUID(int=20), operation, wire['fingerprint'], 4, 'settled', attempt, group,
