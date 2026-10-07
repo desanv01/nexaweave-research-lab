@@ -2,6 +2,8 @@
 
 ## Current source delivery
 
+Current total51 paths: backend30/UI11/Main10 after the narrowly reviewed CI/profile collection correction. Original failed PR96/push archives retained; no application/report algorithm or deadline changes. The separate research-local HTTP interpreter requires the non-editable pure shared contract package installed without provider dependencies. The primitive-only runner excludes report fixtures already mandatory in their dedicated report engine gate; all47 primitive and28 report cases remain required.
+
 Issue95 connects a retained source and a completed native launch to the inherited ReportAgent with one-shot durable PostgreSQL/Temporal authority, shared budget admission, isolated owned report children, immutable receipt/manifest-bound artifacts and protected EN/ZH/MS read/download/recovery controls. Reference integrity is validated; semantic support remains explicitly not_reviewed.
 
 Current Main01a11391-ac46-7cc0-ac04-fef0c2264735 owns architecture, reviews, execution, Git/CI and acceptance. Replacement backend01a11399-4a67-77f1-bd78-8923ae545390 owns30 source/test paths on u02; replacement UI01a11399-7d2e-7201-b640-2dfc33e481c0 owns11 on u01; Main owns9 distinct integration/test/metadata paths. Both workers are stable idle, source-only, no runtime/Git/network/provider/browser or other-chat messages. Historical worker identities below are released/reference-only. Accepted PR94 c7485e24f78740c7f575823dc8e797b63bea86ef remains the integration base.

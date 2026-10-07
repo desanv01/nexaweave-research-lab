@@ -24,11 +24,13 @@ def child() -> int:
         # Connected preparation/launch requires job-local PostgreSQL and Temporal.
         # Connected fixtures are mandatory in run_native_launch_tests.py --engine
         # and run_native_observations_tests.py --engine after those services start;
-        # this earlier step qualifies SQLite action primitives only.
+        # Report child fixtures also have their own mandatory report --engine
+        # step and explicit helper path; this step qualifies SQLite primitives.
         result = int(pytest.main([
             "-q", "-p", "pytest_asyncio.plugin",
             "--ignore", str(ROOT / "backend" / "engine_tests" / "test_connected_preparation_native_launch.py"),
             "--ignore", str(ROOT / "backend" / "engine_tests" / "test_connected_native_observations.py"),
+            "--ignore", str(ROOT / "backend" / "engine_tests" / "test_connected_report_process.py"),
             str(ROOT / "backend" / "engine_tests"),
         ]))
     finally:
