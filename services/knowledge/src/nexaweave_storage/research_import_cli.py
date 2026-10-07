@@ -1,6 +1,6 @@
 """Trusted local import command; stdout contains only fixed safe summaries."""
 from __future__ import annotations
-from nexaweave_knowledge.configuration import environment
+from nexaweave_configuration import environment
 
 import os
 import sys

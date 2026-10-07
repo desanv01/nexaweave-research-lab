@@ -1,7 +1,7 @@
 """Explicit local metadata migration, import, and export commands."""
 
 from __future__ import annotations
-from nexaweave_knowledge.configuration import environment
+from nexaweave_configuration import environment
 
 import argparse
 import json

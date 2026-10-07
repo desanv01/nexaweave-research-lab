@@ -1,6 +1,6 @@
 """Spawn target for one trusted native session. No native/provider imports here."""
 from __future__ import annotations
-from nexaweave_knowledge.configuration import environment
+from nexaweave_configuration import environment
 
 import hashlib
 import ipaddress

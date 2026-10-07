@@ -73,3 +73,24 @@ def test_native_child_scrub_restores_offline_flag_and_removes_secrets(monkeypatc
                         "NEXAWEAVE_NATIVE_TEST_OFFLINE": "1", "HF_HUB_OFFLINE": "1",
                         "TRANSFORMERS_OFFLINE": "1", "HF_DATASETS_OFFLINE": "1"}
     assert guarded == [True]
+
+
+@pytest.mark.parametrize("module", ["research_bundle_cli", "research_import_cli"])
+def test_storage_cli_imports_without_knowledge_or_provider_packages(module):
+    import subprocess
+    import sys
+    code = """
+import importlib.abc
+import importlib
+import sys
+class NoProviders(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in {'nexaweave_knowledge', 'mirofish_knowledge', 'openai', 'flask', 'dotenv', 'camel', 'oasis', 'graphiti_core'}:
+            raise AssertionError('unexpected application/provider import')
+sys.meta_path.insert(0, NoProviders())
+importlib.import_module('nexaweave_storage.' + sys.argv[1])
+"""
+    result = subprocess.run([sys.executable, "-I", "-c", code, module],
+                            capture_output=True, timeout=20, check=False)
+    assert result.returncode == 0, result.stderr.decode()
+    assert result.stdout == result.stderr == b""

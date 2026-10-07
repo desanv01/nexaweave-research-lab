@@ -1,6 +1,6 @@
 """Bounded stdin JSON export/inspect interface for trusted local files."""
 from __future__ import annotations
-from nexaweave_knowledge.configuration import environment
+from nexaweave_configuration import environment
 
 import os
 from pathlib import Path
