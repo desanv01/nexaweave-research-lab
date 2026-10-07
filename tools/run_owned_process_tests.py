@@ -50,7 +50,7 @@ def main():
     if sys.argv[1:]: raise SystemExit('no arguments accepted')
     spec=importlib.util.spec_from_file_location('main_windows_gate_owner',ROOT/'backend/app/utils/owned_process.py')
     helper=importlib.util.module_from_spec(spec);spec.loader.exec_module(helper)
-    private_directory=tempfile.TemporaryDirectory(prefix='mirofish-owned-windows-tests-')
+    private_directory=tempfile.TemporaryDirectory(prefix='nexaweave-owned-windows-tests-')
     directory=private_directory.name
     owner=helper.OwnedProcess();owner.bind_private_directory(private_directory)
     readers=[];read_errors=[]
@@ -67,7 +67,7 @@ def main():
             env=_unit_environment(Path(directory)),cwd=directory,shell=False,close_fds=True,
             stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
         reader=threading.Thread(target=forward_output,args=(process.stdout,),daemon=True,
-            name='mirofish-owned-gate-output')
+            name='nexaweave-owned-gate-output')
         readers.append(reader);reader.start()
         status=process.wait(timeout=180)
         return status

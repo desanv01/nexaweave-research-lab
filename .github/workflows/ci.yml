@@ -72,9 +72,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
-      KNOWLEDGE_TEST_PASSWORD: mirofish-ci-disposable-fixture-only
-      PROJECT_STORE_TEST_PASSWORD: mirofish-ci-disposable-operations-only
-      KNOWLEDGE_POSTGRES_TEST_PASSWORD: mirofish-ci-disposable-operations-only
+      KNOWLEDGE_TEST_PASSWORD: nexaweave-ci-disposable-fixture-only
+      PROJECT_STORE_TEST_PASSWORD: nexaweave-ci-disposable-operations-only
+      KNOWLEDGE_POSTGRES_TEST_PASSWORD: nexaweave-ci-disposable-operations-only
       GRAPHITI_TELEMETRY_ENABLED: 'false'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -94,7 +94,7 @@ jobs:
           # Install pure shared execution contracts without pulling provider dependencies.
           uv pip install --python "$RUNNER_TEMP/workbench-backend/bin/python" --no-deps --reinstall services/knowledge
           uv pip install --python services/knowledge/.venv/bin/python --no-deps --reinstall services/knowledge
-          printf 'MIROFISH_WORKBENCH_BACKEND_PYTHON=%s\n' "$RUNNER_TEMP/workbench-backend/bin/python" >> "$GITHUB_ENV"
+          printf 'NEXAWEAVE_WORKBENCH_BACKEND_PYTHON=%s\n' "$RUNNER_TEMP/workbench-backend/bin/python" >> "$GITHUB_ENV"
       - name: Start disposable real Neo4j Community
         run: docker compose -f infra/compose.knowledge-test.yml up -d --wait --wait-timeout 180
       - name: Start disposable research PostgreSQL
@@ -130,7 +130,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
-      KNOWLEDGE_POSTGRES_TEST_PASSWORD: mirofish-ci-disposable-operations-only
+      KNOWLEDGE_POSTGRES_TEST_PASSWORD: nexaweave-ci-disposable-operations-only
       GRAPHITI_TELEMETRY_ENABLED: 'false'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -156,8 +156,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
-      PROJECT_STORE_TEST_PASSWORD: mirofish-ci-disposable-operations-only
-      KNOWLEDGE_POSTGRES_TEST_PASSWORD: mirofish-ci-disposable-operations-only
+      PROJECT_STORE_TEST_PASSWORD: nexaweave-ci-disposable-operations-only
+      KNOWLEDGE_POSTGRES_TEST_PASSWORD: nexaweave-ci-disposable-operations-only
       TEMPORAL_TEST_ADDRESS: '127.0.0.1:17233'
       GRAPHITI_TELEMETRY_ENABLED: 'false'
     steps:
@@ -172,8 +172,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/mirofish-temporal"
-          cd "$RUNNER_TEMP/mirofish-temporal"
+          mkdir -p "$RUNNER_TEMP/nexaweave-temporal"
+          cd "$RUNNER_TEMP/nexaweave-temporal"
           curl --fail --location --retry 3 --max-time 120 --output temporal.tar.gz https://github.com/temporalio/cli/releases/download/v1.9.1/temporal_cli_1.9.1_linux_amd64.tar.gz
           printf '%s\n' '09a0326a51db84d02735e53542b9ebd8c4758daf47482a9ab0abce15844e60d5  temporal.tar.gz' | sha256sum --check --strict
           tar -xzf temporal.tar.gz temporal
@@ -183,8 +183,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          temporal_bin="$RUNNER_TEMP/mirofish-temporal/temporal"
-          "$temporal_bin" server start-dev --headless --ip 127.0.0.1 --port 17233 --http-port 17234 --metrics-port 17235 --db-filename "$RUNNER_TEMP/mirofish-temporal/test.db" > "$RUNNER_TEMP/mirofish-temporal/server.log" 2>&1 &
+          temporal_bin="$RUNNER_TEMP/nexaweave-temporal/temporal"
+          "$temporal_bin" server start-dev --headless --ip 127.0.0.1 --port 17233 --http-port 17234 --metrics-port 17235 --db-filename "$RUNNER_TEMP/nexaweave-temporal/test.db" > "$RUNNER_TEMP/nexaweave-temporal/server.log" 2>&1 &
           temporal_pid=$!
           trap 'kill "$temporal_pid" 2>/dev/null || true; wait "$temporal_pid" 2>/dev/null || true' EXIT
           ready=false
@@ -197,7 +197,7 @@ jobs:
             sleep 1
           done
           if [ "$ready" != true ]; then
-            tail -100 "$RUNNER_TEMP/mirofish-temporal/server.log"
+            tail -100 "$RUNNER_TEMP/nexaweave-temporal/server.log"
             exit 1
           fi
           services/knowledge/.venv/bin/python tools/run_temporal_execution_tests.py --integration
@@ -206,8 +206,8 @@ jobs:
         shell: bash
         run: |
           docker compose -f infra/compose.operations-test.yml logs --tail 100 postgres
-          if [ -f "$RUNNER_TEMP/mirofish-temporal/server.log" ]; then
-            tail -100 "$RUNNER_TEMP/mirofish-temporal/server.log"
+          if [ -f "$RUNNER_TEMP/nexaweave-temporal/server.log" ]; then
+            tail -100 "$RUNNER_TEMP/nexaweave-temporal/server.log"
           fi
       - name: Remove only this job's disposable database
         if: always()
@@ -218,7 +218,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 20
     env:
-      PROJECT_STORE_TEST_PASSWORD: mirofish-ci-disposable-native-only
+      PROJECT_STORE_TEST_PASSWORD: nexaweave-ci-disposable-native-only
       TEMPORAL_TEST_ADDRESS: '127.0.0.1:17233'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -233,11 +233,11 @@ jobs:
           uv pip install --python backend/.venv/Scripts/python.exe --no-deps services/knowledge
           if ($LASTEXITCODE -ne 0) { throw 'Installed experiment child package failed' }
           $experimentPython = (Resolve-Path backend/.venv/Scripts/python.exe).Path
-          $experimentBootstrap = & $experimentPython -I -c "import importlib.util; print(importlib.util.find_spec('mirofish_knowledge.read_bootstrap').origin)"
+          $experimentBootstrap = & $experimentPython -I -c "import importlib.util; print(importlib.util.find_spec('nexaweave_knowledge.read_bootstrap').origin)"
           if ($LASTEXITCODE -ne 0) { throw 'Installed bootstrap selection failed' }
-          "MIROFISH_EXPERIMENT_TEST_PYTHON=$experimentPython" >> $env:GITHUB_ENV
-          "MIROFISH_EXPERIMENT_TEST_HTTP_PYTHON=$experimentPython" >> $env:GITHUB_ENV
-          "MIROFISH_EXPERIMENT_TEST_BOOTSTRAP=$experimentBootstrap" >> $env:GITHUB_ENV
+          "NEXAWEAVE_EXPERIMENT_TEST_PYTHON=$experimentPython" >> $env:GITHUB_ENV
+          "NEXAWEAVE_EXPERIMENT_TEST_HTTP_PYTHON=$experimentPython" >> $env:GITHUB_ENV
+          "NEXAWEAVE_EXPERIMENT_TEST_BOOTSTRAP=$experimentBootstrap" >> $env:GITHUB_ENV
       - name: Qualify durable preparation and directly affected offline generators
         run: |
           backend/.venv/Scripts/python.exe tools/run_preparation_tests.py --unit
@@ -317,8 +317,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
-      PROJECT_STORE_TEST_PASSWORD: mirofish-ci-disposable-operations-only
-      KNOWLEDGE_POSTGRES_TEST_PASSWORD: mirofish-ci-disposable-operations-only
+      PROJECT_STORE_TEST_PASSWORD: nexaweave-ci-disposable-operations-only
+      KNOWLEDGE_POSTGRES_TEST_PASSWORD: nexaweave-ci-disposable-operations-only
       GRAPHITI_TELEMETRY_ENABLED: 'false'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

@@ -24,8 +24,8 @@ from native_experiments import NativeExperimentComparator, distribution
 import native_experiments as experiments
 from native_recording_contracts import RecordingAnchors
 from native_recordings import capture_recording
-from mirofish_execution.native_run_contracts import NativeRunRequest, NativeRunReceipt, NativeChildIdentity, RunState
-from mirofish_execution.native_run_store import NativeRunRecord
+from nexaweave_execution.native_run_contracts import NativeRunRequest, NativeRunReceipt, NativeChildIdentity, RunState
+from nexaweave_execution.native_run_store import NativeRunRecord
 from test_native_recordings_contract import fixture_source, VERSIONS
 
 

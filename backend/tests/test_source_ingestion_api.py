@@ -39,9 +39,9 @@ def result(bound, request):
 
 @pytest.fixture
 def host(monkeypatch):
-    monkeypatch.setenv("MIROFISH_APP_MODE", "research_local")
+    monkeypatch.setenv("NEXAWEAVE_APP_MODE", "research_local")
     monkeypatch.delenv("FLASK_HOST", raising=False)
-    monkeypatch.delenv("MIROFISH_ALLOWED_ORIGINS", raising=False)
+    monkeypatch.delenv("NEXAWEAVE_ALLOWED_ORIGINS", raising=False)
     bound = scope()
     token = "0123456789abcdef" * 4
     settings = ReadHostSettings("python", "read_bootstrap.py", token, "owner", "display", bound, {})
@@ -116,12 +116,12 @@ def test_readonly_absence_and_provider_free_factory(host, monkeypatch):
     _, facade, headers, _ = host
     original = builtins.__import__
     def block(name, *args, **kwargs):
-        if name.split(".")[0] in {"graphiti_core", "camel", "openai", "neo4j", "mirofish_knowledge"}:
+        if name.split(".")[0] in {"graphiti_core", "camel", "openai", "neo4j", "nexaweave_knowledge"}:
             pytest.fail("Flask startup initialized provider package")
         return original(name, *args, **kwargs)
     monkeypatch.setattr(builtins, "__import__", block)
     assert create_app(ingestion_facade=facade).test_client().get("/health").status_code == 200
-    monkeypatch.setenv("MIROFISH_APP_MODE", "graphiti_readonly")
+    monkeypatch.setenv("NEXAWEAVE_APP_MODE", "graphiti_readonly")
     assert create_app(ingestion_facade=facade).test_client().post(
         "/api/source/ingestion/plan/display", json=payload(), headers=headers).status_code == 404
 

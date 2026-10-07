@@ -79,8 +79,8 @@ async def child():
                 return real_proactor_connect(instance, connection, address)
             IocpProactor.connect = proactor_connect
         from test_local_provider_http import Answer, local_config, messages, model_server
-        from mirofish_knowledge.provider import GraphitiKnowledgeProvider
-        from mirofish_knowledge.local_transport import local_endpoint
+        from nexaweave_knowledge.provider import GraphitiKnowledgeProvider
+        from nexaweave_knowledge.local_transport import local_endpoint
         local_endpoint(uri, bolt=True)
         with model_server() as (server, records, state):
             allowed_ports.add(server.server_port)

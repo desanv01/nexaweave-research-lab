@@ -1,5 +1,5 @@
 """
-MiroFish Backend - Flask应用工厂
+NexaWeave Backend - Flask应用工厂
 """
 
 import os
@@ -14,6 +14,7 @@ from flask import Flask, jsonify, request
 from .config import Config
 from .utils.logger import setup_logger, get_logger
 from .utils.browser_origins import parse_allowed_origins
+from .utils.branding import app_mode, allowed_origins as configured_allowed_origins
 
 
 _API_METHODS = ('GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS')
@@ -26,7 +27,7 @@ def _origin_denied():
 
 def create_app(config_class=Config, *, read_facade=None, evidence_facade=None, source_facade=None, ingestion_facade=None, experiment_facade=None, preparation_facade=None, native_launch_facade=None, native_observations_facade=None, connected_report_facade=None):
     """Flask应用工厂函数"""
-    mode = os.environ.get('MIROFISH_APP_MODE', getattr(config_class, 'MIROFISH_APP_MODE', 'legacy'))
+    mode = app_mode(config_class, Config)
     if mode in {'graphiti_readonly', 'research_local'}:
         from .knowledge_read_app import create_read_app
         return create_read_app(config_class, facade=read_facade, evidence_facade=evidence_facade,
@@ -38,20 +39,11 @@ def create_app(config_class=Config, *, read_facade=None, evidence_facade=None, s
         raise ValueError('invalid application mode')
     app = Flask(__name__)
     app.config.from_object(config_class)
+    app.config['NEXAWEAVE_APP_MODE'] = mode
+    app.config['MIROFISH_APP_MODE'] = mode
 
-    # A subclass can explicitly override the class default. Otherwise read
-    # the environment at app startup, including an explicitly empty value.
-    configured_origins = app.config.get('MIROFISH_ALLOWED_ORIGINS')
-    # A subclass may inherit an explicit override from an intermediate base.
-    # Stop before Config's default; the nearest defining subclass wins.
-    class_override = any(
-        'MIROFISH_ALLOWED_ORIGINS' in vars(candidate)
-        for candidate in getattr(config_class, '__mro__', ())
-        if candidate not in (Config, object)
-    )
-    if not class_override and 'MIROFISH_ALLOWED_ORIGINS' in os.environ:
-        configured_origins = os.environ['MIROFISH_ALLOWED_ORIGINS']
-    allowed_origins = frozenset(parse_allowed_origins(configured_origins))
+    allowed_origins = frozenset(parse_allowed_origins(configured_allowed_origins(config_class, Config)))
+    app.config['NEXAWEAVE_ALLOWED_ORIGINS'] = tuple(sorted(allowed_origins))
     app.config['MIROFISH_ALLOWED_ORIGINS'] = tuple(sorted(allowed_origins))
     
     # 设置JSON编码：确保中文直接显示（而不是 \uXXXX 格式）
@@ -60,7 +52,7 @@ def create_app(config_class=Config, *, read_facade=None, evidence_facade=None, s
         app.json.ensure_ascii = False
     
     # 设置日志
-    logger = setup_logger('mirofish')
+    logger = setup_logger('nexaweave')
     
     # 只在 reloader 子进程中打印启动信息（避免 debug 模式下打印两次）
     is_reloader_process = os.environ.get('WERKZEUG_RUN_MAIN') == 'true'
@@ -69,7 +61,7 @@ def create_app(config_class=Config, *, read_facade=None, evidence_facade=None, s
     
     if should_log_startup:
         logger.info("=" * 50)
-        logger.info("MiroFish Backend 启动中...")
+        logger.info("NexaWeave Backend 启动中...")
         logger.info("=" * 50)
     
     @app.before_request
@@ -123,7 +115,7 @@ def create_app(config_class=Config, *, read_facade=None, evidence_facade=None, s
     # Log only registered endpoint identity, method and final status.
     @app.after_request
     def log_response(response):
-        logger = get_logger('mirofish.request')
+        logger = get_logger('nexaweave.request')
         endpoint = request.endpoint if request.url_rule is not None else 'unmatched'
         logger.debug('method=%s endpoint=%s status=%s',
                      request.method, endpoint, response.status_code)
@@ -138,9 +130,9 @@ def create_app(config_class=Config, *, read_facade=None, evidence_facade=None, s
     # 健康检查
     @app.route('/health')
     def health():
-        return {'status': 'ok', 'service': 'MiroFish Backend'}
+        return {'status': 'ok', 'service': 'NexaWeave Backend'}
     
     if should_log_startup:
-        logger.info("MiroFish Backend 启动完成")
+        logger.info("NexaWeave Backend 启动完成")
     
     return app

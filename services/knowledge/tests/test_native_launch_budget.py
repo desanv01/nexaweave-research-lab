@@ -7,12 +7,12 @@ import threading
 from types import SimpleNamespace
 from uuid import UUID,uuid4
 import pytest
-from mirofish_execution.native_launch_contracts import NativeBudgetReceipt,LaunchAuthorityError,native_budget_fingerprint
-from mirofish_execution.native_run_contracts import NativeRunReceipt,NativeChildIdentity
-from mirofish_execution.native_run_store import NativeRunStore
-from mirofish_execution.budget import BudgetDenied,BudgetConflict,BudgetUncertain,BudgetBusy,ReservationState
-from mirofish_execution.preparation_contracts import PreparedBudgetReceipt
-from mirofish_knowledge.operations import CompletionReceipt
+from nexaweave_execution.native_launch_contracts import NativeBudgetReceipt,LaunchAuthorityError,native_budget_fingerprint
+from nexaweave_execution.native_run_contracts import NativeRunReceipt,NativeChildIdentity
+from nexaweave_execution.native_run_store import NativeRunStore
+from nexaweave_execution.budget import BudgetDenied,BudgetConflict,BudgetUncertain,BudgetBusy,ReservationState
+from nexaweave_execution.preparation_contracts import PreparedBudgetReceipt
+from nexaweave_knowledge.operations import CompletionReceipt
 from test_native_launch_store import factory,ready_host,launch_host,declaration
 from test_durable_native_launch import host_fixture,LIMITS,scripted_native_backends
 from test_native_launch_api import reference
@@ -94,7 +94,7 @@ def test_shared_sync_async_call_bound_and_picklable_parameters():
 
 def test_budget_adapter_keeps_failed_close_owner_retained_until_same_owner_retry():
     from test_native_run_supervisor import request,MemoryStore,ControlledDriver,ScriptedCoordinator
-    from mirofish_execution.budgeted_native_supervisor import BudgetedNativeSupervisor
+    from nexaweave_execution.budgeted_native_supervisor import BudgetedNativeSupervisor
     req=request();store=MemoryStore(req);driver=ControlledDriver()
     driver.allow_launch.set();driver.finish.set();driver.fail_first_close=True
     coordinator=ScriptedCoordinator(req,store,driver)

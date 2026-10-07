@@ -47,7 +47,7 @@ def main():
     password = os.environ.get('PROJECT_STORE_TEST_PASSWORD')
     if not password:
         raise SystemExit('PROJECT_STORE_TEST_PASSWORD required')
-    with tempfile.TemporaryDirectory(prefix='mirofish-document-source-') as directory:
+    with tempfile.TemporaryDirectory(prefix='nexaweave-document-source-') as directory:
         env = _unit_environment(Path(directory))
         env['PROJECT_STORE_POSTGRES_INTEGRATION'] = '1'
         env['PROJECT_STORE_POSTGRES_TEST_DSN'] = make_conninfo(

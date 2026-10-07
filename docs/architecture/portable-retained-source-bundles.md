@@ -5,7 +5,7 @@ This private data artifact supports a selected immutable PostgreSQL project
 revision and 1–16 explicitly requested retained source revisions. It is separate
 from the U14 committed-source ZIP. It does not establish full C41/U04 acceptance.
 
-`mirofish_storage.research_bundle.export_bundle` resolves persisted authority
+`nexaweave_storage.research_bundle.export_bundle` resolves persisted authority
 through `ProjectStore.get(principal, project_id, revision)` and
 `SourceStore.get_source(principal, project_id, source_revision)` for every selected
 source. Revision is mandatory and positive. Sources need only belong to the
@@ -51,7 +51,7 @@ oversized artifact. Final validation still enforces the encoded 12 MiB cap.
 
 ## Trusted local CLI
 
-Run the installed module `python -m mirofish_storage.research_bundle_cli` with one
+Run the installed module `python -m nexaweave_storage.research_bundle_cli` with one
 UTF-8 JSON request on stdin, capped at 32768 bytes. Main owns execution and
 installation. Export request fields:
 
@@ -61,7 +61,7 @@ installation. Export request fields:
 
 Inspect request fields are `operation: "inspect"`, `input` absolute local path,
 and optional lowercase 64-hex `expected_sha256`. Inspect needs no DSN or store
-connection. Export uses only trusted local `MIROFISH_APPSTORE_DSN`, rejects libpq
+connection. Export uses only trusted local `NEXAWEAVE_APPSTORE_DSN`, rejects libpq
 ambient PG variables and service/passfile connection settings, and disables
 default password-file discovery. It never migrates a database.
 

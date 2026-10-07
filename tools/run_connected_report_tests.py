@@ -30,7 +30,7 @@ def child(mode: str, journey: bool = False) -> int:
     guard.install()
     try:
         installed = Path(sys.prefix).resolve()
-        for package in ('mirofish_execution', 'mirofish_storage', 'mirofish_knowledge'):
+        for package in ('nexaweave_execution', 'nexaweave_storage', 'nexaweave_knowledge'):
             spec = importlib.util.find_spec(package)
             if (spec is None or spec.origin is None or
                     not Path(spec.origin).resolve().is_relative_to(installed) or
@@ -82,7 +82,7 @@ def child(mode: str, journey: bool = False) -> int:
         # Native runner legacy path fallback must never shadow an installed
         # execution/storage/knowledge package during this owned qualification.
         for name, module in tuple(sys.modules.items()):
-            if name.split('.')[0] not in ('mirofish_execution', 'mirofish_storage', 'mirofish_knowledge'):
+            if name.split('.')[0] not in ('nexaweave_execution', 'nexaweave_storage', 'nexaweave_knowledge'):
                 continue
             origin = getattr(module, '__file__', None)
             if origin is not None and (not Path(origin).resolve().is_relative_to(installed)
@@ -133,7 +133,7 @@ def main() -> int:
             str(ROOT / 'backend/tests'), str(ROOT / 'backend/engine_tests'),
             str(ROOT / 'services/knowledge/tests')))
         env.update(HF_HUB_OFFLINE='1', TRANSFORMERS_OFFLINE='1', HF_HUB_DISABLE_TELEMETRY='1',
-                   DO_NOT_TRACK='1', MIROFISH_NATIVE_TEST_OFFLINE='1', MIROFISH_REPORT_TEST_OFFLINE='1')
+                   DO_NOT_TRACK='1', NEXAWEAVE_NATIVE_TEST_OFFLINE='1', NEXAWEAVE_REPORT_TEST_OFFLINE='1')
         if mode == 'integration':
             from psycopg.conninfo import make_conninfo
             env.update(PROJECT_STORE_POSTGRES_INTEGRATION='1', KNOWLEDGE_POSTGRES_INTEGRATION='1')

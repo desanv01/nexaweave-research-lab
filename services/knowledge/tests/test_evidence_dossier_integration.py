@@ -11,15 +11,15 @@ from uuid import uuid4
 import pytest
 from psycopg.conninfo import conninfo_to_dict
 
-from mirofish_knowledge.evidence_dossier import EvidenceDossierService, DossierFailure, digest, MAX_RESPONSE_BYTES
-from mirofish_knowledge.operations import Ledger
-from mirofish_knowledge.report_contracts import DossierRequest, DossierSectionRequest, EvidenceDossier
+from nexaweave_knowledge.evidence_dossier import EvidenceDossierService, DossierFailure, digest, MAX_RESPONSE_BYTES
+from nexaweave_knowledge.operations import Ledger
+from nexaweave_knowledge.report_contracts import DossierRequest, DossierSectionRequest, EvidenceDossier
 # Reuse accepted disposable-store guards, retained source fixture, and passive
 # child observations. Only the real module entry point changes in this source.
 from test_evidence_research_integration import retained_graph, factory, _CLI_CHILD
 
 pytestmark = [pytest.mark.postgres, pytest.mark.neo4j]
-_DOSSIER_CHILD = _CLI_CHILD.replace("mirofish_knowledge.research_cli", "mirofish_knowledge.dossier_cli")
+_DOSSIER_CHILD = _CLI_CHILD.replace("nexaweave_knowledge.research_cli", "nexaweave_knowledge.dossier_cli")
 
 
 def _request(f, **updates):

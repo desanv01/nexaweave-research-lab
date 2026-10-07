@@ -30,7 +30,7 @@ def envelope(**updates):
 
 @pytest.fixture
 def client(tmp_path):
-    package = tmp_path / "site-packages" / "mirofish_knowledge"
+    package = tmp_path / "site-packages" / "nexaweave_knowledge"
     package.mkdir(parents=True)
     (package / "read_bootstrap.py").write_text("", encoding="utf-8")
     (package / "evidence_bootstrap.py").write_text("", encoding="utf-8")

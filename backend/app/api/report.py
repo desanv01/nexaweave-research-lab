@@ -59,7 +59,7 @@ from ..utils.zep_lifecycle import (
     unregister_graph_reader,
 )
 
-logger = get_logger('mirofish.api.report')
+logger = get_logger('nexaweave.api.report')
 
 
 # ============== 报告生成接口 ==============

@@ -10,8 +10,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from mirofish_execution import native_seed_contracts
-from mirofish_execution.native_seed_contracts import validate_native_seed_plan
+from nexaweave_execution import native_seed_contracts
+from nexaweave_execution.native_seed_contracts import validate_native_seed_plan
 from scripts.native_seed_posts import NativeSeedError, apply_native_seed_posts
 
 
@@ -211,7 +211,7 @@ class Block:
         if fullname.split('.')[0] in {'oasis', 'camel', 'app', 'openai'}:
             raise AssertionError('hot dependency import')
 sys.meta_path.insert(0, Block())
-from mirofish_execution.native_seed_contracts import validate_native_seed_plan
+from nexaweave_execution.native_seed_contracts import validate_native_seed_plan
 assert validate_native_seed_plan({}) == ()
 try:
     validate_native_seed_plan({'event_config': {'initial_posts': [{}]}})

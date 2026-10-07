@@ -93,6 +93,7 @@ export async function ingestionIdentities(scope, operation) {
   const group = 'mf1_' + await sha256(enc.encode(JSON.stringify(canonical)))
   if (!globalThis.crypto?.subtle) bad('crypto_unavailable')
   const namespace = Uint8Array.from('6ba7b8119dad11d180b400c04fd430c8'.match(/../g), x => parseInt(x, 16))
+  // Retained v1 UUIDv5 domain: changing these bytes would change saved episode IDs.
   const text = enc.encode(`mirofish:episode:v1:${group}:${operation}`), input = new Uint8Array(16 + text.length)
   input.set(namespace); input.set(text, 16)
   const bytes = new Uint8Array(await globalThis.crypto.subtle.digest('SHA-1', input)).slice(0, 16)

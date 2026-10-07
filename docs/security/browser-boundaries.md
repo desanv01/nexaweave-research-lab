@@ -1,7 +1,7 @@
 # Browser origin and request-log boundary (U02d)
 
 The Flask factory validates an explicit browser Origin allowlist at startup.
-`MIROFISH_ALLOWED_ORIGINS` is a comma-separated environment value; a config
+`NEXAWEAVE_ALLOWED_ORIGINS` is a comma-separated environment value; a config
 class can override it. Defaults are `http://localhost:3000` and
 `http://127.0.0.1:3000` for the inherited Vite development flow. An explicitly
 empty value disables cross-origin browser access. No-Origin clients and Vite

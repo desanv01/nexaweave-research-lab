@@ -4,9 +4,9 @@ from uuid import uuid4
 
 import pytest
 
-from mirofish_storage import InvalidProject, SourceStore
-from mirofish_storage.__main__ import main as cli_main
-from mirofish_storage.source import _passages_input, _source_input
+from nexaweave_storage import InvalidProject, SourceStore
+from nexaweave_storage.__main__ import main as cli_main
+from nexaweave_storage.source import _passages_input, _source_input
 
 
 def test_exact_utf8_bom_newline_and_codepoint_offsets():
@@ -68,7 +68,7 @@ def test_cli_rejects_bad_passages_before_connection(tmp_path, monkeypatch, capsy
     declared.write_text('[{"evidence_id":"%s","start":true,"end":1}]' % uuid4(),
                         encoding="utf-8")
     calls = []
-    monkeypatch.setenv("MIROFISH_APPSTORE_DSN", "unused")
+    monkeypatch.setenv("NEXAWEAVE_APPSTORE_DSN", "unused")
     monkeypatch.setattr("psycopg.connect", lambda *args, **kwargs: calls.append(1))
     result = cli_main(["import-source", "--principal", "owner", "--project-id", str(uuid4()),
                        "--source-revision", str(uuid4()), "--name", "text",

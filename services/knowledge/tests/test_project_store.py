@@ -8,9 +8,9 @@ from uuid import uuid4
 
 import pytest
 
-from mirofish_storage import InvalidProject, ProjectStore, canonical_payload
-from mirofish_storage.__main__ import _export_data, _import_payload
-from mirofish_storage.validation import principal_id, strict_json
+from nexaweave_storage import InvalidProject, ProjectStore, canonical_payload
+from nexaweave_storage.__main__ import _export_data, _import_payload
+from nexaweave_storage.validation import principal_id, strict_json
 
 
 def snapshot():
@@ -121,10 +121,10 @@ def test_package_import_has_no_connection_or_application_import_effects():
     script = (
         "import sys, psycopg; "
         "psycopg.connect = lambda *a, **k: (_ for _ in ()).throw(AssertionError('connected')); "
-        "import mirofish_storage; "
+        "import nexaweave_storage; "
         "assert 'flask' not in sys.modules; "
         "assert not any(k == 'graphiti_core' or k.startswith('graphiti_core.') for k in sys.modules); "
-        "assert not any(k == 'mirofish_knowledge' or k.startswith('mirofish_knowledge.') for k in sys.modules)"
+        "assert not any(k == 'nexaweave_knowledge' or k.startswith('nexaweave_knowledge.') for k in sys.modules)"
     )
     result = subprocess.run([sys.executable, "-c", script], capture_output=True,
                             text=True, check=False, timeout=10)

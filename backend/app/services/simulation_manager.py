@@ -19,7 +19,7 @@ from .simulation_config_generator import SimulationConfigGenerator, SimulationPa
 from ..utils.locale import t
 from ..utils.safe_paths import InvalidResourcePath, ensure_directory, safe_path, validate_resource_id
 
-logger = get_logger('mirofish.simulation')
+logger = get_logger('nexaweave.simulation')
 
 
 def ZepEntityReader(*args, **kwargs):
@@ -626,7 +626,7 @@ class SimulationManager:
                 "parallel": f"python {scripts_dir}/run_parallel_simulation.py --config {config_path}",
             },
             "instructions": (
-                f"1. 激活conda环境: conda activate MiroFish\n"
+                f"1. 激活conda环境: conda activate NexaWeave\n"
                 f"2. 运行模拟 (脚本位于 {scripts_dir}):\n"
                 f"   - 单独运行Twitter: python {scripts_dir}/run_twitter_simulation.py --config {config_path}\n"
                 f"   - 单独运行Reddit: python {scripts_dir}/run_reddit_simulation.py --config {config_path}\n"

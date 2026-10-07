@@ -13,12 +13,12 @@ import psycopg
 import pytest
 from psycopg.types.json import Jsonb
 
-from mirofish_execution.native_run_contracts import (NativeChildIdentity, NativeRunBusy,
+from nexaweave_execution.native_run_contracts import (NativeChildIdentity, NativeRunBusy,
     NativeRunConflict, NativeRunDenied, NativeRunReceipt, NativeRunRequest,
     NativeRunMigrationMismatch, NativeRunUnavailable, NativeRunUncertain, RunState)
-from mirofish_execution.native_run_coordinator import NativeObservation, NativeRunCoordinator
-from mirofish_execution.native_run_store import NativeRunStore, migrate_native_runs
-from mirofish_storage import ProjectStore
+from nexaweave_execution.native_run_coordinator import NativeObservation, NativeRunCoordinator
+from nexaweave_execution.native_run_store import NativeRunStore, migrate_native_runs
+from nexaweave_storage import ProjectStore
 from test_project_store import snapshot
 from test_project_store_postgres import factory  # guarded port 15432 fixture
 

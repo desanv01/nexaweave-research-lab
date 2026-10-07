@@ -10,8 +10,8 @@ import psycopg
 import pytest
 from psycopg.conninfo import conninfo_to_dict
 
-from mirofish_storage import Conflict, MigrationMismatch, NotFound, ProjectStore, migrate
-from mirofish_storage.__main__ import main as cli_main
+from nexaweave_storage import Conflict, MigrationMismatch, NotFound, ProjectStore, migrate
+from nexaweave_storage.__main__ import main as cli_main
 from test_project_store import snapshot
 
 pytestmark = pytest.mark.postgres
@@ -116,7 +116,7 @@ def test_cli_import_update_export_and_fixed_failures(factory, tmp_path, monkeypa
     value["files"] = [{"filename": "uploaded.pdf", "size": 17}]
     source = tmp_path / "legacy.json"
     source.write_text(json.dumps(value), encoding="utf-8")
-    monkeypatch.setenv("MIROFISH_APPSTORE_DSN", os.environ["PROJECT_STORE_POSTGRES_TEST_DSN"])
+    monkeypatch.setenv("NEXAWEAVE_APPSTORE_DSN", os.environ["PROJECT_STORE_POSTGRES_TEST_DSN"])
     common = ["--principal", "cli owner", "--workspace-id", str(workspace),
               "--project-id", str(project), "--display-id", "proj_1"]
     assert cli_main(["import-project", *common, "--input", str(source)]) == 0
@@ -144,6 +144,6 @@ def test_cli_import_update_export_and_fixed_failures(factory, tmp_path, monkeypa
     wrong_owner[1] = "other"
     assert cli_main(["export-project", *wrong_owner]) == 2
     errors = capsys.readouterr().err
-    assert "MIROFISH_APPSTORE_DSN" not in errors
+    assert "NEXAWEAVE_APPSTORE_DSN" not in errors
     assert os.environ["PROJECT_STORE_POSTGRES_TEST_DSN"] not in errors
     assert str(source) not in errors

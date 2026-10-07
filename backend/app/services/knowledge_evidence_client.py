@@ -74,7 +74,7 @@ class KnowledgeEvidenceProcessClient(KnowledgeProcessClient):
         self._scope = dict(settings.scope)
         self._anchor = settings.display_graph_id
         script = Path(settings.bootstrap).with_name("evidence_bootstrap.py")
-        if (script.parent.name != "mirofish_knowledge" or "site-packages" not in script.parts
+        if (script.parent.name != "nexaweave_knowledge" or "site-packages" not in script.parts
                 or Path(settings.bootstrap).name != "read_bootstrap.py"):
             raise ValueError("invalid evidence configuration")
         # Only the accepted trusted connection/binding keys cross the boundary.

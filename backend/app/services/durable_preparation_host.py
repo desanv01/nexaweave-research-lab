@@ -121,11 +121,11 @@ class DurablePreparationHost:
                  account_id=None, ceiling_microusd=None, authorize=None,
                  chat_client_factory=None, model_name=None, base_url=None,
                  scheduler=None, generation_seconds=300):
-        from mirofish_execution.preparation_store import PreparationStore
-        from mirofish_execution.budget import BudgetLedger
-        from mirofish_knowledge.bindings import ScopeBindingStore
-        from mirofish_storage import ProjectStore, SourceStore
-        from mirofish_knowledge.contracts import KnowledgeScope
+        from nexaweave_execution.preparation_store import PreparationStore
+        from nexaweave_execution.budget import BudgetLedger
+        from nexaweave_knowledge.bindings import ScopeBindingStore
+        from nexaweave_storage import ProjectStore, SourceStore
+        from nexaweave_knowledge.contracts import KnowledgeScope
         if (not callable(connection_factory) or not Path(artifact_root).is_absolute()
                 or type(generation_seconds) not in (int, float) or not math.isfinite(generation_seconds)
                 or not 1 <= generation_seconds <= 600):
@@ -202,8 +202,8 @@ class DurablePreparationHost:
         return {'model_calls_enabled': bool(enabled), 'ceiling_microusd': str(self.ceiling) if type(self.ceiling) is int and 1 <= self.ceiling <= 2**63-1 else None}
 
     def _owned(self, source_revision, *, expected_revision=None):
-        from mirofish_knowledge.operations import Tombstoned, NotFound, StorageError
-        from mirofish_storage.store import NotFound as AppNotFound, StorageError as AppError
+        from nexaweave_knowledge.operations import Tombstoned, NotFound, StorageError
+        from nexaweave_storage.store import NotFound as AppNotFound, StorageError as AppError
         try:
             binding = self.bindings.resolve(self.principal, self.display_graph_id)
             scope = binding.scope
@@ -239,7 +239,7 @@ class DurablePreparationHost:
         return row
 
     def plan(self, payload):
-        from mirofish_execution.preparation_contracts import PreparationAuthorityError
+        from nexaweave_execution.preparation_contracts import PreparationAuthorityError
         payload = validate_payload('plan', payload)
         # Existing request recovers its original snapshot; never silently reread.
         scope, project, retained = self._owned(payload['source_revision'])
@@ -276,7 +276,7 @@ class DurablePreparationHost:
         return self._dto(row, 'plan', payload)
 
     def start(self, payload):
-        from mirofish_execution.budget import ReservationState
+        from nexaweave_execution.budget import ReservationState
         payload = validate_payload('start', payload)
         row = self._row(payload)
         scope, _, retained = self._owned(row.frozen['public']['source']['source_revision'], expected_revision=row.project_revision)
@@ -311,7 +311,7 @@ class DurablePreparationHost:
         return self._dto(row, 'status', payload)
 
     def _artifacts(self, row, root):
-        from mirofish_execution.native_owned_binding import _regular_bound_file, _manifest
+        from nexaweave_execution.native_owned_binding import _regular_bound_file, _manifest
         from .oasis_profile_generator import OasisProfileGenerator
         public = row.frozen['public']
         names = file_names(public['options']['platforms'])
@@ -394,8 +394,8 @@ class DurablePreparationHost:
         The worker executor owns this call. No detached job or provider SDK is
         created by HTTP. Injected transport must honor finite timeout/no retries.
         """
-        from mirofish_execution.preparation_contracts import PreparationDispatch
-        from mirofish_execution.native_owned_binding import _safe_ancestors
+        from nexaweave_execution.preparation_contracts import PreparationDispatch
+        from nexaweave_execution.native_owned_binding import _safe_ancestors
         from .preparation_dependencies import create_knowledge_preparation
         from .simulation_manager import SimulationManager
         dispatch = PreparationDispatch.from_wire(wire)
@@ -509,8 +509,8 @@ class DurablePreparationHost:
 
     def bind_native(self, payload, *, run_id, runtime_sha256, model_factory):
         """Trusted only: reauthorize READY/project BEFORE inspecting any files."""
-        from mirofish_execution.native_owned_binding import NativeOwnedSessionFactory
-        from mirofish_execution.native_run_contracts import NativeRunRequest
+        from nexaweave_execution.native_owned_binding import NativeOwnedSessionFactory
+        from nexaweave_execution.native_run_contracts import NativeRunRequest
         import pickle
         payload = validate_payload('status', payload)
         row = self._row(payload)

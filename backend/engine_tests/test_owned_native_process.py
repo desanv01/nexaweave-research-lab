@@ -9,8 +9,8 @@ from uuid import uuid4
 
 import pytest
 
-from mirofish_execution.native_process_driver import NativeProcessDriver
-from mirofish_execution.native_run_contracts import NativeRunRequest, NativeRunUnavailable
+from nexaweave_execution.native_process_driver import NativeProcessDriver
+from nexaweave_execution.native_run_contracts import NativeRunRequest, NativeRunUnavailable
 
 
 def offline_models():

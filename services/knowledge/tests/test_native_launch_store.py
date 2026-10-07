@@ -5,11 +5,11 @@ import os
 import threading
 from uuid import uuid4
 import pytest
-from mirofish_execution.native_launch_store import NativeLaunchStore,migrate
-from mirofish_execution.native_launch_contracts import LaunchAuthorityError
-from mirofish_execution.native_run_store import migrate_native_runs
-from mirofish_execution.budget import migrate as migrate_budget
-from mirofish_execution.preparation_store import migrate as migrate_preparation
+from nexaweave_execution.native_launch_store import NativeLaunchStore,migrate
+from nexaweave_execution.native_launch_contracts import LaunchAuthorityError
+from nexaweave_execution.native_run_store import migrate_native_runs
+from nexaweave_execution.budget import migrate as migrate_budget
+from nexaweave_execution.preparation_store import migrate as migrate_preparation
 from test_source_bridge_postgres import factory as original_factory
 
 pytestmark=pytest.mark.postgres
@@ -92,7 +92,7 @@ def test_distinct_review_queue_race_has_one_permanent_claim(factory,tmp_path):
 
 
 def test_project_revision_and_ready_receipt_reauthorization_before_queue(factory,tmp_path):
-    from mirofish_storage import ProjectStore
+    from nexaweave_storage import ProjectStore
     from test_project_store import snapshot
     prep,scope,plan=ready_host(factory,tmp_path)
     host=launch_host(prep,factory);dto=host.plan(declaration(plan))
@@ -118,7 +118,7 @@ def test_own_migration_catalog_drift_and_previous_checksums(factory):
 
 def configure_offline_scheduler(host):
     """PG admission fixture seam, no Temporal/native execution claim."""
-    from mirofish_execution.temporal_native_host import NativeWorkflowRef
+    from nexaweave_execution.temporal_native_host import NativeWorkflowRef
     calls=[]
     host.temporal=object()
     def call(method,request,ref):
@@ -131,7 +131,7 @@ def configure_offline_scheduler(host):
 
 def test_pg_same_id_queue_error_does_not_release_a_concurrent_winner(factory,tmp_path):
     from test_native_launch_api import reference
-    from mirofish_execution.budget import ReservationState
+    from nexaweave_execution.budget import ReservationState
     prep,scope,plan=ready_host(factory,tmp_path);host=launch_host(prep,factory)
     calls=configure_offline_scheduler(host);dto=host.plan(declaration(plan))
     failed_queue=threading.Event();winner_queued=threading.Event()
@@ -163,7 +163,7 @@ def test_pg_same_id_queue_error_does_not_release_a_concurrent_winner(factory,tmp
 
 
 def test_pg_locked_close_wins_before_stale_same_id_queue_and_release(factory,tmp_path):
-    from mirofish_execution.budget import ReservationState
+    from nexaweave_execution.budget import ReservationState
     prep,scope,plan=ready_host(factory,tmp_path);host=launch_host(prep,factory)
     dto=host.plan(declaration(plan));row=host.store.get('owner',dto['request']['run_id'])
     reservation=host.budget.reserve_native('owner',host.account_id,scope,row.request,row.launch_sha256,4)
@@ -187,7 +187,7 @@ def test_pg_locked_close_wins_before_stale_same_id_queue_and_release(factory,tmp
 
 def test_pg_distinct_review_start_race_releases_only_permanently_closed_loser(factory,tmp_path):
     from test_native_launch_api import reference
-    from mirofish_execution.budget import ReservationState
+    from nexaweave_execution.budget import ReservationState
     prep,scope,plan=ready_host(factory,tmp_path);host=launch_host(prep,factory)
     calls=configure_offline_scheduler(host);plans=[host.plan(declaration(plan)) for _ in range(2)]
     ready=threading.Barrier(2);actual=host.store.queue

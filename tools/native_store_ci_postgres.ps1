@@ -9,7 +9,7 @@ if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_OS -ne 'Windows' -or
     throw 'This fixture helper requires a hosted Windows Actions job'
 }
 $runnerTemp = [IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd('\')
-$fixtureRoot = [IO.Path]::GetFullPath((Join-Path $runnerTemp 'mirofish-native-store-pg'))
+$fixtureRoot = [IO.Path]::GetFullPath((Join-Path $runnerTemp 'nexaweave-native-store-pg'))
 if (-not $fixtureRoot.StartsWith($runnerTemp + '\', [StringComparison]::OrdinalIgnoreCase)) {
     throw 'Fixture directory escapes runner temporary directory'
 }

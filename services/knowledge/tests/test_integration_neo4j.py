@@ -11,9 +11,9 @@ from graphiti_core.llm_client.client import LLMClient
 from graphiti_core.embedder.client import EmbedderClient
 from graphiti_core.cross_encoder.client import CrossEncoderClient
 
-from mirofish_knowledge.contracts import GraphPageRequest, Layer, KnowledgeScope, OntologySpec, SourceEnvelope, SearchQuery
-from mirofish_knowledge.provider import CommunityGraphiti, GraphitiKnowledgeProvider, OperationConflict, ReconciliationRequired
-from mirofish_knowledge.operations import request_fingerprint
+from nexaweave_knowledge.contracts import GraphPageRequest, Layer, KnowledgeScope, OntologySpec, SourceEnvelope, SearchQuery
+from nexaweave_knowledge.provider import CommunityGraphiti, GraphitiKnowledgeProvider, OperationConflict, ReconciliationRequired
+from nexaweave_knowledge.operations import request_fingerprint
 
 
 pytestmark = pytest.mark.neo4j

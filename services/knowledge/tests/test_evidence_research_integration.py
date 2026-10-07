@@ -12,12 +12,12 @@ import pytest
 from neo4j import AsyncGraphDatabase
 from psycopg.conninfo import conninfo_to_dict
 
-from mirofish_knowledge.bindings import ScopeBindingStore
-from mirofish_knowledge.contracts import KnowledgeScope, Layer
-from mirofish_knowledge.evidence_research import EvidenceResearchService, ResearchFailure
-from mirofish_knowledge.operations import Ledger
-from mirofish_knowledge.research_contracts import ResearchRequest
-from mirofish_storage import ProjectStore, SourceStore
+from nexaweave_knowledge.bindings import ScopeBindingStore
+from nexaweave_knowledge.contracts import KnowledgeScope, Layer
+from nexaweave_knowledge.evidence_research import EvidenceResearchService, ResearchFailure
+from nexaweave_knowledge.operations import Ledger
+from nexaweave_knowledge.research_contracts import ResearchRequest
+from nexaweave_storage import ProjectStore, SourceStore
 from test_project_store import snapshot
 # Reuse the existing approved loopback DSN guard and explicit migrations.
 from test_source_bridge_postgres import factory
@@ -106,9 +106,9 @@ sys.setprofile(observe)
 threading.setprofile(observe)
 status = 96  # CLI did not terminate through its expected SystemExit path.
 try:
-    sys.argv = ['mirofish_knowledge.research_cli']
+    sys.argv = ['nexaweave_knowledge.research_cli']
     try:
-        runpy.run_module('mirofish_knowledge.research_cli', run_name='__main__')
+        runpy.run_module('nexaweave_knowledge.research_cli', run_name='__main__')
     except SystemExit as exit:
         status = exit.code
 finally:

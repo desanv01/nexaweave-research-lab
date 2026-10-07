@@ -57,7 +57,7 @@ class ReadHostSettings:
             if (not Path(python).is_absolute() or not Path(python).is_file()
                     or not script.is_absolute() or not script.is_file()
                     or script.is_symlink() or not os.access(python, os.X_OK)
-                    or script.name != "read_bootstrap.py" or script.parent.name != "mirofish_knowledge"
+                    or script.name != "read_bootstrap.py" or script.parent.name != "nexaweave_knowledge"
                     or "site-packages" not in script.parts):
                 raise ValueError
             token = _required(os.environ["KNOWLEDGE_READ_TOKEN"], 256)

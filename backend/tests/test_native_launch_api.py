@@ -35,9 +35,9 @@ def planned(payload):
 
 @pytest.fixture
 def api(monkeypatch):
-    monkeypatch.setenv('MIROFISH_APP_MODE','research_local')
+    monkeypatch.setenv('NEXAWEAVE_APP_MODE','research_local')
     monkeypatch.delenv('FLASK_HOST',raising=False)
-    monkeypatch.delenv('MIROFISH_ALLOWED_ORIGINS',raising=False)
+    monkeypatch.delenv('NEXAWEAVE_ALLOWED_ORIGINS',raising=False)
     settings = ReadHostSettings('python','read_bootstrap.py','0123456789abcdef'*4,'owner','display-1',deepcopy(SCOPE),{})
     monkeypatch.setattr(ReadHostSettings,'from_config',classmethod(lambda cls,config:settings))
     class Facade:

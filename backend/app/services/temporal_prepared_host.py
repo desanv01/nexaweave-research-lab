@@ -26,11 +26,11 @@ class TemporalPreparedHost:
                  native_options: Mapping[str, object] | None = None,
                  max_retained: int = 32, max_concurrent_activities: int = 4,
                  shutdown_grace_seconds: int = 30):
-        from mirofish_execution.native_owned_binding import NativeOwnedSessionFactory
-        from mirofish_execution.native_run_contracts import (
+        from nexaweave_execution.native_owned_binding import NativeOwnedSessionFactory
+        from nexaweave_execution.native_run_contracts import (
             InvalidNativeRun, NativeRunDenied, NativeRunRequest, principal_id)
-        from mirofish_execution.native_run_store import NativeRunStore
-        from mirofish_execution.temporal_native_host import TemporalNativeHost
+        from nexaweave_execution.native_run_store import NativeRunStore
+        from nexaweave_execution.temporal_native_host import TemporalNativeHost
         from .native_prepared_host import NativePreparedHost
 
         principal = principal_id(trusted_principal)
@@ -92,7 +92,7 @@ class TemporalPreparedHost:
             shutdown_grace_seconds=shutdown_grace_seconds)
 
     def _bind(self, request):
-        from mirofish_execution.native_run_contracts import NativeRunDenied
+        from nexaweave_execution.native_run_contracts import NativeRunDenied
         try:
             return self.bindings[request]
         except KeyError:
@@ -111,8 +111,8 @@ class TemporalPreparedHost:
         return await self._temporal.result(value, ref)
 
     async def cancel(self, value, ref):
-        from mirofish_execution.native_run_contracts import NativeRunError
-        from mirofish_execution.temporal_native_host import NativeTemporalHostError
+        from nexaweave_execution.native_run_contracts import NativeRunError
+        from nexaweave_execution.temporal_native_host import NativeTemporalHostError
 
         # The accepted host validates principal and exact workflow identity
         # without remote or filesystem I/O. The immutable host table then

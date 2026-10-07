@@ -4,10 +4,10 @@ The bridge connects an owned `mf_app` project and retained source revision to an
 
 ## Offline plan
 
-After importing a project and source text, and binding a source-layer graph through the trusted host, set `MIROFISH_APPSTORE_DSN` locally and run:
+After importing a project and source text, and binding a source-layer graph through the trusted host, set `NEXAWEAVE_APPSTORE_DSN` locally and run:
 
 ```text
-python -m mirofish_storage export-ingestion --principal owner --display-graph-id graph_1 --source-revision 44444444-4444-4444-4444-444444444444 --operation-id 55555555-5555-5555-5555-555555555555 --ontology ontology.json --output new-plan.json
+python -m nexaweave_storage export-ingestion --principal owner --display-graph-id graph_1 --source-revision 44444444-4444-4444-4444-444444444444 --operation-id 55555555-5555-5555-5555-555555555555 --ontology ontology.json --output new-plan.json
 ```
 
 The ontology file is an explicitly named, bounded, regular JSON file. Output is stdout by default or an exclusively created new file. The JSON includes the full retained source text, so it is sensitive local data, and marks `ingestion_executed: false`. It contains the selected scope, exact source envelope, ontology, canonical request fingerprint, and retained-source provenance. Export neither creates a binding nor migrates a schema. It does not authorize a live provider call.

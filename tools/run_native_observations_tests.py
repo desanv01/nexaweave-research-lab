@@ -28,7 +28,7 @@ def child(mode: str) -> int:
     guard.install()
     try:
         installed = Path(sys.prefix).resolve()
-        for package in ('mirofish_execution', 'mirofish_storage', 'mirofish_knowledge'):
+        for package in ('nexaweave_execution', 'nexaweave_storage', 'nexaweave_knowledge'):
             spec = importlib.util.find_spec(package)
             if (spec is None or spec.origin is None or
                     not Path(spec.origin).resolve().is_relative_to(installed) or
@@ -117,7 +117,7 @@ def main() -> int:
             str(ROOT / 'backend/tests'), str(ROOT / 'backend/engine_tests'),
             str(ROOT / 'services/knowledge/tests')))
         env.update(HF_HUB_OFFLINE='1', TRANSFORMERS_OFFLINE='1', HF_HUB_DISABLE_TELEMETRY='1',
-                   DO_NOT_TRACK='1', MIROFISH_NATIVE_TEST_OFFLINE='1')
+                   DO_NOT_TRACK='1', NEXAWEAVE_NATIVE_TEST_OFFLINE='1')
         if mode != 'unit':
             from psycopg.conninfo import make_conninfo
             env.update(PROJECT_STORE_POSTGRES_INTEGRATION='1', KNOWLEDGE_POSTGRES_INTEGRATION='1')

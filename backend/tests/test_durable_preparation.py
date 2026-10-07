@@ -12,10 +12,10 @@ import pytest
 from app.services.durable_preparation_host import DurablePreparationHost, BoundedChat, validate_graph
 from app.services.preparation_client import PreparationError, digest, validate_payload
 from app.services.knowledge_read_facade import KnowledgeReadFacade, ReadHostSettings
-from mirofish_execution.preparation_store import PreparationRecord, _record
-from mirofish_execution.preparation_contracts import PreparationAuthorityError
-from mirofish_execution.budget import ReservationState
-from mirofish_knowledge.contracts import KnowledgeScope
+from nexaweave_execution.preparation_store import PreparationRecord, _record
+from nexaweave_execution.preparation_contracts import PreparationAuthorityError
+from nexaweave_execution.budget import ReservationState
+from nexaweave_knowledge.contracts import KnowledgeScope
 from test_provider_neutral_preparation import ByteClient, ScriptedChat, SCOPE, uid
 
 
@@ -63,7 +63,7 @@ class MemoryStore:
         return row, True
 
     def claim(self, principal, dispatch):
-        from mirofish_execution.preparation_contracts import PreparationDispatch
+        from nexaweave_execution.preparation_contracts import PreparationDispatch
         dispatch = PreparationDispatch.from_wire(dispatch)
         row = self.get(principal, dispatch.operation_id, dispatch.plan_sha256)
         if row.state != 'queued' or row.attempt_id != dispatch.attempt_id:

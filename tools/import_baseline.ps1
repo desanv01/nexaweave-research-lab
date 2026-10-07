@@ -18,8 +18,8 @@ try {
     $manifest = @()
     $operations = @()
     foreach ($entry in $entries) {
-        if (-not $entry.FullName.StartsWith('MiroFish-main/')) { throw 'Unexpected archive root.' }
-        $relative = $entry.FullName.Substring('MiroFish-main/'.Length)
+        if (-not $entry.FullName.StartsWith('NexaWeave-main/')) { throw 'Unexpected archive root.' }
+        $relative = $entry.FullName.Substring('NexaWeave-main/'.Length)
         if ($relative -match '(^|/)(\.|\.\.|\.git|node_modules|\.venv)(/|$)' -or $relative.Contains(':') -or $relative.Contains('\')) { throw "Unsafe entry: $relative" }
         # Quarantine inherited workflows as inert reference material before first push.
         # Keep inherited README/ignore files intact as references, not active new-product claims.
@@ -39,8 +39,8 @@ try {
         $manifest += [pscustomobject]@{ path=$op.Original; imported_path=$op.Imported; size=$op.Entry.Length; sha256=(Get-FileHash -LiteralPath $op.Target -Algorithm SHA256).Hash.ToLowerInvariant() }
     }
     $result = [ordered]@{
-        archive='MiroFish-main.zip'; archive_sha256=$expectedHash.ToLowerInvariant(); file_count=$entries.Count
-        upstream_repository='https://github.com/666ghj/MiroFish'; archive_commit=$null
+        archive='NexaWeave-main.zip'; archive_sha256=$expectedHash.ToLowerInvariant(); file_count=$entries.Count
+        upstream_repository='https://github.com/desanv01/nexaweave-research-lab'; archive_commit=$null
         observed_upstream_head='39d849138ef254f6c737ab4c4705e5545dbe31d4'; observed_date='2026-09-26'
         note='Snapshot commit mapping unknown. Current upstream is a separate reference, not asserted to match the ZIP. All 128 entries retained; workflows and README/ignore originals relocated as inert references.'
         files=$manifest

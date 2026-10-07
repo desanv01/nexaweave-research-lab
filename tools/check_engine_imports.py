@@ -52,7 +52,7 @@ def main() -> int:
         return child(sys.argv[2])
     if len(sys.argv) != 1:
         raise SystemExit("Unexpected import-check arguments")
-    with tempfile.TemporaryDirectory(prefix="mirofish-engine-imports-") as directory:
+    with tempfile.TemporaryDirectory(prefix="nexaweave-engine-imports-") as directory:
         env = _unit_environment(Path(directory))
         env.update(HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1", HF_HUB_DISABLE_TELEMETRY="1", DO_NOT_TRACK="1")
         for script in SCRIPT_HANDLERS:

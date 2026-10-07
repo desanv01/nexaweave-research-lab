@@ -11,7 +11,7 @@ import zipfile
 
 import pytest
 
-from mirofish_storage import NotFound, ProjectStore, SourceStore
+from nexaweave_storage import NotFound, ProjectStore, SourceStore
 from test_project_store import snapshot
 from test_source_store_postgres import factory
 
@@ -44,7 +44,7 @@ sys.path.insert(0, REPOSITORY)
 from tools.run_unit_tests import LoopbackOnlySockets
 guard = LoopbackOnlySockets()
 guard.install()
-blocked = ('app', 'flask', 'dotenv', 'openai', 'camel', 'oasis', 'graphiti_core', 'mirofish_knowledge')
+blocked = ('app', 'flask', 'dotenv', 'openai', 'camel', 'oasis', 'graphiti_core', 'nexaweave_knowledge')
 class NoApplicationOrProvider(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
         if any(fullname == item or fullname.startswith(item + '.') for item in blocked):
@@ -54,7 +54,7 @@ observed = set()
 def observe(frame, event, arg):
     module = frame.f_globals.get('__name__', '')
     name = frame.f_code.co_name
-    if event == 'return' and module == 'mirofish_storage.store' and name == 'get' and arg is not None:
+    if event == 'return' and module == 'nexaweave_storage.store' and name == 'get' and arg is not None:
         observed.add('authority')
     if event == 'call' and name == '_read_document' and module == '__main__':
         if 'authority' not in observed:
@@ -66,7 +66,7 @@ sys.setprofile(observe)
 threading.setprofile(observe)
 status = 96
 try:
-    assert all(not os.environ.get(key) for key in ('LLM_API_KEY', 'OPENAI_API_KEY', 'DEEPSEEK_API_KEY', 'ZEP_API_KEY', 'MIROFISH_SECRET_SENTINEL'))
+    assert all(not os.environ.get(key) for key in ('LLM_API_KEY', 'OPENAI_API_KEY', 'DEEPSEEK_API_KEY', 'ZEP_API_KEY', 'NEXAWEAVE_SECRET_SENTINEL'))
     sys.argv = [SAVED_CLI, *sys.argv[1:]]
     try:
         runpy.run_path(SAVED_CLI, run_name='__main__')
@@ -101,9 +101,9 @@ def saved_cli(tmp_path, factory):
     for key in list(env):
         if (key.startswith(("PG", "KNOWLEDGE_")) or key in (
                 "LLM_API_KEY", "OPENAI_API_KEY", "DEEPSEEK_API_KEY", "ZEP_API_KEY",
-                "MIROFISH_SECRET_SENTINEL", "PYTHONPATH", "LLM_BASE_URL", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")):
+                "NEXAWEAVE_SECRET_SENTINEL", "PYTHONPATH", "LLM_BASE_URL", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")):
             env.pop(key, None)
-    env["MIROFISH_APPSTORE_DSN"] = os.environ["PROJECT_STORE_POSTGRES_TEST_DSN"]
+    env["NEXAWEAVE_APPSTORE_DSN"] = os.environ["PROJECT_STORE_POSTGRES_TEST_DSN"]
     def run(project, revision, path, digest, principal="owner", name="DOCX evidence"):
         completed = subprocess.run(
             [sys.executable, "-I", "-u", str(wrapper), "ingest-docx", "--principal", principal,
@@ -120,7 +120,7 @@ def saved_cli(tmp_path, factory):
         if not value["ok"]:
             assert set(value) == {"ok", "error"}
             assert str(path) not in completed.stdout.decode("utf-8")
-            assert env["MIROFISH_APPSTORE_DSN"] not in completed.stdout.decode("utf-8")
+            assert env["NEXAWEAVE_APPSTORE_DSN"] not in completed.stdout.decode("utf-8")
         return value
     return run
 

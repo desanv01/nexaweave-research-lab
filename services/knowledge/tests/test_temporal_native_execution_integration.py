@@ -11,14 +11,14 @@ import pytest
 from temporalio.client import Client
 from temporalio.worker import Replayer
 
-from mirofish_execution.native_process_driver import NativeProcessDriver
-from mirofish_execution.native_run_coordinator import NativeRunCoordinator
-from mirofish_execution.native_run_store import NativeRunStore, migrate_native_runs
-from mirofish_execution.native_run_supervisor import NativeRunSupervisor
-from mirofish_execution.native_run_contracts import RunState
-from mirofish_execution.temporal_native_host import (NativeTemporalHostError,
+from nexaweave_execution.native_process_driver import NativeProcessDriver
+from nexaweave_execution.native_run_coordinator import NativeRunCoordinator
+from nexaweave_execution.native_run_store import NativeRunStore, migrate_native_runs
+from nexaweave_execution.native_run_supervisor import NativeRunSupervisor
+from nexaweave_execution.native_run_contracts import RunState
+from nexaweave_execution.temporal_native_host import (NativeTemporalHostError,
     TemporalNativeHost)
-from mirofish_execution.temporal_native_workflow import NativeExecutionWorkflow
+from nexaweave_execution.temporal_native_workflow import NativeExecutionWorkflow
 from test_native_run_supervisor_integration import GateFactory, await_file, owned
 from test_project_store_postgres import factory  # guarded port 15432 fixture
 

@@ -20,7 +20,7 @@ from ..utils.logger import get_logger
 from ..utils.safe_paths import InvalidResourcePath, safe_path, validate_resource_id
 
 
-logger = get_logger('mirofish.simulation_ipc')
+logger = get_logger('nexaweave.simulation_ipc')
 MAX_IPC_MESSAGE_BYTES = 1024 * 1024
 MAX_IPC_JSON_DEPTH = 64
 # The shared path helper bounds complete components to 128 characters. Leave

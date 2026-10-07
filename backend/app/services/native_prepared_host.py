@@ -26,13 +26,13 @@ class NativePreparedHost:
                  grace_seconds: float = 1.0, join_seconds: float = 2.0,
                  go_timeout_seconds: float = 20.0):
         # These imports are reached only by an explicit trusted host caller.
-        from mirofish_execution.native_owned_binding import NativeOwnedSessionFactory
-        from mirofish_execution.native_process_driver import NativeProcessDriver
-        from mirofish_execution.native_run_contracts import (
+        from nexaweave_execution.native_owned_binding import NativeOwnedSessionFactory
+        from nexaweave_execution.native_process_driver import NativeProcessDriver
+        from nexaweave_execution.native_run_contracts import (
             InvalidNativeRun, NativeRunDenied, NativeRunRequest, principal_id)
-        from mirofish_execution.native_run_coordinator import NativeRunCoordinator
-        from mirofish_execution.native_run_store import NativeRunStore
-        from mirofish_execution.native_run_supervisor import NativeRunSupervisor
+        from nexaweave_execution.native_run_coordinator import NativeRunCoordinator
+        from nexaweave_execution.native_run_store import NativeRunStore
+        from nexaweave_execution.native_run_supervisor import NativeRunSupervisor
 
         bound_principal = principal_id(principal)
         bound_request = NativeRunRequest.from_wire(request)

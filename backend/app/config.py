@@ -4,7 +4,7 @@ import os
 from dotenv import load_dotenv
 
 # 加载项目根目录的 .env 文件
-# 路径: MiroFish/.env (相对于 backend/app/config.py)
+# 路径: NexaWeave/.env (相对于 backend/app/config.py)
 project_root_env = os.path.join(os.path.dirname(__file__), '../../.env')
 
 if os.path.exists(project_root_env):
@@ -16,14 +16,16 @@ else:
 
 class Config:
     """Flask配置类"""
-    MIROFISH_APP_MODE = 'legacy'
+    NEXAWEAVE_APP_MODE = 'legacy'
+    MIROFISH_APP_MODE = NEXAWEAVE_APP_MODE  # Config-class compatibility alias.
     
     # Flask配置
-    SECRET_KEY = os.environ.get('SECRET_KEY', 'mirofish-secret-key')
+    SECRET_KEY = os.environ.get('SECRET_KEY', 'nexaweave-secret-key')
     DEBUG = os.environ.get('FLASK_DEBUG', 'False').lower() == 'true'
     # Explicit browser Origin policy. The factory reads the environment at
     # startup unless a subclass overrides this attribute.
-    MIROFISH_ALLOWED_ORIGINS = ('http://localhost:3000', 'http://127.0.0.1:3000')
+    NEXAWEAVE_ALLOWED_ORIGINS = ('http://localhost:3000', 'http://127.0.0.1:3000')
+    MIROFISH_ALLOWED_ORIGINS = NEXAWEAVE_ALLOWED_ORIGINS  # Config-class compatibility alias.
     
     # JSON配置 - 禁用ASCII转义，让中文直接显示
     JSON_AS_ASCII = False
@@ -73,7 +75,7 @@ class Config:
         if not cls.ZEP_API_KEY:
             errors.append("ZEP_API_KEY 未配置")
         if os.environ.get("ZEP_API_URL"):
-            errors.append("ZEP_API_URL 不受支持；MiroFish 仅连接 Zep Cloud")
+            errors.append("ZEP_API_URL 不受支持；NexaWeave 仅连接 Zep Cloud")
         if cls.DEBUG:
             import warnings
             warnings.warn("Flask DEBUG mode is enabled. Do not use in production.", RuntimeWarning)

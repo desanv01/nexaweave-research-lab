@@ -10,13 +10,13 @@ import pytest
 from psycopg.conninfo import conninfo_to_dict
 from psycopg.types.json import Jsonb
 
-from mirofish_knowledge.contracts import KnowledgeScope, Layer
-from mirofish_knowledge.bindings import ScopeBindingStore, _stored
-from mirofish_knowledge.operations import (
+from nexaweave_knowledge.contracts import KnowledgeScope, Layer
+from nexaweave_knowledge.bindings import ScopeBindingStore, _stored
+from nexaweave_knowledge.operations import (
     Busy, CompletionReceipt, Conflict, InvalidTransition, Ledger, MigrationMismatch,
     NotFound, OperationState, StaleAttempt, StorageError, Tombstoned, migrate,
 )
-from mirofish_knowledge import operations as operations_module
+from nexaweave_knowledge import operations as operations_module
 
 pytestmark = pytest.mark.postgres
 

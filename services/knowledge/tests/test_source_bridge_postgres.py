@@ -9,17 +9,17 @@ import psycopg
 import pytest
 from psycopg.conninfo import conninfo_to_dict
 
-from mirofish_knowledge.bindings import ScopeBindingStore
-from mirofish_knowledge.contracts import (FactResult, IngestResult, KnowledgeScope,
+from nexaweave_knowledge.bindings import ScopeBindingStore
+from nexaweave_knowledge.contracts import (FactResult, IngestResult, KnowledgeScope,
                                           Layer, OntologySpec)
-from mirofish_knowledge.ingestion import KnowledgeIngestionCoordinator
-from mirofish_knowledge.operations import (CompletionReceipt, Ledger,
+from nexaweave_knowledge.ingestion import KnowledgeIngestionCoordinator
+from nexaweave_knowledge.operations import (CompletionReceipt, Ledger,
                                            OperationState, migrate as migrate_knowledge)
-from mirofish_knowledge.source_bridge import (BridgeConflict, BridgeDenied,
+from nexaweave_knowledge.source_bridge import (BridgeConflict, BridgeDenied,
                                                BridgeInvalid, BridgeNotFound, BridgeUnavailable,
                                                BridgeUncertain, SourceIngestionBridge)
-from mirofish_storage import ProjectStore, SourceStore, migrate as migrate_app
-from mirofish_storage.__main__ import main as cli_main
+from nexaweave_storage import ProjectStore, SourceStore, migrate as migrate_app
+from nexaweave_storage.__main__ import main as cli_main
 from test_project_store import snapshot
 
 pytestmark = pytest.mark.postgres
@@ -72,7 +72,7 @@ def test_real_owned_plan_cli_and_denials(factory, tmp_path, monkeypatch, capsys)
     assert plan.source.source_sha256 == hashlib.sha256(retained.text.encode()).hexdigest()
     assert plan.source.recorded_at == retained.recorded_at
     assert plan.source.evidence_ids == tuple(item.evidence_id for item in retained.passages)
-    monkeypatch.setenv("MIROFISH_APPSTORE_DSN", os.environ["PROJECT_STORE_POSTGRES_TEST_DSN"])
+    monkeypatch.setenv("NEXAWEAVE_APPSTORE_DSN", os.environ["PROJECT_STORE_POSTGRES_TEST_DSN"])
     ontology_file = tmp_path / "ontology.json"
     ontology_file.write_text(spec.model_dump_json(), encoding="utf-8")
     args = ["export-ingestion", "--principal", "owner", "--display-graph-id", display,
@@ -126,7 +126,7 @@ class FakeProvider:
                           episode_ids=(episode,), evidence_ids=source.evidence_ids)
         return IngestResult(episode_id=episode, already_exists=False, facts=(fact,))
     async def completion_proof(self, scope, source, ontology):
-        from mirofish_knowledge.operations import request_fingerprint
+        from nexaweave_knowledge.operations import request_fingerprint
         return CompletionReceipt(scope.group_id, scope.episode_uuid(source.operation_id),
                                  request_fingerprint(scope, source, ontology), source.evidence_ids)
 

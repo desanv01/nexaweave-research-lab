@@ -51,7 +51,7 @@ def main():
     args = parser.parse_args()
     if args.child:
         return child(args.integration)
-    with tempfile.TemporaryDirectory(prefix='mirofish-workbench-evidence-') as directory:
+    with tempfile.TemporaryDirectory(prefix='nexaweave-workbench-evidence-') as directory:
         env = _unit_environment(Path(directory))
         env['PYTHONPATH'] = os.pathsep.join([str(ROOT), str(ROOT / 'services/knowledge/src'),
                                            str(ROOT / 'services/knowledge/tests')])
@@ -60,19 +60,19 @@ def main():
             from psycopg.conninfo import make_conninfo
             pg = os.environ.get('PROJECT_STORE_TEST_PASSWORD')
             neo = os.environ.get('KNOWLEDGE_TEST_PASSWORD')
-            backend = os.environ.get('MIROFISH_WORKBENCH_BACKEND_PYTHON')
+            backend = os.environ.get('NEXAWEAVE_WORKBENCH_BACKEND_PYTHON')
             if not pg or not neo or not backend or not Path(backend).is_absolute() or not Path(backend).is_file():
                 parser.error('approved fixture passwords and locked backend interpreter required')
             # -I verifies the actual installed package, ignoring source PYTHONPATH.
             installed = subprocess.run([sys.executable, '-I', '-c',
-                "import mirofish_knowledge; from pathlib import Path; p=Path(mirofish_knowledge.__file__).resolve(); "
+                "import nexaweave_knowledge; from pathlib import Path; p=Path(nexaweave_knowledge.__file__).resolve(); "
                 "assert 'site-packages' in p.parts; assert p.with_name('evidence_bootstrap.py').is_file(); "
                 "print(p.with_name('read_bootstrap.py'))"], env=env, cwd=directory,
                 capture_output=True, timeout=30, check=False)
             if installed.returncode or installed.stderr:
                 parser.error('non-editable installed knowledge package required')
             env.update(PROJECT_STORE_POSTGRES_INTEGRATION='1', KNOWLEDGE_INTEGRATION='1',
-                       KNOWLEDGE_TEST_PASSWORD=neo, MIROFISH_WORKBENCH_BACKEND_PYTHON=backend,
+                       KNOWLEDGE_TEST_PASSWORD=neo, NEXAWEAVE_WORKBENCH_BACKEND_PYTHON=backend,
                        KNOWLEDGE_PYTHON=str(Path(sys.executable).absolute()),
                        KNOWLEDGE_BOOTSTRAP_SCRIPT=installed.stdout.decode().strip())
             env['PROJECT_STORE_POSTGRES_TEST_DSN'] = make_conninfo(host='127.0.0.1', port=15432,

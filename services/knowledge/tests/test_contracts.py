@@ -5,8 +5,8 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 
-from mirofish_knowledge.contracts import FactResult, KnowledgeScope, Layer, SourceEnvelope, OntologySpec, SearchQuery
-from mirofish_knowledge.provider import ProviderConfig, Endpoint, UnsupportedCapability, GraphitiKnowledgeProvider, BoundedGenericClient, OperationConflict, ReconciliationRequired, _fact, _request_fingerprint
+from nexaweave_knowledge.contracts import FactResult, KnowledgeScope, Layer, SourceEnvelope, OntologySpec, SearchQuery
+from nexaweave_knowledge.provider import ProviderConfig, Endpoint, UnsupportedCapability, GraphitiKnowledgeProvider, BoundedGenericClient, OperationConflict, ReconciliationRequired, _fact, _request_fingerprint
 from graphiti_core.llm_client import LLMConfig
 from graphiti_core.prompts.models import Message
 from pydantic import BaseModel
@@ -202,7 +202,7 @@ async def test_search_uses_configured_cross_encoder_recipe():
 
 @pytest.mark.asyncio
 async def test_initialize_persists_environment_config(monkeypatch):
-    import mirofish_knowledge.provider as module
+    import nexaweave_knowledge.provider as module
 
     config = ProviderConfig(neo4j_uri="bolt://localhost", neo4j_user="neo4j", neo4j_password="secret", llm=Endpoint(base_url="http://localhost", model="fake", api_key="secret"), embedding=Endpoint(base_url="http://localhost", model="fake", api_key="secret"), embedding_dimension=1024)
 

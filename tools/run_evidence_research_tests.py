@@ -58,7 +58,7 @@ def main() -> int:
     args = parser.parse_args()
     if args.child:
         return child(args.integration)
-    with tempfile.TemporaryDirectory(prefix="mirofish-evidence-research-") as directory:
+    with tempfile.TemporaryDirectory(prefix="nexaweave-evidence-research-") as directory:
         env = _unit_environment(Path(directory))
         env["PYTHONPATH"] = os.pathsep.join([
             str(ROOT), str(ROOT / "services" / "knowledge" / "src"),

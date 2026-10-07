@@ -6,8 +6,8 @@ import math
 import statistics
 import time
 
-from mirofish_execution.native_run_contracts import NativeRunReceipt, RunState
-from mirofish_execution.native_run_store import NativeRunStore
+from nexaweave_execution.native_run_contracts import NativeRunReceipt, RunState
+from nexaweave_execution.native_run_store import NativeRunStore
 
 try:
     from .native_experiment_contracts import (ExperimentCohort, ExperimentError,

@@ -14,16 +14,16 @@ from uuid import UUID, uuid4
 import pytest
 from pydantic import ValidationError
 
-import mirofish_knowledge.evidence_research as module
-import mirofish_knowledge.research_cli as cli
-import mirofish_knowledge.provider as provider_module
-from mirofish_knowledge.bindings import BindingRecord
-from mirofish_knowledge.contracts import FactResult, KnowledgeScope, Layer
-from mirofish_knowledge.operations import Busy, Tombstoned
-from mirofish_knowledge.provider import GraphitiKnowledgeProvider
-from mirofish_knowledge.research_contracts import ResearchRequest
-from mirofish_storage.source import ResolvedEvidence
-from mirofish_storage.store import NotFound, StorageError
+import nexaweave_knowledge.evidence_research as module
+import nexaweave_knowledge.research_cli as cli
+import nexaweave_knowledge.provider as provider_module
+from nexaweave_knowledge.bindings import BindingRecord
+from nexaweave_knowledge.contracts import FactResult, KnowledgeScope, Layer
+from nexaweave_knowledge.operations import Busy, Tombstoned
+from nexaweave_knowledge.provider import GraphitiKnowledgeProvider
+from nexaweave_knowledge.research_contracts import ResearchRequest
+from nexaweave_storage.source import ResolvedEvidence
+from nexaweave_storage.store import NotFound, StorageError
 
 NOW = datetime(2025, 1, 1, tzinfo=timezone.utc)
 

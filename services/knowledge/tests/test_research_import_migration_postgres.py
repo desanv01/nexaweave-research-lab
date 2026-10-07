@@ -6,10 +6,10 @@ from uuid import uuid4
 from psycopg.types.json import Jsonb
 import pytest
 
-from mirofish_storage import MigrationMismatch, migrate
-from mirofish_storage.store import _catalog
-import mirofish_storage.store as store_module
-from mirofish_storage.validation import canonical_payload
+from nexaweave_storage import MigrationMismatch, migrate
+from nexaweave_storage.store import _catalog
+import nexaweave_storage.store as store_module
+from nexaweave_storage.validation import canonical_payload
 from test_project_store import snapshot
 from test_source_store_postgres import factory
 
@@ -26,7 +26,7 @@ def test_prior_application_upgrade_and_failed_sql3_are_atomic(factory, monkeypat
             with conn.transaction():
                 conn.execute('DROP SCHEMA mf_app CASCADE')
                 for version, name in [(1, '0001_project_revisions.sql'), (2, '0002_source_evidence.sql')][:start_version]:
-                    sql = files('mirofish_storage').joinpath('migrations', name).read_text('utf-8')
+                    sql = files('nexaweave_storage').joinpath('migrations', name).read_text('utf-8')
                     conn.execute(sql)
                     conn.execute('INSERT INTO mf_app.schema_migrations VALUES (%s,%s,%s)',
                         (version, hashlib.sha256(sql.encode('utf-8')).hexdigest(), _catalog(conn)))

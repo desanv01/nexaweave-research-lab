@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
-# Capture the caller-supplied key before importing MiroFish modules. app.config
+# Capture the caller-supplied key before importing NexaWeave modules. app.config
 # deliberately loads the repository .env with override=True, which must not
 # silently replace the account selected for this explicit validation process.
 _PROCESS_ZEP_API_KEY = os.environ.get("ZEP_API_KEY", "").strip()
@@ -378,7 +378,7 @@ def _episode_to_batch_item(graph_id: str, item: SourceEpisode, index: int) -> Ba
         data=item.data,
         data_type=item.data_type,
         created_at=item.created_at,
-        source_description="MiroFish deep Zep Cloud validation corpus",
+        source_description="NexaWeave deep Zep Cloud validation corpus",
         metadata={
             "source": "mirofish_zep_deep_validation",
             "phase": item.phase,
@@ -393,7 +393,7 @@ def _add_and_wait(client: Any, graph_id: str, item: SourceEpisode, timeout: int)
         type=item.data_type,
         data=item.data,
         created_at=item.created_at,
-        source_description="MiroFish temporal Zep Cloud validation update",
+        source_description="NexaWeave temporal Zep Cloud validation update",
         metadata={"source": "mirofish_zep_deep_validation", "phase": item.phase},
     )
     episode_uuid = _uuid(episode)
@@ -484,7 +484,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
     print(f"[zep-deep] graph_id={graph_id}", flush=True)
     try:
-        builder.create_graph("MiroFish Zep Cloud Deep Validation", graph_id=graph_id)
+        builder.create_graph("NexaWeave Zep Cloud Deep Validation", graph_id=graph_id)
         created = True
         print("[zep-deep] graph created", flush=True)
 
@@ -602,9 +602,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         updater_drained = True
         updater_stats = updater.get_stats()
         if updater_stats["items_sent"] != 5 or updater_stats["pending_episode_count"] != 0:
-            raise AssertionError(f"unexpected MiroFish updater stats: {updater_stats}")
+            raise AssertionError(f"unexpected NexaWeave updater stats: {updater_stats}")
         result["mirofish_updater"] = updater_stats
-        print("[zep-deep] MiroFish updater processed 5 mock activities", flush=True)
+        print("[zep-deep] NexaWeave updater processed 5 mock activities", flush=True)
 
         final_nodes = fetch_all_nodes(client, graph_id, page_size=2)
         final_edges = fetch_all_edges(client, graph_id, page_size=2)
@@ -715,7 +715,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
         if len(entity_context.related_edges) != len(complete_node_edges):
             raise AssertionError(
-                "MiroFish entity context omitted incoming or outgoing node edges"
+                "NexaWeave entity context omitted incoming or outgoing node edges"
             )
 
         result["runtime_assertions"] = {

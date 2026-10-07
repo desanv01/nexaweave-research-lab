@@ -12,7 +12,7 @@ injected source facade does not bypass settings parsing or the HTTP boundary.
 
 For normal local startup, configure the existing trusted read-host settings
 (installed interpreter/bootstrap, token, principal, display graph, scope and
-connection settings), set `MIROFISH_APP_MODE=research_local` and use the backend's
+connection settings), set `NEXAWEAVE_APP_MODE=research_local` and use the backend's
 existing `python run.py` entrypoint. Both protected modes select
 `Config.validate_readonly()` and default to `127.0.0.1:5001`, threaded with debug
 disabled by validation. An explicitly configured host must remain loopback;

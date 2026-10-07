@@ -10,16 +10,16 @@ from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner
 
-from mirofish_execution.temporal_activities import SourceIngestionActivities
-from mirofish_execution.temporal_contracts import (InvalidTemporalRequest,
+from nexaweave_execution.temporal_activities import SourceIngestionActivities
+from nexaweave_execution.temporal_contracts import (InvalidTemporalRequest,
     TemporalIngestionRequest, TemporalReceipt)
-from mirofish_execution.temporal_workflow import (HEARTBEAT_TIMEOUT,
+from nexaweave_execution.temporal_workflow import (HEARTBEAT_TIMEOUT,
     SCHEDULE_TO_CLOSE, START_TO_CLOSE, SourceIngestionWorkflow)
-from mirofish_execution.budget import BudgetLedger
-from mirofish_execution.budgeted_ingestion import BudgetedIngestion
-from mirofish_knowledge.ingestion import KnowledgeIngestionCoordinator
-from mirofish_knowledge.operations import Ledger
-from mirofish_knowledge.source_bridge import SourceIngestionBridge
+from nexaweave_execution.budget import BudgetLedger
+from nexaweave_execution.budgeted_ingestion import BudgetedIngestion
+from nexaweave_knowledge.ingestion import KnowledgeIngestionCoordinator
+from nexaweave_knowledge.operations import Ledger
+from nexaweave_knowledge.source_bridge import SourceIngestionBridge
 
 
 def request_wire():
@@ -105,7 +105,7 @@ def test_invalid_temporal_wire_denied(change):
 
 @pytest.mark.asyncio
 async def test_workflow_one_attempt_and_finite_timeouts(monkeypatch):
-    from mirofish_execution import temporal_workflow as module
+    from nexaweave_execution import temporal_workflow as module
     captured = {}
     async def execute(name, wire, **options):
         captured.update(options)
@@ -128,7 +128,7 @@ async def test_workflow_one_attempt_and_finite_timeouts(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_workflow_validation_is_terminal_and_nonretryable(monkeypatch):
-    from mirofish_execution import temporal_workflow as module
+    from nexaweave_execution import temporal_workflow as module
     malformed = dict(request_wire(), source_text="not allowed")
     with pytest.raises(ApplicationError) as bad_input:
         await SourceIngestionWorkflow().run(malformed)

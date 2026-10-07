@@ -10,9 +10,9 @@ from uuid import uuid4
 
 import pytest
 
-from mirofish_storage import NotFound, ProjectStore, SourceStore
-from mirofish_storage.research_bundle import canonical, decode, export_bundle, inspect_bundle
-from mirofish_storage.research_bundle_cli import main
+from nexaweave_storage import NotFound, ProjectStore, SourceStore
+from nexaweave_storage.research_bundle import canonical, decode, export_bundle, inspect_bundle
+from nexaweave_storage.research_bundle_cli import main
 from test_project_store import snapshot
 from test_source_store_postgres import factory
 
@@ -82,7 +82,7 @@ def test_same_owner_foreign_project_source_denial_closes_connections_and_creates
         connection = factory()
         connections.append(connection)
         return connection
-    import mirofish_storage.research_bundle_cli as cli_module
+    import nexaweave_storage.research_bundle_cli as cli_module
     monkeypatch.setattr(cli_module, "_stores", lambda: (ProjectStore(tracked), SourceStore(tracked)))
     output = tmp_path / "foreign-denied.json"
     out = StringIO()
@@ -94,7 +94,7 @@ def test_same_owner_foreign_project_source_denial_closes_connections_and_creates
 
 def test_denial_creates_no_output_and_ambient_override_denied(factory, tmp_path, monkeypatch):
     project, selected, _, _, _ = owned(factory)
-    monkeypatch.setenv("MIROFISH_APPSTORE_DSN", os.environ["PROJECT_STORE_POSTGRES_TEST_DSN"])
+    monkeypatch.setenv("NEXAWEAVE_APPSTORE_DSN", os.environ["PROJECT_STORE_POSTGRES_TEST_DSN"])
     for key in list(os.environ):
         if key.upper().startswith("PG"):
             monkeypatch.delenv(key)
@@ -116,7 +116,7 @@ import os
 import runpy
 import socket
 import sys
-blocked = ('app', 'flask', 'dotenv', 'openai', 'camel', 'oasis', 'graphiti_core', 'mirofish_knowledge')
+blocked = ('app', 'flask', 'dotenv', 'openai', 'camel', 'oasis', 'graphiti_core', 'nexaweave_knowledge')
 class NoProviders(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
         if any(fullname == name or fullname.startswith(name + '.') for name in blocked):
@@ -156,7 +156,7 @@ sys.setprofile(profile)
 status = 97
 try:
     try:
-        runpy.run_module('mirofish_storage.research_bundle_cli', run_name='__main__')
+        runpy.run_module('nexaweave_storage.research_bundle_cli', run_name='__main__')
     except SystemExit as error:
         status = error.code
 finally:
@@ -180,10 +180,10 @@ def test_fresh_installed_cli_export_inspect_digest_tamper_and_no_fallback(factor
         upper = key.upper()
         if (upper.startswith(("PG", "KNOWLEDGE_")) or "PROXY" in upper
                 or upper.endswith(("API_KEY", "TOKEN", "SECRET"))
-                or upper in {"MIROFISH_APPSTORE_DSN", "PROJECT_STORE_POSTGRES_TEST_DSN", "PYTHONPATH",
+                or upper in {"NEXAWEAVE_APPSTORE_DSN", "PROJECT_STORE_POSTGRES_TEST_DSN", "PYTHONPATH",
                              "LLM_BASE_URL", "OPENAI_BASE_URL", "DEEPSEEK_BASE_URL"}):
             env.pop(key, None)
-    export_env = dict(env, MIROFISH_APPSTORE_DSN=os.environ["PROJECT_STORE_POSTGRES_TEST_DSN"])
+    export_env = dict(env, NEXAWEAVE_APPSTORE_DSN=os.environ["PROJECT_STORE_POSTGRES_TEST_DSN"])
     def run(data, inspect=False):
         wrapper = tmp_path / ("inspect.py" if inspect else "export.py")
         wrapper.write_text(f"INSPECT = {inspect!r}\n" + _CHILD, encoding="utf-8")

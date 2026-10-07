@@ -7,11 +7,11 @@ from uuid import UUID
 
 import pytest
 
-import mirofish_storage.research_import as importer
-import mirofish_storage.research_import_cli as cli
-from mirofish_storage.research_bundle import canonical, decode, MAX_ARTIFACT_BYTES
-from mirofish_storage.research_import import ImportError, ResearchImportStore, prepare_import, remap_id
-from mirofish_storage.validation import canonical_payload
+import nexaweave_storage.research_import as importer
+import nexaweave_storage.research_import_cli as cli
+from nexaweave_storage.research_bundle import canonical, decode, MAX_ARTIFACT_BYTES
+from nexaweave_storage.research_import import ImportError, ResearchImportStore, prepare_import, remap_id
+from nexaweave_storage.validation import canonical_payload
 from test_research_bundle import artifact, reseal, SOURCE, EVIDENCE
 
 TARGET = "00000000-0000-0000-0000-000000000011"
@@ -183,7 +183,7 @@ def test_cli_ambient_authority_denied(setting, monkeypatch):
 def test_cli_dsn_override_denied_before_connect(option, monkeypatch):
     for key in list(__import__("os").environ):
         if key.upper().startswith("PG"): monkeypatch.delenv(key)
-    monkeypatch.setenv("MIROFISH_APPSTORE_DSN", f"host=127.0.0.1 {option}=PRIVATE")
+    monkeypatch.setenv("NEXAWEAVE_APPSTORE_DSN", f"host=127.0.0.1 {option}=PRIVATE")
     import psycopg
     monkeypatch.setattr(psycopg, "connect", lambda *a, **k: pytest.fail("connect"))
     with pytest.raises(ImportError, match="authority_unavailable"): cli._store()

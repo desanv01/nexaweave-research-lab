@@ -12,12 +12,12 @@ import psycopg
 import pytest
 from psycopg.conninfo import conninfo_to_dict
 
-from mirofish_knowledge.bindings import ScopeBindingStore
-from mirofish_knowledge.contracts import KnowledgeScope, Layer
-from mirofish_knowledge.operations import Ledger, migrate as migrate_knowledge
-from mirofish_knowledge.source_library import (SourceLibrary, SourceSettings, SourceError,
+from nexaweave_knowledge.bindings import ScopeBindingStore
+from nexaweave_knowledge.contracts import KnowledgeScope, Layer
+from nexaweave_knowledge.operations import Ledger, migrate as migrate_knowledge
+from nexaweave_knowledge.source_library import (SourceLibrary, SourceSettings, SourceError,
     declarations, encoded, validate_payload, MAX_BYTES)
-from mirofish_storage import ProjectStore, SourceStore, Conflict, NotFound, migrate
+from nexaweave_storage import ProjectStore, SourceStore, Conflict, NotFound, migrate
 from test_project_store import snapshot
 
 
@@ -256,13 +256,13 @@ def test_fresh_installed_source_import_denies_provider_modules(tmp_path):
 import importlib.abc, sys
 class Deny(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
-        if fullname in {"mirofish_knowledge.provider", "mirofish_knowledge.read_runtime"} or fullname.split(".")[0] in {"graphiti_core", "neo4j", "openai", "camel"}:
+        if fullname in {"nexaweave_knowledge.provider", "nexaweave_knowledge.read_runtime"} or fullname.split(".")[0] in {"graphiti_core", "neo4j", "openai", "camel"}:
             raise AssertionError("forbidden provider import: " + fullname)
 sys.meta_path.insert(0, Deny())
-import mirofish_knowledge.source_bootstrap
-import mirofish_knowledge.bindings
-assert "mirofish_knowledge.provider" not in sys.modules
-assert "mirofish_knowledge.read_runtime" not in sys.modules
+import nexaweave_knowledge.source_bootstrap
+import nexaweave_knowledge.bindings
+assert "nexaweave_knowledge.provider" not in sys.modules
+assert "nexaweave_knowledge.read_runtime" not in sys.modules
 print("source-only")
 '''
     result = subprocess.run([sys.executable, "-I", "-c", code], cwd=tmp_path,
@@ -273,12 +273,12 @@ print("source-only")
 
 def test_fresh_public_provider_export_remains_compatible(tmp_path):
     code = r'''
-import mirofish_knowledge
-assert "GraphitiKnowledgeProvider" in mirofish_knowledge.__all__
-from mirofish_knowledge import GraphitiKnowledgeProvider
-from mirofish_knowledge.provider import GraphitiKnowledgeProvider as direct
+import nexaweave_knowledge
+assert "GraphitiKnowledgeProvider" in nexaweave_knowledge.__all__
+from nexaweave_knowledge import GraphitiKnowledgeProvider
+from nexaweave_knowledge.provider import GraphitiKnowledgeProvider as direct
 assert GraphitiKnowledgeProvider is direct
-assert mirofish_knowledge.GraphitiKnowledgeProvider is direct
+assert nexaweave_knowledge.GraphitiKnowledgeProvider is direct
 print("public-export")
 '''
     result = subprocess.run([sys.executable, "-I", "-c", code], cwd=tmp_path,
@@ -298,7 +298,7 @@ def test_source_settings_reject_ambient_libpq_before_connect(monkeypatch, key):
 def test_actual_pdf_owned_pg_exact_pages_restart_idempotence_conflict_and_evidence(factory):
     from test_pdf_source import pdf_bytes
     from test_source_library import pdf_payload
-    from mirofish_storage.pdf import extract_pdf
+    from nexaweave_storage.pdf import extract_pdf
     settings, project = owned(factory)
     binary = pdf_bytes(["Beginning 猫", "", "Middle 雪", "End 中文"])
     extracted = extract_pdf(binary)

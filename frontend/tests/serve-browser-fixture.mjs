@@ -9,6 +9,8 @@ const root = fileURLToPath(new URL('../', import.meta.url))
 // Vite otherwise treats a closed noninteractive stdin as a parent shutdown.
 // This affects this fixture process only; no account or project setting changes.
 process.env.CI = 'true'
+process.env.BROWSER = 'none'
+delete process.env.BROWSER_ARGS
 
 let environmentDirectory
 let server
@@ -46,7 +48,7 @@ const close = (failed = false) => {
 }
 
 try {
-  environmentDirectory = await mkdtemp(path.join(tmpdir(), 'mirofish-browser-env-'))
+  environmentDirectory = await mkdtemp(path.join(tmpdir(), 'nexaweave-browser-env-'))
   server = await createServer({
     configFile: false, root, envDir: environmentDirectory, plugins: [vue()],
     resolve: { alias: { '@': path.join(root, 'src'), '@locales': path.join(root, '../locales') } },
@@ -58,7 +60,7 @@ try {
   process.on('SIGTERM', onSignal)
   process.stdin.setEncoding('utf8')
   process.stdin.on('data', onInput)
-  console.log('Offline browser fixture: http://127.0.0.1:4317/tests/browser-rendering.html')
+  console.log('NexaWeave offline browser fixture: http://127.0.0.1:4317/tests/browser-rendering.html')
 } catch {
   console.error('Offline browser fixture failed to start; check Vite setup and port 4317')
   await close(true)

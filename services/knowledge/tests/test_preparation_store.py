@@ -6,11 +6,11 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from mirofish_execution.budget import BudgetLedger, BudgetDenied, ReservationState, migrate as migrate_budget
-from mirofish_execution.preparation_store import PreparationStore, migrate
-from mirofish_execution.preparation_contracts import PreparedBudgetReceipt, PreparationAuthorityError
-from mirofish_storage import ProjectStore
-from mirofish_knowledge.operations import Ledger
+from nexaweave_execution.budget import BudgetLedger, BudgetDenied, ReservationState, migrate as migrate_budget
+from nexaweave_execution.preparation_store import PreparationStore, migrate
+from nexaweave_execution.preparation_contracts import PreparedBudgetReceipt, PreparationAuthorityError
+from nexaweave_storage import ProjectStore
+from nexaweave_knowledge.operations import Ledger
 from test_source_bridge_postgres import factory, owned_fixture, ontology
 from test_project_store import snapshot
 
@@ -98,7 +98,7 @@ def test_pg_restart_duplicate_race_and_actual_inherited_publication(factory, tmp
 
 def test_shared_ingestion_preparation_cap_race(factory, tmp_path):
     host, scope, retained, _, _, _ = real_host(factory, tmp_path, cap=5)
-    from mirofish_knowledge.source_bridge import SourceIngestionBridge
+    from nexaweave_knowledge.source_bridge import SourceIngestionBridge
     ingestion = SourceIngestionBridge(factory).plan('owner', host.display_graph_id, retained.source_revision, uuid4(), ontology())
     planned = host.plan(request(retained))
     def prepare():

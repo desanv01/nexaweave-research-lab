@@ -57,7 +57,7 @@ canonical request UUID, method, trusted anchor scope and payload.
 
 The executable comes exclusively from trusted `ReadHostSettings`. The bootstrap
 is the fixed `evidence_bootstrap.py` sibling of installed `read_bootstrap.py`
-under `site-packages/mirofish_knowledge`; no request path is used. The bootstrap
+under `site-packages/nexaweave_knowledge`; no request path is used. The bootstrap
 also rejects package/read-runtime/dispatcher modules resolved outside that
 installed directory. Main must install a non-editable package before testing
 or running this API. `-I -u`, binary private pipes, a private temporary directory,
@@ -81,7 +81,7 @@ semantic support judgment, and simulation claims are not real-world predictions.
 
 Main qualification source includes pure route/profile/dispatcher tests and a
 real loopback HTTP backend child using
-`MIROFISH_WORKBENCH_BACKEND_PYTHON`, `KNOWLEDGE_PYTHON` and
+`NEXAWEAVE_WORKBENCH_BACKEND_PYTHON`, `KNOWLEDGE_PYTHON` and
 `KNOWLEDGE_BOOTSTRAP_SCRIPT`. The latter uses retained actual PostgreSQL/Neo4j
 fixtures and the default real facade/private child. Passive backend profiling
 observes fresh installed launches, environment keys and owned cleanup. The

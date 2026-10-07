@@ -201,7 +201,7 @@ wheels = [
 ]
 
 [[package]]
-name = "mirofish-knowledge"
+name = "nexaweave-knowledge"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

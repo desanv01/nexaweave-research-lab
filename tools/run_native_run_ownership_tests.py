@@ -57,9 +57,9 @@ def main() -> int:
     args = parser.parse_args()
     if args.child:
         return child(args.postgres)
-    with tempfile.TemporaryDirectory(prefix="mirofish-native-run-tests-") as directory:
+    with tempfile.TemporaryDirectory(prefix="nexaweave-native-run-tests-") as directory:
         env = _unit_environment(Path(directory))
-        env["MIROFISH_NATIVE_TEST_OFFLINE"] = "1"
+        env["NEXAWEAVE_NATIVE_TEST_OFFLINE"] = "1"
         if args.postgres:
             from psycopg.conninfo import make_conninfo
             password = os.environ.get("PROJECT_STORE_TEST_PASSWORD")

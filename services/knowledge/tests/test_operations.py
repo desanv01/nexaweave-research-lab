@@ -9,10 +9,10 @@ from uuid import uuid4
 import psycopg
 import pytest
 
-from mirofish_knowledge.contracts import KnowledgeScope, Layer, OntologySpec, SourceEnvelope
-from mirofish_knowledge.bindings import BindingRecord, ScopeBindingStore, _stored
-from mirofish_knowledge.operations import CompletionReceipt, Conflict, Ledger, StorageError, Tombstoned, _error_code, _fingerprint, _read_lock_key, _receipt, request_fingerprint
-from mirofish_knowledge.provider import _request_fingerprint
+from nexaweave_knowledge.contracts import KnowledgeScope, Layer, OntologySpec, SourceEnvelope
+from nexaweave_knowledge.bindings import BindingRecord, ScopeBindingStore, _stored
+from nexaweave_knowledge.operations import CompletionReceipt, Conflict, Ledger, StorageError, Tombstoned, _error_code, _fingerprint, _read_lock_key, _receipt, request_fingerprint
+from nexaweave_knowledge.provider import _request_fingerprint
 
 
 def _request():

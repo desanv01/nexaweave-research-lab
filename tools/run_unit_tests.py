@@ -133,7 +133,7 @@ def _run_pytest_child() -> int:
 
 
 def main() -> int:
-    with tempfile.TemporaryDirectory(prefix="mirofish-unit-") as directory:
+    with tempfile.TemporaryDirectory(prefix="nexaweave-unit-") as directory:
         temp_root = Path(directory)
         command = [
             sys.executable,

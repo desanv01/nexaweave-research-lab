@@ -21,14 +21,14 @@ pytestmark = pytest.mark.postgres
 @pytest.fixture
 def experiment_python():
     """Require Main's explicit installed runtime; never use the test runner."""
-    value = os.environ.get('MIROFISH_EXPERIMENT_TEST_PYTHON')
+    value = os.environ.get('NEXAWEAVE_EXPERIMENT_TEST_PYTHON')
     try:
         if (type(value) is not str or not 1 <= len(value) <= 4096 or '\x00' in value
                 or not Path(value).is_absolute() or not Path(value).is_file()
                 or not os.access(value, os.X_OK)):
             raise ValueError
     except (ValueError, TypeError, OSError):
-        pytest.fail('MIROFISH_EXPERIMENT_TEST_PYTHON must explicitly name an absolute installed knowledge interpreter executable', pytrace=False)
+        pytest.fail('NEXAWEAVE_EXPERIMENT_TEST_PYTHON must explicitly name an absolute installed knowledge interpreter executable', pytrace=False)
     return value
 
 
@@ -36,8 +36,8 @@ def experiment_python():
 def protected_fixture(experiment_python, connection_factory, cohort_fixture, tmp_path, monkeypatch):
     from app.services.native_experiment_contracts import ExperimentCohort, ExperimentMember, canonical, sha
     from app.services.native_experiment_http_facade import ExperimentSettings, NativeExperimentFacade
-    from mirofish_execution.native_run_contracts import NativeChildIdentity, NativeRunReceipt
-    from mirofish_execution.native_run_store import NativeRunStore
+    from nexaweave_execution.native_run_contracts import NativeChildIdentity, NativeRunReceipt
+    from nexaweave_execution.native_run_store import NativeRunStore
     from psycopg.conninfo import conninfo_to_dict
     from types import SimpleNamespace
     install_offline_boundary(monkeypatch)
@@ -90,19 +90,19 @@ def lean_client(monkeypatch, settings, facade):
     from app import create_app
     from app.config import Config
     from app.services.knowledge_read_facade import ReadHostSettings
-    monkeypatch.setenv('MIROFISH_APP_MODE', 'research_local')
+    monkeypatch.setenv('NEXAWEAVE_APP_MODE', 'research_local')
     monkeypatch.delenv('FLASK_HOST', raising=False)
-    monkeypatch.delenv('MIROFISH_ALLOWED_ORIGINS', raising=False)
+    monkeypatch.delenv('NEXAWEAVE_ALLOWED_ORIGINS', raising=False)
     monkeypatch.setattr(ReadHostSettings, 'from_config', classmethod(lambda cls, config: settings))
     class C(Config):
         DEBUG = False
-        MIROFISH_ALLOWED_ORIGINS = ('http://localhost:3000',)
+        NEXAWEAVE_ALLOWED_ORIGINS = ('http://localhost:3000',)
     return create_app(C, experiment_facade=facade).test_client()
 
 
 def test_actual_catalog_selected_comparison_no_writes(connection_factory, protected_fixture, monkeypatch):
     from app.services.native_experiment_http_client import comparison, catalog
-    from mirofish_execution.native_run_store import NativeRunStore
+    from nexaweave_execution.native_run_store import NativeRunStore
     settings, facade, cohort, runs, manifest, raw = protected_fixture
     before_files = [hashes(root) for _, root, _ in runs]
     store = NativeRunStore(connection_factory)

@@ -15,9 +15,9 @@ from test_native_experiment_http_contract import PROJECT, PIN, fixtures, selecto
 
 @pytest.fixture
 def host(monkeypatch, tmp_path):
-    monkeypatch.setenv('MIROFISH_APP_MODE', 'research_local')
+    monkeypatch.setenv('NEXAWEAVE_APP_MODE', 'research_local')
     monkeypatch.delenv('FLASK_HOST', raising=False)
-    monkeypatch.delenv('MIROFISH_ALLOWED_ORIGINS', raising=False)
+    monkeypatch.delenv('NEXAWEAVE_ALLOWED_ORIGINS', raising=False)
     monkeypatch.setenv('KNOWLEDGE_EXPERIMENT_MANIFEST', str(tmp_path/'never-opened.json'))
     monkeypatch.setenv('KNOWLEDGE_EXPERIMENT_MANIFEST_SHA256', PIN)
     token = '0123456789abcdef'*4
@@ -28,7 +28,7 @@ def host(monkeypatch, tmp_path):
     monkeypatch.setattr(ReadHostSettings, 'from_config', classmethod(lambda cls, config: settings))
     class LocalConfig(Config):
         DEBUG = False
-        MIROFISH_ALLOWED_ORIGINS = ('http://localhost:3000',)
+        NEXAWEAVE_ALLOWED_ORIGINS = ('http://localhost:3000',)
     class Facade:
         calls = []
         corrupt = None
@@ -133,7 +133,7 @@ def test_bad_optional_config_only_disables_experiments(host, monkeypatch, config
 
 def test_nonresearch_modes_omit_experiment_routes(host, monkeypatch):
     _, _, facade, auth, _, config_class = host
-    monkeypatch.setenv('MIROFISH_APP_MODE', 'graphiti_readonly')
+    monkeypatch.setenv('NEXAWEAVE_APP_MODE', 'graphiti_readonly')
     app = create_app(config_class, experiment_facade=facade)
     assert app.test_client().get('/api/experiments/catalog', headers=auth).status_code == 404
     assert not facade.calls
@@ -163,7 +163,7 @@ def test_cold_experiment_module_import_has_no_native_or_provider_bootstrap():
     source = '''
 import sys
 import app.experiment_api
-for name in ('mirofish_execution','psycopg','oasis','camel','graphiti_core','neo4j','openai','temporalio'):
+for name in ('nexaweave_execution','psycopg','oasis','camel','graphiti_core','neo4j','openai','temporalio'):
     assert not any(m == name or m.startswith(name+'.') for m in sys.modules), name
 '''
     proc = subprocess.run([sys.executable, '-c', source], cwd=Path(__file__).resolve().parents[1],

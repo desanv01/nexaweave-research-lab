@@ -55,7 +55,7 @@ def main() -> int:
     args = parser.parse_args()
     if args.child:
         return child(args.postgres)
-    with tempfile.TemporaryDirectory(prefix="mirofish-project-store-tests-") as directory:
+    with tempfile.TemporaryDirectory(prefix="nexaweave-project-store-tests-") as directory:
         env = _unit_environment(Path(directory))
         if args.postgres:
             from psycopg.conninfo import make_conninfo

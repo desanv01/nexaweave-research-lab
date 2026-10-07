@@ -17,10 +17,10 @@ from uuid import uuid4
 import pytest
 from psycopg.conninfo import conninfo_to_dict
 
-from mirofish_knowledge.evidence_research import EvidenceResearchService
-from mirofish_knowledge.research_contracts import ResearchRequest, ResearchResult
-from mirofish_knowledge.report_contracts import EvidenceDossier
-from mirofish_knowledge.operations import Ledger
+from nexaweave_knowledge.evidence_research import EvidenceResearchService
+from nexaweave_knowledge.research_contracts import ResearchRequest, ResearchResult
+from nexaweave_knowledge.report_contracts import EvidenceDossier
+from nexaweave_knowledge.operations import Ledger
 from test_evidence_research_integration import retained_graph, factory, _CLI_CHILD
 from test_evidence_dossier_integration import _request, _assert_connected
 
@@ -34,7 +34,7 @@ sys.path.insert(0,str(Path(os.environ['WORKBENCH_TEST_ROOT'])/'backend'))
 from tools.run_unit_tests import LoopbackOnlySockets
 guard=LoopbackOnlySockets();guard.install()
 original=builtins.__import__
-blocked=('mirofish_knowledge','graphiti_core','openai','camel','oasis','torch','transformers','temporalio')
+blocked=('nexaweave_knowledge','graphiti_core','openai','camel','oasis','torch','transformers','temporalio')
 def imports(name,*args,**kwargs):
     if any(name==p or name.startswith(p+'.') for p in blocked):
         raise AssertionError('backend SDK import')
@@ -143,7 +143,7 @@ async def test_actual_http_installed_pipe_retained_evidence_history_and_denial(r
             source_nodes = (records[0]["source_id"], records[0]["target_id"])
             source_evidence = set(records[0]["evidence_ids"])
     assert source_nodes is not None and source_evidence is not None
-    backend_python = os.environ.get("MIROFISH_WORKBENCH_BACKEND_PYTHON")
+    backend_python = os.environ.get("NEXAWEAVE_WORKBENCH_BACKEND_PYTHON")
     knowledge_python = os.environ.get("KNOWLEDGE_PYTHON")
     bootstrap = os.environ.get("KNOWLEDGE_BOOTSTRAP_SCRIPT")
     if not backend_python or not knowledge_python or not bootstrap:
@@ -162,8 +162,8 @@ async def test_actual_http_installed_pipe_retained_evidence_history_and_denial(r
     pg = conninfo_to_dict(os.environ["PROJECT_STORE_POSTGRES_TEST_DSN"])
     token = "0123456789abcdef" * 4
     env.update(WORKBENCH_TEST_ROOT=str(Path(__file__).resolve().parents[3]),
-        MIROFISH_APP_MODE="graphiti_readonly", PYTHON_DOTENV_DISABLED="1", FLASK_HOST="127.0.0.1",
-        FLASK_DEBUG="0", MIROFISH_ALLOWED_ORIGINS="http://localhost:3000", KNOWLEDGE_READ_TOKEN=token,
+        NEXAWEAVE_APP_MODE="graphiti_readonly", PYTHON_DOTENV_DISABLED="1", FLASK_HOST="127.0.0.1",
+        FLASK_DEBUG="0", NEXAWEAVE_ALLOWED_ORIGINS="http://localhost:3000", KNOWLEDGE_READ_TOKEN=token,
         KNOWLEDGE_PYTHON=knowledge_python, KNOWLEDGE_BOOTSTRAP_SCRIPT=bootstrap,
         KNOWLEDGE_PRINCIPAL="owner", KNOWLEDGE_DISPLAY_GRAPH_ID=f["ids"][0],
         KNOWLEDGE_BOUND_SCOPE_JSON=f["source"].model_dump_json(), KNOWLEDGE_PG_HOST=pg["host"],
@@ -175,7 +175,7 @@ async def test_actual_http_installed_pipe_retained_evidence_history_and_denial(r
     # -I loads the actual non-editable package; only the test guard is admitted
     # from the repository, then that import path is immediately removed.
     probe = ("import os,sys\nsys.path.insert(0,os.environ['WORKBENCH_TEST_ROOT'])\n" +
-        _CLI_CHILD.replace("mirofish_knowledge.research_cli", "mirofish_knowledge.evidence_bootstrap")
+        _CLI_CHILD.replace("nexaweave_knowledge.research_cli", "nexaweave_knowledge.evidence_bootstrap")
         .replace("guard = LoopbackOnlySockets()", "sys.path.remove(os.environ['WORKBENCH_TEST_ROOT'])\nguard = LoopbackOnlySockets()"))
     for operation, request_payload in (
         ("research", ResearchRequest(display_graph_ids=f["ids"], text="Alice 猫",

@@ -1,6 +1,6 @@
 # Graphiti read-only application mode (U03i)
 
-`MIROFISH_APP_MODE=graphiti_readonly` selects a separate Flask factory before legacy graph, simulation, report, and runner initialization. The default `legacy` mode is unchanged. This mode serves a graph view and bounded entity context only. It has no generation, mutation, simulation, or report routes and does not fall back to Zep. It needs no LLM, embedding, or reranker key. Bind only to loopback; debug mode and a nonloopback `FLASK_HOST` are rejected at startup.
+`NEXAWEAVE_APP_MODE=graphiti_readonly` selects a separate Flask factory before legacy graph, simulation, report, and runner initialization. The default `legacy` mode is unchanged. This mode serves a graph view and bounded entity context only. It has no generation, mutation, simulation, or report routes and does not fall back to Zep. It needs no LLM, embedding, or reranker key. Bind only to loopback; debug mode and a nonloopback `FLASK_HOST` are rejected at startup.
 
 ## Trusted settings
 
@@ -8,11 +8,11 @@ Set these in the server's private environment. The native process passes only `K
 
 | Variable | Meaning |
 |---|---|
-| `MIROFISH_APP_MODE` | `graphiti_readonly` |
+| `NEXAWEAVE_APP_MODE` | `graphiti_readonly` |
 | `FLASK_HOST` | `127.0.0.1` (default), `::1`, or `localhost` |
-| `MIROFISH_ALLOWED_ORIGINS` | Exact comma-separated HTTP(S) browser origins; CORS is not authentication |
+| `NEXAWEAVE_ALLOWED_ORIGINS` | Exact comma-separated HTTP(S) browser origins; CORS is not authentication |
 | `KNOWLEDGE_PYTHON` | Absolute executable path to the installed knowledge environment's Python |
-| `KNOWLEDGE_BOOTSTRAP_SCRIPT` | Absolute regular file path to that environment's installed `site-packages/mirofish_knowledge/read_bootstrap.py` |
+| `KNOWLEDGE_BOOTSTRAP_SCRIPT` | Absolute regular file path to that environment's installed `site-packages/nexaweave_knowledge/read_bootstrap.py` |
 | `KNOWLEDGE_READ_TOKEN` | Private printable bearer token, 32–256 characters, generated with a cryptographic RNG |
 | `KNOWLEDGE_PRINCIPAL` | Trusted host principal, not a request field |
 | `KNOWLEDGE_DISPLAY_GRAPH_ID` | One bound legacy display ID, ASCII letters/digits/underscore/hyphen |
@@ -34,9 +34,9 @@ Install the knowledge package as a regular, non-editable wheel in the isolated i
 import json
 import os
 import psycopg
-from mirofish_knowledge.bindings import ScopeBindingStore
-from mirofish_knowledge.contracts import KnowledgeScope
-from mirofish_knowledge.operations import migrate
+from nexaweave_knowledge.bindings import ScopeBindingStore
+from nexaweave_knowledge.contracts import KnowledgeScope
+from nexaweave_knowledge.operations import migrate
 
 with psycopg.connect(os.environ["KNOWLEDGE_MIGRATION_DSN"]) as owner:
     migrate(owner)

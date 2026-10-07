@@ -24,7 +24,7 @@ from uuid import UUID
 # Source-loaded transport tests intentionally do not import app (which starts
 # Flask). Load the one shared stdlib helper only from this trusted source tree.
 _owner_spec = importlib.util.spec_from_file_location(
-    "_mirofish_owned_process", Path(__file__).resolve().parent.parent / "utils" / "owned_process.py")
+    "_nexaweave_owned_process", Path(__file__).resolve().parent.parent / "utils" / "owned_process.py")
 _owned_process = importlib.util.module_from_spec(_owner_spec)
 _owner_spec.loader.exec_module(_owned_process)
 OwnedProcess = _owned_process.OwnedProcess
@@ -318,7 +318,7 @@ class KnowledgeProcessClient:
             try:
                 if self._cooperative_tick is not None:
                     self._cooperative_tick()
-                private_directory = tempfile.TemporaryDirectory(prefix="mirofish-knowledge-")
+                private_directory = tempfile.TemporaryDirectory(prefix="nexaweave-knowledge-")
                 owner.bind_private_directory(private_directory)
                 directory = private_directory.name
                 events = queue.Queue()
@@ -336,10 +336,10 @@ class KnowledgeProcessClient:
                     self._cooperative_tick()
                 writer = threading.Thread(target=_write_request,
                                           args=(process.stdin, frame, events), daemon=True,
-                                          name="mirofish-knowledge-writer")
+                                          name="nexaweave-knowledge-writer")
                 reader = threading.Thread(target=_read_response,
                                           args=(process.stdout, events, response_limit), daemon=True,
-                                          name="mirofish-knowledge-reader")
+                                          name="nexaweave-knowledge-reader")
                 threads = [writer, reader]
                 writer.start()
                 reader.start()

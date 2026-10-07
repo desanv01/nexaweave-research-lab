@@ -16,9 +16,9 @@ from uuid import uuid4
 
 import pytest
 from psycopg.conninfo import conninfo_to_dict
-from mirofish_knowledge.bindings import ScopeBindingStore
-from mirofish_knowledge.contracts import KnowledgeScope, Layer
-from mirofish_storage import ProjectStore, SourceStore
+from nexaweave_knowledge.bindings import ScopeBindingStore
+from nexaweave_knowledge.contracts import KnowledgeScope, Layer
+from nexaweave_storage import ProjectStore, SourceStore
 from test_source_bridge_postgres import factory
 from test_project_store import snapshot
 from test_document_source_integration import _package, _paragraph
@@ -34,7 +34,7 @@ sys.path.insert(0,str(Path(root)/'backend'))
 from tools.run_unit_tests import LoopbackOnlySockets
 guard=LoopbackOnlySockets();guard.install()
 original=builtins.__import__
-blocked=('mirofish_knowledge','graphiti_core','openai','neo4j','camel','oasis','torch','transformers','temporalio','pymupdf','fitz')
+blocked=('nexaweave_knowledge','graphiti_core','openai','neo4j','camel','oasis','torch','transformers','temporalio','pymupdf','fitz')
 def imports(name,*args,**kwargs):
     if any(name==p or name.startswith(p+'.') for p in blocked):
         raise AssertionError('backend provider/runtime import')
@@ -109,7 +109,7 @@ def _exchange(port, method, route, payload=None, *, token=None, origin=None):
 @contextmanager
 def _host(tmp_path, scope, display, *, mode='research_local'):
     from tools.run_unit_tests import _unit_environment
-    backend=os.environ.get('MIROFISH_WORKBENCH_BACKEND_PYTHON')
+    backend=os.environ.get('NEXAWEAVE_WORKBENCH_BACKEND_PYTHON')
     python=os.environ.get('KNOWLEDGE_PYTHON');bootstrap=os.environ.get('KNOWLEDGE_BOOTSTRAP_SCRIPT')
     assert backend and python and bootstrap, 'Main-supplied locked interpreters/installed bootstrap required'
     assert Path(backend).is_absolute() and Path(backend).is_file()
@@ -124,8 +124,8 @@ def _host(tmp_path, scope, display, *, mode='research_local'):
     pg=conninfo_to_dict(os.environ['PROJECT_STORE_POSTGRES_TEST_DSN'])
     token='0123456789abcdef'*4
     env.update(SOURCE_HTTP_TEST_ROOT=str(Path(__file__).resolve().parents[3]),
-        MIROFISH_APP_MODE=mode,PYTHON_DOTENV_DISABLED='1',FLASK_HOST='127.0.0.1',FLASK_DEBUG='0',
-        MIROFISH_ALLOWED_ORIGINS='http://localhost:3000',KNOWLEDGE_READ_TOKEN=token,
+        NEXAWEAVE_APP_MODE=mode,PYTHON_DOTENV_DISABLED='1',FLASK_HOST='127.0.0.1',FLASK_DEBUG='0',
+        NEXAWEAVE_ALLOWED_ORIGINS='http://localhost:3000',KNOWLEDGE_READ_TOKEN=token,
         KNOWLEDGE_PYTHON=python,KNOWLEDGE_BOOTSTRAP_SCRIPT=bootstrap,KNOWLEDGE_PRINCIPAL='owner',
         KNOWLEDGE_DISPLAY_GRAPH_ID=display,KNOWLEDGE_BOUND_SCOPE_JSON=scope.model_dump_json(),
         KNOWLEDGE_PG_HOST=pg['host'],KNOWLEDGE_PG_PORT=pg['port'],KNOWLEDGE_PG_DATABASE=pg['dbname'],
@@ -246,7 +246,7 @@ sys.path.insert(0,root)
 from tools.run_unit_tests import LoopbackOnlySockets
 sys.path.remove(root)
 guard=LoopbackOnlySockets();guard.install()
-blocked=('graphiti_core','openai','neo4j','mirofish_knowledge.provider','mirofish_knowledge.read_runtime','pymupdf','fitz')
+blocked=('graphiti_core','openai','neo4j','nexaweave_knowledge.provider','nexaweave_knowledge.read_runtime','pymupdf','fitz')
 class NoProviders(importlib.abc.MetaPathFinder):
     def find_spec(self,fullname,path=None,target=None):
         if any(fullname==item or fullname.startswith(item+'.') for item in blocked):
@@ -263,7 +263,7 @@ def observe(frame,event,arg):
 sys.setprofile(observe);threading.setprofile(observe)
 status=98
 try:
-    import mirofish_knowledge.source_bootstrap as module
+    import nexaweave_knowledge.source_bootstrap as module
     assert 'site-packages' in Path(module.__file__).resolve().parts
     assert all(not os.environ.get(key) for key in ('LLM_API_KEY','OPENAI_API_KEY','DEEPSEEK_API_KEY',
         'ZEP_API_KEY','KNOWLEDGE_NEO4J_URI','KNOWLEDGE_NEO4J_PASSWORD','KNOWLEDGE_READ_TOKEN'))
@@ -312,7 +312,7 @@ def test_actual_installed_source_child_reads_owned_pg_without_provider_imports(f
 
 def test_actual_http_pdf_fixed_child_pg_pages_restart_and_private_denials(factory,tmp_path):
     from test_pdf_source import pdf_bytes
-    from mirofish_storage.pdf import extract_pdf
+    from nexaweave_storage.pdf import extract_pdf
     scope,display,before=_seed(factory)
     binary=pdf_bytes(['Beginning 猫','','Middle 雪','End 中文'])
     extracted=extract_pdf(binary)

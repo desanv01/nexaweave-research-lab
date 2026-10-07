@@ -107,7 +107,7 @@ def test_fresh_cold_factory_evidence_health_and_invalid_routes_without_sdks(tmp_
 import builtins,os,sys
 sys.path.insert(0,os.environ['TEST_BACKEND'])
 original=builtins.__import__
-blocked=('mirofish_knowledge','graphiti_core','openai','camel','oasis','temporalio','torch','transformers')
+blocked=('nexaweave_knowledge','graphiti_core','openai','camel','oasis','temporalio','torch','transformers')
 def imports(name,*args,**kwargs):
     if any(name==p or name.startswith(p+'.') for p in blocked):
         raise AssertionError('cold SDK import')
@@ -129,8 +129,8 @@ print('cold evidence healthy')
 '''
     env = {key: value for key, value in os.environ.items() if not key.startswith(
         ("KNOWLEDGE_", "LLM_", "OPENAI_", "DEEPSEEK_", "ZEP_"))}
-    env.update(TEST_BACKEND=str(Path(__file__).resolve().parents[1]), MIROFISH_APP_MODE="graphiti_readonly",
-        PYTHON_DOTENV_DISABLED="1", FLASK_HOST="127.0.0.1", FLASK_DEBUG="0", MIROFISH_ALLOWED_ORIGINS="")
+    env.update(TEST_BACKEND=str(Path(__file__).resolve().parents[1]), NEXAWEAVE_APP_MODE="graphiti_readonly",
+        PYTHON_DOTENV_DISABLED="1", FLASK_HOST="127.0.0.1", FLASK_DEBUG="0", NEXAWEAVE_ALLOWED_ORIGINS="")
     result = subprocess.run([sys.executable, "-I", "-c", script], cwd=tmp_path, env=env,
                             capture_output=True, timeout=30)
     assert result.returncode == 0 and result.stdout.strip() == b"cold evidence healthy"

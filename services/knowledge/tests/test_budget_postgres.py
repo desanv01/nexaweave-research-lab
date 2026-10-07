@@ -7,12 +7,12 @@ from uuid import uuid4
 import pytest
 from psycopg.types.json import Jsonb
 
-from mirofish_execution import (BudgetBusy, BudgetConflict, BudgetDenied, BudgetLedger,
+from nexaweave_execution import (BudgetBusy, BudgetConflict, BudgetDenied, BudgetLedger,
                                 BudgetUncertain, BudgetUnavailable, BudgetedIngestion, MigrationMismatch,
                                 ReservationState, migrate)
-from mirofish_knowledge.ingestion import KnowledgeIngestionCoordinator
-from mirofish_knowledge.operations import Ledger
-from mirofish_knowledge.source_bridge import SourceIngestionBridge
+from nexaweave_knowledge.ingestion import KnowledgeIngestionCoordinator
+from nexaweave_knowledge.operations import Ledger
+from nexaweave_knowledge.source_bridge import SourceIngestionBridge
 from test_source_bridge_postgres import (FakeProvider, factory, ontology,
                                          owned_fixture)
 

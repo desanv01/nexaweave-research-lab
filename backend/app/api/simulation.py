@@ -60,7 +60,7 @@ from ..utils.zep_lifecycle import get_graph_readers, graph_lifecycle_lock
 from ..models.project import ProjectManager
 from ..services.report_agent import ReportManager
 
-logger = get_logger('mirofish.api.simulation')
+logger = get_logger('nexaweave.api.simulation')
 
 
 def _get_default_platform(simulation_id: str) -> str:

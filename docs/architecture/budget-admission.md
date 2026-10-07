@@ -7,7 +7,7 @@ does not measure provider usage or impose a provider invoice limit.
 ## Host sequence
 
 1. Explicitly migrate the existing project and knowledge stores, then call
-   `mirofish_execution.migrate(connection)` on the migration-owner connection.
+   `nexaweave_execution.migrate(connection)` on the migration-owner connection.
    This task does not run any production migration.
 2. A trusted host creates a single immutable account per owned project with
    `BudgetLedger(factory).create_account(principal, project_id, account_id,

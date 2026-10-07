@@ -1,14 +1,17 @@
+# Local development only; this is not a qualified application deployment.
 services:
-  mirofish:
-    image: ghcr.io/666ghj/mirofish:latest
-    # 加速镜像（如拉取缓慢可替换上方地址）
-    # image: ghcr.nju.edu.cn/666ghj/mirofish:latest
-    container_name: mirofish
+  nexaweave:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: nexaweave:development
+    container_name: nexaweave
     env_file:
       - .env
+    environment:
+      BROWSER: none
     ports:
-      - "3000:3000"
-      - "5001:5001"
-    restart: unless-stopped
+      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:5001:5001"
     volumes:
       - ./backend/uploads:/app/backend/uploads

@@ -19,9 +19,9 @@ from uuid import UUID, uuid4
 import pytest
 from neo4j import GraphDatabase
 from psycopg.conninfo import conninfo_to_dict
-from mirofish_execution.budget import BudgetLedger, migrate
-from mirofish_knowledge.operations import Ledger
-from mirofish_storage import SourceStore
+from nexaweave_execution.budget import BudgetLedger, migrate
+from nexaweave_knowledge.operations import Ledger
+from nexaweave_storage import SourceStore
 from test_source_bridge_postgres import factory, owned_fixture
 from test_integration_neo4j import fixture_data
 from test_source_library_http_integration import _HTTP_CHILD, _events, _exchange
@@ -123,7 +123,7 @@ def model_server():
 def host(directory, scope, display, account, model_port, *, enabled=True):
     from tools.run_unit_tests import _unit_environment
     backend, python, bootstrap = (os.environ[k] for k in
-        ('MIROFISH_WORKBENCH_BACKEND_PYTHON', 'KNOWLEDGE_PYTHON', 'KNOWLEDGE_BOOTSTRAP_SCRIPT'))
+        ('NEXAWEAVE_WORKBENCH_BACKEND_PYTHON', 'KNOWLEDGE_PYTHON', 'KNOWLEDGE_BOOTSTRAP_SCRIPT'))
     assert Path(backend).is_absolute() and Path(backend).is_file()
     assert Path(python).is_absolute() and Path(python).is_file()
     assert 'site-packages' in Path(bootstrap).parts
@@ -138,9 +138,9 @@ def host(directory, scope, display, account, model_port, *, enabled=True):
             env.pop(key, None)
     pg = conninfo_to_dict(os.environ['PROJECT_STORE_POSTGRES_TEST_DSN'])
     token = '0123456789abcdef' * 4
-    env.update(SOURCE_HTTP_TEST_ROOT=str(ROOT), MIROFISH_APP_MODE='research_local',
+    env.update(SOURCE_HTTP_TEST_ROOT=str(ROOT), NEXAWEAVE_APP_MODE='research_local',
         PYTHON_DOTENV_DISABLED='1', FLASK_HOST='127.0.0.1', FLASK_DEBUG='0',
-        MIROFISH_ALLOWED_ORIGINS='http://localhost:3000', KNOWLEDGE_READ_TOKEN=token,
+        NEXAWEAVE_ALLOWED_ORIGINS='http://localhost:3000', KNOWLEDGE_READ_TOKEN=token,
         KNOWLEDGE_PYTHON=python, KNOWLEDGE_BOOTSTRAP_SCRIPT=bootstrap, KNOWLEDGE_PRINCIPAL='owner',
         KNOWLEDGE_DISPLAY_GRAPH_ID=display, KNOWLEDGE_BOUND_SCOPE_JSON=scope.model_dump_json(),
         KNOWLEDGE_PG_HOST=pg['host'], KNOWLEDGE_PG_PORT=pg['port'], KNOWLEDGE_PG_DATABASE=pg['dbname'],

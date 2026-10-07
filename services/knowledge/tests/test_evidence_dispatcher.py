@@ -6,9 +6,9 @@ from uuid import uuid4
 
 import pytest
 
-from mirofish_knowledge.evidence_dispatcher import EvidenceCommandDispatcher, _encode
-from mirofish_knowledge.evidence_bootstrap import serve_once
-from mirofish_knowledge.evidence_dossier import EvidenceDossierService
+from nexaweave_knowledge.evidence_dispatcher import EvidenceCommandDispatcher, _encode
+from nexaweave_knowledge.evidence_bootstrap import serve_once
+from nexaweave_knowledge.evidence_dossier import EvidenceDossierService
 from test_evidence_research import Harness
 
 
@@ -95,7 +95,7 @@ def test_bounded_encoder_no_clipping():
 
 @pytest.mark.asyncio
 async def test_actual_result_cap_returns_error_not_partial_completion(dispatcher, monkeypatch):
-    import mirofish_knowledge.evidence_dispatcher as module
+    import nexaweave_knowledge.evidence_dispatcher as module
     command, harness = dispatcher
     monkeypatch.setitem(module.RESULT_LIMITS, "research", 128)
     reply = json.loads(await command.dispatch(envelope(command), principal="owner"))

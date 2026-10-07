@@ -183,7 +183,7 @@ class KnowledgeIngestionProcessClient(KnowledgeProcessClient):
         self._scope = dict(settings.scope)
         self._method = method
         script = Path(settings.bootstrap).with_name("source_ingestion_bootstrap.py")
-        if (Path(settings.bootstrap).name != "read_bootstrap.py" or script.parent.name != "mirofish_knowledge"
+        if (Path(settings.bootstrap).name != "read_bootstrap.py" or script.parent.name != "nexaweave_knowledge"
                 or "site-packages" not in script.parts):
             raise ValueError("invalid ingestion configuration")
         child = {key: settings.child_environment[key] for key in CHILD_KEYS}

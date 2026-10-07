@@ -16,7 +16,7 @@ class DurableReportHost:
     def __init__(self, settings, connection_factory, read_facade, native_launch_host, artifact_root,
                  account_id=None, ceiling_microusd=None, authorize=None, model_factory=None,
                  model_label=None, limits=None, scheduler=None):
-        from mirofish_execution.report_store import ReportStore
+        from nexaweave_execution.report_store import ReportStore
         from .native_observations_host import NativeObservationsHost
         if not callable(connection_factory) or not Path(artifact_root).is_absolute():
             raise ReportError('report_unavailable')
@@ -107,7 +107,7 @@ class DurableReportHost:
             return self._dto(row, payload, 'start')
         if not self.authorization(row)['model_calls_enabled']:
             raise ReportError('model_calls_disabled')
-        from mirofish_knowledge.contracts import KnowledgeScope
+        from nexaweave_knowledge.contracts import KnowledgeScope
         row, claimed = self.store.queue(self.principal, row.report_id, row.plan_sha256,
             KnowledgeScope.model_validate_json(json.dumps(self.scope_dto)), self.account_id)
         if claimed:
@@ -143,7 +143,7 @@ class DurableReportHost:
 
     def generate(self, wire, *, heartbeat=None, cancelled=None):
         """Trusted Temporal activity: claim once, never resume a partial child."""
-        from mirofish_execution.report_contracts import dispatch
+        from nexaweave_execution.report_contracts import dispatch
         from .report_process import ReportProcess, report_files
         from ..utils.safe_paths import ensure_directory
         dispatch(wire)

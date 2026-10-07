@@ -27,7 +27,7 @@ def operation(request):
         raise ValueError
     from native_experiment_contracts import read_manifest, cohort_from_manifest, canonical
     from native_experiments import NativeExperimentComparator, _authorized
-    from mirofish_execution.native_run_store import NativeRunStore
+    from nexaweave_execution.native_run_store import NativeRunStore
     import psycopg
     principal = os.environ['KNOWLEDGE_PRINCIPAL']
     cohort = cohort_from_manifest(read_manifest(os.environ['KNOWLEDGE_EXPERIMENT_MANIFEST'],

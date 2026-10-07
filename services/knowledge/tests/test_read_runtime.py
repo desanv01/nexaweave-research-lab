@@ -10,10 +10,10 @@ from uuid import uuid4
 
 import pytest
 
-from mirofish_knowledge.commands import KnowledgeCommandDispatcher
-from mirofish_knowledge.contracts import KnowledgeScope, Layer
-from mirofish_knowledge.read_runtime import ReadRuntimeProvider, ReadSettings
-from mirofish_knowledge.stdio import serve_once
+from nexaweave_knowledge.commands import KnowledgeCommandDispatcher
+from nexaweave_knowledge.contracts import KnowledgeScope, Layer
+from nexaweave_knowledge.read_runtime import ReadRuntimeProvider, ReadSettings
+from nexaweave_knowledge.stdio import serve_once
 
 
 def settings(scope):

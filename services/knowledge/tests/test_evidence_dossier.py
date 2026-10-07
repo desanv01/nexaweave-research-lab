@@ -10,13 +10,13 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 
-from mirofish_knowledge.contracts import KnowledgeScope, Layer
-from mirofish_knowledge.dossier_cli import MAX_REQUEST_BYTES, main, parse_request
-from mirofish_knowledge.evidence_dossier import (
+from nexaweave_knowledge.contracts import KnowledgeScope, Layer
+from nexaweave_knowledge.dossier_cli import MAX_REQUEST_BYTES, main, parse_request
+from nexaweave_knowledge.evidence_dossier import (
     DossierFailure, EvidenceDossierService, digest, plain_markdown)
-from mirofish_knowledge.evidence_research import ResearchFailure, claim_candidates, passage_coverage
-from mirofish_knowledge.report_contracts import DossierRequest, DossierSectionRequest, EvidenceDossier
-from mirofish_knowledge.research_contracts import Citation, ResearchFact, ResearchResult, ScopeCoverage
+from nexaweave_knowledge.evidence_research import ResearchFailure, claim_candidates, passage_coverage
+from nexaweave_knowledge.report_contracts import DossierRequest, DossierSectionRequest, EvidenceDossier
+from nexaweave_knowledge.research_contracts import Citation, ResearchFact, ResearchResult, ScopeCoverage
 
 
 @pytest.fixture
@@ -248,7 +248,7 @@ async def test_failed_section_does_not_return_partial_and_service_reusable(recor
 
 @pytest.mark.asyncio
 async def test_overall_deadline_and_busy_without_new_background_work(records, monkeypatch):
-    import mirofish_knowledge.evidence_dossier as module
+    import nexaweave_knowledge.evidence_dossier as module
     scope, fact = records
     service, calls = service_with(response((fact,)))
     entered = asyncio.Event()
@@ -268,7 +268,7 @@ async def test_overall_deadline_and_busy_without_new_background_work(records, mo
 
 @pytest.mark.asyncio
 async def test_no_silent_clipping_when_final_markdown_exceeds_limit(records, monkeypatch):
-    import mirofish_knowledge.evidence_dossier as module
+    import nexaweave_knowledge.evidence_dossier as module
     scope, fact = records
     # Raw research fits, but records plus trace plus escaped Markdown do not.
     result = response((fact,))
@@ -311,7 +311,7 @@ async def test_empty_queries_and_unknown_truncated_scan_counts_are_honest(record
 
 @pytest.mark.asyncio
 async def test_cumulative_research_budget_stops_before_next_query(records, monkeypatch):
-    import mirofish_knowledge.evidence_dossier as module
+    import nexaweave_knowledge.evidence_dossier as module
     scope, fact = records
     result = response((fact,))
     raw_size = len(result.model_dump_json().encode())

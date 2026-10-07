@@ -3,116 +3,53 @@
   "note": "Explicit baseline differences. Entries are unverified candidates until main reviews and accepts the exact revision.",
   "entries": [
     {
-      "imported_path": "backend/app/services/__init__.py",
-      "original_sha256": "5c78b7c2e902a80197acfeb9493ad81da903002eda04dd9870a2de1e42c12112",
-      "current_sha256": "b276dde6debc8ba84ed1d520993d58099286a3209d6a4dde4d84120ae25014b9",
-      "reason": "Preserve all inherited service exports via lazy imports; avoid loading Zep/model SDKs and simulation runner merely for read-only startup.",
-      "phase": "U03j"
+      "imported_path": ".github/star-history/history.json",
+      "original_sha256": "a3bae74b68fc2f6fc37d53f88e2e6a680c74808058e885d4207bfc9de5c8442c",
+      "current_sha256": "64dbf7318d6758f12e684509a41e11099c24c344ea3802b039145879a82a8d2d",
+      "reason": "Use this repository identity and observed aggregate star count; preserve original upstream state/chart bytes under docs/upstream/star-history references; never relabel upstream counts as NexaWeave popularity.",
+      "phase": "NexaWeave canonical rebrand"
     },
     {
-      "imported_path": "backend/app/utils/__init__.py",
-      "original_sha256": "444e75d227f54480da0e3d4edb5b3152666540460e25dfa68c76f16c0563deb3",
-      "current_sha256": "5bc1960674deeb5a3cb666d7d3b0899bed368ed8f8a3bdf1a01831425a8e9cf7",
-      "reason": "Keep utility exports lazy so logger/locale access does not import model or file-parser dependencies.",
-      "phase": "U03j"
-    },
-    {
-      "imported_path": "backend/app/services/oasis_profile_generator.py",
-      "original_sha256": "ed9cd3416a46b922bc2f9bf0e9623435d9b96bdf0198db27602ca8c4f0dd0e37",
-      "current_sha256": "f23a2c44843360db189a09e8cca5e05358cc05a9e5346cb2da060dd81ac3189f",
-      "reason": "U03j basic-only/local RNG and inherited Twitter formatting. U03k explicit injected chat/context, strict neutral parsing without fallback, preserving legacy defaults. U03n strict-neutral realtime/final Reddit serialization preserves missing demographic attributes and supplied values; legacy defaults remain.",
-      "phase": "U03j/U03k/U03n",
-      "review_status": "Main source reviewed; pending U03n exact-head CI"
-    },
-    {
-      "imported_path": "frontend/package.json",
-      "original_sha256": "f972113d3cca752acc44f7e63d97fec138b2a34388b173f85f847bf7108fe852",
-      "current_sha256": "abe2ec6cf0d4676143c13b40eab7cb1b8f52e426e0dc447e6988b8572c54bdac",
-      "reason": "Main pins Markdown-it/DOMPurify runtime and jsdom test dependency; adds node:test script without changing frontend framework versions.",
-      "phase": "U02h"
-    },
-    {
-      "imported_path": "frontend/package-lock.json",
-      "original_sha256": "a4a188daf04a442b8e23c3291d9062b4e00faa5ff49503db759c85e67c4037be",
-      "current_sha256": "4307e35e62fafcf897e4be12977464b67ddbde63ec85ebf90bd360f94a53676b",
-      "reason": "Main locks renderer/test dependency closure and updates PostCSS/nanoid within existing ranges to address current advisories.",
-      "phase": "U02h"
-    },
-    {
-      "imported_path": "frontend/src/components/Step4Report.vue",
-      "original_sha256": "dcac96bdcb6b8df566155b543387cb51034e341f235a83b455608e34abd6bb4c",
-      "current_sha256": "801d28d44092e8aed6e1204d837f69af3bb49d07d4d4b8001ccd7ac5e0361bf5",
-      "reason": "Use bounded shared sanitized Markdown at report/interview HTML sinks and Vue text for placeholders; preserve report heading suppression and expansion controls.",
-      "phase": "U02h"
-    },
-    {
-      "imported_path": "frontend/src/components/Step5Interaction.vue",
-      "original_sha256": "067f165535e5b6583515ed30d9eb97727c273a410b81e0b7e95886bdb37d9541",
-      "current_sha256": "dc83d1d229b8ea15cef26500d8719a237e85fbfbf55343304dec38635d78ea8f",
-      "reason": "Use bounded shared sanitized Markdown at report/chat/interview HTML sinks; preserve chat headings and native ordered-list start/nesting semantics.",
-      "phase": "U02h"
-    },
-    {
-      "imported_path": "backend/app/utils/file_parser.py",
-      "original_sha256": "f1adfdda1a6674ad7af76dc95a9b76f388470098e4cf514be908440c4167c398",
-      "current_sha256": "c6de13742d73f5b3bad32b3678350f538bd6cb3a7d2c4c966a1f2de361488b51",
-      "reason": "Bound source bytes/PDF pages/extracted text/multifile results; safe classified errors, BOM decoding and progress-guaranteed bounded chunking. Native parser isolation remains separate. U13a adds bounded DOCX extraction through a fixed standard-library sibling while retaining the five-field saved parser contract and existing formats.",
-      "phase": "U02e/U13a",
-      "review_status": "Main source reviewed; pending U13a exact-head qualification"
+      "imported_path": "Dockerfile",
+      "original_sha256": "acf36e3c8a13bd8a2a87ee68a9d52aadd569cc4755daab681b46aa5e9b85d85f",
+      "current_sha256": "e13545ee33432ccffbb396b4ca0715f97e948c6d12921a1711d2a311e5f720e8",
+      "reason": "NexaWeave canonical package/configuration and ordinary display names; reviewed derived source change preserving legal/provenance and persisted v1 identities.",
+      "phase": "NexaWeave canonical rebrand"
     },
     {
       "imported_path": "backend/app/__init__.py",
       "original_sha256": "f04d262decf6c11437280c0f0c1353774f642888b2ef3f02dfa0e96e992b3c1c",
-      "current_sha256": "ad2a08571774b74263870c7e5efd7b7c1b481c061c785f2384bf62365be7fdec",
-      "reason": "U02d exact Origin/CORS and private logging retained. U03i selects explicit graphiti_readonly factory before inherited blueprints/runner; default legacy unchanged. U11a forwards optional evidence facade only in explicit read-only mode; legacy default unchanged. U04d explicitly selects research_local source-retention routes using the same protected factory/settings; graphiti_readonly and legacy defaults remain. U06b forwards optional protected research source-ingestion facade; legacy/read-only modes preserve inherited behavior. U10b forwards optional protected experiment facade only through the existing research-local factory; no legacy/read-only blueprint or runtime change. U07c forwards the explicitly injected trusted preparation facade through research_local factory without initializing optional engines in ordinary HTTP imports. U07d forwards an explicitly injected protected native-launch facade only through research_local; preserves ordinary import and legacy behavior. U07e passes the optional cold receipt-bound native observations facade into the existing protected research-local app. U07g explicit connected inherited report operation/native evidence and protected app integration; legacy defaults/loops/notices retained.",
-      "phase": "U02d/U03i / U11a / U04d/U06b/U10b/U07c/U07d/U07e/U07g",
-      "review_status": "Main source reviewed; local/hosted U07g qualification pending"
-    },
-    {
-      "imported_path": "backend/app/config.py",
-      "original_sha256": "a85580b4551724b3c2fff419565c9aa11f6dba1992f5981ed34037a264c2a2f3",
-      "current_sha256": "3e1d5e687f65c7e3a47c427656667bb55c5fc90a8cf492b96947f1a11f1bb39e",
-      "reason": "U02d explicit origins retained. U03i separate read-only host validation without Zep/model credentials; inherited legacy validation unchanged. U13a adds DOCX to the inherited allowed-extension list only.",
-      "phase": "U02d/U03i/U13a",
-      "review_status": "Main source reviewed; pending U13a exact-head qualification"
-    },
-    {
-      "imported_path": "backend/run.py",
-      "original_sha256": "893a01b2e1881e4eb06bdbc4737e444d72eb374f9f326a1249dbc9aa04274483",
-      "current_sha256": "932f0ee46196af219c32f3eab45ee73d22106327ed77455fa4ca9c3750857c15",
-      "reason": "Select explicit graphiti_readonly startup validation and loopback default; preserve legacy startup behavior. U04d recognizes explicit research_local through the protected validator and loopback default; legacy behavior unchanged.",
-      "phase": "U03i / U04d",
-      "review_status": "Main source reviewed; exact U04d CI qualification pending."
-    },
-    {
-      "imported_path": "tests/test_local_star_count_fetch.py",
-      "original_sha256": "6c524bc1fbdf521c5f61d5dfa129bec88f8b5f895a55ecdceb775e6d40bb3379",
-      "current_sha256": "0a70680fd7b9cbd7cd710df32bd50c9948dcf9d06ac374f40d8af067851f3000",
-      "reason": "Workflow-inspection fixture now reads the byte-preserved quarantined workflow reference after the U00 archive import. Assertions are unchanged.",
-      "phase": "U00",
-      "review_status": "accepted-PR2",
-      "review_pr": "https://github.com/desanv01/mirofish-research-lab/pull/2"
+      "current_sha256": "636121ae0699586d6a6aa216d9d0a965d951eec584e45fea419b94a1f5d6899f",
+      "reason": "U02d exact Origin/CORS and private logging retained. U03i selects explicit graphiti_readonly factory before inherited blueprints/runner; default legacy unchanged. U11a forwards optional evidence facade only in explicit read-only mode; legacy default unchanged. U04d explicitly selects research_local source-retention routes using the same protected factory/settings; graphiti_readonly and legacy defaults remain. U06b forwards optional protected research source-ingestion facade; legacy/read-only modes preserve inherited behavior. U10b forwards optional protected experiment facade only through the existing research-local factory; no legacy/read-only blueprint or runtime change. U07c forwards the explicitly injected trusted preparation facade through research_local factory without initializing optional engines in ordinary HTTP imports. U07d forwards an explicitly injected protected native-launch facade only through research_local; preserves ordinary import and legacy behavior. U07e passes the optional cold receipt-bound native observations facade into the existing protected research-local app. U07g explicit connected inherited report operation/native evidence and protected app integration; legacy defaults/loops/notices retained. NexaWeave canonical package/configuration and ordinary display names; reviewed derived source change preserving legal/provenance and persisted v1 identities.",
+      "phase": "NexaWeave canonical rebrand"
     },
     {
       "imported_path": "backend/app/api/graph.py",
       "original_sha256": "096f8b54a1a81430678a4082067be000d05e9b0ebbbe047ba05ce4abde5ba56b",
-      "current_sha256": "5a38d0774b195fa9d1bc1461d24e9386df6688b55453d76327842f269455b205",
-      "reason": "U02a validates supplied project IDs/storage paths. U02g bounds ontology admission/save/extraction, uses isolated parsing, rejects mixed multipart field confusion and prevents model work after parsing/phase failure with safe retained FAILED state.",
-      "phase": "U02a/U02g"
+      "current_sha256": "ed19a390f4259ba1d6287f28b9bf8a6eaf01a9355653b133db63f81c622ae1ee",
+      "reason": "U02a validates supplied project IDs/storage paths. U02g bounds ontology admission/save/extraction, uses isolated parsing, rejects mixed multipart field confusion and prevents model work after parsing/phase failure with safe retained FAILED state. NexaWeave canonical package/configuration and ordinary display names; reviewed derived source change preserving legal/provenance and persisted v1 identities.",
+      "phase": "NexaWeave canonical rebrand"
     },
     {
       "imported_path": "backend/app/api/report.py",
       "original_sha256": "afebaad104c822dc1804940537e5925913166e8fde8fb06e08a74e00da1b8afe",
-      "current_sha256": "91b5ca1e2e6063726ad028e9c1983a015413a31ea0fdf3125be4c1605126bede",
-      "reason": "Validate report/simulation IDs and section bounds; preserve safe path errors through HTTP handlers.",
-      "phase": "U02a"
+      "current_sha256": "4aafc7db3f6c4dc2ce2a5d458df6a60096fe9705fd600b15ce9517b438b1baee",
+      "reason": "Validate report/simulation IDs and section bounds; preserve safe path errors through HTTP handlers. NexaWeave canonical package/configuration and ordinary display names; reviewed derived source change preserving legal/provenance and persisted v1 identities.",
+      "phase": "NexaWeave canonical rebrand"
     },
     {
       "imported_path": "backend/app/api/simulation.py",
       "original_sha256": "48c34e15dc957a0e7205283ebaffdbb1b3c09e3a59f6a87fa35bffeafdf782d4",
-      "current_sha256": "bb93f078ebef84eb3f1e89945b7ad4f8769a6622310c64f4d7ee74ed3d588d80",
-      "reason": "Bound direct simulation database/config/profile/report-history paths and HTTP ID/platform validation.",
-      "phase": "U02a"
+      "current_sha256": "970a24a58fe9faf22bf63a80d9012fe5ed332d84ef03d1b34984074de73ba084",
+      "reason": "Bound direct simulation database/config/profile/report-history paths and HTTP ID/platform validation. NexaWeave canonical package/configuration and ordinary display names; reviewed derived source change preserving legal/provenance and persisted v1 identities.",
+      "phase": "NexaWeave canonical rebrand"
+    },
+    {
+      "imported_path": "backend/app/config.py",
+      "original_sha256": "a85580b4551724b3c2fff419565c9aa11f6dba1992f5981ed34037a264c2a2f3",
+      "current_sha256": "35b2b414b0313ffae66279a857228ef20806ee2ffb49f2232a6dca542908ccbf",
+      "reason": "U02d explicit origins retained. U03i separate read-only host validation without Zep/model credentials; inherited legacy validation unchanged. U13a adds DOCX to the inherited allowed-extension list only. NexaWeave canonical package/configuration and ordinary display names; reviewed derived source change preserving legal/provenance and persisted v1 identities.",
+      "phase": "NexaWeave canonical rebrand"
     },
     {
       "imported_path": "backend/app/models/project.py",
@@ -122,19 +59,102 @@
       "phase": "U02a/U02g"
     },
     {
+      "imported_path": "backend/app/services/__init__.py",
+      "original_sha256": "5c78b7c2e902a80197acfeb9493ad81da903002eda04dd9870a2de1e42c12112",
+      "current_sha256": "b276dde6debc8ba84ed1d520993d58099286a3209d6a4dde4d84120ae25014b9",
+      "reason": "Preserve all inherited service exports via lazy imports; avoid loading Zep/model SDKs and simulation runner merely for read-only startup.",
+      "phase": "U03j"
+    },
+    {
+      "imported_path": "backend/app/services/graph_builder.py",
+      "original_sha256": "ac8739bca09437136dca343d992c66b2092021e084e9a81ce37cb8c988205486",
+      "current_sha256": "7dadb1bedb483c942a074c3b7ee50e48402c346cc334a6e245d06eb55afcdbc6",
+      "reason": "NexaWeave canonical package/configuration and ordinary display names; reviewed derived source change preserving legal/provenance and persisted v1 identities.",
+      "phase": "NexaWeave canonical rebrand"
+    },
+    {
+      "imported_path": "backend/app/services/oasis_profile_generator.py",
+      "original_sha256": "ed9cd3416a46b922bc2f9bf0e9623435d9b96bdf0198db27602ca8c4f0dd0e37",
+      "current_sha256": "124e565981ec6cebe43b5a63b7fe8b91236cef7b0d82d8dc67a330574c0f9492",
+      "reason": "U03j basic-only/local RNG and inherited Twitter formatting. U03k explicit injected chat/context, strict neutral parsing without fallback, preserving legacy defaults. U03n strict-neutral realtime/final Reddit serialization preserves missing demographic attributes and supplied values; legacy defaults remain. NexaWeave canonical package/configuration and ordinary display names; reviewed derived source change preserving legal/provenance and persisted v1 identities.",
+      "phase": "NexaWeave canonical rebrand"
+    },
+    {
+      "imported_path": "backend/app/services/ontology_generator.py",
+      "original_sha256": "9cf783df52d8ef80f11527c65ea9b4467c0b294064d559123a86f197d82d1cc5",
+      "current_sha256": "53266f1eda850875ded4321920793072670b21018dd41de61898a23b47151bbd",
+      "reason": "NexaWeave canonical package/configuration and ordinary display names; reviewed derived source change preserving legal/provenance and persisted v1 identities.",
+      "phase": "NexaWeave canonical rebrand"
+    },
+    {
       "imported_path": "backend/app/services/report_agent.py",
       "original_sha256": "b1211efa900e2fe73875b6acbf690550ee21a40b76c5170eee4e6ec404a4be47",
-      "current_sha256": "3556d97c2949f66a15cc3cc20cd30b4a5274b973973ef58258f2b620bcd17e5e",
-      "reason": "U02a safe paths and U01c forced-final sanitization retained. U03l adds trusted neutral report/chat mode, strict failures, bounded evidence sidecar and scope-bound pinned follow-up context while preserving legacy behavior. U07g explicit connected inherited report operation/native evidence and protected app integration; legacy defaults/loops/notices retained.",
-      "phase": "U02a/U01c/U03l/U07g",
-      "review_status": "Main source reviewed; local/hosted U07g qualification pending"
+      "current_sha256": "c3710550e2fd2c0cfe603c6c8ee1ca027d904ac5105e0c4952a312c9f95438cf",
+      "reason": "U02a safe paths and U01c forced-final sanitization retained. U03l adds trusted neutral report/chat mode, strict failures, bounded evidence sidecar and scope-bound pinned follow-up context while preserving legacy behavior. U07g explicit connected inherited report operation/native evidence and protected app integration; legacy defaults/loops/notices retained. NexaWeave canonical package/configuration and ordinary display names; reviewed derived source change preserving legal/provenance and persisted v1 identities.",
+      "phase": "NexaWeave canonical rebrand"
+    },
+    {
+      "imported_path": "backend/app/services/simulation_config_generator.py",
+      "original_sha256": "3bb128db01398dd344a2a4c12875f424f7b9ae9c2a7b89f99c42e1ac555396d1",
+      "current_sha256": "081577429779a1d486d4e7a19dd522db459ba4db23283a3339a34abedc1ca90f",
+      "reason": "Defer SDK imports and inject trusted chat client; explicit strict neutral configuration rejects incomplete/truncated responses without changing legacy defaults. NexaWeave canonical package/configuration and ordinary display names; reviewed derived source change preserving legal/provenance and persisted v1 identities.",
+      "phase": "NexaWeave canonical rebrand"
+    },
+    {
+      "imported_path": "backend/app/services/simulation_ipc.py",
+      "original_sha256": "2cd596faed552c29f8e486b6641677787c2c38eeab822a82512be07e9b4088d9",
+      "current_sha256": "9f1a68b73851d985b0602b206df6027881753a373969065f32896b1ed71f4419",
+      "reason": "U01b fixes independent completed-file cleanup. U02b bounds IPC transport and atomic publication. U02c exposes bounded lifecycle status publication shared by native script handlers. NexaWeave canonical package/configuration and ordinary display names; reviewed derived source change preserving legal/provenance and persisted v1 identities.",
+      "phase": "NexaWeave canonical rebrand"
+    },
+    {
+      "imported_path": "backend/app/services/simulation_manager.py",
+      "original_sha256": "6287937a965a97cea12a0d54ac55e7d1ae98944a96accfd7504a21350cc4e902",
+      "current_sha256": "8ae8c5881f24e3f4cdd04d4699d7a5942c6eac9bca0a6073321f031c2593b422",
+      "reason": "U02a bounded paths; U03k trusted graph-bound preparation dependencies, complete artifact/ID checks before READY and fixed neutral errors, preserving legacy defaults. U07c neutral trusted preparation may use an explicitly supplied full operation-UUID simulation ID; strict validation and exclusive new directory prevent overwrite, with the legacy random-ID default preserved. NexaWeave canonical package/configuration and ordinary display names; reviewed derived source change preserving legal/provenance and persisted v1 identities.",
+      "phase": "NexaWeave canonical rebrand"
+    },
+    {
+      "imported_path": "backend/app/services/simulation_runner.py",
+      "original_sha256": "5ddb78ece900fe836fdb90e9d831d2036365909c953ae839497edb6ec4f20666",
+      "current_sha256": "e21591832f48be9068664498ce2ee40a583aeab35c123f1741520be852b75eb6",
+      "reason": "Validate native state/config/log/database paths while retaining lifecycle failure and cleanup handlers. NexaWeave canonical package/configuration and ordinary display names; reviewed derived source change preserving legal/provenance and persisted v1 identities.",
+      "phase": "NexaWeave canonical rebrand"
+    },
+    {
+      "imported_path": "backend/app/services/zep_entity_reader.py",
+      "original_sha256": "80ebdc701ce68cc1d0fe2ca8d58076c8b9ac5c3fe2f38b2a3d593a8a8fb2a7a8",
+      "current_sha256": "15a1cd37b66278d8f4f5c0560b257604045a7fb4c9ec0975077f852738317dd6",
+      "reason": "NexaWeave canonical package/configuration and ordinary display names; reviewed derived source change preserving legal/provenance and persisted v1 identities.",
+      "phase": "NexaWeave canonical rebrand"
+    },
+    {
+      "imported_path": "backend/app/services/zep_graph_memory_updater.py",
+      "original_sha256": "a9fe25ee7bd2d97d2b6ad5b21dae82955fb13acab595393b8f5cad280614dafe",
+      "current_sha256": "550713ae51c43502c441bcb14a9fc9176ecd733968bf403b9ec01d1ad9f844c7",
+      "reason": "NexaWeave canonical package/configuration and ordinary display names; reviewed derived source change preserving legal/provenance and persisted v1 identities.",
+      "phase": "NexaWeave canonical rebrand"
     },
     {
       "imported_path": "backend/app/services/zep_tools.py",
       "original_sha256": "5a2142a6a8662d764a9e31f1b12c2d19f03729f28bfd3e353ac0bcbf71d3e3be",
-      "current_sha256": "c889c15282e68d596cf307202592489d544c168111ae72a3696423b0bf31b3ef",
-      "reason": "Defer legacy SDK imports; preserve inherited research algorithms with explicit strict-neutral input/failure handling and source-evidence labels.",
-      "phase": "U03l"
+      "current_sha256": "cf81ab8107e44f072bc18f3c1c2fe82ea6808d9249af5387a66278814f77cc31",
+      "reason": "Defer legacy SDK imports; preserve inherited research algorithms with explicit strict-neutral input/failure handling and source-evidence labels. NexaWeave canonical package/configuration and ordinary display names; reviewed derived source change preserving legal/provenance and persisted v1 identities.",
+      "phase": "NexaWeave canonical rebrand"
+    },
+    {
+      "imported_path": "backend/app/utils/__init__.py",
+      "original_sha256": "444e75d227f54480da0e3d4edb5b3152666540460e25dfa68c76f16c0563deb3",
+      "current_sha256": "5bc1960674deeb5a3cb666d7d3b0899bed368ed8f8a3bdf1a01831425a8e9cf7",
+      "reason": "Keep utility exports lazy so logger/locale access does not import model or file-parser dependencies.",
+      "phase": "U03j"
+    },
+    {
+      "imported_path": "backend/app/utils/file_parser.py",
+      "original_sha256": "f1adfdda1a6674ad7af76dc95a9b76f388470098e4cf514be908440c4167c398",
+      "current_sha256": "85aebeb61b19849080ccf2572cc7eb9f655b197c42846828972fbf51c60f5369",
+      "reason": "Bound source bytes/PDF pages/extracted text/multifile results; safe classified errors, BOM decoding and progress-guaranteed bounded chunking. Native parser isolation remains separate. U13a adds bounded DOCX extraction through a fixed standard-library sibling while retaining the five-field saved parser contract and existing formats. NexaWeave canonical package/configuration and ordinary display names; reviewed derived source change preserving legal/provenance and persisted v1 identities.",
+      "phase": "NexaWeave canonical rebrand"
     },
     {
       "imported_path": "backend/app/utils/llm_client.py",
@@ -144,34 +164,53 @@
       "phase": "U03l"
     },
     {
-      "imported_path": "backend/app/services/simulation_manager.py",
-      "original_sha256": "6287937a965a97cea12a0d54ac55e7d1ae98944a96accfd7504a21350cc4e902",
-      "current_sha256": "9d63c30eb42428586cdc40fe1a91b6cceede1eeb6f78220d4a496dfcada63e02",
-      "reason": "U02a bounded paths; U03k trusted graph-bound preparation dependencies, complete artifact/ID checks before READY and fixed neutral errors, preserving legacy defaults. U07c neutral trusted preparation may use an explicitly supplied full operation-UUID simulation ID; strict validation and exclusive new directory prevent overwrite, with the legacy random-ID default preserved.",
-      "phase": "U02a/U03k/U07c",
-      "review_status": "Main reviewed exact U07c source;101 offline unit/no skips and18 real PG/Temporal/no skips passed. Actual combined browser and exact hosted acceptance pending."
+      "imported_path": "backend/app/utils/logger.py",
+      "original_sha256": "e05bb408d6400ffa744394bf87019cfb73f9fbca797479999a953bd9d0dc1794",
+      "current_sha256": "18e37110380b9d4ea5d8ebaa6898cd3895a342b8ea5246580b47f9069b6c089a",
+      "reason": "NexaWeave canonical package/configuration and ordinary display names; reviewed derived source change preserving legal/provenance and persisted v1 identities.",
+      "phase": "NexaWeave canonical rebrand"
     },
     {
-      "imported_path": "backend/app/services/simulation_config_generator.py",
-      "original_sha256": "3bb128db01398dd344a2a4c12875f424f7b9ae9c2a7b89f99c42e1ac555396d1",
-      "current_sha256": "58ceb4d128507d3c3b62652da197c3dae0ceef1c4b052af278d7d2bfbfff2f68",
-      "reason": "Defer SDK imports and inject trusted chat client; explicit strict neutral configuration rejects incomplete/truncated responses without changing legacy defaults.",
-      "phase": "U03k"
+      "imported_path": "backend/app/utils/retry.py",
+      "original_sha256": "9d6cedd532e500ad35a916f89ce61748c083d300478461ab17520cef19177e4d",
+      "current_sha256": "405e61635cf856f896698ec863454ffab9531f2894774b5258d8dcdd1ab4ed12",
+      "reason": "NexaWeave canonical package/configuration and ordinary display names; reviewed derived source change preserving legal/provenance and persisted v1 identities.",
+      "phase": "NexaWeave canonical rebrand"
     },
     {
-      "imported_path": "backend/app/services/simulation_runner.py",
-      "original_sha256": "5ddb78ece900fe836fdb90e9d831d2036365909c953ae839497edb6ec4f20666",
-      "current_sha256": "91599e6070c6b052d6c72f2462a4715189d0dc5db41bff65be64627448f9df52",
-      "reason": "Validate native state/config/log/database paths while retaining lifecycle failure and cleanup handlers.",
-      "phase": "U02a"
+      "imported_path": "backend/app/utils/zep.py",
+      "original_sha256": "652f8e2d9e7eb395724a444d6508f5944286cf8717771c9a61f826a3e0277258",
+      "current_sha256": "64be45a11c8689ddbc1eb9ccb1165206eddd69dda79e1539f31256cc0c00bb78",
+      "reason": "NexaWeave canonical package/configuration and ordinary display names; reviewed derived source change preserving legal/provenance and persisted v1 identities.",
+      "phase": "NexaWeave canonical rebrand"
     },
     {
-      "imported_path": "backend/app/services/simulation_ipc.py",
-      "original_sha256": "2cd596faed552c29f8e486b6641677787c2c38eeab822a82512be07e9b4088d9",
-      "current_sha256": "c96ea9bea8f9beac5e5fc925c9af96584bfb3690a7ce4d5bb25e3e8ccb29e16f",
-      "reason": "U01b fixes independent completed-file cleanup. U02b bounds IPC transport and atomic publication. U02c exposes bounded lifecycle status publication shared by native script handlers.",
-      "phase": "U01b/U02b/U02c",
-      "review_status": "U01b-accepted-PR6; U02b-accepted-PR11; U02c-pending-exact-head-ci"
+      "imported_path": "backend/app/utils/zep_paging.py",
+      "original_sha256": "e1f3cdbb20530c51e8dcd0c358d38a13a760f77b0618824fdfcfecc421e206a1",
+      "current_sha256": "a67dae2e329d5ca84a2f076c8e3ca260f0f10dddcf8db936881ee031da3e1b81",
+      "reason": "NexaWeave canonical package/configuration and ordinary display names; reviewed derived source change preserving legal/provenance and persisted v1 identities.",
+      "phase": "NexaWeave canonical rebrand"
+    },
+    {
+      "imported_path": "backend/pyproject.toml",
+      "original_sha256": "e923fa98056d1b6085ab789993a1d05f31bfc1e8cbbb6b9aa17d49663253c1a2",
+      "current_sha256": "b882c9021a29881de131da7fa4d28fc3047700058faacf3637a6a29cd7672eed",
+      "reason": "Main adds pinned opt-in PostgreSQL and Temporal runtime for trusted prepared native hosting; inherited third-party package records and notices retained. NexaWeave canonical package/configuration and ordinary display names; reviewed derived source change preserving legal/provenance and persisted v1 identities.",
+      "phase": "NexaWeave canonical rebrand"
+    },
+    {
+      "imported_path": "backend/requirements.txt",
+      "original_sha256": "5be0583939f836d1dc9cb0392af3b1410f5c65d2c37f724fb82772431173d58e",
+      "current_sha256": "ad980e511f0ecebec2c671ef026f36153607ba7ca3343b9902fabb2e2c882029",
+      "reason": "NexaWeave canonical package/configuration and ordinary display names; reviewed derived source change preserving legal/provenance and persisted v1 identities.",
+      "phase": "NexaWeave canonical rebrand"
+    },
+    {
+      "imported_path": "backend/run.py",
+      "original_sha256": "893a01b2e1881e4eb06bdbc4737e444d72eb374f9f326a1249dbc9aa04274483",
+      "current_sha256": "cc39a7ead1df509de326128801d475d2d70eb00722d94c5a2895df0496d87b26",
+      "reason": "Select explicit graphiti_readonly startup validation and loopback default; preserve legacy startup behavior. U04d recognizes explicit research_local through the protected validator and loopback default; legacy behavior unchanged. NexaWeave canonical package/configuration and ordinary display names; reviewed derived source change preserving legal/provenance and persisted v1 identities.",
+      "phase": "NexaWeave canonical rebrand"
     },
     {
       "imported_path": "backend/scripts/run_parallel_simulation.py",
@@ -198,42 +237,75 @@
       "review_status": "Main exact source reviewed; U07f relevant local/hosted qualification pending"
     },
     {
-      "imported_path": "backend/pyproject.toml",
-      "original_sha256": "e923fa98056d1b6085ab789993a1d05f31bfc1e8cbbb6b9aa17d49663253c1a2",
-      "current_sha256": "69242a08f3661f8ce9b9a6ceb5a4519eb4e81aa06c69f797551f23ff67f07dff",
-      "reason": "Main adds pinned opt-in PostgreSQL and Temporal runtime for trusted prepared native hosting; inherited third-party package records and notices retained.",
-      "phase": "U03p/U03q"
+      "imported_path": "backend/scripts/validate_zep_cloud_integration.py",
+      "original_sha256": "baf1b07bb4e23fba44cc66a363880b5be65a29843d870113aa776c6cbaa43ba9",
+      "current_sha256": "aa7e2b90d5e80d58bda63d5201027e4e333b47e6d17bb1a3cbb4f6904491d943",
+      "reason": "NexaWeave canonical package/configuration and ordinary display names; reviewed derived source change preserving legal/provenance and persisted v1 identities.",
+      "phase": "NexaWeave canonical rebrand"
+    },
+    {
+      "imported_path": "backend/tests/test_zep_cloud_contracts.py",
+      "original_sha256": "6bba5c2d520671e83792951ca9682648ac405ff425d9775ca0233763a715ccca",
+      "current_sha256": "b556db61c79fc2ee525890b4bfc2cfef08fded2689c8934d8ee0851dd7de9211",
+      "reason": "NexaWeave canonical package/configuration and ordinary display names; reviewed derived source change preserving legal/provenance and persisted v1 identities.",
+      "phase": "NexaWeave canonical rebrand"
+    },
+    {
+      "imported_path": "backend/tests/test_zep_graph_memory_updater.py",
+      "original_sha256": "18eb0df889a0fe438a94a8c51d485b0c93eff707f4a579d122169671c08e1ed8",
+      "current_sha256": "d5582f6ccfef072316137c3ab63ef63c93a0d9a329321e300bd62ebb8b365a0e",
+      "reason": "NexaWeave canonical package/configuration and ordinary display names; reviewed derived source change preserving legal/provenance and persisted v1 identities.",
+      "phase": "NexaWeave canonical rebrand"
     },
     {
       "imported_path": "backend/uv.lock",
       "original_sha256": "877281f85fe26eb120149503b0b99021fd7e3e577d026f584857d03839595b09",
-      "current_sha256": "79211fa44774e1062123707154c37b54e0ab764fa55483704957fe742dfc4d56",
-      "reason": "Main adds pinned opt-in PostgreSQL and Temporal runtime for trusted prepared native hosting; inherited third-party package records and notices retained.",
-      "phase": "U03p/U03q"
+      "current_sha256": "6a260c1082acef957f59a2ec978a8f27ebe02394a832640e4b17d24c7351298a",
+      "reason": "Main adds pinned opt-in PostgreSQL and Temporal runtime for trusted prepared native hosting; inherited third-party package records and notices retained. NexaWeave canonical package/configuration and ordinary display names; reviewed derived source change preserving legal/provenance and persisted v1 identities.",
+      "phase": "NexaWeave canonical rebrand"
     },
     {
-      "imported_path": "locales/en.json",
-      "original_sha256": "b47c61ba64330cf5094ce611ff270c95f22f0ce4e98bfb6fa05ee6c6e5b93f84",
-      "current_sha256": "775c63006124d82b5896eb360342c5b6814171a752ea3040a5af875fb47156b5",
-      "reason": "U13a updates only the English supported-format label for DOCX. U11b adds only the English Home workbench navigation label; inherited catalog remains. Main applies human-authorized visible NexaWeave branding/public repository links; preserves legal provenance, behavior and persisted compatibility. Main correction2 fixes observed Home mobile overflow and removes unqualified scale/cost/ready claims while preserving controls, locale keys and placeholders.",
-      "phase": "U13a/U11b/U00-NexaWeave",
+      "imported_path": "docker-compose.yml",
+      "original_sha256": "5da34431bdb02d56ac05b9a23c8cd8902f652e25574561ee2d2ccb03a38d2411",
+      "current_sha256": "9803a99a6f31d7b820979d6de0e30ed60202b3311398de5115beb74a50aa11c4",
+      "reason": "NexaWeave canonical package/configuration and ordinary display names; reviewed derived source change preserving legal/provenance and persisted v1 identities.",
+      "phase": "NexaWeave canonical rebrand"
+    },
+    {
+      "imported_path": "frontend/index.html",
+      "original_sha256": "69ce89b9ce4f5995064453fe2709da0a68e518c9a9aae29dde26226c036eef36",
+      "reason": "Main applies human-authorized visible NexaWeave branding/public repository links; preserves legal provenance, behavior and persisted compatibility.",
+      "phase": "U00-NexaWeave",
+      "current_sha256": "60d04cd45b9e74a0bb3d2dd6782489782349ae0b0090e868d8ffa451aedf224b",
       "review_status": "Main reviewed exact branding source; relevant build/export/browser and exact hosted acceptance pending."
     },
     {
-      "imported_path": "locales/zh.json",
-      "original_sha256": "7d44d70ca75e89c79c2ce793ddceab32cf7b251bc9210cf81c04d37daf3daab8",
-      "current_sha256": "f426b18a001914f07612267dd4589da62d8354db8067d60670ca8f87887e87be",
-      "reason": "U13a updates only the Chinese supported-format label for DOCX. U11b adds only the Chinese Home workbench navigation label; inherited catalog remains. Main applies human-authorized visible NexaWeave branding/public repository links; preserves legal provenance, behavior and persisted compatibility. Main correction2 fixes observed Home mobile overflow and removes unqualified scale/cost/ready claims while preserving controls, locale keys and placeholders.",
-      "phase": "U13a/U11b/U00-NexaWeave",
-      "review_status": "Main reviewed exact branding source; relevant build/export/browser and exact hosted acceptance pending."
+      "imported_path": "frontend/package-lock.json",
+      "original_sha256": "a4a188daf04a442b8e23c3291d9062b4e00faa5ff49503db759c85e67c4037be",
+      "current_sha256": "4307e35e62fafcf897e4be12977464b67ddbde63ec85ebf90bd360f94a53676b",
+      "reason": "Main locks renderer/test dependency closure and updates PostCSS/nanoid within existing ranges to address current advisories.",
+      "phase": "U02h"
     },
     {
-      "imported_path": "frontend/src/views/Home.vue",
-      "original_sha256": "7ebc342c34556912542030bf9e7c98e6ee4d754fe93a44601cd5c7699adcb409",
-      "current_sha256": "4a9b84ad18313ada43659032239431c0c855cfa0f7df12bef309fd8263d5a488",
-      "reason": "U13a adds DOCX and already-supported MARKDOWN to the existing upload accept/filter list; no layout/style changes. U11b adds one localized navigation link to the protected local evidence workbench; inherited Home upload/workflow behavior remains. Main applies human-authorized visible NexaWeave branding/public repository links; preserves legal provenance, behavior and persisted compatibility. Main correction2 fixes observed Home mobile overflow and removes unqualified scale/cost/ready claims while preserving controls, locale keys and placeholders.",
-      "phase": "U13a/U11b/U00-NexaWeave",
-      "review_status": "Main reviewed exact branding source; relevant build/export/browser and exact hosted acceptance pending."
+      "imported_path": "frontend/package.json",
+      "original_sha256": "f972113d3cca752acc44f7e63d97fec138b2a34388b173f85f847bf7108fe852",
+      "current_sha256": "abe2ec6cf0d4676143c13b40eab7cb1b8f52e426e0dc447e6988b8572c54bdac",
+      "reason": "Main pins Markdown-it/DOMPurify runtime and jsdom test dependency; adds node:test script without changing frontend framework versions.",
+      "phase": "U02h"
+    },
+    {
+      "imported_path": "frontend/src/components/Step4Report.vue",
+      "original_sha256": "dcac96bdcb6b8df566155b543387cb51034e341f235a83b455608e34abd6bb4c",
+      "current_sha256": "801d28d44092e8aed6e1204d837f69af3bb49d07d4d4b8001ccd7ac5e0361bf5",
+      "reason": "Use bounded shared sanitized Markdown at report/interview HTML sinks and Vue text for placeholders; preserve report heading suppression and expansion controls.",
+      "phase": "U02h"
+    },
+    {
+      "imported_path": "frontend/src/components/Step5Interaction.vue",
+      "original_sha256": "067f165535e5b6583515ed30d9eb97727c273a410b81e0b7e95886bdb37d9541",
+      "current_sha256": "dc83d1d229b8ea15cef26500d8719a237e85fbfbf55343304dec38635d78ea8f",
+      "reason": "Use bounded shared sanitized Markdown at report/chat/interview HTML sinks; preserve chat headings and native ordered-list start/nesting semantics.",
+      "phase": "U02h"
     },
     {
       "imported_path": "frontend/src/router/index.js",
@@ -244,11 +316,11 @@
       "review_status": "Main source reviewed; pending U11b exact-revision CI acceptance"
     },
     {
-      "imported_path": "frontend/index.html",
-      "original_sha256": "69ce89b9ce4f5995064453fe2709da0a68e518c9a9aae29dde26226c036eef36",
-      "reason": "Main applies human-authorized visible NexaWeave branding/public repository links; preserves legal provenance, behavior and persisted compatibility.",
-      "phase": "U00-NexaWeave",
-      "current_sha256": "60d04cd45b9e74a0bb3d2dd6782489782349ae0b0090e868d8ffa451aedf224b",
+      "imported_path": "frontend/src/views/Home.vue",
+      "original_sha256": "7ebc342c34556912542030bf9e7c98e6ee4d754fe93a44601cd5c7699adcb409",
+      "current_sha256": "4a9b84ad18313ada43659032239431c0c855cfa0f7df12bef309fd8263d5a488",
+      "reason": "U13a adds DOCX and already-supported MARKDOWN to the existing upload accept/filter list; no layout/style changes. U11b adds one localized navigation link to the protected local evidence workbench; inherited Home upload/workflow behavior remains. Main applies human-authorized visible NexaWeave branding/public repository links; preserves legal provenance, behavior and persisted compatibility. Main correction2 fixes observed Home mobile overflow and removes unqualified scale/cost/ready claims while preserving controls, locale keys and placeholders.",
+      "phase": "U13a/U11b/U00-NexaWeave",
       "review_status": "Main reviewed exact branding source; relevant build/export/browser and exact hosted acceptance pending."
     },
     {
@@ -300,11 +372,19 @@
       "review_status": "Main reviewed exact branding source; relevant build/export/browser and exact hosted acceptance pending."
     },
     {
-      "imported_path": "package.json",
-      "original_sha256": "f2b8cc90bc21b0b4990d5192b5e7c09161982760dede52cb743862d908526715",
-      "reason": "Main applies human-authorized visible NexaWeave branding/public repository links; preserves legal provenance, behavior and persisted compatibility.",
-      "phase": "U00-NexaWeave",
-      "current_sha256": "490cc01fd06e9ba7e04c1691a098e6e7c98fda2475488359c87f473870f2f8b0",
+      "imported_path": "locales/en.json",
+      "original_sha256": "b47c61ba64330cf5094ce611ff270c95f22f0ce4e98bfb6fa05ee6c6e5b93f84",
+      "current_sha256": "775c63006124d82b5896eb360342c5b6814171a752ea3040a5af875fb47156b5",
+      "reason": "U13a updates only the English supported-format label for DOCX. U11b adds only the English Home workbench navigation label; inherited catalog remains. Main applies human-authorized visible NexaWeave branding/public repository links; preserves legal provenance, behavior and persisted compatibility. Main correction2 fixes observed Home mobile overflow and removes unqualified scale/cost/ready claims while preserving controls, locale keys and placeholders.",
+      "phase": "U13a/U11b/U00-NexaWeave",
+      "review_status": "Main reviewed exact branding source; relevant build/export/browser and exact hosted acceptance pending."
+    },
+    {
+      "imported_path": "locales/zh.json",
+      "original_sha256": "7d44d70ca75e89c79c2ce793ddceab32cf7b251bc9210cf81c04d37daf3daab8",
+      "current_sha256": "f426b18a001914f07612267dd4589da62d8354db8067d60670ca8f87887e87be",
+      "reason": "U13a updates only the Chinese supported-format label for DOCX. U11b adds only the Chinese Home workbench navigation label; inherited catalog remains. Main applies human-authorized visible NexaWeave branding/public repository links; preserves legal provenance, behavior and persisted compatibility. Main correction2 fixes observed Home mobile overflow and removes unqualified scale/cost/ready claims while preserving controls, locale keys and placeholders.",
+      "phase": "U13a/U11b/U00-NexaWeave",
       "review_status": "Main reviewed exact branding source; relevant build/export/browser and exact hosted acceptance pending."
     },
     {
@@ -314,6 +394,56 @@
       "phase": "U00-NexaWeave",
       "current_sha256": "468e26c128ee60b5f568ea52706977af66adc66b1c2fc6738b5c2f962ed63da3",
       "review_status": "Main reviewed exact branding source; relevant build/export/browser and exact hosted acceptance pending."
+    },
+    {
+      "imported_path": "package.json",
+      "original_sha256": "f2b8cc90bc21b0b4990d5192b5e7c09161982760dede52cb743862d908526715",
+      "reason": "Main applies human-authorized visible NexaWeave branding/public repository links; preserves legal provenance, behavior and persisted compatibility.",
+      "phase": "U00-NexaWeave",
+      "current_sha256": "490cc01fd06e9ba7e04c1691a098e6e7c98fda2475488359c87f473870f2f8b0",
+      "review_status": "Main reviewed exact branding source; relevant build/export/browser and exact hosted acceptance pending."
+    },
+    {
+      "imported_path": "scripts/fetch_star_count.py",
+      "original_sha256": "dfe9e0060d9abb0b3e1cda61bd73bba77fe878815adcbea14601666dce30e927",
+      "current_sha256": "98b0703ca25b0aae635b5dae93128b47d3eaa9dbacbd523808a33d00c6bf396e",
+      "reason": "Use this repository identity and observed aggregate star count; preserve original upstream state/chart bytes under docs/upstream/star-history references; never relabel upstream counts as NexaWeave popularity.",
+      "phase": "NexaWeave canonical rebrand"
+    },
+    {
+      "imported_path": "scripts/star_history.py",
+      "original_sha256": "ff1945890f0eada740539d1815887884601f5187a0363584ba925674814376b7",
+      "current_sha256": "77110131b0b99eb1e7dbb3cf409911346dcb54364e4476bf6710f98a098a5bcc",
+      "reason": "Use this repository identity and observed aggregate star count; preserve original upstream state/chart bytes under docs/upstream/star-history references; never relabel upstream counts as NexaWeave popularity.",
+      "phase": "NexaWeave canonical rebrand"
+    },
+    {
+      "imported_path": "static/image/star-history-dark.svg",
+      "original_sha256": "cef547111a25c492d0f4bfde69b68a264d5447659bdbcc93d825cb27ac9d6465",
+      "current_sha256": "a0568d4bc230048a709b5612910591d191c4d35f6bd5c6e39b8bd63b2463a455",
+      "reason": "Use this repository identity and observed aggregate star count; preserve original upstream state/chart bytes under docs/upstream/star-history references; never relabel upstream counts as NexaWeave popularity.",
+      "phase": "NexaWeave canonical rebrand"
+    },
+    {
+      "imported_path": "static/image/star-history-light.svg",
+      "original_sha256": "5f2c5f21c8d1bafe33e5bd09cbcfc79bf4a1c9b3f8168ca2894758c1535292f9",
+      "current_sha256": "0b1b4502ecf93b8e7ceadde708f410036a64b1137fe49b600f98fae3ab40204f",
+      "reason": "Use this repository identity and observed aggregate star count; preserve original upstream state/chart bytes under docs/upstream/star-history references; never relabel upstream counts as NexaWeave popularity.",
+      "phase": "NexaWeave canonical rebrand"
+    },
+    {
+      "imported_path": "tests/test_local_star_count_fetch.py",
+      "original_sha256": "6c524bc1fbdf521c5f61d5dfa129bec88f8b5f895a55ecdceb775e6d40bb3379",
+      "current_sha256": "ac9fb520f8f05830b7aef7c073e8216bb97236553cf1c10cba2e21c80b089d84",
+      "reason": "Workflow-inspection fixture now reads the byte-preserved quarantined workflow reference after the U00 archive import. Assertions are unchanged. NexaWeave canonical package/configuration and ordinary display names; reviewed derived source change preserving legal/provenance and persisted v1 identities.",
+      "phase": "NexaWeave canonical rebrand"
+    },
+    {
+      "imported_path": "tests/test_local_star_history.py",
+      "original_sha256": "5d9fb5466b5d121432d9e82869edf91fe41cb1f02b8a6fe704372fb167368d55",
+      "current_sha256": "7ee244e4673703961c40a6f02ab11e63dc13fc54437aee5cbb3d6cc5ca0412ba",
+      "reason": "Use this repository identity and observed aggregate star count; preserve original upstream state/chart bytes under docs/upstream/star-history references; never relabel upstream counts as NexaWeave popularity.",
+      "phase": "NexaWeave canonical rebrand"
     }
   ]
 }

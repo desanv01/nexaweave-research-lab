@@ -47,7 +47,7 @@ def main():
     args = parser.parse_args()
     if args.child:
         return child(args.integration)
-    with tempfile.TemporaryDirectory(prefix='mirofish-research-import-') as directory:
+    with tempfile.TemporaryDirectory(prefix='nexaweave-research-import-') as directory:
         env = _unit_environment(Path(directory))
         env['PYTHONPATH'] = os.pathsep.join([str(ROOT), str(ROOT / 'services/knowledge/src'),
                                            str(ROOT / 'services/knowledge/tests')])
@@ -58,7 +58,7 @@ def main():
             if not password:
                 parser.error('approved disposable fixture password required')
             installed = subprocess.run([sys.executable, '-I', '-c',
-                "import mirofish_storage.research_import_cli as m; from pathlib import Path; "
+                "import nexaweave_storage.research_import_cli as m; from pathlib import Path; "
                 "assert 'site-packages' in Path(m.__file__).resolve().parts"],
                 env=env, cwd=directory, capture_output=True, timeout=30, check=False)
             if installed.returncode or installed.stderr:

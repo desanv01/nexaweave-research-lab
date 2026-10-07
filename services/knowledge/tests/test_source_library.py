@@ -9,7 +9,7 @@ from uuid import uuid4
 
 import pytest
 
-from mirofish_knowledge.source_library import SourceLibrary, SourceError, validate_payload, encoded
+from nexaweave_knowledge.source_library import SourceLibrary, SourceError, validate_payload, encoded
 
 
 def pdf_payload(binary=b"%PDF-1.7\nwire admission fixture\n%%EOF"):
@@ -25,7 +25,7 @@ def pdf_payload(binary=b"%PDF-1.7\nwire admission fixture\n%%EOF"):
     lambda p: p.update(content="x" * 2796205), lambda p: p.update(source_name="\x00"),
 ])
 def test_pdf_child_rejects_before_authority_or_parser(change, monkeypatch):
-    import mirofish_storage.pdf as parser
+    import nexaweave_storage.pdf as parser
     monkeypatch.setattr(parser, "extract_pdf", lambda binary: pytest.fail("parser reached"))
     library = SourceLibrary(object(), connection_factory=lambda: pytest.fail("connection reached"))
     payload = pdf_payload()
@@ -35,7 +35,7 @@ def test_pdf_child_rejects_before_authority_or_parser(change, monkeypatch):
 
 
 def test_pdf_child_authority_denial_precedes_native_extraction(monkeypatch):
-    import mirofish_storage.pdf as parser
+    import nexaweave_storage.pdf as parser
     monkeypatch.setattr(parser, "extract_pdf", lambda binary: pytest.fail("parser reached"))
     library = SourceLibrary(object(), connection_factory=lambda: pytest.fail("connection reached"))
     def denied(): raise SourceError("source_denied")
@@ -59,11 +59,11 @@ def test_cold_source_and_pdf_module_imports_are_native_and_sdk_free(tmp_path):
 import importlib.abc,sys
 class Deny(importlib.abc.MetaPathFinder):
     def find_spec(self,fullname,path=None,target=None):
-        if fullname.split('.')[0] in {'pymupdf','fitz','graphiti_core','openai','neo4j','camel','oasis','temporalio'} or fullname in {'mirofish_knowledge.provider','mirofish_knowledge.read_runtime'}:
+        if fullname.split('.')[0] in {'pymupdf','fitz','graphiti_core','openai','neo4j','camel','oasis','temporalio'} or fullname in {'nexaweave_knowledge.provider','nexaweave_knowledge.read_runtime'}:
             raise AssertionError('forbidden cold runtime import')
 sys.meta_path.insert(0,Deny())
-import mirofish_knowledge.source_bootstrap
-import mirofish_storage.pdf
+import nexaweave_knowledge.source_bootstrap
+import nexaweave_storage.pdf
 assert 'pymupdf' not in sys.modules and 'fitz' not in sys.modules
 print('cold-source-pdf')
 '''
@@ -85,7 +85,7 @@ def test_missing_pdf_profile_is_unavailable_without_storage_mutation(monkeypatch
 
 
 def test_authority_rechecked_after_pdf_extraction_before_storage_mutation(monkeypatch):
-    import mirofish_storage.pdf as parser
+    import nexaweave_storage.pdf as parser
     scope = SimpleNamespace(project_id=uuid4())
     library = SourceLibrary(SimpleNamespace(principal="owner"),
         connection_factory=lambda: pytest.fail("storage mutation reached"))

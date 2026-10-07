@@ -1,15 +1,8 @@
-"""Explicit, ownership-scoped project metadata revisions.
-
-Importing this package never connects to PostgreSQL or runs migrations.
-"""
-
-from .store import (Conflict, MigrationMismatch, NotFound, ProjectRecord,
-                    ProjectStore, StorageError, migrate)
-from .source import (PassageRecord, ResolvedEvidence, SourceMetadata, SourceRecord,
-                     SourceStore)
-from .validation import InvalidProject, canonical_payload, validate_evidence, validate_snapshot
-
-__all__ = ["Conflict", "InvalidProject", "MigrationMismatch", "NotFound",
-           "ProjectRecord", "ProjectStore", "StorageError", "canonical_payload",
-           "migrate", "validate_evidence", "validate_snapshot", "PassageRecord",
-           "ResolvedEvidence", "SourceMetadata", "SourceRecord", "SourceStore"]
+"""Deprecated import compatibility; implementation is nexaweave_storage."""
+import importlib as _importlib
+_canonical = _importlib.import_module("nexaweave_storage")
+__all__ = getattr(_canonical, "__all__", [])
+def __getattr__(name):
+    return getattr(_canonical, name)
+def __dir__():
+    return sorted(set(globals()) | set(dir(_canonical)))

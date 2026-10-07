@@ -9,11 +9,11 @@ import sqlite3
 from types import SimpleNamespace
 from uuid import uuid4
 import pytest
-from mirofish_execution.temporal_preparation_host import TemporalPreparationHost
-from mirofish_execution.temporal_native_host import TemporalNativeHost,NativeWorkflowRef
-from mirofish_execution.native_run_store import NativeRunStore
-from mirofish_execution.native_launch_store import NativeLaunchStore
-from mirofish_execution.native_launch_contracts import NativeBudgetReceipt
+from nexaweave_execution.temporal_preparation_host import TemporalPreparationHost
+from nexaweave_execution.temporal_native_host import TemporalNativeHost,NativeWorkflowRef
+from nexaweave_execution.native_run_store import NativeRunStore
+from nexaweave_execution.native_launch_store import NativeLaunchStore
+from nexaweave_execution.native_launch_contracts import NativeBudgetReceipt
 from test_provider_neutral_preparation import ScriptedChat
 from test_preparation_store import real_host,request,reference as preparation_reference
 from test_native_launch_store import factory,migrate_all,launch_host,declaration

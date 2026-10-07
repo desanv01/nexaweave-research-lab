@@ -14,14 +14,14 @@ from app.utils.browser_origins import validate_origin
 
 @pytest.fixture
 def make_app(monkeypatch):
-    monkeypatch.delenv("MIROFISH_ALLOWED_ORIGINS", raising=False)
+    monkeypatch.delenv("NEXAWEAVE_ALLOWED_ORIGINS", raising=False)
     monkeypatch.setattr(SimulationRunner, "register_cleanup", classmethod(lambda _cls: None))
 
     def build(origins=None):
         if origins is None:
             config_class = Config
         else:
-            config_class = type("OriginConfig", (Config,), {"MIROFISH_ALLOWED_ORIGINS": origins})
+            config_class = type("OriginConfig", (Config,), {"NEXAWEAVE_ALLOWED_ORIGINS": origins})
         app = create_app(config_class)
         app.config["TESTING"] = True
         calls = []
@@ -140,7 +140,7 @@ def test_explicit_empty_allowlist_and_environment_override(make_app, monkeypatch
     assert empty_calls == []
     assert empty_app.test_client().get("/api/fixture").status_code == 200
 
-    monkeypatch.setenv("MIROFISH_ALLOWED_ORIGINS", "https://research.example:8443")
+    monkeypatch.setenv("NEXAWEAVE_ALLOWED_ORIGINS", "https://research.example:8443")
     env_app = create_app(Config)
     env_app.config["TESTING"] = True
 
@@ -153,7 +153,7 @@ def test_explicit_empty_allowlist_and_environment_override(make_app, monkeypatch
     assert client.get("/api/env", headers={"Origin": "http://localhost:3000"}).status_code == 403
 
     class ExplicitConfig(Config):
-        MIROFISH_ALLOWED_ORIGINS = "http://localhost:3000"
+        NEXAWEAVE_ALLOWED_ORIGINS = "http://localhost:3000"
 
     override_app = create_app(ExplicitConfig)
     override_app.config["TESTING"] = True
@@ -168,10 +168,10 @@ def test_explicit_empty_allowlist_and_environment_override(make_app, monkeypatch
 
 
 def test_inherited_config_override_precedes_environment(make_app, monkeypatch):
-    monkeypatch.setenv("MIROFISH_ALLOWED_ORIGINS", "https://environment.example")
+    monkeypatch.setenv("NEXAWEAVE_ALLOWED_ORIGINS", "https://environment.example")
 
     class ExplicitConfig(Config):
-        MIROFISH_ALLOWED_ORIGINS = "http://localhost:3000"
+        NEXAWEAVE_ALLOWED_ORIGINS = "http://localhost:3000"
 
     class ChildConfig(ExplicitConfig):
         pass
@@ -208,7 +208,7 @@ def test_invalid_config_fails_before_cleanup_registration(monkeypatch, configure
                         classmethod(lambda _cls: called.append(True)))
 
     class BadConfig(Config):
-        MIROFISH_ALLOWED_ORIGINS = configured
+        NEXAWEAVE_ALLOWED_ORIGINS = configured
 
     with pytest.raises(ValueError) as error:
         create_app(BadConfig)
@@ -230,7 +230,7 @@ def test_health_is_minimal_and_ignores_browser_origin(make_app):
     app, _ = make_app()
     response = app.test_client().get("/health", headers={"Origin": "null"})
     assert response.status_code == 200
-    assert response.json == {"status": "ok", "service": "MiroFish Backend"}
+    assert response.json == {"status": "ok", "service": "NexaWeave Backend"}
     assert "Access-Control-Allow-Origin" not in response.headers
 
 

@@ -43,7 +43,7 @@ def install_offline_boundary(monkeypatch):
                 raise AssertionError("external fixture socket attempted")
             return original(sock, address)
         monkeypatch.setattr(socket.socket, name, guarded)
-    monkeypatch.setenv("MIROFISH_NATIVE_TEST_OFFLINE", "1")
+    monkeypatch.setenv("NEXAWEAVE_NATIVE_TEST_OFFLINE", "1")
 
 
 @pytest.fixture(autouse=True)
@@ -61,9 +61,9 @@ def actual_run(factory, parent, project, simulation, seed, *, fail=False):
     from app.services.native_recording_contracts import RecordingAnchors
     from app.services.native_recordings import capture_recording
     from app.services.native_experiment_contracts import ExperimentMember, RecordingPin
-    from mirofish_execution.native_owned_binding import NativeOwnedSessionFactory, _manifest
-    from mirofish_execution.native_run_contracts import NativeRunRequest, RunState
-    from mirofish_execution.native_run_store import NativeRunStore
+    from nexaweave_execution.native_owned_binding import NativeOwnedSessionFactory, _manifest
+    from nexaweave_execution.native_run_contracts import NativeRunRequest, RunState
+    from nexaweave_execution.native_run_store import NativeRunStore
 
     parent.mkdir()
     root = prepared(parent)
@@ -171,7 +171,7 @@ def cli(cohort, tmp_path, raw, *, principal="owner", pin=None):
     script = Path(__file__).resolve().parents[1] / "app" / "services" / "native_experiment_cli.py"
     allowed = {"SYSTEMROOT", "WINDIR", "PATH", "TEMP", "TMP", "TMPDIR", "COMSPEC", "SYSTEMDRIVE", "PATHEXT", "LANG", "LC_ALL"}
     env = {k: v for k, v in os.environ.items() if k.upper() in allowed}
-    env["MIROFISH_APPSTORE_DSN"] = os.environ["PROJECT_STORE_POSTGRES_TEST_DSN"]
+    env["NEXAWEAVE_APPSTORE_DSN"] = os.environ["PROJECT_STORE_POSTGRES_TEST_DSN"]
     proc = subprocess.run([sys.executable, "-I", "-c", CHILD, str(script), "--principal", principal,
         "--manifest", str(path), "--manifest-sha256", pin or sha(data)], input=raw,
         capture_output=True, cwd=tmp_path, env=env, timeout=120, check=False)
@@ -186,7 +186,7 @@ def cli(cohort, tmp_path, raw, *, principal="owner", pin=None):
 @pytest.fixture(scope="module")
 def cohort_fixture(connection_factory, tmp_path_factory):
     from app.services.native_experiment_contracts import ExperimentCohort
-    from mirofish_storage import ProjectStore
+    from nexaweave_storage import ProjectStore
     root = tmp_path_factory.mktemp("owned-experiments")
     project = uuid4()
     ProjectStore(connection_factory).create("owner", uuid4(), project, "proj_1", _snapshot())
@@ -250,7 +250,7 @@ def test_actual_fresh_saved_cli_reads_store_recordings_and_closes_resources(conn
 def test_actual_authority_rejects_cross_project_before_absent_recording(connection_factory, cohort_fixture, tmp_path):
     from app.services.native_experiment_contracts import ExperimentCohort, ExperimentError, canonical
     from app.services.native_experiments import NativeExperimentComparator
-    from mirofish_storage import ProjectStore
+    from nexaweave_storage import ProjectStore
     cohort, _, _ = cohort_fixture
     project = uuid4()
     ProjectStore(connection_factory).create("owner", uuid4(), project, "proj_1", _snapshot())
@@ -268,8 +268,8 @@ def test_actual_authority_rejects_cross_project_before_absent_recording(connecti
 def test_actual_prelaunch_cancel_intent_remains_declared_pending_and_read_only(connection_factory, cohort_fixture):
     from app.services.native_experiment_contracts import ExperimentCohort, ExperimentMember, canonical
     from app.services.native_experiments import NativeExperimentComparator
-    from mirofish_execution.native_run_contracts import RunState
-    from mirofish_execution.native_run_store import NativeRunStore
+    from nexaweave_execution.native_run_contracts import RunState
+    from nexaweave_execution.native_run_store import NativeRunStore
     cohort, _, _ = cohort_fixture
     request = replace(cohort.members[0].request, run_id=uuid4(), simulation_id="exp-cancel-" + uuid4().hex)
     store = NativeRunStore(connection_factory)
