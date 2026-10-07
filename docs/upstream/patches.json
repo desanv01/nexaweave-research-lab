@@ -63,10 +63,10 @@
     {
       "imported_path": "backend/app/__init__.py",
       "original_sha256": "f04d262decf6c11437280c0f0c1353774f642888b2ef3f02dfa0e96e992b3c1c",
-      "current_sha256": "f2e3ca2cdf4947ef8f8df3ce74492f79fd3a524176f1d080b7444cc8285c6e20",
-      "reason": "U02d exact Origin/CORS and private logging retained. U03i selects explicit graphiti_readonly factory before inherited blueprints/runner; default legacy unchanged. U11a forwards optional evidence facade only in explicit read-only mode; legacy default unchanged. U04d explicitly selects research_local source-retention routes using the same protected factory/settings; graphiti_readonly and legacy defaults remain. U06b forwards optional protected research source-ingestion facade; legacy/read-only modes preserve inherited behavior. U10b forwards optional protected experiment facade only through the existing research-local factory; no legacy/read-only blueprint or runtime change. U07c forwards the explicitly injected trusted preparation facade through research_local factory without initializing optional engines in ordinary HTTP imports. U07d forwards an explicitly injected protected native-launch facade only through research_local; preserves ordinary import and legacy behavior. U07e passes the optional cold receipt-bound native observations facade into the existing protected research-local app.",
-      "phase": "U02d/U03i / U11a / U04d/U06b/U10b/U07c/U07d/U07e",
-      "review_status": "Main source review in progress; U07e exact installed/PG/native/browser and hosted qualification pending."
+      "current_sha256": "ad2a08571774b74263870c7e5efd7b7c1b481c061c785f2384bf62365be7fdec",
+      "reason": "U02d exact Origin/CORS and private logging retained. U03i selects explicit graphiti_readonly factory before inherited blueprints/runner; default legacy unchanged. U11a forwards optional evidence facade only in explicit read-only mode; legacy default unchanged. U04d explicitly selects research_local source-retention routes using the same protected factory/settings; graphiti_readonly and legacy defaults remain. U06b forwards optional protected research source-ingestion facade; legacy/read-only modes preserve inherited behavior. U10b forwards optional protected experiment facade only through the existing research-local factory; no legacy/read-only blueprint or runtime change. U07c forwards the explicitly injected trusted preparation facade through research_local factory without initializing optional engines in ordinary HTTP imports. U07d forwards an explicitly injected protected native-launch facade only through research_local; preserves ordinary import and legacy behavior. U07e passes the optional cold receipt-bound native observations facade into the existing protected research-local app. U07g explicit connected inherited report operation/native evidence and protected app integration; legacy defaults/loops/notices retained.",
+      "phase": "U02d/U03i / U11a / U04d/U06b/U10b/U07c/U07d/U07e/U07g",
+      "review_status": "Main source reviewed; local/hosted U07g qualification pending"
     },
     {
       "imported_path": "backend/app/config.py",
@@ -124,9 +124,10 @@
     {
       "imported_path": "backend/app/services/report_agent.py",
       "original_sha256": "b1211efa900e2fe73875b6acbf690550ee21a40b76c5170eee4e6ec404a4be47",
-      "current_sha256": "abe20a60de578dbcc43ee25f96d0775ebb26d94be5c43b17f3c90f7d551504fb",
-      "reason": "U02a safe paths and U01c forced-final sanitization retained. U03l adds trusted neutral report/chat mode, strict failures, bounded evidence sidecar and scope-bound pinned follow-up context while preserving legacy behavior.",
-      "phase": "U02a/U01c/U03l"
+      "current_sha256": "3556d97c2949f66a15cc3cc20cd30b4a5274b973973ef58258f2b620bcd17e5e",
+      "reason": "U02a safe paths and U01c forced-final sanitization retained. U03l adds trusted neutral report/chat mode, strict failures, bounded evidence sidecar and scope-bound pinned follow-up context while preserving legacy behavior. U07g explicit connected inherited report operation/native evidence and protected app integration; legacy defaults/loops/notices retained.",
+      "phase": "U02a/U01c/U03l/U07g",
+      "review_status": "Main source reviewed; local/hosted U07g qualification pending"
     },
     {
       "imported_path": "backend/app/services/zep_tools.py",

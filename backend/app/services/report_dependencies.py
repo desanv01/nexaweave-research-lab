@@ -33,3 +33,17 @@ def create_knowledge_report_agent(facade, graph_id: str, simulation_id: str,
         search_selector=search_selector, interview_capability=interview_capability)
     return ReportAgent(graph_id, simulation_id, simulation_requirement,
                        llm_client=model_client, zep_tools=tools, neutral_mode=True)
+
+
+def create_connected_report_agent(context, *, requirement, output_language, model_client):
+    """Child-only construction; every dependency is frozen or explicitly injected."""
+    from .connected_report_context import validate_context
+    from .connected_report_tools import lexical_selector
+    context = validate_context(context)
+    binding = context['binding']
+    tools = KnowledgeReportTools(graph_id=binding['display_graph_id'],
+        simulation_id=binding['preparation']['simulation_id'], graph=context['graph'], scope=binding['scope'],
+        llm_client=model_client, search_selector=lexical_selector(context), interview_capability=None)
+    return ReportAgent(binding['display_graph_id'], binding['preparation']['simulation_id'], requirement,
+        llm_client=model_client, zep_tools=tools, neutral_mode=True,
+        connected_context=context, output_language=output_language)

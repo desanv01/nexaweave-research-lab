@@ -67,6 +67,20 @@ def fails(code, action):
     assert "private" not in str(error.value)
 
 
+def test_private_cooperative_abort_passes_reader_without_changing_exception_sanitization():
+    from app.services.knowledge_transport import KnowledgeCooperativeAbort
+    class AbortClient:
+        def call(self, raw):
+            raise KnowledgeCooperativeAbort('report_cancelled')
+    with pytest.raises(KnowledgeCooperativeAbort) as caught:
+        reader(AbortClient()).get_graph_data('display_1')
+    assert caught.value.code == 'report_cancelled'
+    class BrokenClient:
+        def call(self, raw):
+            raise RuntimeError('private transport text')
+    fails('transport_failure', lambda: reader(BrokenClient()).get_graph_data('display_1'))
+
+
 def test_complete_graph_wiring_metadata_and_projection():
     nodes = [fact(10), fact(11, name=None, summary=None, labels=["Entity", "Company"])]
     edge = fact(20, "edge", invalid_at="2024-02-01T00:00:00Z")
