@@ -24,7 +24,7 @@ def _origin_denied():
     return jsonify({'success': False, 'error': 'Origin not allowed'}), 403
 
 
-def create_app(config_class=Config, *, read_facade=None, evidence_facade=None, source_facade=None, ingestion_facade=None, experiment_facade=None, preparation_facade=None, native_launch_facade=None, native_observations_facade=None):
+def create_app(config_class=Config, *, read_facade=None, evidence_facade=None, source_facade=None, ingestion_facade=None, experiment_facade=None, preparation_facade=None, native_launch_facade=None, native_observations_facade=None, connected_report_facade=None):
     """Flask应用工厂函数"""
     mode = os.environ.get('MIROFISH_APP_MODE', getattr(config_class, 'MIROFISH_APP_MODE', 'legacy'))
     if mode in {'graphiti_readonly', 'research_local'}:
@@ -32,7 +32,8 @@ def create_app(config_class=Config, *, read_facade=None, evidence_facade=None, s
         return create_read_app(config_class, facade=read_facade, evidence_facade=evidence_facade,
                                source_facade=source_facade, ingestion_facade=ingestion_facade,
                                experiment_facade=experiment_facade, preparation_facade=preparation_facade,
-                               native_launch_facade=native_launch_facade, native_observations_facade=native_observations_facade, mode=mode)
+                               native_launch_facade=native_launch_facade, native_observations_facade=native_observations_facade,
+                               connected_report_facade=connected_report_facade, mode=mode)
     if mode != 'legacy':
         raise ValueError('invalid application mode')
     app = Flask(__name__)

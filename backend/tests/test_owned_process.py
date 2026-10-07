@@ -848,3 +848,74 @@ def test_windows_knowledge_startup_failure_is_owned_and_reusable(tmp_path, monke
     # The existing client remains usable without retrying the failed operation.
     _knowledge_echo_script(tmp_path)
     assert json.loads(client.call(_knowledge_request()))['ok']
+
+
+@pytest.mark.parametrize('abort', [None, 'report_cancelled', 'timeout', 'report_uncertain'])
+def test_knowledge_wait_cooperates_on_calling_thread_and_releases_owned_child(tmp_path, monkeypatch, transport, abort):
+    script = _knowledge_child_script(tmp_path, '''
+import json,sys,time
+incoming=sys.stdin.buffer.read()
+request=json.loads(incoming[4:])
+time.sleep(2.2)
+reply=json.dumps({'version':1,'request_id':request['request_id'],'ok':True,'result':{}}).encode()
+sys.stdout.buffer.write(len(reply).to_bytes(4,'big')+reply)
+sys.stdout.buffer.flush()
+''')
+    owners = []
+    actual_owner = transport.OwnedProcess
+    class CaptureOwner(actual_owner):
+        def __init__(self):
+            super().__init__()
+            owners.append(self)
+            self.directory = None
+        def start(self, popen, args, **kwargs):
+            self.directory = Path(kwargs['cwd'])
+            return super().start(popen, args, **kwargs)
+    monkeypatch.setattr(transport, 'OwnedProcess', CaptureOwner)
+    caller = threading.get_ident()
+    ticks = []
+    wait_started = None
+    def tick():
+        nonlocal wait_started
+        ticks.append(threading.get_ident())
+        if len(ticks) == 2:
+            # The second tick is after the owned child has been started.
+            wait_started = time.monotonic()
+        if (abort is not None and len(ticks) >= 5 and wait_started is not None
+                and time.monotonic() - wait_started >= 1):
+            raise transport.KnowledgeCooperativeAbort(abort)
+    client = transport.KnowledgeProcessClient(sys.executable, script, timeout_seconds=6,
+        cooperative_tick=tick)
+    for _ in range(2):
+        ticks.clear()
+        wait_started = None
+        if abort is None:
+            assert json.loads(client.call(_knowledge_request()))['ok']
+        else:
+            with pytest.raises(transport.KnowledgeCooperativeAbort) as caught:
+                client.call(_knowledge_request())
+            assert caught.value.code == abort
+        assert len(ticks) >= (5 if abort is not None else 3) and set(ticks) == {caller}
+        owner = owners[-1]
+        assert owner.closed and owner.process.poll() is not None
+        assert not owner.directory.exists() and not client._lock.locked()
+        assert not any(thread.name.startswith('mirofish-knowledge-') for thread in threading.enumerate())
+
+
+def test_knowledge_cleanup_failure_overrides_cooperative_abort(tmp_path, monkeypatch, transport):
+    script = _knowledge_child_script(tmp_path, 'import sys,time\nsys.stdin.buffer.read()\ntime.sleep(5)\n')
+    original_stop = transport._stop_owned
+    def failed_cleanup(owner, threads):
+        original_stop(owner, threads)
+        raise RuntimeError('private cleanup fault')
+    monkeypatch.setattr(transport, '_stop_owned', failed_cleanup)
+    ticks = []
+    def tick():
+        ticks.append(True)
+        if len(ticks) >= 3:
+            raise transport.KnowledgeCooperativeAbort('report_cancelled')
+    client = transport.KnowledgeProcessClient(sys.executable, script, timeout_seconds=6,
+        cooperative_tick=tick)
+    with pytest.raises(transport.KnowledgeTransportFailure) as caught:
+        client.call(_knowledge_request())
+    assert caught.value.outcome_unknown and not client._lock.locked()

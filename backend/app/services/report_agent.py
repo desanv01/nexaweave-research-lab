@@ -881,6 +881,8 @@ class ReportAgent:
     # Legacy callers and test fixtures may construct an agent without __init__.
     # Explicit neutral agents set the instance value during __init__.
     neutral_mode = False
+    connected_context = None
+    connected_instruction = ''
     
     # 最大工具调用次数（每个章节）
     MAX_TOOL_CALLS_PER_SECTION = 5
@@ -898,7 +900,7 @@ class ReportAgent:
         simulation_requirement: str,
         llm_client: Optional[LLMClient] = None,
         zep_tools: Optional[ZepToolsService] = None,
-        *, neutral_mode: bool = False,
+        *, neutral_mode: bool = False, connected_context=None, output_language=None,
     ):
         """
         初始化Report Agent
@@ -915,6 +917,20 @@ class ReportAgent:
         self.simulation_requirement = simulation_requirement
         
         self.neutral_mode = neutral_mode
+        self.connected_context = connected_context
+        self.connected_instruction = ''
+        if connected_context is not None:
+            from .connected_report_context import validate_context
+            from .connected_report_tools import RecordedNativeEvents, connected_instruction
+            context = validate_context(connected_context)
+            if (not neutral_mode or output_language not in ('en', 'zh', 'ms')
+                    or context['binding']['display_graph_id'] != graph_id
+                    or context['binding']['preparation']['simulation_id'] != simulation_id):
+                raise NeutralCapabilityError('binding_mismatch')
+            self.connected_context = context
+            self.connected_instruction = connected_instruction(context, output_language)
+            self.recorded_native_events = RecordedNativeEvents(context)
+            self.VALID_TOOL_NAMES = (set(type(self).VALID_TOOL_NAMES) - {'interview_agents'}) | {'recorded_native_events'}
         if neutral_mode and (llm_client is None or zep_tools is None
                              or getattr(zep_tools, "graph_id", None) != graph_id
                              or getattr(zep_tools, "simulation_id", None) != simulation_id
@@ -925,6 +941,11 @@ class ReportAgent:
         
         # 工具定义
         self.tools = self._define_tools()
+        if self.connected_context is not None:
+            self.tools.pop('interview_agents', None)
+            self.tools['recorded_native_events'] = dict(name='recorded_native_events',
+                description='Read exact admitted native events, preserving their original raw JSON and references.',
+                parameters=dict(platform='twitter or reddit', offset='Exact zero-based admitted record index', limit='Integer 1–20 within admitted selection'))
         
         # 日志记录器（在 generate_report 中初始化）
         self.report_logger: Optional[ReportLogger] = None
@@ -971,6 +992,11 @@ class ReportAgent:
         }
     
     def _execute_tool(self, tool_name: str, parameters: Dict[str, Any], report_context: str = "") -> str:
+        if self.connected_context is not None and tool_name == 'recorded_native_events':
+            result = self.recorded_native_events(parameters)
+            if len(result.encode('utf-8')) > 65536:
+                raise NeutralCapabilityError('result_too_large')
+            return result
         result = self._execute_tool_impl(tool_name, parameters, report_context)
         if self.neutral_mode:
             if type(result) is not str or len(result.encode("utf-8")) > 65536:
@@ -1239,6 +1265,7 @@ class ReportAgent:
             progress_callback("planning", 30, t('progress.generatingOutline'))
         
         system_prompt = f"{PLAN_SYSTEM_PROMPT}\n\n{get_language_instruction()}"
+        system_prompt += self.connected_instruction
         if self.neutral_mode:
             system_prompt += ("\nSource graph evidence is not observed simulation behavior. "
                               "Do not claim simulated interviews or outcomes without the interview tool.")
@@ -1358,6 +1385,7 @@ class ReportAgent:
             tools_description=self._get_tools_description(),
         )
         system_prompt = f"{system_prompt}\n\n{get_language_instruction()}"
+        system_prompt += self.connected_instruction
         if self.neutral_mode:
             system_prompt += ("\nSource graph facts are not simulated observations. "
                               "Use interview results only when the trusted interview tool succeeds. "
@@ -1391,6 +1419,8 @@ class ReportAgent:
         conflict_retries = 0  # 工具调用与Final Answer同时出现的连续冲突次数
         used_tools = set()  # 记录已调用过的工具名
         all_tools = {"insight_forge", "panorama_search", "quick_search", "interview_agents"}
+        if self.connected_context is not None:
+            all_tools = set(self.tools)
 
         # 报告上下文，用于InsightForge的子问题生成
         report_context = f"章节标题: {section.title}\n模拟需求: {self.simulation_requirement}"
@@ -1828,6 +1858,11 @@ class ReportAgent:
             
             # 使用ReportManager组装完整报告
             report.markdown_content = ReportManager.assemble_full_report(report_id, outline)
+            if self.connected_context is not None:
+                from .connected_report_context import validate_references
+                validate_references(report.markdown_content, self.connected_context)
+                for section in outline.sections:
+                    validate_references(section.content, self.connected_context, require_native=False)
             if self.neutral_mode:
                 if not self.zep_tools.retrieval_ledger:
                     raise NeutralCapabilityError("insufficient_evidence")

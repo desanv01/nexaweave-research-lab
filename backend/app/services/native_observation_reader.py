@@ -108,6 +108,23 @@ def _safe(path, directory=False):
 class NativeObservationReader:
     @contextmanager
     def page(self, root, platforms, platform, offset, limit, evidence_sha256):
+        with self._read(root, platforms, platform, offset, limit, evidence_sha256) as result:
+            yield result
+
+    @contextmanager
+    def context(self, root, platforms, windows, evidence_sha256):
+        """Full-manifest lease with exact selected records, one physical read per file.
+
+        Existing page parsing and limits stay unchanged. Connected complete
+        coverage is all-or-refuse; the caller enforces its smaller context cap.
+        Every platform's entire log is parsed even when only a window is selected.
+        """
+        with self._read(root, platforms, platforms[0], 0, 1, evidence_sha256,
+                        selection=windows, connected=True) as result:
+            yield result
+
+    @contextmanager
+    def _read(self, root, platforms, platform, offset, limit, evidence_sha256, *, selection=None, connected=False):
         """Hold descriptors through final authority validation; recheck every file/ancestor."""
         try:
             root = Path(root)
@@ -160,7 +177,28 @@ class NativeObservationReader:
                 if digest(manifest) != evidence_sha256:
                     raise NativeObservationsError('evidence_invalid')
                 pages = {p: parse_log(logs[p], offset if p == platform else 0, limit if p == platform else 1) for p in platforms}
-                result = dict(pages[platform], manifest=manifest, platform=platform, offset=offset, limit=limit)
+                if connected:
+                    from .connected_report_client import CONTEXT_BYTES, encoded
+                    selected, coverage = {}, []
+                    if selection is not None:
+                        from mirofish_execution.report_contracts import windows
+                        windows(selection)
+                        if any(w['platform'] not in platforms for w in selection):
+                            raise NativeObservationsError('invalid_request')
+                    for p in platforms:
+                        window = None if selection is None else next((w for w in selection if w['platform'] == p), None)
+                        total = pages[p]['total_records']
+                        start, count = (0, total) if selection is None else ((window['offset'], window['count']) if window else (0, 0))
+                        if start + count > total:
+                            raise NativeObservationsError('invalid_request')
+                        selected[p] = parse_log(logs[p], start, max(1, count))['records'] if count else []
+                        coverage.append(dict(platform=p, total_records=total, selected_records=count,
+                            complete=count == total, windows=[dict(offset=start, count=count)] if count else []))
+                    result = dict(manifest=manifest, records=selected, coverage=coverage)
+                    if len(encoded(result)) > CONTEXT_BYTES:
+                        raise NativeObservationsError('result_too_large')
+                else:
+                    result = dict(pages[platform], manifest=manifest, platform=platform, offset=offset, limit=limit)
                 yield result
                 for path, descriptor, path_identity, descriptor_identity in opened:
                     if (_identity(_safe(path)) != path_identity

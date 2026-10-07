@@ -69,6 +69,16 @@ class KnowledgeTransportFailure(KnowledgeTransportError):
         super().__init__()
 
 
+class KnowledgeCooperativeAbort(BaseException):
+    """Private trusted report control; bypass the reader's public error sanitizer."""
+
+    def __init__(self, code):
+        if code not in ('report_cancelled', 'timeout', 'report_uncertain'):
+            code = 'report_uncertain'
+        self.code = code
+        super().__init__(code)
+
+
 def _pairs(items):
     value = {}
     for key, item in items:
@@ -278,7 +288,7 @@ class KnowledgeProcessClient:
         return _RESPONSE_MAX
 
     def __init__(self, python_executable, bootstrap_script, *, timeout_seconds=120,
-                 child_environment=None):
+                 child_environment=None, cooperative_tick=None):
         if (type(timeout_seconds) not in (int, float) or not math.isfinite(timeout_seconds)
                 or not 0 < timeout_seconds <= 300):
             raise ValueError("timeout_seconds must be finite and in (0, 300]")
@@ -287,6 +297,9 @@ class KnowledgeProcessClient:
         self._extra_environment = _trusted_environment(child_environment)
         self._timeout = float(timeout_seconds)
         self._lock = threading.Lock()
+        if cooperative_tick is not None and not callable(cooperative_tick):
+            raise ValueError("cooperative_tick must be callable")
+        self._cooperative_tick = cooperative_tick
 
     def call(self, raw: bytes) -> bytes:
         if not self._lock.acquire(blocking=False):
@@ -303,6 +316,8 @@ class KnowledgeProcessClient:
             response_limit = self._response_limit(raw)
             frame = len(raw).to_bytes(4, "big") + raw
             try:
+                if self._cooperative_tick is not None:
+                    self._cooperative_tick()
                 private_directory = tempfile.TemporaryDirectory(prefix="mirofish-knowledge-")
                 owner.bind_private_directory(private_directory)
                 directory = private_directory.name
@@ -317,6 +332,8 @@ class KnowledgeProcessClient:
                 )
                 spawned = True
                 deadline = time.monotonic() + self._timeout
+                if self._cooperative_tick is not None:
+                    self._cooperative_tick()
                 writer = threading.Thread(target=_write_request,
                                           args=(process.stdin, frame, events), daemon=True,
                                           name="mirofish-knowledge-writer")
@@ -329,12 +346,16 @@ class KnowledgeProcessClient:
                 completed = set()
                 body = None
                 while completed != {"writer_done", "reader_done"}:
+                    if self._cooperative_tick is not None:
+                        self._cooperative_tick()
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         raise KnowledgeTransportFailure(outcome_unknown=True)
                     try:
-                        event, value = events.get(timeout=remaining)
+                        event, value = events.get(timeout=min(1.0, remaining) if self._cooperative_tick is not None else remaining)
                     except queue.Empty:
+                        if self._cooperative_tick is not None:
+                            continue
                         raise KnowledgeTransportFailure(outcome_unknown=True) from None
                     if event in {"writer_error", "reader_error"}:
                         raise KnowledgeTransportFailure(outcome_unknown=True)
@@ -344,7 +365,19 @@ class KnowledgeProcessClient:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise KnowledgeTransportFailure(outcome_unknown=True)
-                process.wait(timeout=remaining)
+                if self._cooperative_tick is None:
+                    process.wait(timeout=remaining)
+                else:
+                    while process.poll() is None:
+                        self._cooperative_tick()
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise KnowledgeTransportFailure(outcome_unknown=True)
+                        try:
+                            process.wait(timeout=min(1.0, remaining))
+                        except subprocess.TimeoutExpired:
+                            pass
+                    self._cooperative_tick()
                 if process.returncode != 0:
                     raise KnowledgeTransportFailure(outcome_unknown=True)
                 self._validate_reply(body, request_id)

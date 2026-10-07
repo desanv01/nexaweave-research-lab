@@ -1,0 +1,22 @@
+# U07g connected inherited narrative reports
+
+## Lazy report-route startup correction: Main review
+
+Main retained corrected1 PR37555649997/push37555646397 complete eight-job archives (120 entries each): seven jobs passed each, native-store27 passed/two actual socket HTTP cases failed. The accepted HTTP observer blocks all execution/storage/provider imports at generic startup. Main reviewed the source-only four-path correction: route registration and metadata use stdlib-only envelopes; codec imports occur at actual report handling, and a locked singleton lazy facade preserves admission across requests. Existing authority, raw request limits, shared validators, safe statuses/headers, result bounds and all original native import negatives remain unchanged. Added cold startup and missing-codec regressions require independent Main execution; hosted/postmerge acceptance is pending.
+
+
+## Current source delivery
+
+Current total51 paths: backend30/UI11/Main10 after the narrowly reviewed CI/profile collection correction. Original failed PR96/push archives retained; no application/report algorithm or deadline changes. The separate research-local HTTP interpreter requires the non-editable pure shared contract package installed without provider dependencies. The primitive-only runner excludes report fixtures already mandatory in their dedicated report engine gate; all47 primitive and28 report cases remain required.
+
+Issue95 connects a retained source and a completed native launch to the inherited ReportAgent with one-shot durable PostgreSQL/Temporal authority, shared budget admission, isolated owned report children, immutable receipt/manifest-bound artifacts and protected EN/ZH/MS read/download/recovery controls. Reference integrity is validated; semantic support remains explicitly not_reviewed.
+
+Current Main01a11391-ac46-7cc0-ac04-fef0c2264735 owns architecture, reviews, execution, Git/CI and acceptance. Replacement backend01a11399-4a67-77f1-bd78-8923ae545390 owns30 source/test paths on u02; replacement UI01a11399-7d2e-7201-b640-2dfc33e481c0 owns11 on u01; Main owns9 distinct integration/test/metadata paths. Both workers are stable idle, source-only, no runtime/Git/network/provider/browser or other-chat messages. Historical worker identities below are released/reference-only. Accepted PR94 c7485e24f78740c7f575823dc8e797b63bea86ef remains the integration base.
+
+Main reviewed and qualified the exact stable corrections, including real owned child execution, real PostgreSQL/Temporal native-to-report journeys and fresh browser recovery/download/cleanup. The retained Browser4 failure was an activity heartbeat timeout during fresh synchronous authorization. The correction cooperates on the same activity thread throughout unchanged fresh authorization and optional transport waits, preserving the original activity15/SDK15/run120/cleanup20 boundaries. The failed identity was not redispatched; fresh Browser5 completed under those bounds.
+
+The reviewed source must pass all eight exact required hosted jobs at PR, push and postmerge with complete logs before issue95 acceptance. Existing accepted unchanged evidence is reused. Paid calls0, no public app deployment, no provider/semantic/billed-cost/full44 acceptance. Issue3 and all eight combined workstreams remain open.
+
+## Historical source dispatch
+
+Issue95; accepted PR94 c7485e24f78740c7f575823dc8e797b63bea86ef/all24/full119 each. Main alone architecture/review/all runtime/checks/Git/acceptance. NEW backend01a1118f-48ba-74b1-bad6-c32b47040620 exclusive26u02 and UI01a1118f-6860-76b0-8de6-67df7d3eba72 exclusive11u01 GPT6.1Sol/medium/Fast requested-unverified source/test authoring only. Root frozen U07G-CONTRACT/packets/transfer/registry control; all old writers released/reference-only. Preserve actual inherited ReportAgent/neutral source ledger and distinct native evidence, one-shot PGTemporal/shared-budget/owned child/known cleanup, immutable model-disabled read/download and explicit safe ENZHMS recovery. SDK-cold validation before factory, all actual requests finite/no retries/global envelope, partial/uncertain outcomes preserved. No runtime/checks while writers active; stable complete handoffs reviewed by Main then installed meaningful unit/actual child/real PGTemporal/native->report/browser qualification and exact PR/push/postmerge eight/full logs. User browser correction BROWSER=none/headless mandatory. No paid calls/public app deployment/semantic/full44 acceptance.
