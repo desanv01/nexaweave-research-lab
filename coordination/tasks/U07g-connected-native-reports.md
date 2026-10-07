@@ -1,5 +1,10 @@
 # U07g connected inherited narrative reports
 
+## Lazy report-route startup correction: Main review
+
+Main retained corrected1 PR37555649997/push37555646397 complete eight-job archives (120 entries each): seven jobs passed each, native-store27 passed/two actual socket HTTP cases failed. The accepted HTTP observer blocks all execution/storage/provider imports at generic startup. Main reviewed the source-only four-path correction: route registration and metadata use stdlib-only envelopes; codec imports occur at actual report handling, and a locked singleton lazy facade preserves admission across requests. Existing authority, raw request limits, shared validators, safe statuses/headers, result bounds and all original native import negatives remain unchanged. Added cold startup and missing-codec regressions require independent Main execution; hosted/postmerge acceptance is pending.
+
+
 ## Current source delivery
 
 Current total51 paths: backend30/UI11/Main10 after the narrowly reviewed CI/profile collection correction. Original failed PR96/push archives retained; no application/report algorithm or deadline changes. The separate research-local HTTP interpreter requires the non-editable pure shared contract package installed without provider dependencies. The primitive-only runner excludes report fixtures already mandatory in their dedicated report engine gate; all47 primitive and28 report cases remain required.

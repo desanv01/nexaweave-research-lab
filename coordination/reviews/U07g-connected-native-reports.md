@@ -1,5 +1,10 @@
 # U07g Main review pending
 
+## Lazy report-route startup correction: Main review
+
+Main retained corrected1 PR37555649997/push37555646397 complete eight-job archives (120 entries each): seven jobs passed each, native-store27 passed/two actual socket HTTP cases failed. The accepted HTTP observer blocks all execution/storage/provider imports at generic startup. Main reviewed the source-only four-path correction: route registration and metadata use stdlib-only envelopes; codec imports occur at actual report handling, and a locked singleton lazy facade preserves admission across requests. Existing authority, raw request limits, shared validators, safe statuses/headers, result bounds and all original native import negatives remain unchanged. Added cold startup and missing-codec regressions require independent Main execution; hosted/postmerge acceptance is pending.
+
+
 ## Current Main review: local qualification complete, hosted acceptance pending
 
 Main's integration scope is now10 under CI Amendment4; backend30/UI11 remain disjoint, total51 changed paths. Original PR96/push source840f2a0 failed two hosted jobs; both full eight-job archives (117 entries each) are retained before correction. The minimal HTTP profile lacked the pure execution contracts package: local reproduction proved ModuleNotFoundError, and a non-editable --no-deps installation passed the unchanged actual HTTP provider-import guard, health200/unconfigured-report503 and owned shutdown. No provider dependency or model factory was added. The primitive-only collector unintentionally reran28 report cases without the separate helper path even though their dedicated mandatory report gate had passed28/zero skips; its narrow exclusion now preserves all47 primitive cases and that dedicated report gate. Main verified the actual47-case collection boundary without rerunning unchanged bodies. Application production and report/transport/UI assertions remain unchanged by this CI/profile/documentation correction. Corrected exact hosted logs remain required.

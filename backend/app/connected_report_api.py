@@ -1,9 +1,8 @@
 """Six explicit protected report POST routes; no optional model imports."""
+import json
+import threading
 from flask import Response, request
 from werkzeug.exceptions import BadRequest
-from .services.connected_report_client import (ReportError, CODES, REQUEST_BYTES, RESULT_BYTES,
-    CONTENT_BYTES, encoded, strict_json, validate_payload, validate_result, validate_read, validate_download)
-from .services.connected_report_facade import ConnectedReportFacade
 
 STATUS = dict(zip(('invalid_request invalid_reply unauthorized origin_denied not_found conflict tombstoned '
     'busy result_too_large report_unavailable model_calls_disabled budget_denied report_failed report_cancelled '
@@ -11,15 +10,30 @@ STATUS = dict(zip(('invalid_request invalid_reply unauthorized origin_denied not
     (400, 502, 401, 403, 404, 409, 410, 409, 413, 503, 409, 409, 409, 409, 409, 503, 503, 500)))
 
 
+def _encoded(value):
+    """Fixed error envelopes stay available before the optional report codec."""
+    return json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(',', ':')).encode('utf-8')
+
+
 def register_connected_report_routes(app, settings, connected_report_facade=None):
-    facade = connected_report_facade if connected_report_facade is not None else ConnectedReportFacade(settings)
+    facade = connected_report_facade
+    facade_lock = threading.Lock()
+
+    def trusted_facade():
+        nonlocal facade
+        if facade is None:
+            with facade_lock:
+                if facade is None:
+                    from .services.connected_report_facade import ConnectedReportFacade
+                    facade = ConnectedReportFacade(settings)
+        return facade
 
     @app.after_request
     def connected_report_headers(response):
         if request.path.startswith('/api/connected-report/'):
             if response.status_code in (404, 405, 413):
                 code = {404: 'not_found', 405: 'invalid_request', 413: 'result_too_large'}[response.status_code]
-                response.set_data(encoded(dict(success=False, error=dict(code=code))))
+                response.set_data(_encoded(dict(success=False, error=dict(code=code))))
                 response.status_code = STATUS[code]
                 response.content_type = 'application/json'
             response.headers['Cache-Control'] = 'no-store'
@@ -27,10 +41,17 @@ def register_connected_report_routes(app, settings, connected_report_facade=None
         return response
 
     def failure(code):
-        code = code if code in CODES else 'internal_error'
-        return Response(encoded(dict(success=False, error=dict(code=code))), status=STATUS[code], content_type='application/json')
+        code = code if code in STATUS else 'internal_error'
+        return Response(_encoded(dict(success=False, error=dict(code=code))), status=STATUS[code], content_type='application/json')
 
     def handle(method, graph_id):
+        try:
+            from .services.connected_report_client import (ReportError, REQUEST_BYTES, RESULT_BYTES,
+                CONTENT_BYTES, encoded, strict_json, validate_payload, validate_result, validate_read, validate_download)
+        except ImportError:
+            return failure('report_unavailable')
+        except Exception:
+            return failure('internal_error')
         try:
             if graph_id != settings.display_graph_id:
                 raise ReportError('not_found')
@@ -44,6 +65,10 @@ def register_connected_report_routes(app, settings, connected_report_facade=None
             if len(raw) != request.content_length or len(raw) > REQUEST_BYTES:
                 raise ReportError('invalid_request')
             payload = validate_payload(method, strict_json(raw))
+            try:
+                facade = trusted_facade()
+            except ImportError:
+                raise ReportError('report_unavailable') from None
             data = facade.execute(method, graph_id, payload)
             if method == 'read':
                 data = validate_read(data, graph_id, settings.scope, payload, settings.principal)
