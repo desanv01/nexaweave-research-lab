@@ -17,6 +17,7 @@ from .validation import InvalidProject, principal_id, uuid_value
 
 MAX_TEXT_BYTES = 1024 * 1024
 MAX_EXCERPT_BYTES = 32768
+MAX_ORIGINAL_BYTES = 2 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -53,6 +54,16 @@ class SourceMetadata:
     byte_length: int
     codepoint_length: int
     recorded_at: datetime
+
+
+@dataclass(frozen=True)
+class SourceBinaryRecord:
+    source: SourceRecord
+    content: bytes
+    sha256: str
+    byte_length: int
+    media_type: str = "application/pdf"
+    contract_version: int = 1
 
 
 @dataclass(frozen=True)
@@ -161,6 +172,24 @@ def _validated_source(row, passage_rows) -> SourceRecord:
                         recorded, passages)
 
 
+def _validated_binary(source: SourceRecord, row) -> SourceBinaryRecord:
+    if row is None:
+        raise Conflict()
+    try:
+        version, media, size, digest, raw = row
+        content = bytes(raw)
+        if (type(version) is not int or version != 1
+                or media != "application/pdf" or type(size) is not int
+                or not 0 < size <= MAX_ORIGINAL_BYTES or len(content) != size
+                or b"%PDF-" not in content[:1024] or not content.rstrip().endswith(b"%%EOF")
+                or type(digest) is not str or len(digest.strip()) != 64
+                or hashlib.sha256(content).hexdigest() != digest.strip()):
+            raise ValueError()
+    except (TypeError, ValueError, AttributeError):
+        raise StorageError() from None
+    return SourceBinaryRecord(source, content, digest.strip(), size)
+
+
 class SourceStore:
     def __init__(self, connection_factory: Callable[[], psycopg.Connection]):
         self._factory = connection_factory
@@ -198,6 +227,75 @@ class SourceStore:
             if source.passages != passages:
                 raise Conflict()
             return source
+
+    def ingest_pdf(self, principal, project_id, source_revision, name, text,
+                   passages, original: bytes) -> SourceBinaryRecord:
+        principal, project_id, source_revision = (principal_id(principal),
+            uuid_value(project_id), uuid_value(source_revision))
+        name, text, digest, byte_length, codepoint_length = _source_input(name, text)
+        passages = _passages_input(passages, project_id, source_revision, text)
+        if (type(original) is not bytes or not 0 < len(original) <= MAX_ORIGINAL_BYTES
+                or b"%PDF-" not in original[:1024] or not original.rstrip().endswith(b"%%EOF")):
+            raise InvalidProject()
+        original_sha = hashlib.sha256(original).hexdigest()
+        with _transaction(self._factory) as conn:
+            if conn.execute("SELECT 1 FROM mf_app.projects WHERE principal=%s AND project_id=%s",
+                            (principal, project_id)).fetchone() is None:
+                raise NotFound()
+            inserted = conn.execute(
+                "INSERT INTO mf_app.source_revisions (source_revision,project_id,name,retained_text,text_sha256,byte_length,codepoint_length) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING RETURNING source_revision",
+                (source_revision, project_id, name, text, digest, byte_length, codepoint_length)).fetchone()
+            if inserted:
+                for ordinal, passage in enumerate(passages):
+                    conn.execute("INSERT INTO mf_app.passage_evidence "
+                        "(evidence_id,project_id,source_revision,ordinal,start_offset,end_offset,page,excerpt,excerpt_sha256) "
+                        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                        (passage.evidence_id, project_id, source_revision, ordinal,
+                         passage.start, passage.end, passage.page, passage.excerpt,
+                         passage.excerpt_sha256))
+                conn.execute("INSERT INTO mf_app.source_binaries "
+                    "(project_id,source_revision,contract_version,media_type,byte_length,sha256,original_bytes) "
+                    "VALUES (%s,%s,1,'application/pdf',%s,%s,%s)",
+                    (project_id, source_revision, len(original), original_sha, original))
+            row = conn.execute("SELECT " + _SOURCE + " FROM mf_app.source_revisions "
+                               "WHERE source_revision=%s FOR UPDATE", (source_revision,)).fetchone()
+            if row is None or row[0] != project_id or row[2:7] != (name, text, digest, byte_length, codepoint_length):
+                raise Conflict()
+            passage_rows = conn.execute("SELECT " + _PASSAGE + " FROM mf_app.passage_evidence "
+                "WHERE project_id=%s AND source_revision=%s ORDER BY ordinal",
+                (project_id, source_revision)).fetchall()
+            source = _validated_source(row, passage_rows)
+            if source.passages != passages:
+                raise Conflict()
+            binary = conn.execute("SELECT contract_version,media_type,byte_length,sha256,original_bytes "
+                "FROM mf_app.source_binaries WHERE project_id=%s AND source_revision=%s FOR UPDATE",
+                (project_id, source_revision)).fetchone()
+            result = _validated_binary(source, binary)
+            if result.content != original or result.sha256 != original_sha:
+                raise Conflict()
+            return result
+
+    def get_original(self, principal, project_id, source_revision) -> SourceBinaryRecord:
+        principal, project_id, source_revision = (principal_id(principal),
+            uuid_value(project_id), uuid_value(source_revision))
+        with _transaction(self._factory) as conn:
+            row = conn.execute("SELECT s." + _SOURCE.replace(",", ",s.") + " FROM mf_app.source_revisions s "
+                "JOIN mf_app.projects p ON p.project_id=s.project_id "
+                "WHERE p.principal=%s AND s.project_id=%s AND s.source_revision=%s",
+                (principal, project_id, source_revision)).fetchone()
+            if row is None:
+                raise NotFound()
+            passages = conn.execute("SELECT " + _PASSAGE + " FROM mf_app.passage_evidence "
+                "WHERE project_id=%s AND source_revision=%s ORDER BY ordinal",
+                (project_id, source_revision)).fetchall()
+            source = _validated_source(row, passages)
+            binary = conn.execute("SELECT contract_version,media_type,byte_length,sha256,original_bytes "
+                "FROM mf_app.source_binaries WHERE project_id=%s AND source_revision=%s",
+                (project_id, source_revision)).fetchone()
+            if binary is None:
+                raise NotFound()
+            return _validated_binary(source, binary)
 
     def get_source(self, principal, project_id, source_revision) -> SourceRecord:
         principal, project_id, source_revision = (principal_id(principal),

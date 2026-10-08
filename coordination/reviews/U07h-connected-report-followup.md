@@ -1,0 +1,7 @@
+# U07h Main review and qualification record
+
+Source-only authors are implementing the frozen grounded follow-up packet. Main resolved pre-execution contract defects in escaped-question export reserve, completed1000 history reads, distinct safe conflicts, same-transaction account/history admission and the current conversation publication digest cycle. The current final pair's full content is hashed in the artifact; final receipt/head stay external to that artifact, while prior completed pairs retain their authoritative proofs. These are architecture corrections, not passed runtime tests.
+
+Main shared integration adds cold factory injection, a separate authenticated channel, explicit completed-report selection and manual turn recovery, and owned resource resets. Actual parent SFC fixtures compile the new sibling and preserve existing report assertions. Runners retain loopback-only guards, installed package provenance, nonempty exact-target accounting, no selected skips, finite owned children and explicit cleanup. Original report runner, old SQL and accepted fixture bounds remain unchanged.
+
+Pending: complete source handoffs/byte snapshot, inherited algorithm/authority/history/budget/publication source review, meaningful unit and real child/PostgreSQL/Temporal results, immutable parent/disabled-read proof, localized browser narrative/recovery/download/lifecycle, exact complete hosted archives and final acceptance. No semantic, paid-cost or full-project acceptance is claimed.

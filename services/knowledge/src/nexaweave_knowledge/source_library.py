@@ -110,7 +110,7 @@ def validate_payload(method, payload):
     if method in {"context", "list"}:
         if payload:
             raise ValueError
-    elif method == "get":
+    elif method in {"get", "binary_metadata", "binary_read"}:
         if set(payload) != {"source_revision"}:
             raise ValueError
         uuid_value(payload["source_revision"])
@@ -121,17 +121,17 @@ def validate_payload(method, payload):
         text_value(payload["source_name"], name=True)
         text_value(payload["text"])
         declarations(payload["source_revision"], payload["text"], payload["blocks"])
-    elif method == "retain_pdf":
-        pdf_input(payload)
+    elif method in {"retain_pdf", "retain_pdf_binary"}:
+        pdf_input(payload, version=2 if method == "retain_pdf_binary" else 1)
     else:
         raise ValueError
 
 
-def pdf_input(payload):
+def pdf_input(payload, *, version=1):
     """Validate decoded input and digest before importing any PDF runtime."""
     if (type(payload) is not dict or set(payload) != {"schema_version", "source_revision",
             "source_name", "format", "content", "input_sha256"}
-            or type(payload["schema_version"]) is not int or payload["schema_version"] != 1
+            or type(payload["schema_version"]) is not int or payload["schema_version"] != version
             or type(payload["format"]) is not str or payload["format"] != "pdf"):
         raise ValueError
     uuid_value(payload["source_revision"])
@@ -216,6 +216,17 @@ def source_result(record, *, include_text=False):
     return result
 
 
+def binary_result(record, *, include_content=False):
+    result = {"schema_version": 2, "binary_retained": True,
+        "graph_ingestion_executed": False, "source": metadata(record.source),
+        "binary": {"contract_version": 1, "project_id": str(record.source.project_id),
+            "source_revision": str(record.source.source_revision), "media_type": record.media_type,
+            "byte_length": record.byte_length, "sha256": record.sha256}}
+    if include_content:
+        result["content_base64"] = base64.b64encode(record.content).decode("ascii")
+    return result
+
+
 class SourceLibrary:
     def __init__(self, settings, *, connection_factory=None):
         self.settings = settings
@@ -248,6 +259,44 @@ class SourceLibrary:
         if method == "get":
             return source_result(store.get_source(self.settings.principal, scope.project_id,
                                  payload["source_revision"]), include_text=True)
+        if method in {"binary_metadata", "binary_read"}:
+            original = store.get_original(self.settings.principal, scope.project_id,
+                                          payload["source_revision"])
+            self.authorize()
+            result = binary_result(original, include_content=method == "binary_read")
+            if len(encoded(result)) > MAX_BYTES:
+                raise SourceError("result_too_large")
+            return result
+        if method == "retain_pdf_binary":
+            from nexaweave_storage.pdf import extract_pdf, PdfError
+            binary = pdf_input(payload, version=2)
+            try:
+                extracted = extract_pdf(binary)
+            except PdfError as error:
+                raise SourceError(error.code) from None
+            passages = extracted.declarations(payload["source_revision"])
+            extraction = {"format": "pdf", "input_hash_verified": True,
+                "input_sha256": payload["input_sha256"], "input_digest_persisted": True,
+                "blocks_persisted": False, "original_document_verified": True,
+                "binary_persistently_bound": True, "ocr_performed": False,
+                "page_layout": "unknown", "semantic_quality": "unknown", "coverage": ["page_text"],
+                "page_text": [extracted.text[p["start"]:p["end"]] for p in extracted.pages],
+                "pages": list(extracted.pages), "page_count": extracted.page_count,
+                "empty_page_count": extracted.empty_page_count, "declared_passage_count": len(passages)}
+            if len(encoded(extraction)) + len(encoded(passages)) + 100 * 256 + 4096 > MAX_BYTES:
+                raise SourceError("result_too_large")
+            text_value(extracted.text)
+            self.authorize()
+            original = store.ingest_pdf(self.settings.principal, scope.project_id,
+                payload["source_revision"], payload["source_name"], extracted.text, passages, binary)
+            self.authorize()
+            if original.sha256 != payload["input_sha256"] or original.content != binary:
+                raise SourceError("source_unavailable")
+            result = {**source_result(original.source), "schema_version": 2,
+                "binary_retained": True, "extraction": extraction, "binary": binary_result(original)["binary"]}
+            if len(encoded(result)) > MAX_BYTES:
+                raise SourceError("result_too_large")
+            return result
         if method == "retain_pdf":
             # This lazy import is reached only after strict bytes/digest admission
             # and persisted scope/project authorization in the fixed source child.

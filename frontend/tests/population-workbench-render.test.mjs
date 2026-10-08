@@ -6,7 +6,13 @@ import { parse, compileScript } from '@vue/compiler-sfc'
 import { populationCopy, populationCopyFor, populationErrorKey } from '../src/i18n/populationWorkbench.js'
 const dom = new JSDOM('<!doctype html><html><body></body></html>', { url: 'http://127.0.0.1:5173/research' })
 for (const name of ['window', 'document', 'Element', 'HTMLElement', 'SVGElement', 'Node']) globalThis[name] = name === 'window' ? dom.window : dom.window[name]
+globalThis.localStorage = dom.window.localStorage
 const { createApp, nextTick, h, reactive } = await import('vue')
+const localeFiles = Object.fromEntries(['en', 'zh', 'ms'].map(key => [`../../../locales/${key}.json`, { default: JSON.parse(readFileSync(new URL(`../../locales/${key}.json`, import.meta.url), 'utf8')) }]))
+let localeSource = readFileSync(new URL('../src/i18n/index.js', import.meta.url), 'utf8')
+localeSource = localeSource.replace(/import languages from [^\n]+/, `const languages = ${readFileSync(new URL('../../locales/languages.json', import.meta.url), 'utf8')}`)
+localeSource = localeSource.replace(/import\.meta\.glob\([^\n]+\)/, JSON.stringify(localeFiles)).replace(/from (['"])(vue|vue-i18n)\1/g, (_m, _q, name) => `from ${JSON.stringify(import.meta.resolve(name))}`)
+const localeUrl = `data:text/javascript;base64,${Buffer.from(localeSource).toString('base64')}`, sharedLocale = await import(localeUrl)
 async function compile(path, replacements = {}) {
   const file = new URL(path, import.meta.url), { descriptor } = parse(readFileSync(file, 'utf8'), { filename: file.pathname })
   const compiled = compileScript(descriptor, { id: path, inlineTemplate: true, genDefaultAs: '__component' })
@@ -20,12 +26,15 @@ const preparation = await compile('../src/components/workbench/SimulationPrepara
 const nativeLaunch = await compile('../src/components/workbench/NativeLaunch.vue')
 const nativeObservations = await compile('../src/components/workbench/NativeObservations.vue')
 const connectedReports = await compile('../src/components/workbench/ConnectedReports.vue')
+const connectedFollowup = await compile('../src/components/workbench/ConnectedFollowup.vue')
 const dossier = await compile('../src/components/workbench/DossierExport.vue')
 const evidence = await compile('../src/components/workbench/EvidenceResults.vue', { './DossierExport.vue': dossier.url })
 const sources = await compile('../src/components/workbench/SourceLibrary.vue')
 const ingestion = await compile('../src/components/workbench/SourceIngestion.vue')
 const experiments = await compile('../src/components/workbench/ExperimentComparison.vue')
 const workbench = await compile('../src/views/ResearchWorkbench.vue', {
+  '../i18n/index.js': localeUrl,
+  '../components/workbench/ConnectedFollowup.vue': connectedFollowup.url,
   '../components/workbench/PopulationWorkbench.vue': population.url, '../components/workbench/SimulationPreparation.vue': preparation.url, '../components/workbench/NativeLaunch.vue': nativeLaunch.url, '../components/workbench/NativeObservations.vue': nativeObservations.url, '../components/workbench/ConnectedReports.vue': connectedReports.url,
   '../components/workbench/EvidenceResults.vue': evidence.url,
   '../components/workbench/SourceLibrary.vue': sources.url,
@@ -33,8 +42,10 @@ const workbench = await compile('../src/views/ResearchWorkbench.vue', {
   '../components/workbench/ExperimentComparison.vue': experiments.url
 })
 function mount(component, initial = {}) {
+  if (component === workbench.component) sharedLocale.setUiLocale('en')
   const props = reactive(initial), root = document.createElement('div'); document.body.append(root)
   const app = createApp({ setup: () => () => h(component, props) })
+  app.use(sharedLocale.default)
   app.component('RouterLink', { props: ['to'], setup: (p, { slots }) => () => h('a', { href: p.to }, slots.default?.()) })
   app.mount(root)
   return { root, props, cleanup() { app.unmount(); root.remove() } }

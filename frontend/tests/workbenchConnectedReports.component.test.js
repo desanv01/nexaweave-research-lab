@@ -10,8 +10,14 @@ import { connectedReportsCopyFor } from '../src/i18n/connectedReports.js'
 globalThis.crypto ||= webcrypto
 const dom = new JSDOM('<!doctype html><html><body></body></html>', { url: 'http://127.0.0.1:5173/research' })
 for (const name of ['window', 'document', 'Element', 'HTMLElement', 'SVGElement', 'Node']) globalThis[name] = name === 'window' ? dom.window : dom.window[name]
+globalThis.localStorage = dom.window.localStorage
 const { createApp, h, nextTick } = await import('vue')
 const dataModule = code => `data:text/javascript;base64,${Buffer.from(code).toString('base64')}`
+const localeFiles = Object.fromEntries(['en', 'zh', 'ms'].map(key => [`../../../locales/${key}.json`, { default: JSON.parse(readFileSync(new URL(`../../locales/${key}.json`, import.meta.url), 'utf8')) }]))
+let localeSource = readFileSync(new URL('../src/i18n/index.js', import.meta.url), 'utf8')
+localeSource = localeSource.replace(/import languages from [^\n]+/, `const languages = ${readFileSync(new URL('../../locales/languages.json', import.meta.url), 'utf8')}`)
+localeSource = localeSource.replace(/import\.meta\.glob\([^\n]+\)/, JSON.stringify(localeFiles)).replace(/from (['"])(vue|vue-i18n)\1/g, (_m, _q, name) => `from ${JSON.stringify(import.meta.resolve(name))}`)
+const localeUrl = dataModule(localeSource), sharedLocale = await import(localeUrl)
 async function compile(path, replacements = {}) {
   const file = new URL(path, import.meta.url), { descriptor } = parse(readFileSync(file, 'utf8'), { filename: file.pathname })
   const result = compileScript(descriptor, { id: path, inlineTemplate: true, genDefaultAs: '__component' })
@@ -21,9 +27,9 @@ async function compile(path, replacements = {}) {
 }
 const empty = dataModule('export default {render(){return null}}')
 const preparationSeed = dataModule(`import {h} from ${JSON.stringify(import.meta.resolve('vue'))}; export default {props:['methods','connected'],emits:['ready'],setup(p,{emit}){return ()=>h('button',{class:'fixture-preparation',disabled:!p.connected,onClick:async()=>{const f=globalThis.__u07gParentFixture;const plan=await p.methods.plan(f.prepPayload(),f.source());const ready=await p.methods.start({schema_version:1,operation_id:plan.operation_id,plan_sha256:plan.plan_sha256});emit('ready',ready)}},'Fixture preparation')}}`)
-const native = await compile('../src/components/workbench/NativeLaunch.vue'), observations = await compile('../src/components/workbench/NativeObservations.vue'), reports = await compile('../src/components/workbench/ConnectedReports.vue')
+const native = await compile('../src/components/workbench/NativeLaunch.vue'), observations = await compile('../src/components/workbench/NativeObservations.vue'), reports = await compile('../src/components/workbench/ConnectedReports.vue'), followups = await compile('../src/components/workbench/ConnectedFollowup.vue')
 const replacements = Object.fromEntries(['EvidenceResults', 'SourceLibrary', 'SourceIngestion', 'ExperimentComparison', 'PopulationWorkbench'].map(n => [`../components/workbench/${n}.vue`, empty]))
-const parent = await compile('../src/views/ResearchWorkbench.vue', { ...replacements, '../components/workbench/SimulationPreparation.vue': preparationSeed, '../components/workbench/NativeLaunch.vue': native.url, '../components/workbench/NativeObservations.vue': observations.url, '../components/workbench/ConnectedReports.vue': reports.url })
+const parent = await compile('../src/views/ResearchWorkbench.vue', { ...replacements, '../i18n/index.js': localeUrl, '../components/workbench/SimulationPreparation.vue': preparationSeed, '../components/workbench/NativeLaunch.vue': native.url, '../components/workbench/NativeObservations.vue': observations.url, '../components/workbench/ConnectedReports.vue': reports.url, '../components/workbench/ConnectedFollowup.vue': followups.url })
 const uid = n => `00000000-0000-0000-0000-${String(n).padStart(12, '0')}`, hash = 'a'.repeat(64), clone = v => JSON.parse(JSON.stringify(v))
 function ascii(v) { if (Array.isArray(v)) return '[' + v.map(ascii).join(',') + ']'; if (v && typeof v === 'object') return '{' + Object.keys(v).sort().map(k => ascii(k) + ':' + ascii(v[k])).join(',') + '}'; return JSON.stringify(v).replace(/[\u007f-\uffff]/g, c => '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0')) }
 const digest = v => createHash('sha256').update(ascii(v), 'ascii').digest('hex'), bytesHash = v => createHash('sha256').update(v).digest('hex'), pick = (v, keys) => Object.fromEntries(keys.split(' ').map(k => [k, v[k]]))
@@ -53,7 +59,7 @@ function reportDone(known) {
 }
 globalThis.__u07gParentFixture = { prepPayload, source: sourceRecord }
 const envelope = data => new Response(JSON.stringify({ success: true, data }), { headers: { 'Content-Type': 'application/json' } })
-function mount() { const root = document.createElement('div'); document.body.append(root); const app = createApp(parent.component); app.component('RouterLink', { props: ['to'], setup: (p, { slots }) => () => h('a', { href: p.to }, slots.default?.()) }); app.mount(root); let mounted = true; return { root, cleanup() { if (mounted) { mounted = false; app.unmount(); root.remove() } } } }
+function mount() { sharedLocale.setUiLocale('en'); const root = document.createElement('div'); document.body.append(root); const app = createApp(parent.component); app.use(sharedLocale.default); app.component('RouterLink', { props: ['to'], setup: (p, { slots }) => () => h('a', { href: p.to }, slots.default?.()) }); app.mount(root); let mounted = true; return { root, cleanup() { if (mounted) { mounted = false; app.unmount(); root.remove() } } } }
 function input(m, selector, value) { const e = m.root.querySelector(selector); e.value = value; e.dispatchEvent(new dom.window.Event(e.tagName === 'SELECT' ? 'change' : 'input', { bubbles: true })) }
 async function waitFor(predicate) { const end = Date.now() + 3000; do { await nextTick(); if (predicate()) return; await new Promise(r => setImmediate(r)) } while (Date.now() < end); assert.ok(predicate(), 'bounded parent condition did not complete') }
 async function connect(m) { input(m, '#graph-id', 'graph_1'); input(m, '#bearer-token', 'private-token'); m.root.querySelector('.connection-form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true })); await waitFor(() => !m.root.querySelector('.fixture-preparation').disabled) }

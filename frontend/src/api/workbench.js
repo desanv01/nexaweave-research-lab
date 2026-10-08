@@ -1,5 +1,5 @@
 // Isolated protected read client. Never share the inherited Axios interceptors.
-import { sourcePayload, sourceReadRequest, verifySourceInput, validateSourceResult } from './sourceLibrary.js'
+import { sourcePayload, sourceReadRequest, verifySourceInput, validateSourceResult, sourceOriginalPayload, verifyOriginalPdfInput, validateSourceOriginalResult } from './sourceLibrary.js'
 import { ingestionPayload, validateIngestionResult } from './sourceIngestion.js'
 import { experimentSelection, validateExperimentCatalog, validateExperimentComparison } from './experimentComparison.js'
 import { populationOptions, validatePopulationPreview, validatePopulationExport } from './populationWorkbench.js'
@@ -7,6 +7,7 @@ import { preparationPayload, preparationSource, validatePreparationResult, PREPA
 import { nativeLaunchPayload, validateNativeLaunchResult, NATIVE_LAUNCH_CODES, NATIVE_ERROR_STATUS } from './nativeLaunch.js'
 import { createNativeObservationsChannel } from './nativeObservations.js'
 import { createConnectedReportsChannel } from './connectedReports.js'
+import { createConnectedFollowupsChannel } from './connectedFollowups.js'
 export class WorkbenchError extends Error {
   constructor(code) { super(code); this.name = 'WorkbenchError'; this.code = code }
 }
@@ -218,7 +219,9 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
   const nativePlans = new Map(), nativeStarted = new Set()
   const observations = createNativeObservationsChannel({ fetchImpl, deadlineMs, connection: () => authenticated && connection ? { ...connection } : null, denied: () => disconnect() })
   const reports = createConnectedReportsChannel({ fetchImpl, deadlineMs, connection: () => authenticated && connection ? { ...connection } : null, denied: () => disconnect() })
-  function cancel(preservePopulation = false) { reports.cancel(); generation++; active?.abort(); active = null; activeMethod = null; if (!preservePopulation) populationAdmission = null }
+  const followups = createConnectedFollowupsChannel({ fetchImpl, deadlineMs, connection: () => authenticated && connection ? { ...connection } : null, denied: () => disconnect() })
+  function cancelShared(preservePopulation = false) { generation++; active?.abort(); active = null; activeMethod = null; if (!preservePopulation) populationAdmission = null }
+  function cancel(preservePopulation = false) { reports.cancel(); followups.cancel(); cancelShared(preservePopulation) }
   function clearNativeLaunch() {
     observations.clear()
     // Child resets must not invalidate another section's transport epoch.
@@ -226,12 +229,15 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
     if (active && activeMethod?.startsWith('nativeLaunch')) cancel()
     nativePlans.clear()
   }
-  function disconnect() { reports.clear(); observations.clear(); cancel(); connection = null; authenticated = false; ingestionScope = null; populationAdmission = null; preparationPlans.clear(); preparationStarted.clear(); nativePlans.clear(); nativeStarted.clear() }
-  async function request(method, payload, ingestionContext) {
+  function disconnect() { reports.clear(); followups.clear(); observations.clear(); cancel(); connection = null; authenticated = false; ingestionScope = null; populationAdmission = null; preparationPlans.clear(); preparationStarted.clear(); nativePlans.clear(); nativeStarted.clear() }
+  async function request(method, payload, ingestionContext, options = {}) {
     if (!connection || (method !== 'graph' && !authenticated)) fail('disconnected')
     const population = method.startsWith('population')
-    cancel(method === 'populationExport')
+    // Original PDF reads have no effect on report or follow-up ownership.
+    if (['sourceOriginalMetadata', 'sourceOriginalRead'].includes(method)) cancelShared()
+    else cancel(method === 'populationExport')
     const source = method.startsWith('source'), ingestion = method.startsWith('ingestion'), experiment = method.startsWith('experiment')
+    const original = ['sourceRetainOriginal', 'sourceOriginalMetadata', 'sourceOriginalRead'].includes(method)
     const preparation = method.startsWith('preparation')
     const native = method.startsWith('nativeLaunch')
     let nativeRaw, nativeContext
@@ -283,14 +289,18 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
       payload = JSON.parse(ingestionRaw)
       ingestionContext = JSON.parse(JSON.stringify({ ...ingestionContext, ...(ingestionScope ? { scope: ingestionScope } : {}) }))
     }
-    const raw = native ? nativeRaw : preparation ? preparationRaw : population ? JSON.stringify(populationRequest) : experiment ? experimentRequest?.raw : ingestion ? (method === 'ingestionStatus' ? undefined : ingestionRaw) : method === 'graph' || method === 'sourceList' || method === 'sourceGet' ? undefined : method === 'sourceRetain' ? sourcePayload(payload) : requestPayload(method, payload, connection.graph)
+    const originalRaw = original ? sourceOriginalPayload(method, payload) : undefined
+    const raw = native ? nativeRaw : preparation ? preparationRaw : population ? JSON.stringify(populationRequest) : experiment ? experimentRequest?.raw : ingestion ? (method === 'ingestionStatus' ? undefined : ingestionRaw) : original ? (method === 'sourceRetainOriginal' ? originalRaw : undefined) : method === 'graph' || method === 'sourceList' || method === 'sourceGet' ? undefined : method === 'sourceRetain' ? sourcePayload(payload) : requestPayload(method, payload, connection.graph)
     if (population && encoder.encode(raw).length > 16384) fail('invalid_request')
-    const sourceRequest = method === 'sourceGet' ? sourceReadRequest(payload) : method === 'sourceRetain' ? JSON.parse(raw) : undefined
+    const sourceRequest = original ? (method === 'sourceRetainOriginal' ? JSON.parse(originalRaw) : originalRaw) : method === 'sourceGet' ? sourceReadRequest(payload) : method === 'sourceRetain' ? JSON.parse(raw) : undefined
     const epoch = generation, current = connection, controller = new AbortController()
     active = controller
     activeMethod = method
     let timedOut = false, reader, responseBody
     const timer = setTimeout(() => { timedOut = true; controller.abort() }, deadlineMs)
+    const callerAbort = () => controller.abort()
+    if (options.signal?.aborted) callerAbort()
+    else options.signal?.addEventListener('abort', callerAbort, { once: true })
     const owned = () => { if (generation !== epoch || controller.signal.aborted) fail(timedOut ? 'deadline' : 'cancelled') }
     const guarded = promise => new Promise((resolve, reject) => {
       const aborted = () => reject(new WorkbenchError(timedOut ? 'deadline' : 'cancelled'))
@@ -304,14 +314,15 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
     try {
       const paths = { graph: 'data', research: 'research', dossier: 'dossier' }
       if (method === 'sourceRetain') { await guarded(verifySourceInput(sourceRequest)); owned() }
+      if (method === 'sourceRetainOriginal') { await guarded(verifyOriginalPdfInput(sourceRequest)); owned() }
       if (method === 'ingestionPlan') {
         await guarded(validateSourceResult('sourceGet', ingestionContext.inspected, { source_revision: payload.source_revision }))
         owned()
         if (ingestionContext.inspected.source.codepoint_length > 32768 || !ingestionContext.inspected.passages.length) fail('invalid_request')
       }
-      const sourcePaths = { sourceList: 'library', sourceGet: 'item', sourceRetain: 'retain' }
+      const sourcePaths = { sourceList: 'library', sourceGet: 'item', sourceRetain: 'retain', sourceRetainOriginal: 'retain-original', sourceOriginalMetadata: 'original-metadata', sourceOriginalRead: 'original' }
       const ingestionPaths = { ingestionPlan: 'plan', ingestionExecute: 'execute', ingestionStatus: 'operation' }
-      const path = native ? `/api/native-launch/${{ nativeLaunchPlan: 'plan', nativeLaunchStart: 'start', nativeLaunchStatus: 'status', nativeLaunchCancel: 'cancel' }[method]}/${current.graph}` : preparation ? `/api/preparation/${current.graph}/${{ preparationPlan: 'plan', preparationStart: 'start', preparationStatus: 'status' }[method]}` : population ? `/api/graph/population/${current.graph}/${method === 'populationPreview' ? 'preview' : 'export'}` : experiment ? `/api/experiments/${method === 'experimentCatalog' ? 'catalog' : 'compare'}` : ingestion ? `/api/source/ingestion/${ingestionPaths[method]}/${current.graph}${method === 'ingestionStatus' ? '/' + payload.operation_id : ''}` : source ? `/api/source/${sourcePaths[method]}/${current.graph}${method === 'sourceGet' ? '/' + sourceRequest.source_revision : ''}` : `/api/graph/${paths[method]}/${current.graph}`
+      const path = native ? `/api/native-launch/${{ nativeLaunchPlan: 'plan', nativeLaunchStart: 'start', nativeLaunchStatus: 'status', nativeLaunchCancel: 'cancel' }[method]}/${current.graph}` : preparation ? `/api/preparation/${current.graph}/${{ preparationPlan: 'plan', preparationStart: 'start', preparationStatus: 'status' }[method]}` : population ? `/api/graph/population/${current.graph}/${method === 'populationPreview' ? 'preview' : 'export'}` : experiment ? `/api/experiments/${method === 'experimentCatalog' ? 'catalog' : 'compare'}` : ingestion ? `/api/source/ingestion/${ingestionPaths[method]}/${current.graph}${method === 'ingestionStatus' ? '/' + payload.operation_id : ''}` : source ? `/api/source/${sourcePaths[method]}/${current.graph}${['sourceGet', 'sourceOriginalMetadata', 'sourceOriginalRead'].includes(method) ? '/' + sourceRequest.source_revision : ''}` : `/api/graph/${paths[method]}/${current.graph}`
       // Fence before invoking fetch, including synchronous throws and lost replies.
       if (method === 'preparationStart') preparationStarted.add(payload.operation_id)
       if (method === 'nativeLaunchStart' || method === 'nativeLaunchCancel') nativeStarted.add(payload.launch_id)
@@ -368,7 +379,7 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
         try { result = method === 'experimentCatalog' ? validateExperimentCatalog(value.data) : validateExperimentComparison(value.data, experimentRequest.catalog, experimentRequest.payload) } catch { fail('invalid_reply') }
       } else if (population) {
         try { result = validatePopulationPreview(value.data, current.graph, populationRequest) } catch { fail('invalid_reply') }
-      } else result = ingestion ? await guarded(validateIngestionResult(method, value.data, { ...ingestionContext, payload })) : source ? await guarded(validateSourceResult(method, value.data, sourceRequest)) : validateResult(method, value.data, current.graph)
+      } else result = original ? await guarded(validateSourceOriginalResult(method, value.data, sourceRequest)) : ingestion ? await guarded(validateIngestionResult(method, value.data, { ...ingestionContext, payload })) : source ? await guarded(validateSourceResult(method, value.data, sourceRequest)) : validateResult(method, value.data, current.graph)
       if (method === 'research' && [...result.source_claims, ...result.simulation_observations, ...result.other_claims].length > (payload.top_k ?? 10)) fail()
       if (method === 'dossier') {
         const returned = result.request
@@ -397,6 +408,7 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
       fail('transport_failure')
     } finally {
       clearTimeout(timer)
+      options.signal?.removeEventListener('abort', callerAbort)
       controller.abort()
       if (reader) { try { void reader.cancel().catch(() => {}) } catch { /* no raw errors */ } reader.releaseLock() }
       else if (responseBody) { try { void responseBody.cancel().catch(() => {}) } catch { /* no raw errors */ } }
@@ -417,6 +429,9 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
     sourceList: () => request('sourceList'),
     sourceGet: payload => request('sourceGet', payload),
     sourceRetain: payload => request('sourceRetain', payload),
+    sourceRetainOriginal: (payload, options) => request('sourceRetainOriginal', payload, undefined, options),
+    sourceOriginalMetadata: (payload, options) => request('sourceOriginalMetadata', payload, undefined, options),
+    sourceOriginalRead: (payload, options) => request('sourceOriginalRead', payload, undefined, options),
     experimentCatalog: () => request('experimentCatalog'),
     experimentCompare: (payload, catalog) => request('experimentCompare', payload, catalog),
     populationPreview: options => request('populationPreview', { options }),
@@ -438,9 +453,17 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
     connectedReportRead: (payload, known) => reports.read(payload, known),
     connectedReportDownload: (payload, known) => reports.download(payload, known),
     clearConnectedReports: () => reports.clear(),
+    connectedFollowupPlan: (payload, parentReport) => followups.plan(payload, parentReport),
+    connectedFollowupStart: (payload, known) => followups.start(payload, known),
+    connectedFollowupStatus: (payload, known) => followups.status(payload, known),
+    connectedFollowupCancel: (payload, known) => followups.cancelTurn(payload, known),
+    connectedFollowupRead: (payload, known) => followups.read(payload, known),
+    connectedFollowupDownload: (payload, known) => followups.download(payload, known),
+    connectedFollowupHistory: payload => followups.history(payload),
+    clearConnectedFollowups: () => followups.clear(),
     ingestionPlan: (payload, inspected, scope) => request('ingestionPlan', payload, { inspected, scope }),
     ingestionExecute: (payload, known) => request('ingestionExecute', payload, { known, scope: known.scope }),
     ingestionStatus: (payload, known, scope, project) => request('ingestionStatus', payload, { known, scope, project }),
-    cancel, disconnect
+    cancel, cancelShared, disconnect
   }
 }

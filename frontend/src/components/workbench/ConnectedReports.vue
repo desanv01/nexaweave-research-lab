@@ -3,9 +3,12 @@ import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { nativeObservationSelection } from '../../api/nativeObservations.js'
 import { connectedReportPayload, newReportId, reportIdentity, reportSnapshot, validateConnectedReportResult, validateConnectedReportRead, validateConnectedReportDownload } from '../../api/connectedReports.js'
 import { connectedReportsCopyFor, connectedReportsError } from '../../i18n/connectedReports.js'
+import { connectedFollowupsCopyFor } from '../../i18n/connectedFollowups.js'
 import { MAX_MARKDOWN_CHARS, renderSafeMarkdown } from '../../utils/safeMarkdown.js'
 const props = defineProps({ methods: { type: Object, required: true }, selection: { type: Object, default: null }, connected: Boolean, busy: Boolean, displayGraphId: { type: String, default: '' }, resetVersion: { type: Number, default: 0 }, locale: { type: String, default: 'en' } })
+const emit = defineEmits(['followup'])
 const copy = computed(() => connectedReportsCopyFor(props.locale))
+const followupCopy = computed(() => connectedFollowupsCopyFor(props.locale))
 const selected = ref(null), requirement = ref(''), outputLanguage = ref('en'), coverageMode = ref('complete'), declared = ref([])
 const plan = ref(null), history = ref([]), pending = ref(false), error = ref(''), notice = ref(''), feedback = ref(null)
 const recoveryId = ref(''), recoveryHash = ref(''), content = ref(null), artifact = ref('report'), sectionIndex = ref('1'), download = ref(null)
@@ -121,6 +124,14 @@ async function prepareDownload(target) {
   } catch (e) { if (life === epoch) discardArtifacts(); handleError(e, life) }
   finally { if (life === epoch) { pending.value = false; await announce() } }
 }
+async function selectFollowup(target) {
+  if (locked.value || target?.state !== 'completed') return
+  const life = epoch
+  try {
+    const admitted = await validateConnectedReportResult(clone(target), { graph: props.displayGraphId, payload: reportIdentity(target), known: clone(target) })
+    if (life === epoch && admitted.state === 'completed') emit('followup', clone(admitted))
+  } catch (e) { handleError(e, life) }
+}
 </script>
 <template>
   <section class="connected-reports" :lang="locale" aria-labelledby="connected-reports-title" :aria-busy="pending">
@@ -143,7 +154,7 @@ async function prepareDownload(target) {
       <h4>{{ copy.cleanup }}</h4><p class="cleanup">{{ record.value.cleanup.known ? (record.value.cleanup.pending ? copy.pendingCleanup : copy.observedCleanup) : copy.unknown }} · {{ record.value.cleanup.owner_thread_alive === null ? copy.unknown : record.value.cleanup.owner_thread_alive ? copy.alive : copy.stopped }}</p>
       <template v-if="record.value.receipt"><h4>{{ copy.receipt }}</h4><dl><dt>{{ copy.receiptHash }}</dt><dd class="mono">{{ record.value.receipt_sha256 }}</dd><dt>{{ copy.manifestHash }}</dt><dd class="mono">{{ record.value.receipt.manifest_sha256 }}</dd></dl><p class="limitations">{{ copy.interpretation }}</p></template><p v-else>{{ copy.noReceipt }}</p>
       <p v-if="!record.value.authorization.model_calls_enabled || !record.value.authorization.budget_configured || !record.value.ceiling_microusd">{{ copy.disabled }}</p>
-      <div class="actions"><button v-if="record.reviewed && record.value.state === 'planned'" class="report-start primary" type="button" :disabled="!canStart(record.value)" @click="request('start', record.value)">{{ copy.start }}</button><button class="report-refresh" type="button" :disabled="locked" @click="request('status', record.value)">{{ copy.refresh }}</button><button class="report-cancel" type="button" :disabled="locked || !!record.value.receipt || record.value.cancel_requested" @click="request('cancel', record.value)">{{ copy.cancel }}</button><button v-if="record.value.state === 'completed'" class="report-read" type="button" :disabled="locked" @click="request('read', record.value)">{{ copy.read }}</button></div>
+      <div class="actions"><button v-if="record.reviewed && record.value.state === 'planned'" class="report-start primary" type="button" :disabled="!canStart(record.value)" @click="request('start', record.value)">{{ copy.start }}</button><button class="report-refresh" type="button" :disabled="locked" @click="request('status', record.value)">{{ copy.refresh }}</button><button class="report-cancel" type="button" :disabled="locked || !!record.value.receipt || record.value.cancel_requested" @click="request('cancel', record.value)">{{ copy.cancel }}</button><button v-if="record.value.state === 'completed'" class="report-read" type="button" :disabled="locked" @click="request('read', record.value)">{{ copy.read }}</button><button v-if="record.value.state === 'completed'" class="report-followup" type="button" :disabled="locked" @click="selectFollowup(record.value)">{{ followupCopy.useForFollowup }}</button></div>
       <div v-if="record.value.state === 'completed'" class="download-controls"><label :for="`report-artifact-${record.value.report_id}`">{{ copy.artifact }}<select :id="`report-artifact-${record.value.report_id}`" v-model="artifact" :disabled="locked"><option v-for="(label, kind) in copy.artifacts" :key="kind" :value="kind">{{ label }}</option></select></label><label v-if="artifact === 'section'" :for="`report-section-${record.value.report_id}`">{{ copy.section }}<select :id="`report-section-${record.value.report_id}`" v-model="sectionIndex" :disabled="locked"><option v-for="n in record.value.progress.total_sections" :key="n" :value="String(n)">{{ n }}</option></select></label><button class="report-download" type="button" :disabled="locked" @click="prepareDownload(record.value)">{{ copy.download }}</button><a v-if="download?.report_id === record.value.report_id" class="report-save" :href="download.url" :download="download.name">{{ copy.save }} · {{ download.name }}</a></div>
     </article>
     <section v-if="content" class="narrative" aria-labelledby="report-narrative-title"><h3 id="report-narrative-title">{{ copy.narrative }}</h3><p class="mono">{{ content.report.report_id }}</p><p>{{ copy.interpretation }}</p><div v-if="rendered" class="markdown" v-html="rendered"></div><template v-else><p v-if="content.content.length > MAX_MARKDOWN_CHARS">{{ copy.largeContent }}</p><pre class="literal">{{ content.content }}</pre></template></section>

@@ -11,8 +11,10 @@ import SimulationPreparation from '../components/workbench/SimulationPreparation
 import NativeLaunch from '../components/workbench/NativeLaunch.vue'
 import NativeObservations from '../components/workbench/NativeObservations.vue'
 import ConnectedReports from '../components/workbench/ConnectedReports.vue'
+import ConnectedFollowup from '../components/workbench/ConnectedFollowup.vue'
 import { populationCopyFor } from '../i18n/populationWorkbench.js'
-const locale = ref('en'), copy = computed(() => copyFor(locale.value))
+import { uiLocale as locale } from '../i18n/index.js'
+const copy = computed(() => copyFor(locale.value))
 const origin = ref('http://127.0.0.1:5001'), graph = ref(''), token = ref(''), reveal = ref(false)
 const connected = ref(false), busy = ref(false), status = ref('disconnected'), errorCode = ref('')
 const ingestionRequest = ref('')
@@ -35,7 +37,9 @@ const preparationReset = ref(0)
 const nativeReady = ref(null), nativeReset = ref(0)
 const observationSelection = ref(null), observationReset = ref(0)
 const reportSelection = ref(null), reportReset = ref(0)
-function clearReports() { reportSelection.value = null; reportReset.value++; client.clearConnectedReports() }
+const followupSelection = ref(null), followupReset = ref(0)
+function clearFollowups() { followupSelection.value = null; followupReset.value++; client.clearConnectedFollowups() }
+function clearReports() { clearFollowups(); reportSelection.value = null; reportReset.value++; client.clearConnectedReports() }
 function clearNativeViews() { clearObservations(); clearReports() }
 const reportMethods = Object.freeze(Object.fromEntries([
   ['plan', 'connectedReportPlan'], ['start', 'connectedReportStart'], ['status', 'connectedReportStatus'],
@@ -44,6 +48,14 @@ const reportMethods = Object.freeze(Object.fromEntries([
   try { return await client[name](...args) }
   catch (e) { if (['unauthorized', 'origin_denied', 'disconnected'].includes(e?.code)) disconnect(); throw e }
 }]).concat([['clear', () => client.clearConnectedReports()]])))
+const followupMethods = Object.freeze(Object.fromEntries([
+  ['plan', 'connectedFollowupPlan'], ['start', 'connectedFollowupStart'], ['status', 'connectedFollowupStatus'],
+  ['cancel', 'connectedFollowupCancel'], ['read', 'connectedFollowupRead'], ['download', 'connectedFollowupDownload'],
+  ['history', 'connectedFollowupHistory']
+].map(([method, name]) => [method, async (...args) => {
+  try { return await client[name](...args) }
+  catch (e) { if (['unauthorized', 'origin_denied', 'disconnected'].includes(e?.code)) disconnect(); throw e }
+}]).concat([['clear', () => client.clearConnectedFollowups()]])))
 function clearObservations() { observationSelection.value = null; observationReset.value++; client.clearNativeObservations() }
 const observationMethods = Object.freeze({
   page: async (payload, selection, knownPage) => {
@@ -74,7 +86,10 @@ const ingestionMethods = Object.freeze({
 const sourceMethods = Object.freeze({
   list: () => operation(() => client.sourceList(), false, true),
   get: payload => operation(() => client.sourceGet(payload), false, true),
-  retain: payload => operation(() => client.sourceRetain(payload), false, true)
+  retain: payload => operation(() => client.sourceRetain(payload), false, true),
+  retainOriginal: (payload, options) => operation(() => client.sourceRetainOriginal(payload, options), false, true),
+  originalMetadata: (payload, options) => operation(() => client.sourceOriginalMetadata(payload, options), false, true, '', false, true),
+  originalRead: (payload, options) => operation(() => client.sourceOriginalRead(payload, options), false, true, '', false, true)
 })
 const experimentMethods = Object.freeze({
   catalog: () => operation(() => client.experimentCatalog(), false, true),
@@ -90,10 +105,11 @@ const graphEntries = computed(() => graphData.value?.[graphKind.value] || [])
 function clearProtected() { clearNativeViews(); sourceReset.value++; populationReset.value++; preparationReset.value++; nativeReset.value++; nativeReady.value = null; inspectedSource.value = null; graphData.value = null; result.value = null; graphPage.value = 0 }
 function disconnect() { generation++; client.disconnect(); token.value = ''; reveal.value = false; connected.value = false; busy.value = false; clearProtected(); errorCode.value = ''; ingestionRequest.value = ''; status.value = 'disconnected' }
 function cancel() { generation++; populationReset.value++; client.cancel(); busy.value = false; status.value = 'cancelled'; errorCode.value = ''; if (!connected.value) { client.disconnect(); token.value = ''; clearProtected() } }
-async function operation(action, connecting = false, source = false, ingestion = '', population = false) {
+async function operation(action, connecting = false, source = false, ingestion = '', population = false, preserveProtected = false) {
   const epoch = ++generation
   if (!population) populationReset.value++
-  client.cancel(population)
+  if (preserveProtected) client.cancelShared(population)
+  else client.cancel(population)
   busy.value = true; errorCode.value = ''; ingestionRequest.value = ingestion; status.value = connecting ? 'connecting' : 'loading'
   if (connecting) { connected.value = false; clearProtected() } else if (!source) result.value = null
   try {
@@ -153,7 +169,8 @@ onBeforeUnmount(disconnect)
       <SimulationPreparation :methods="preparationMethods" :connected="connected" :busy="busy" :reset-version="preparationReset" :locale="locale" :source="inspectedSource?.source || null" :display-graph-id="graphData?.graph_id || ''" :type-labels="populationTypes" @ready="nativeReady = $event" @cleared="nativeReset++" />
       <NativeLaunch :methods="nativeMethods" :ready="nativeReady" :connected="connected" :busy="busy" :reset-version="nativeReset" :locale="locale" :display-graph-id="graphData?.graph_id || ''" @inspect="observationSelection = $event" @report="reportSelection = $event" @cleared="clearNativeViews" />
       <NativeObservations :methods="observationMethods" :selection="observationSelection" :connected="connected" :busy="busy" :reset-version="observationReset" :locale="locale" :display-graph-id="graphData?.graph_id || ''" />
-      <ConnectedReports :methods="reportMethods" :selection="reportSelection" :connected="connected" :busy="busy" :reset-version="reportReset" :locale="locale" :display-graph-id="graphData?.graph_id || ''" />
+      <ConnectedReports :methods="reportMethods" :selection="reportSelection" :connected="connected" :busy="busy" :reset-version="reportReset" :locale="locale" :display-graph-id="graphData?.graph_id || ''" @followup="followupSelection = $event" />
+      <ConnectedFollowup :methods="followupMethods" :selection="followupSelection" :connected="connected" :busy="busy" :reset-version="followupReset" :locale="locale" :display-graph-id="graphData?.graph_id || ''" />
       <section class="query-section" aria-labelledby="query-title"><h2 id="query-title">{{ copy.research }}</h2>
         <form @submit.prevent="submit"><fieldset :disabled="!connected || busy"><legend>{{ copy.scope }}</legend><div class="choices"><label><input v-model="mode" type="radio" value="research">{{ copy.research }}</label><label><input v-model="mode" type="radio" value="dossier">{{ copy.dossier }}</label></div>
           <label v-if="mode === 'research'" for="question">{{ copy.query }}<textarea id="question" v-model="query" required rows="3" maxlength="4000"></textarea></label>

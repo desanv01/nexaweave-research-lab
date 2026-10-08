@@ -15,7 +15,7 @@ from .graph_reads import GraphReadViolation, ResultTooLarge
 from .ingestion import IngestionUncertain
 from .operations import (Busy, CompletionReceipt, Conflict, InvalidTransition,
                          NotFound, StaleAttempt, Tombstoned, _receipt, request_fingerprint)
-from .provider import OperationConflict, ReconciliationRequired, UnsupportedCapability
+from .provider_errors import OperationConflict, ReconciliationRequired, UnsupportedCapability
 
 
 _REQUEST_LIMIT = 512 * 1024

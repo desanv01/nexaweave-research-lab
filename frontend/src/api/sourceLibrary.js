@@ -221,3 +221,67 @@ export async function validateSourceResult(method, v, request, cryptoImpl = glob
     return v
   } catch (e) { if (e instanceof WorkbenchError && e.code === 'crypto_unavailable') throw e; bad() }
 }
+
+// V2 original-PDF contract. The V1 validators above deliberately keep their
+// accepted false binary flags and exact result shapes.
+export function sourceOriginalPayload(method, payload) {
+  try {
+    if (method === 'sourceRetainOriginal') {
+      shape(payload, 'schema_version source_revision source_name format content input_sha256')
+      if (payload.schema_version !== 2 || payload.format !== 'pdf') bad()
+      sourcePayload({ ...payload, schema_version: 1 })
+      return JSON.stringify(payload)
+    }
+    if (!['sourceOriginalMetadata', 'sourceOriginalRead'].includes(method)) bad()
+    shape(payload, 'source_revision'); id(payload.source_revision)
+    return { source_revision: payload.source_revision }
+  } catch { bad('invalid_request') }
+}
+
+export async function verifyOriginalPdfInput(payload, cryptoImpl = globalThis.crypto) {
+  sourceOriginalPayload('sourceRetainOriginal', payload)
+  return verifySourceInput(payload, cryptoImpl)
+}
+
+function originalBinary(binary, source, request) {
+  shape(binary, 'contract_version project_id source_revision media_type byte_length sha256')
+  if (binary.contract_version !== 1 || binary.media_type !== 'application/pdf') bad()
+  id(binary.project_id); id(binary.source_revision); hash(binary.sha256)
+  int(binary.byte_length, PDF_LIMIT, 1)
+  if (binary.project_id !== source.project_id || binary.source_revision !== source.source_revision ||
+      binary.source_revision !== request.source_revision || request.project_id && binary.project_id !== request.project_id) bad()
+}
+
+export async function validateSourceOriginalResult(method, value, payload, cryptoImpl = globalThis.crypto) {
+  try {
+    if (!['sourceRetainOriginal', 'sourceOriginalMetadata', 'sourceOriginalRead'].includes(method)) bad()
+    const retain = method === 'sourceRetainOriginal', read = method === 'sourceOriginalRead'
+    const keys = retain
+      ? 'schema_version binary_retained graph_ingestion_executed source passages offset_unit extraction binary'
+      : 'schema_version binary_retained graph_ingestion_executed source binary' + (read ? ' content_base64' : '')
+    shape(value, keys)
+    if (value.schema_version !== 2 || value.binary_retained !== true || value.graph_ingestion_executed !== false) bad()
+    metadata(value.source); originalBinary(value.binary, value.source, payload)
+    if (retain) {
+      if (payload.schema_version !== 2 || payload.format !== 'pdf' || value.binary.sha256 !== payload.input_sha256) bad()
+      const x = value.extraction
+      if (x?.input_hash_verified !== true || x.input_digest_persisted !== true ||
+          x.original_document_verified !== true || x.binary_persistently_bound !== true ||
+          x.blocks_persisted !== false || x.ocr_performed !== false) bad()
+      const old = { ...value, schema_version: 1, binary_retained: false,
+        extraction: { ...x, input_digest_persisted: false, original_document_verified: false,
+          binary_persistently_bound: false } }
+      delete old.binary
+      await validateSourceResult('sourceRetain', old, { ...payload, schema_version: 1 }, cryptoImpl)
+    }
+    if (read) {
+      if (typeof value.content_base64 !== 'string' || value.content_base64.length > Math.ceil(PDF_LIMIT / 3) * 4) bad()
+      const binary = atob(value.content_base64)
+      if (btoa(binary) !== value.content_base64 || binary.length !== value.binary.byte_length) bad()
+      const bytes = Uint8Array.from(binary, c => c.charCodeAt(0))
+      pdfBytes(bytes)
+      if (await sha256(bytes, cryptoImpl) !== value.binary.sha256) bad()
+    }
+    return value
+  } catch (e) { if (e instanceof WorkbenchError && e.code === 'crypto_unavailable') throw e; bad() }
+}

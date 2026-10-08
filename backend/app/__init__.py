@@ -9,8 +9,6 @@ import warnings
 # 需要在所有其他导入之前设置
 warnings.filterwarnings("ignore", message=".*resource_tracker.*")
 
-from flask import Flask, jsonify, request
-
 from .config import Config
 from .utils.logger import setup_logger, get_logger
 from .utils.browser_origins import parse_allowed_origins
@@ -19,14 +17,37 @@ from .utils.branding import app_mode, allowed_origins as configured_allowed_orig
 
 _API_METHODS = ('GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS')
 _CORS_HEADERS = frozenset({'content-type', 'authorization'})
+_FLASK_EXPORTS = frozenset({'Flask', 'jsonify', 'request'})
+
+
+def __getattr__(name):
+    if name in _FLASK_EXPORTS:
+        from importlib import import_module
+        value = getattr(import_module('flask'), name)
+        return globals().setdefault(name, value)
+    raise AttributeError(name)
+
+
+def __dir__():
+    return sorted(set(globals()) | _FLASK_EXPORTS)
+
+
+def _load_flask_exports():
+    # Function globals do not consult module __getattr__. Resolve only missing
+    # names so caller patches remain live, including request-time callbacks.
+    for name in _FLASK_EXPORTS:
+        if name not in globals():
+            __getattr__(name)
 
 
 def _origin_denied():
+    _load_flask_exports()
     return jsonify({'success': False, 'error': 'Origin not allowed'}), 403
 
 
-def create_app(config_class=Config, *, read_facade=None, evidence_facade=None, source_facade=None, ingestion_facade=None, experiment_facade=None, preparation_facade=None, native_launch_facade=None, native_observations_facade=None, connected_report_facade=None):
+def create_app(config_class=Config, *, read_facade=None, evidence_facade=None, source_facade=None, ingestion_facade=None, experiment_facade=None, preparation_facade=None, native_launch_facade=None, native_observations_facade=None, connected_report_facade=None, connected_followup_facade=None):
     """Flask应用工厂函数"""
+    _load_flask_exports()
     mode = app_mode(config_class, Config)
     if mode in {'graphiti_readonly', 'research_local'}:
         from .knowledge_read_app import create_read_app
@@ -34,7 +55,8 @@ def create_app(config_class=Config, *, read_facade=None, evidence_facade=None, s
                                source_facade=source_facade, ingestion_facade=ingestion_facade,
                                experiment_facade=experiment_facade, preparation_facade=preparation_facade,
                                native_launch_facade=native_launch_facade, native_observations_facade=native_observations_facade,
-                               connected_report_facade=connected_report_facade, mode=mode)
+                               connected_report_facade=connected_report_facade,
+                               connected_followup_facade=connected_followup_facade, mode=mode)
     if mode != 'legacy':
         raise ValueError('invalid application mode')
     app = Flask(__name__)
@@ -136,3 +158,10 @@ def create_app(config_class=Config, *, read_facade=None, evidence_facade=None, s
         logger.info("NexaWeave Backend 启动完成")
     
     return app
+
+
+# Preserve the previous public star-import surface without loading Flask when
+# a process imports only an app.services target.
+__all__ = ['os', 'warnings', 'Config', 'setup_logger', 'get_logger',
+           'parse_allowed_origins', 'app_mode', 'configured_allowed_origins',
+           'create_app', 'Flask', 'jsonify', 'request']

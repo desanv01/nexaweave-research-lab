@@ -65,6 +65,15 @@ jobs:
       - name: Qualify connected report transport and actual workbench components
         run: node --test tests/connectedReports.test.js tests/connectedReports.component.test.js tests/workbenchConnectedReports.component.test.js
         working-directory: frontend
+      - name: Qualify grounded follow-up transport and actual shared workbench
+        run: node --test tests/connectedFollowups.test.js tests/connectedFollowups.component.test.js tests/workbenchConnectedFollowups.component.test.js
+        working-directory: frontend
+      - name: Qualify verified original PDF component and owned downloads
+        run: node --test tests/source-original.component.test.js
+        working-directory: frontend
+      - name: Qualify shared persisted UI languages and keyboard selection
+        run: node --test tests/sharedLocale.component.test.js tests/workbenchSources.component.test.js
+        working-directory: frontend
       - run: npm run build
 
   knowledge-compatibility:
@@ -113,6 +122,8 @@ jobs:
         run: services/knowledge/.venv/bin/python tools/run_pdf_source_tests.py
       - name: Qualify protected retained-source HTTP and installed PG-only child
         run: services/knowledge/.venv/bin/python tools/run_source_library_tests.py
+      - name: Qualify atomic original PDFs, migration, restart and protected byte reads
+        run: services/knowledge/.venv/bin/python tools/run_source_binary_tests.py --postgres
       - name: Qualify connected source ingestion with real stores and local synthetic SDK
         run: services/knowledge/.venv/bin/python tools/run_source_ingestion_tests.py
       - name: Test database diagnostics on failure
@@ -266,6 +277,16 @@ jobs:
         run: |
           backend/.venv/Scripts/python.exe tools/run_connected_report_tests.py --engine
           if ($LASTEXITCODE -ne 0) { throw 'Connected report child qualification failed' }
+      - name: Qualify follow-up cold contracts and exact original PDF codecs
+        run: |
+          backend/.venv/Scripts/python.exe tools/run_connected_followup_tests.py --unit
+          if ($LASTEXITCODE -ne 0) { throw 'Connected follow-up offline qualification failed' }
+          backend/.venv/Scripts/python.exe tools/run_source_binary_tests.py --unit
+          if ($LASTEXITCODE -ne 0) { throw 'Original PDF offline qualification failed' }
+      - name: Qualify actual inherited follow-up child and immutable parent report
+        run: |
+          backend/.venv/Scripts/python.exe tools/run_connected_followup_tests.py --engine
+          if ($LASTEXITCODE -ne 0) { throw 'Connected follow-up child qualification failed' }
       - name: Qualify actual owned Windows parser and knowledge process trees
         run: |
           backend/.venv/Scripts/python.exe tools/run_owned_process_tests.py
@@ -302,6 +323,8 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw 'Generated PGTemporal native seed fidelity qualification failed' }
             backend/.venv/Scripts/python.exe tools/run_connected_report_tests.py --integration
             if ($LASTEXITCODE -ne 0) { throw 'Connected native-receipt-to-report PGTemporal qualification failed' }
+            backend/.venv/Scripts/python.exe tools/run_connected_followup_tests.py --integration
+            if ($LASTEXITCODE -ne 0) { throw 'Connected follow-up history and shared-budget PGTemporal qualification failed' }
           } finally {
             ./tools/native_temporal_ci_server.ps1 -Action stop
           }

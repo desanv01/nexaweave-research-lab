@@ -16,7 +16,7 @@ from app.config import Config
 from app.services.knowledge_read_facade import ReadHostSettings
 from app.services.knowledge_reader import KnowledgeReadError
 from app.services.knowledge_source_client import (MAX_BYTES, TEXT_BYTES, declarations,
-    encoded, validate_result, KnowledgeSourceProcessClient)
+    encoded, validate_result, KnowledgeSourceProcessClient, original_result)
 from app.services.knowledge_source_facade import KnowledgeSourceFacade, validate_upload
 from app.services.knowledge_transport import KnowledgeInvalidRequest, KnowledgeTransportFailure
 from app.utils import docx_extraction
@@ -534,6 +534,36 @@ def pdf_receipt_fixture(payload):
         "ocr_performed": False, "page_layout": "unknown", "semantic_quality": "unknown",
         "coverage": ["page_text"], "page_text": texts, "pages": pages,
         "page_count": 4, "empty_page_count": 1, "declared_passage_count": 3}}
+
+
+def original_pdf_fixture(payload):
+    old = pdf_receipt_fixture(payload)
+    raw = base64.b64decode(payload["content"])
+    return {**old, "schema_version": 2, "binary_retained": True,
+        "binary": {"contract_version": 1, "project_id": scope()["project_id"],
+            "source_revision": payload["source_revision"], "media_type": "application/pdf",
+            "byte_length": len(raw), "sha256": hashlib.sha256(raw).hexdigest()},
+        "extraction": {**old["extraction"], "input_digest_persisted": True,
+            "original_document_verified": True, "binary_persistently_bound": True}}
+
+
+def test_v2_original_codec_rejects_corrupt_binding_without_weakening_v1():
+    payload = dict(pdf_upload_fixture(), schema_version=2)
+    result = original_pdf_fixture(payload)
+    assert original_result("retain_pdf_binary", result, scope(), payload) == result
+    metadata = {key: value for key, value in result.items() if key in
+        {"schema_version", "binary_retained", "graph_ingestion_executed", "source", "binary"}}
+    identity = {"source_revision": payload["source_revision"]}
+    assert original_result("binary_metadata", metadata, scope(), identity) == metadata
+    full = {**metadata, "content_base64": payload["content"]}
+    assert original_result("binary_read", full, scope(), identity) == full
+    for altered in ({**full, "content_base64": full["content_base64"] + "="},
+                    {**full, "binary": {**full["binary"], "sha256": "0" * 64}},
+                    {**full, "source": {**full["source"], "source_revision": str(uuid4())}}):
+        with pytest.raises(ValueError):
+            original_result("binary_read", altered, scope(), identity)
+    with pytest.raises(ValueError):
+        original_result("retain_pdf_binary", pdf_receipt_fixture(payload), scope(), payload)
 
 
 def install_pdf_wire_reply(child, *, corrupt_result=None):
