@@ -7,6 +7,7 @@ from dataclasses import replace
 import hashlib
 import importlib.metadata
 import json
+import math
 import os
 from pathlib import Path
 import socket
@@ -14,6 +15,7 @@ import sqlite3
 import statistics
 import subprocess
 import sys
+import time
 from uuid import uuid4
 
 import pytest
@@ -22,6 +24,66 @@ from test_native_prepared_host import connection_factory, _snapshot, _close
 from offline_fixture import prepared, offline_models
 
 pytestmark = pytest.mark.postgres
+
+
+_native_cohort_phase_sink = None
+
+
+class NativeCohortPhases:
+    """Fixed bounded metadata; independent of native qualification."""
+    def __init__(self, member=None):
+        self.member = member
+        self.count = 0
+        self.started = {}
+
+    def emit(self, phase, event, started, *, cleanup=False):
+        active_error = sys.exception() if cleanup else None
+        try:
+            if self.count >= 128:
+                return
+            now = time.monotonic()
+            elapsed = max(0.0, now - started)
+            if not math.isfinite(now) or not math.isfinite(elapsed) or now < 0:
+                return
+            self.count += 1
+            record = dict(schema_version=1, suite='native-store-cohort',
+                phase=(self.member + '-' + phase) if self.member is not None else phase,
+                event=event, monotonic_seconds=now, elapsed_seconds=elapsed)
+            if _native_cohort_phase_sink is not None:
+                _native_cohort_phase_sink(record)
+            else:
+                print('NEXAWEAVE_FIXTURE_PHASE ' + json.dumps(record, allow_nan=False), flush=True)
+        except (KeyboardInterrupt, SystemExit):
+            if not cleanup or active_error is None:
+                raise
+        except Exception:
+            pass
+
+    def start(self, phase):
+        try:
+            started = time.monotonic()
+            self.started[phase] = started
+            self.emit(phase, 'start', started)
+        except Exception:
+            pass
+
+    def end(self, phase):
+        try:
+            started = self.started.pop(phase, None)
+            if started is not None:
+                self.emit(phase, 'end', started)
+        except Exception:
+            pass
+
+    def observed_closed(self):
+        active_error = sys.exception()
+        try:
+            self.emit('cleanup', 'observed_closed', time.monotonic(), cleanup=True)
+        except (KeyboardInterrupt, SystemExit):
+            if active_error is None:
+                raise
+        except Exception:
+            pass
 
 
 def unavailable_models():
@@ -57,6 +119,8 @@ def hashes(root):
 
 
 def actual_run(factory, parent, project, simulation, seed, *, fail=False):
+    phases = NativeCohortPhases({'exp-a': 'member-a', 'exp-b': 'member-b', 'exp-f': 'member-f'}.get(simulation))
+    phases.start('prepare-inputs-manifest')
     from app.services.native_prepared_host import NativePreparedHost
     from app.services.native_recording_contracts import RecordingAnchors
     from app.services.native_recordings import capture_recording
@@ -75,21 +139,30 @@ def actual_run(factory, parent, project, simulation, seed, *, fail=False):
     request = NativeRunRequest.from_wire(dict(schema_version=1, principal="owner", project_id=project,
         project_revision=1, simulation_id=simulation, run_id=uuid4(), artifact_sha256=_manifest(root, names, 2 * 1024 * 1024),
         runtime_sha256="b" * 64, platforms=["twitter", "reddit"], seed=seed, max_rounds=1))
+    phases.end('prepare-inputs-manifest')
+    phases.start('construct-host')
     binding = NativeOwnedSessionFactory(str(root), "graph-fixture", simulation, "owner", str(project), 1,
         ("twitter", "reddit"), seed, 1, "b" * 64, unavailable_models if fail else offline_models)
     host = NativePreparedHost(principal="owner", request=request, session_factory=binding,
         connection_factory=factory, dispatch_allowed=lambda _: True, lease_seconds=240,
         poll_seconds=0.2, call_budget_seconds=20, handshake_seconds=10, go_timeout_seconds=30, join_seconds=3)
     try:
+        phases.end('construct-host')
+        phases.start('host-start')
         host.start(35)
+        phases.end('host-start')
+        phases.start('host-wait-and-receipt-check')
         result = host.wait(180)
         assert result.run_state == (RunState.failed if fail else RunState.completed)
         saved = NativeRunStore(factory).get("owner", request.run_id)
         assert saved.receipt == result.receipt and saved.receipt is not None
+        phases.end('host-wait-and-receipt-check')
     finally:
         _close(host)
+        phases.observed_closed()
     if fail:
         return ExperimentMember(simulation, "Failed owned fixture", "declared-case", request), root, None
+    phases.start('recording-hash-metrics')
     before = hashes(root)
     expected = {}
     for p in request.platforms:
@@ -98,12 +171,15 @@ def actual_run(factory, parent, project, simulation, seed, *, fail=False):
         with sqlite3.connect(f"{(root / (p + '_simulation.db')).as_uri()}?mode=ro", uri=True) as conn:
             expected[p] = {"actions": actions, "total": sum(actions.values()),
                 "tables": {t: conn.execute(f'SELECT COUNT(*) FROM "{t}"').fetchone()[0] for t in ("post", "follow", "trace")}}
+    phases.end('recording-hash-metrics')
+    phases.start('recording-capture-verify')
     anchors = RecordingAnchors("graph-fixture", simulation, str(request.run_id), "fixture-branch", str(project), 1)
     bundle = parent / "recording"
     revision = capture_recording(root, bundle, anchors=anchors, platforms=request.platforms,
         closed_run_confirmed=True, runtime_versions={"oasis": importlib.metadata.version("camel-oasis"),
             "camel": importlib.metadata.version("camel-ai")}, runtime_sha256=request.runtime_sha256)
     assert hashes(root) == before
+    phases.end('recording-capture-verify')
     return ExperimentMember(simulation, "Owned fixture " + simulation, "declared-case", request,
         RecordingPin(str(bundle), revision, anchors)), root, expected
 
@@ -185,11 +261,14 @@ def cli(cohort, tmp_path, raw, *, principal="owner", pin=None):
 
 @pytest.fixture(scope="module")
 def cohort_fixture(connection_factory, tmp_path_factory):
+    phases = NativeCohortPhases()
+    phases.start('cohort-project-create')
     from app.services.native_experiment_contracts import ExperimentCohort
     from nexaweave_storage import ProjectStore
     root = tmp_path_factory.mktemp("owned-experiments")
     project = uuid4()
     ProjectStore(connection_factory).create("owner", uuid4(), project, "proj_1", _snapshot())
+    phases.end('cohort-project-create')
     with pytest.MonkeyPatch.context() as monkeypatch:
         install_offline_boundary(monkeypatch)
         monkeypatch.chdir(root)

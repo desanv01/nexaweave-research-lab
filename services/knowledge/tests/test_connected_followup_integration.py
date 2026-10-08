@@ -4,14 +4,79 @@ import base64
 from dataclasses import dataclass
 import hashlib
 import json
+import math
 from pathlib import Path
 import re
+import sys
+import time
 from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
 
 pytestmark = [pytest.mark.postgres, pytest.mark.connected_followup_temporal]
+
+
+_fixture_phase_sink = None
+
+
+class FixturePhases:
+    """Bounded diagnostics only; no lifecycle or qualification authority."""
+    def __init__(self, suite):
+        self.suite = suite
+        self.count = 0
+        self.started = {}
+
+    def emit(self, phase, event, started, *, cleanup=False):
+        active_error = sys.exception() if cleanup else None
+        try:
+            if self.count >= 128:
+                return
+            now = time.monotonic()
+            elapsed = max(0.0, now - started)
+            if not math.isfinite(now) or not math.isfinite(elapsed) or now < 0:
+                return
+            self.count += 1
+            record = dict(
+                schema_version=1, suite=self.suite, phase=phase, event=event,
+                monotonic_seconds=now, elapsed_seconds=elapsed)
+            if _fixture_phase_sink is not None:
+                _fixture_phase_sink(record)
+            else:
+                print('NEXAWEAVE_FIXTURE_PHASE ' + json.dumps(record, allow_nan=False), flush=True)
+        except (KeyboardInterrupt, SystemExit):
+            # Called only after all original cleanup assertions have succeeded.
+            # An existing work/cleanup exception must retain its exact identity.
+            if not cleanup or active_error is None:
+                raise
+        except Exception:
+            pass
+
+    def start(self, phase):
+        try:
+            started = time.monotonic()
+            self.started[phase] = started
+            self.emit(phase, 'start', started)
+        except Exception:
+            pass
+
+    def end(self, phase):
+        try:
+            started = self.started.pop(phase, None)
+            if started is not None:
+                self.emit(phase, 'end', started)
+        except Exception:
+            pass
+
+    def observed_closed(self):
+        active_error = sys.exception()
+        try:
+            self.emit('cleanup', 'observed_closed', time.monotonic(), cleanup=True)
+        except (KeyboardInterrupt, SystemExit):
+            if active_error is None:
+                raise
+        except Exception:
+            pass
 
 
 @dataclass(frozen=True)
@@ -150,6 +215,8 @@ async def test_actual_report_followup_history_and_disabled_exports(factory, tmp_
                         dict(poster_type='Person', content='Final same actor E')]), ensure_ascii=False)
             return response
 
+    phases = FixturePhases('followup')
+    phases.start('setup')
     monkeypatch.chdir(tmp_path)
     migrate_all(factory)
     with factory() as conn:
@@ -216,26 +283,36 @@ async def test_actual_report_followup_history_and_disabled_exports(factory, tmp_
         reports.generate = generate_with_slow_first_authorization
     reports.scheduler = report_temporal.scheduler_for(loop)
     try:
+        phases.end('setup')
         async with preparation.worker(), native.worker(), report_temporal.worker():
+            phases.start('preparation-plan-start')
             payload = request(retained)
             payload['options'].update(types=['Person','Organization'], max_agents=2, max_rounds=1)
             planned = await asyncio.to_thread(prep.plan, payload)
             await asyncio.to_thread(prep.start, prep_reference(planned))
             preparation_row = prep.store.get('owner', planned['operation_id'])
+            phases.end('preparation-plan-start')
+            phases.start('preparation-result')
             await asyncio.wait_for(temporal.get_workflow_handle(preparation_row.dispatch.workflow_id).result(), 60)
             ready = await asyncio.to_thread(prep.status, prep_reference(planned))
             assert ready['state']=='ready' and not ready['simulation_executed']
+            phases.end('preparation-result')
             input_root = prep.root/ready['receipt']['simulation_id']
             original_inputs = {f['name']:(input_root/f['name']).read_bytes() for f in ready['receipt']['files']}
+            phases.start('native-plan-start')
             launch = await asyncio.to_thread(native_host.plan, declaration(planned))
             await asyncio.to_thread(native_host.start, native_reference(launch))
             native_row = native_host.store.get('owner', launch['request']['run_id'])
+            phases.end('native-plan-start')
+            phases.start('native-result')
             native_receipt = await asyncio.wait_for(native.result(native_row.request, NativeWorkflowRef(**native_row.workflow)), 180)
             assert native_receipt.outcome=='completed' and len(native_owners)==1
             launch = await asyncio.to_thread(native_host.status, native_reference(launch))
             assert launch['state']=='completed' and launch['receipt']==native_receipt.to_wire()
+            phases.end('native-result')
             original_outputs = {name:(input_root/name).read_bytes() for platform in ('twitter','reddit')
                 for name in (platform+'_simulation.db', platform+'/actions.jsonl')}
+            phases.start('report-plan-start')
             declared = dict(schema_version=1, report_id=str(uuid4()), launch_id=str(native_row.run_id),
                 launch_sha256=launch['launch_sha256'], requirement='Distinguish retained source and actual observed records.',
                 output_language='en', native_windows=None)
@@ -244,6 +321,8 @@ async def test_actual_report_followup_history_and_disabled_exports(factory, tmp_
             reference = dict(schema_version=1, report_id=reviewed['report_id'], plan_sha256=reviewed['plan_sha256'])
             await asyncio.to_thread(reports.start, reference)
             row = reports.store.get('owner', reference['report_id'], reference['plan_sha256'])
+            phases.end('report-plan-start')
+            phases.start('report-result-proof')
             await asyncio.wait_for(temporal.get_workflow_handle(row.workflow['workflow_id']).result(), 180)
             completed = await asyncio.to_thread(reports.status, reference)
             assert completed['state']=='completed' and completed['cleanup']==dict(known=True,pending=False,owner_thread_alive=False)
@@ -276,6 +355,8 @@ async def test_actual_report_followup_history_and_disabled_exports(factory, tmp_
             assert ReportBudgetReceipt.from_wire(report_capacity.receipt.json_value()) == report_capacity.receipt
             calls = [json.loads(line) for line in report_log.read_text(encoding='utf-8').splitlines()]
             assert calls[-1]['closed'] and 1<=calls[-1]['calls']<=64 and any(c.get('response_format') for c in calls)
+            phases.end('report-result-proof')
+            phases.start('report-protected-reads-exports-recovery')
             report_enabled[0]=False
             before_calls=report_log.read_bytes()
             before_budget=native_host.budget.status('owner',prep.account_id)
@@ -297,7 +378,9 @@ async def test_actual_report_followup_history_and_disabled_exports(factory, tmp_
             assert all((input_root/name).read_bytes()==raw for name,raw in {**original_inputs,**original_outputs}.items())
             recovered=await asyncio.to_thread(reports.start,reference)
             assert recovered['receipt']==completed['receipt'] and report_log.read_bytes()==before_calls
+            phases.end('report-protected-reads-exports-recovery')
 
+            phases.start('followup-setup')
             # A distinct new fixture allowance20 covers prior12 + two followup4;
             # the accepted report fixture and all its original assertions stay unchanged.
             from nexaweave_execution.followup_store import migrate as migrate_followups
@@ -324,8 +407,11 @@ async def test_actual_report_followup_history_and_disabled_exports(factory, tmp_
             head = empty_head(reference['report_id'],reference['plan_sha256'])
             finished = []
             stale = None
+            phases.end('followup-setup')
             async with follow_temporal.worker():
                 for ordinal,language in enumerate(('en','ms'),1):
+                    turn_phase = 'followup-turn-1' if ordinal == 1 else 'followup-turn-2'
+                    phases.start(turn_phase + '-plan-start')
                     body = dict(schema_version=1,turn_id=str(uuid4()),report_id=reference['report_id'],
                         report_plan_sha256=reference['plan_sha256'],question='Explain selected evidence 猫 😀 '+str(ordinal),
                         output_language=language,expected_history_sha256=head)
@@ -338,12 +424,16 @@ async def test_actual_report_followup_history_and_disabled_exports(factory, tmp_
                     identity = dict(schema_version=1,turn_id=turn['turn_id'],plan_sha256=turn['plan_sha256'])
                     await asyncio.to_thread(followups.start,identity)
                     owned = followups.store.get('owner',identity['turn_id'],identity['plan_sha256'])
+                    phases.end(turn_phase + '-plan-start')
+                    phases.start(turn_phase + '-result-proof')
                     await asyncio.wait_for(temporal.get_workflow_handle(owned.workflow['workflow_id']).result(),180)
                     result = await asyncio.to_thread(followups.status,identity)
                     assert result['state']=='completed' and result['cleanup']==dict(known=True,pending=False,owner_thread_alive=False)
                     assert result['receipt_sha256']==digest(result['receipt'])
                     assert result['receipt']['manifest_sha256']==digest(result['manifest'])
                     assert result['receipt']['semantic_support_status']=='not_reviewed'
+                    phases.end(turn_phase + '-result-proof')
+                    phases.start(turn_phase + '-protected-read-publication-proof')
                     read_turn = await asyncio.to_thread(followups.read,identity)
                     validate_turn_read(read_turn,prep.display_graph_id,followups.scope_dto,identity,'owner')
                     assert '[[source:' in read_turn['content'] and '[[native:' in read_turn['content']
@@ -360,10 +450,14 @@ async def test_actual_report_followup_history_and_disabled_exports(factory, tmp_
                     assert reservation.receipt.followup_receipt==result['receipt'] and reservation.receipt.followup_receipt_sha256==result['receipt_sha256']
                     assert FollowupBudgetReceipt.from_wire(reservation.receipt.json_value())==reservation.receipt
                     finished.append((identity,result,read_turn['content']))
+                    phases.end(turn_phase + '-protected-read-publication-proof')
+                phases.start('followup-stale-start-refusal')
                 before_follow_calls=follow_log.read_bytes()
                 with pytest.raises(FollowupError,match='history_changed'):
                     await asyncio.to_thread(followups.start,dict(schema_version=1,turn_id=stale['turn_id'],plan_sha256=stale['plan_sha256']))
                 assert follow_log.read_bytes()==before_follow_calls
+                phases.end('followup-stale-start-refusal')
+            phases.start('followup-disabled-history-exports-recovery')
             rows=[json.loads(line) for line in follow_log.read_text().splitlines()]
             assert sum('call' in row for row in rows)==6 and sum(row.get('closed',False) for row in rows)==2
             follow_enabled[0]=False
@@ -397,14 +491,18 @@ async def test_actual_report_followup_history_and_disabled_exports(factory, tmp_
             assert all((parent_root/name).read_bytes()==raw for name,raw in parent_files.items())
             assert all((input_root/name).read_bytes()==raw for name,raw in {**original_inputs,**original_outputs}.items())
             assert report_log.read_bytes()==before_calls
+            phases.end('followup-disabled-history-exports-recovery')
 
+            phases.start('foreign-report-read-refusal')
             foreign=dict(reference,report_id=str(uuid4()))
             with pytest.raises(ReportError):
                 await asyncio.to_thread(reports.read,foreign)
             assert report_log.read_bytes()==before_calls
+            phases.end('foreign-report-read-refusal')
     finally:
         for owner in native_owners:
             assert await asyncio.to_thread(owner.close,20)
         if native_row is not None:
             local=await native.retry_cleanup(native_row.request)
             assert not local.cleanup_pending and not local.owner_thread_alive
+        phases.observed_closed()

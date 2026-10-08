@@ -238,6 +238,12 @@ jobs:
           version: '0.11.25'
       - name: Install inherited locked backend runtime
         run: uv sync --project backend --locked --extra dev --extra native-store --extra native-temporal --python 3.12.13
+      - name: Apply fingerprint-checked native optional import correction
+        run: |
+          backend/.venv/Scripts/python.exe tools/apply_native_import_patch.py --apply
+          if ($LASTEXITCODE -ne 0) { throw 'Native optional import correction failed' }
+          backend/.venv/Scripts/python.exe tools/apply_native_import_patch.py --check
+          if ($LASTEXITCODE -ne 0) { throw 'Native optional import fingerprint verification failed' }
       - name: Install fixed experiment child package and select explicit test runtimes
         shell: pwsh
         run: |

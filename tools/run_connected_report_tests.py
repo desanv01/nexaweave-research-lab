@@ -3,11 +3,13 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import math
 import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -44,9 +46,63 @@ def child(mode: str, journey: bool = False) -> int:
             skipped = 0
             paths = {}
             targets = {path.name: 0 for path in (*UNIT_TARGETS, PG_STORE_TARGET, PG_TARGET, ENGINE_TARGET)}
+
+            diagnostic_origin = None
+            diagnostic_records = 0
+            capture_manager = None
+
+            def diagnostic(self, record, *, fixture=False):
+                try:
+                    if self.diagnostic_records >= 4096:
+                        return
+                    expected = ({'schema_version', 'suite', 'phase', 'event', 'monotonic_seconds', 'elapsed_seconds'}
+                                if fixture else {'schema_version', 'suite', 'nodeid', 'event', 'when', 'outcome',
+                                                 'duration_seconds', 'monotonic_seconds', 'elapsed_seconds'})
+                    allowed_suites = ('report-ordinary', 'report-cooperative-heartbeat') if fixture else ('report',)
+                    if set(record) != expected or type(record['schema_version']) is not int or record['schema_version'] != 1 or record['suite'] not in allowed_suites:
+                        return
+                    for key in ('monotonic_seconds', 'elapsed_seconds', *(() if fixture else ('duration_seconds',))):
+                        if type(record[key]) not in (int, float) or not math.isfinite(record[key]) or record[key] < 0:
+                            return
+                    self.diagnostic_records += 1
+                    prefix = 'NEXAWEAVE_FIXTURE_PHASE ' if fixture else 'NEXAWEAVE_TEST_PHASE '
+                    line = prefix + json.dumps(record, allow_nan=False)
+                    if self.capture_manager is not None:
+                        with self.capture_manager.global_and_fixture_disabled():
+                            print(line, flush=True)
+                    else:
+                        print(line, flush=True)
+                except Exception:
+                    # Diagnostic availability never changes qualification; controls
+                    # still propagate into the runner's existing owned finally.
+                    pass
+
+            def fixture_phase(self, record):
+                self.diagnostic(record, fixture=True)
+
+            def node_phase(self, nodeid, event, when, outcome, duration):
+                try:
+                    now = time.monotonic()
+                    if self.diagnostic_origin is None:
+                        self.diagnostic_origin = now
+                    self.diagnostic(dict(schema_version=1, suite='report', nodeid=nodeid, event=event,
+                                         when=when, outcome=outcome, duration_seconds=duration,
+                                         monotonic_seconds=now, elapsed_seconds=max(0.0, now - self.diagnostic_origin)))
+                except Exception:
+                    pass
+
+            def pytest_runtest_logstart(self, nodeid, location):
+                self.node_phase(nodeid, 'start', 'node', None, 0.0)
             def pytest_collection_finish(self, session):
                 self.collected = len(session.items)
                 self.paths = {item.nodeid: Path(item.path).name for item in session.items}
+                try:
+                    self.capture_manager = session.config.pluginmanager.getplugin('capturemanager')
+                    for item in session.items:
+                        if Path(item.path).resolve() == PG_TARGET.resolve():
+                            item.module._fixture_phase_sink = self.fixture_phase
+                except Exception:
+                    pass
             def pytest_runtest_logreport(self, report):
                 if report.skipped:
                     self.skipped += 1
@@ -55,6 +111,7 @@ def child(mode: str, journey: bool = False) -> int:
                     name = self.paths.get(report.nodeid)
                     if name in self.targets:
                         self.targets[name] += 1
+                self.node_phase(report.nodeid, 'end', report.when, report.outcome, report.duration)
         accounting = Accounting()
         if mode == 'engine':
             targets = (ENGINE_TARGET,)
