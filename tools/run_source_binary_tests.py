@@ -103,7 +103,7 @@ def main():
                 print('source_binary_installed_bootstrap_required',file=sys.stderr)
                 return 1
             env.update(PROJECT_STORE_POSTGRES_INTEGRATION='1',KNOWLEDGE_POSTGRES_INTEGRATION='1',
-                NEXAWEAVE_WORKBENCH_BACKEND_PYTHON=backend,KNOWLEDGE_PYTHON=str(Path(sys.executable).resolve()),
+                NEXAWEAVE_WORKBENCH_BACKEND_PYTHON=backend,KNOWLEDGE_PYTHON=str(Path(sys.executable).absolute()),
                 KNOWLEDGE_BOOTSTRAP_SCRIPT=bootstrap.stdout.decode().strip(),
                 PROJECT_STORE_POSTGRES_TEST_DSN=make_conninfo(host='127.0.0.1',port=15432,dbname='mirofish_operations_test',
                     user='mirofish_fixture',password=password,connect_timeout=5))
