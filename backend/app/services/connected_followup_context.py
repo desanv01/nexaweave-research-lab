@@ -1,6 +1,7 @@
 """Fresh, descriptor-bound accepted report context for an owned chat child."""
 import hashlib
 import time
+from contextlib import nullcontext
 from .connected_report_context import validate_context
 from .connected_report_client import digest, ReportError
 from .report_process import report_files
@@ -8,6 +9,25 @@ from nexaweave_execution.followup_contracts import FollowupError, CODES, validat
 
 
 def freeze_parent(parent_host, report_id, report_plan_sha256, *, deadline=None, tick=None):
+    from .knowledge_read_facade import KnowledgeReadFacade
+    from .knowledge_transport import KnowledgeCooperativeAbort
+    session = (parent_host.reader.parent_verification_session(deadline=deadline, tick=tick)
+               if isinstance(getattr(parent_host, 'reader', None), KnowledgeReadFacade) else nullcontext())
+    try:
+        with session:
+            return _freeze_parent(parent_host, report_id, report_plan_sha256, deadline=deadline, tick=tick)
+    except KnowledgeCooperativeAbort as error:
+        code = {'report_cancelled': 'followup_cancelled', 'report_uncertain': 'followup_uncertain'}.get(error.code, error.code)
+        raise FollowupError(code if code in CODES else 'conflict') from None
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except FollowupError:
+        raise
+    except Exception:
+        raise FollowupError('timeout' if deadline is not None and time.monotonic() >= deadline else 'conflict') from None
+
+
+def _freeze_parent(parent_host, report_id, report_plan_sha256, *, deadline=None, tick=None):
     """Return a detached private-copy input only after full parent reauthorization."""
     try:
         def parent_tick():
