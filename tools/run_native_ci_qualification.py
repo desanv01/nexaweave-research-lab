@@ -19,6 +19,7 @@ from uuid import uuid4
 
 ROOT = Path(__file__).resolve().parents[1]
 PREFIX = 'NEXAWEAVE_CI_RESULT '
+TIMING_PREFIX = 'NEXAWEAVE_CI_TIMING '
 OFFLINE_TESTS = (
     ('read-boundary', 'run_read_boundary_tests.py', None),
     ('preparation-unit', 'run_preparation_tests.py', '--unit'),
@@ -119,6 +120,22 @@ def _replay_and_check(path, lane, output):
     return valid and set(seen) == set(lane.expected) and all(v == 0 for v in seen.values())
 
 
+def _timing(output, *, token, lane, gate, phase, origin, started):
+    """Ignore ordinary diagnostic failure; return controls for owned cleanup."""
+    try:
+        now = time.monotonic()
+        record = dict(token=token, lane=lane, gate=gate, phase=phase,
+                      monotonic_seconds=now, elapsed_seconds=max(0.0, now - started),
+                      lane_elapsed_seconds=max(0.0, now - origin))
+        output.write((TIMING_PREFIX + json.dumps(record, allow_nan=False) + '\n').encode())
+        output.flush()
+    except (KeyboardInterrupt, SystemExit) as control:
+        # The caller distinguishes work admission from deferred cleanup control.
+        return control
+    except Exception:
+        pass
+
+
 def _run_lanes(lanes, *, environment, output, max_seconds=1000,
                cancel=None, owner_factory=None, sanitize_offline=False):
     """Own two real child trees through log replay/exit aggregation.
@@ -134,14 +151,30 @@ def _run_lanes(lanes, *, environment, output, max_seconds=1000,
                    for lane in lanes)):
         raise ValueError('invalid bounded CI plan')
     owner_factory = owner_factory or _owner_type()
-    deadline = time.monotonic() + max_seconds
+    origin = time.monotonic()
+    deadline = origin + max_seconds
     reserve = min(10.0, max_seconds / 2)
     running = []
     failed = False
     interrupted = None
     cleanup_messages = []
+    lane_origins = {}
+    observed_exits = set()
+    def diagnostic(lane, phase, started, *, cleanup=False):
+        nonlocal interrupted, failed
+        control = _timing(output, token=lane.token, lane=lane.name, gate='controller',
+                          phase=phase, origin=lane_origins.get(lane.name, origin), started=started)
+        if control is not None:
+            failed = True
+            if interrupted is None:
+                interrupted = control
+            if not cleanup:
+                raise control
     try:
         for lane in lanes:
+            launched = time.monotonic()
+            lane_origins[lane.name] = launched
+            diagnostic(lane, 'launch-start', launched)
             directory = tempfile.TemporaryDirectory(prefix=f'nexaweave-ci-{lane.name}-')
             owner = owner_factory()
             owner.bind_private_directory(directory)
@@ -157,24 +190,41 @@ def _run_lanes(lanes, *, environment, output, max_seconds=1000,
                             stdout=log, stderr=subprocess.STDOUT,
                             shell=False, close_fds=True,
                             creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+                diagnostic(lane, 'launch-end', launched)
             except Exception as error:
                 failed = True
+                diagnostic(lane, 'launch-error', launched)
                 output.write(f'lane {lane.name} startup failed: {type(error).__name__}\n'.encode())
-        while any(owner.process is not None and owner.process.poll() is None
-                  for _, _, owner, _, _ in running):
+        while True:
+            active = False
+            for lane, _, owner, _, _ in running:
+                if owner.process is not None:
+                    if owner.process.poll() is None:
+                        active = True
+                    elif lane.name not in observed_exits:
+                        observed_exits.add(lane.name)
+                        diagnostic(lane, 'observed-exit', lane_origins[lane.name])
+            if not active:
+                break
             if ((cancel is not None and cancel.is_set())
                     or time.monotonic() >= deadline - reserve):
                 failed = True
+                for lane, _, owner, _, _ in running:
+                    if owner.process is not None and owner.process.poll() is None:
+                        diagnostic(lane, 'whole-bound-interruption', origin)
                 output.write(b'native CI cancelled or whole deadline exhausted\n')
                 break
             time.sleep(min(0.05, max(0, deadline - reserve - time.monotonic())))
     except BaseException as error:
-        interrupted = error
+        if interrupted is None:
+            interrupted = error
         failed = True
     finally:
         # Close *every* tree even if another owner fails. File redirection avoids
         # unjoined reader threads and pipe backpressure; replay happens afterward.
         for lane, _, owner, _, log in running:
+            closing = time.monotonic()
+            diagnostic(lane, 'ownership-close-start', closing, cleanup=True)
             try:
                 owner.stop([], timeout=min(3.0, max(0, deadline - time.monotonic())))
                 if not owner.closed or (owner.process is not None
@@ -184,15 +234,16 @@ def _run_lanes(lanes, *, environment, output, max_seconds=1000,
                     failed = True
             except BaseException as error:
                 failed = True
-                if isinstance(error, (KeyboardInterrupt, SystemExit)):
+                if interrupted is None and isinstance(error, (KeyboardInterrupt, SystemExit)):
                     interrupted = error
                 cleanup_messages.append(f'lane {lane.name} cleanup failed: {type(error).__name__}\n')
             finally:
+                diagnostic(lane, 'ownership-close-end', closing, cleanup=True)
                 try:
                     log.close()
                 except BaseException as error:
                     failed = True
-                    if isinstance(error, (KeyboardInterrupt, SystemExit)):
+                    if interrupted is None and isinstance(error, (KeyboardInterrupt, SystemExit)):
                         interrupted = error
                     cleanup_messages.append(f'lane {lane.name} log close failed: {type(error).__name__}\n')
         # Diagnostics cannot interrupt ownership closure of the other lane.
@@ -202,24 +253,36 @@ def _run_lanes(lanes, *, environment, output, max_seconds=1000,
             except Exception:
                 failed = True
         for lane, directory, owner, path, _ in running:
+            replaying = time.monotonic()
+            diagnostic(lane, 'replay-start', replaying, cleanup=True)
             try:
                 if not _replay_and_check(path, lane, output):
                     failed = True
                     output.write(f'lane {lane.name} failed or result evidence incomplete\n'.encode())
             except BaseException as error:
                 failed = True
-                if isinstance(error, (KeyboardInterrupt, SystemExit)):
+                if interrupted is None and isinstance(error, (KeyboardInterrupt, SystemExit)):
                     interrupted = error
                 output.write(f'lane {lane.name} log replay failed: {type(error).__name__}\n'.encode())
             finally:
+                diagnostic(lane, 'replay-end', replaying, cleanup=True)
+                cleaning = time.monotonic()
+                diagnostic(lane, 'private-cleanup-start', cleaning, cleanup=True)
                 try:
                     owner.cleanup_private_directory(directory)
                 except BaseException as error:
                     failed = True
-                    if isinstance(error, (KeyboardInterrupt, SystemExit)):
+                    if interrupted is None and isinstance(error, (KeyboardInterrupt, SystemExit)):
                         interrupted = error
                     output.write(f'lane {lane.name} private cleanup failed: {type(error).__name__}\n'.encode())
-        output.flush()
+                finally:
+                    diagnostic(lane, 'private-cleanup-end', cleaning, cleanup=True)
+        try:
+            output.flush()
+        except BaseException as error:
+            failed = True
+            if interrupted is None:
+                interrupted = error
     if interrupted is not None:
         raise interrupted
     return int(failed or time.monotonic() > deadline)
@@ -234,13 +297,22 @@ def _write_scripts(directory, python, token):
     commands = [(gate, str(ROOT / 'tools' / script), mode)
                 for gate, script, mode in OFFLINE_TESTS]
     offline.write_text(
-        'import json,subprocess,sys\n'
-        f'commands={commands!r}\ntoken={token!r}\nfailed=False\n'
+        'import json,subprocess,sys,time\n'
+        f'commands={commands!r}\ntoken={token!r}\nfailed=False\norigin=time.monotonic()\n'
+        'def timing(gate,phase,started):\n'
+        ' try:\n'
+        '  now=time.monotonic()\n'
+        f'  print({TIMING_PREFIX!r}+json.dumps(dict(token=token,lane="offline",gate=gate,phase=phase,monotonic_seconds=now,elapsed_seconds=max(0.0,now-started),lane_elapsed_seconds=max(0.0,now-origin)),allow_nan=False),flush=True)\n'
+        ' except Exception:\n'
+        '  pass\n'
         'for gate,script,mode in commands:\n'
+        ' started=time.monotonic()\n'
+        ' timing(gate,"start",started)\n'
         ' try:\n'
         '  status=subprocess.run([sys.executable,script,*([mode] if mode else [])],check=False).returncode\n'
         ' except Exception:\n'
         '  status=-1\n'
+        ' timing(gate,"end",started)\n'
         f' print({PREFIX!r}+json.dumps(dict(token=token,gate=gate,status=status)),flush=True)\n'
         ' failed=failed or status!=0\n'
         'raise SystemExit(int(failed))\n', encoding='utf-8')
@@ -248,13 +320,26 @@ def _write_scripts(directory, python, token):
     pg = _quote_ps(ROOT / 'tools/native_store_ci_postgres.ps1')
     temporal = _quote_ps(ROOT / 'tools/native_temporal_ci_server.ps1')
     lines = ["$ErrorActionPreference = 'Stop'", '$failed = $false',
+             '$laneClock = [Diagnostics.Stopwatch]::StartNew()',
+             'function Write-Timing($gate, $phase, $clock) {',
+             '  $savedExit = $global:LASTEXITCODE',
+             '  try {',
+             '    $now = [double][Diagnostics.Stopwatch]::GetTimestamp() / [double][Diagnostics.Stopwatch]::Frequency',
+             f"    $record = @{{token={_quote_ps(token)};lane='fixture';gate=$gate;phase=$phase;monotonic_seconds=$now;elapsed_seconds=[double]$clock.Elapsed.TotalSeconds;lane_elapsed_seconds=[double]$laneClock.Elapsed.TotalSeconds}}",
+             f"    [Console]::Out.WriteLine('{TIMING_PREFIX}' + ($record | ConvertTo-Json -Compress))",
+             '    [Console]::Out.Flush()',
+             '  } catch { } finally { $global:LASTEXITCODE = $savedExit }',
+             '}',
              'function Invoke-Gate($gate, [scriptblock]$body) {',
              '  $status = -1',
              '  $script:gateSucceeded = $false',
+             '  $gateClock = [Diagnostics.Stopwatch]::StartNew()',
+             "  Write-Timing $gate 'start' $gateClock",
              # Capturing native output can wait for an inherited daemon handle
              # even with its normal stdout redirected. Outer stdout is a file.
              '  try { $global:LASTEXITCODE = 0; & $body; $status = $LASTEXITCODE }',
              '  catch { [Console]::Out.WriteLine($_); $status = -1 }',
+             "  Write-Timing $gate 'end' $gateClock",
              f'  [Console]::Out.WriteLine(\'{PREFIX}\' + (@{{token={_quote_ps(token)};gate=$gate;status=[int]$status}} | ConvertTo-Json -Compress))',
              '  $script:gateSucceeded = ($status -eq 0)',
              '  if ($status -ne 0) { $script:failed = $true }',
