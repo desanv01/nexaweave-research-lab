@@ -160,6 +160,15 @@ def _run_lanes(lanes, *, environment, output, max_seconds=1000,
     cleanup_messages = []
     lane_origins = {}
     observed_exits = set()
+    def cleanup_report(message):
+        nonlocal interrupted, failed
+        try:
+            output.write(message.encode())
+        except BaseException as error:
+            failed = True
+            if interrupted is None and isinstance(error, (KeyboardInterrupt, SystemExit)):
+                interrupted = error
+
     def diagnostic(lane, phase, started, *, cleanup=False):
         nonlocal interrupted, failed
         control = _timing(output, token=lane.token, lane=lane.name, gate='controller',
@@ -248,22 +257,19 @@ def _run_lanes(lanes, *, environment, output, max_seconds=1000,
                     cleanup_messages.append(f'lane {lane.name} log close failed: {type(error).__name__}\n')
         # Diagnostics cannot interrupt ownership closure of the other lane.
         for message in cleanup_messages:
-            try:
-                output.write(message.encode())
-            except Exception:
-                failed = True
+            cleanup_report(message)
         for lane, directory, owner, path, _ in running:
             replaying = time.monotonic()
             diagnostic(lane, 'replay-start', replaying, cleanup=True)
             try:
                 if not _replay_and_check(path, lane, output):
                     failed = True
-                    output.write(f'lane {lane.name} failed or result evidence incomplete\n'.encode())
+                    cleanup_report(f'lane {lane.name} failed or result evidence incomplete\n')
             except BaseException as error:
                 failed = True
                 if interrupted is None and isinstance(error, (KeyboardInterrupt, SystemExit)):
                     interrupted = error
-                output.write(f'lane {lane.name} log replay failed: {type(error).__name__}\n'.encode())
+                cleanup_report(f'lane {lane.name} log replay failed: {type(error).__name__}\n')
             finally:
                 diagnostic(lane, 'replay-end', replaying, cleanup=True)
                 cleaning = time.monotonic()
@@ -274,7 +280,7 @@ def _run_lanes(lanes, *, environment, output, max_seconds=1000,
                     failed = True
                     if interrupted is None and isinstance(error, (KeyboardInterrupt, SystemExit)):
                         interrupted = error
-                    output.write(f'lane {lane.name} private cleanup failed: {type(error).__name__}\n'.encode())
+                    cleanup_report(f'lane {lane.name} private cleanup failed: {type(error).__name__}\n')
                 finally:
                     diagnostic(lane, 'private-cleanup-end', cleaning, cleanup=True)
         try:

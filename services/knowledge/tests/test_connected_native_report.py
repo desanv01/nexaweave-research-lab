@@ -81,20 +81,6 @@ def factory():
 @pytest.mark.asyncio
 @pytest.mark.parametrize('slow_authorization', [False, True], ids=['ordinary', 'cooperative-heartbeat'])
 async def test_actual_native_receipt_to_inherited_report_preserves_inputs_and_disabled_reads(factory, tmp_path, monkeypatch, slow_authorization):
-    import threading
-    # Main private fixture observer: preserve the concrete refusal while keeping
-    # fixed product errors, journal claims and every acceptance assertion intact.
-    diagnostic_errors = []
-    def report_exception_trace(frame, event, arg):
-        if event == 'exception' and Path(frame.f_code.co_filename).name in (
-                'durable_report_host.py', 'report_store.py', 'report_process.py'):
-            if len(diagnostic_errors) < 100:
-                diagnostic_errors.append(dict(file=Path(frame.f_code.co_filename).name,
-                    function=frame.f_code.co_name, line=frame.f_lineno,
-                    type=arg[0].__name__, code=getattr(arg[1], 'code', None), text=str(arg[1])[:512]))
-        return report_exception_trace
-    previous_trace = threading.gettrace()
-    threading.settrace(report_exception_trace)
     from test_connected_preparation_native_launch import RichConnectedChat
     from test_preparation_store import real_host, request, reference as prep_reference
     from test_native_launch_store import migrate_all, launch_host, declaration
@@ -273,8 +259,6 @@ async def test_actual_native_receipt_to_inherited_report_preserves_inputs_and_di
                 await asyncio.to_thread(reports.read,foreign)
             assert report_log.read_bytes()==before_calls
     finally:
-        threading.settrace(previous_trace)
-        print(json.dumps(dict(main_private_report_refusal_diagnostics=diagnostic_errors), ensure_ascii=True), flush=True)
         for owner in native_owners:
             assert await asyncio.to_thread(owner.close,20)
         if native_row is not None:

@@ -74,7 +74,7 @@ def child(mode: str, journey: bool = False) -> int:
             print('connected_followup_fixture_missing', file=sys.stderr)
             return 1
         result = int(pytest.main([
-            '-q', '--rootdir', str(ROOT), '-p', 'pytest_asyncio.plugin',
+            '-q', '--durations=0', '--rootdir', str(ROOT), '-p', 'pytest_asyncio.plugin',
             '-o', 'asyncio_default_fixture_loop_scope=function', '-o', 'markers=' + MARKERS,
             '-m', selection, *map(str, targets),
         ], plugins=[accounting]))

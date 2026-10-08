@@ -191,6 +191,73 @@ def test_controller_diagnostic_sink_failure_does_not_skip_either_tree_cleanup(tm
     assert output.count(ci.PREFIX.encode()) == 2
 
 
+@pytest.mark.parametrize('target', ('replay', 'cleanup-report', 'private-cleanup-report'))
+@pytest.mark.parametrize('control_type', (None, KeyboardInterrupt, SystemExit))
+def test_reporting_sink_failure_still_closes_both_real_trees_and_directories(tmp_path, target, control_type):
+    first, _, first_child = local_lane(tmp_path, 'first', descendant=True)
+    second, _, second_child = local_lane(tmp_path, 'second', descendant=True)
+    owners = []
+    cleaned = []
+    injected = []
+    control = control_type(23) if control_type is not None else None
+    owner_type = ci._owner_type()
+
+    class ReportingOwner(owner_type):
+        def stop(self, *args, **kwargs):
+            result = super().stop(*args, **kwargs)
+            if self is owners[0] and target == 'cleanup-report':
+                raise RuntimeError('report after actual tree closure')
+            return result
+
+        def cleanup_private_directory(self, directory):
+            result = super().cleanup_private_directory(directory)
+            cleaned.append(self)
+            if self is owners[0] and target == 'private-cleanup-report':
+                raise RuntimeError('report after actual directory cleanup')
+            return result
+
+    def factory():
+        owner = ReportingOwner()
+        owners.append(owner)
+        return owner
+
+    class ReportingFailure(io.BytesIO):
+        def write(self, value):
+            selected = (
+                target == 'replay' and value.startswith(b'\n=== native CI lane first')
+                or target == 'cleanup-report' and value.startswith(b'lane first cleanup failed:')
+                or target == 'private-cleanup-report' and value.startswith(b'lane first private cleanup failed:')
+            )
+            if selected and not injected:
+                injected.append(value)
+                if control is not None:
+                    raise control
+                raise BrokenPipeError('initial reporting failure')
+            if injected and not value.startswith(ci.TIMING_PREFIX.encode()):
+                # The same unavailable sink also rejects the error report and
+                # second lane's replay. Neither may skip its private cleanup.
+                raise BrokenPipeError('persistent reporting failure')
+            return super().write(value)
+
+    sink = ReportingFailure()
+    if control is None:
+        assert ci._run_lanes((first, second), environment=os.environ, output=sink,
+                             max_seconds=25, owner_factory=factory) == 1
+    else:
+        with pytest.raises(control_type) as raised:
+            ci._run_lanes((first, second), environment=os.environ, output=sink,
+                          max_seconds=25, owner_factory=factory)
+        assert raised.value is control
+        if control_type is SystemExit:
+            assert raised.value.code == 23
+    assert len(injected) == 1 and len(owners) == 2
+    assert first_child.is_file() and second_child.is_file()
+    assert cleaned == owners
+    assert all(owner.closed and owner.tree_empty for owner in owners)
+    assert all(owner.process.poll() is not None for owner in owners)
+    assert all(not Path(owner._directory_name).exists() for owner in owners)
+
+
 @pytest.mark.parametrize('control_type', (KeyboardInterrupt, SystemExit))
 @pytest.mark.parametrize('phase', ('launch-end', 'ownership-close-start', 'replay-start', 'private-cleanup-start'))
 def test_timing_control_propagates_exact_instance_after_all_owned_cleanup(tmp_path, control_type, phase):
