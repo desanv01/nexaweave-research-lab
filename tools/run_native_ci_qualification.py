@@ -250,24 +250,27 @@ def _write_scripts(directory, python, token):
     lines = ["$ErrorActionPreference = 'Stop'", '$failed = $false',
              'function Invoke-Gate($gate, [scriptblock]$body) {',
              '  $status = -1',
-             '  try { $global:LASTEXITCODE = 0; & $body | ForEach-Object { [Console]::Out.WriteLine($_) }; $status = $LASTEXITCODE }',
+             '  $script:gateSucceeded = $false',
+             # Capturing native output can wait for an inherited daemon handle
+             # even with its normal stdout redirected. Outer stdout is a file.
+             '  try { $global:LASTEXITCODE = 0; & $body; $status = $LASTEXITCODE }',
              '  catch { [Console]::Out.WriteLine($_); $status = -1 }',
              f'  [Console]::Out.WriteLine(\'{PREFIX}\' + (@{{token={_quote_ps(token)};gate=$gate;status=[int]$status}} | ConvertTo-Json -Compress))',
+             '  $script:gateSucceeded = ($status -eq 0)',
              '  if ($status -ne 0) { $script:failed = $true }',
-             '  return ($status -eq 0)',
              '}',
              'try {',
-             f"  $pgReady = Invoke-Gate 'postgres-start' {{ & {pg} -Action start }}",
-             '  if ($pgReady -ne $true) { throw \'PostgreSQL prerequisite failed\' }',
-             f"  $null = Invoke-Gate 'native-store' {{ & {_quote_ps(python)} {_quote_ps(ROOT / 'tools/run_native_store_tests.py')} --postgres }}",
-             f"  $temporalReady = Invoke-Gate 'temporal-start' {{ & {temporal} -Action start }}",
-             '  if ($temporalReady -ne $true) { throw \'Temporal prerequisite failed\' }']
+             f"  Invoke-Gate 'postgres-start' {{ & {pg} -Action start }}",
+             '  if (-not $script:gateSucceeded) { throw \'PostgreSQL prerequisite failed\' }',
+             f"  Invoke-Gate 'native-store' {{ & {_quote_ps(python)} {_quote_ps(ROOT / 'tools/run_native_store_tests.py')} --postgres }}",
+             f"  Invoke-Gate 'temporal-start' {{ & {temporal} -Action start }}",
+             '  if (-not $script:gateSucceeded) { throw \'Temporal prerequisite failed\' }']
     # Native store then all nine original final-shell modes: no selection changes.
     for gate, script, mode in FIXTURE_TESTS[1:]:
-        lines.append(f"  $null = Invoke-Gate {_quote_ps(gate)} {{ & {_quote_ps(python)} {_quote_ps(ROOT / 'tools' / script)} {mode} }}")
+        lines.append(f"  Invoke-Gate {_quote_ps(gate)} {{ & {_quote_ps(python)} {_quote_ps(ROOT / 'tools' / script)} {mode} }}")
     lines.extend(['} catch { Write-Output $_; $failed = $true } finally {',
-                  f"  $null = Invoke-Gate 'temporal-stop' {{ & {temporal} -Action stop }}",
-                  f"  $null = Invoke-Gate 'postgres-stop' {{ & {pg} -Action stop }}",
+                  f"  Invoke-Gate 'temporal-stop' {{ & {temporal} -Action stop }}",
+                  f"  Invoke-Gate 'postgres-stop' {{ & {pg} -Action stop }}",
                   '}', 'if ($failed) { exit 1 }', 'exit 0'])
     fixture.write_text('\n'.join(lines) + '\n', encoding='utf-8')
     return (

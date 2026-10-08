@@ -53,9 +53,10 @@ def local_lane(tmp_path, name, *, status=0, marker=True, wait=False, descendant=
     return ci.Lane(name, (sys.executable, str(script)), (name,), token), ready, child_ready
 
 
-def run_owned(lanes, *, cancel=None, max_seconds=25, environment=None, sanitize_offline=False):
+def run_owned(lanes, *, cancel=None, max_seconds=25, environment=None,
+              sanitize_offline=False, owner_type=None, exit_codes=None):
     owners = []
-    owner_type = ci._owner_type()
+    owner_type = owner_type or ci._owner_type()
     class RecordingOwner(owner_type):
         def start(self, popen, args, **kwargs):
             self.requested_creationflags = kwargs.get('creationflags', 0)
@@ -73,6 +74,10 @@ def run_owned(lanes, *, cancel=None, max_seconds=25, environment=None, sanitize_
     assert all(owner.process.poll() is not None for owner in owners)
     assert all(owner.requested_creationflags & subprocess.CREATE_NO_WINDOW for owner in owners)
     assert all(not Path(owner._directory_name).exists() for owner in owners)
+    if exit_codes is not None:
+        # Actual recorded root exits, independently of marker-based rejection.
+        exit_codes.update({lane.name: owner.process.returncode
+                           for lane, owner in zip(lanes, owners)})
     return status, output.getvalue()
 
 
@@ -189,3 +194,129 @@ def test_real_offline_child_isolates_profile_and_secrets_but_keeps_runtime_selec
     status, output = run_owned(tuple(lanes), environment=environment, sanitize_offline=True)
     assert status == 0
     assert b'not-a-real-key' not in output and b'private-fixture-sentinel' not in output
+
+
+@pytest.mark.parametrize(('native_status', 'stop_status'), ((0, 0), (7, 0), (0, 7)))
+def test_actual_generated_nested_helper_returns_with_extra_handle_and_keeps_failure(
+        tmp_path, monkeypatch, native_status, stop_status):
+    # Capture the actual stdlib ownership class before replacing only the trusted
+    # generated plan's ROOT. No production CLI injection or hosted/DB bypass.
+    owner_type = ci._owner_type()
+    root = tmp_path / 'synthetic-root'
+    tools = root / 'tools'
+    tools.mkdir(parents=True)
+    plan = tmp_path / 'plan'
+    plan.mkdir()
+    ready = tmp_path / 'daemon-ready'
+    stop = tmp_path / 'daemon-stop'
+    stopped = tmp_path / 'daemon-stopped'
+    server_log = tmp_path / 'server.log'
+    launcher = tools / 'launcher.py'
+    control = tools / 'service-control.py'
+    child_code = (
+        'import os,time\nfrom pathlib import Path\n'
+        f'Path({str(ready)!r}).write_text(str(os.getpid()))\n'
+        'print("private daemon log",flush=True)\n'
+        'deadline=time.monotonic()+30\n'
+        f'while not Path({str(stop)!r}).exists():\n'
+        ' if time.monotonic()>=deadline: raise RuntimeError("stop signal missing")\n'
+        ' time.sleep(0.01)\n'
+        f'Path({str(stopped)!r}).write_text("ordinary stop observed")\n'
+    )
+    launcher.write_text(
+        'import ctypes,subprocess,sys,time\nfrom pathlib import Path\n'
+        'api=ctypes.WinDLL("kernel32",use_last_error=True)\n'
+        'api.GetStdHandle.argtypes=[ctypes.c_uint32]\n'
+        'api.GetStdHandle.restype=ctypes.c_void_p\n'
+        'api.SetHandleInformation.argtypes=[ctypes.c_void_p,ctypes.c_uint32,ctypes.c_uint32]\n'
+        'api.SetHandleInformation.restype=ctypes.c_int\n'
+        # Retain the extra original stdout handle, although Popen replaces the
+        # child's *standard* stdout/stderr with a separate private logfile.
+        'handle=api.GetStdHandle(0xfffffff5)\n'
+        'assert api.SetHandleInformation(handle,1,1)\n'
+        f'with open({str(server_log)!r},"wb") as log:\n'
+        f' subprocess.Popen([sys.executable,"-c",{child_code!r}],stdin=subprocess.DEVNULL,\n'
+        '  stdout=log,stderr=log,close_fds=False,creationflags=subprocess.CREATE_NO_WINDOW)\n'
+        'deadline=time.monotonic()+3\n'
+        f'while not Path({str(ready)!r}).exists():\n'
+        ' if time.monotonic()>=deadline: raise RuntimeError("daemon not ready")\n'
+        ' time.sleep(0.01)\n'
+        'print("native launcher started; normal output redirected",flush=True)\n',
+        encoding='utf-8')
+    control.write_text(
+        'import sys,time\nfrom pathlib import Path\n'
+        'service,action=sys.argv[1:]\n'
+        'print("nested helper native output "+service+" "+action,flush=True)\n'
+        'if service=="postgres" and action=="stop":\n'
+        f' Path({str(stop)!r}).write_text("stop")\n'
+        ' deadline=time.monotonic()+3\n'
+        f' while not Path({str(stopped)!r}).exists():\n'
+        '  if time.monotonic()>=deadline: raise RuntimeError("ordinary stop unobserved")\n'
+        '  time.sleep(0.01)\n'
+        f'raise SystemExit({stop_status} if service=="temporal" and action=="stop" else 0)\n',
+        encoding='utf-8')
+    pg_helper = tools / 'native_store_ci_postgres.ps1'
+    temporal_helper = tools / 'native_temporal_ci_server.ps1'
+    python = ci._quote_ps(sys.executable)
+    pg_helper.write_text(
+        "param([ValidateSet('start','stop')][string]$Action)\n"
+        "if ($Action -eq 'start') {\n"
+        f'  & {python} {ci._quote_ps(launcher)}\n'
+        '  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n'
+        '  [Console]::Out.WriteLine("nested PG helper returned with daemon alive")\n'
+        '} else {\n'
+        f"  & {python} {ci._quote_ps(control)} postgres stop\n"
+        '  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n'
+        '}\nexit 0\n', encoding='utf-8')
+    temporal_helper.write_text(
+        "param([ValidateSet('start','stop')][string]$Action)\n"
+        f'& {python} {ci._quote_ps(control)} temporal $Action\n'
+        'exit $LASTEXITCODE\n', encoding='utf-8')
+    live_check = (
+        'import ctypes\n'
+        'api=ctypes.WinDLL("kernel32",use_last_error=True)\n'
+        'api.OpenProcess.argtypes=[ctypes.c_uint32,ctypes.c_int,ctypes.c_uint32]\n'
+        'api.OpenProcess.restype=ctypes.c_void_p\n'
+        'api.WaitForSingleObject.argtypes=[ctypes.c_void_p,ctypes.c_uint32]\n'
+        'api.WaitForSingleObject.restype=ctypes.c_uint32\n'
+        'api.CloseHandle.argtypes=[ctypes.c_void_p]\n'
+        f'pid=int(Path({str(ready)!r}).read_text())\n'
+        'handle=api.OpenProcess(0x00100000,False,pid)\n'
+        'assert handle\n'
+        'try: assert api.WaitForSingleObject(handle,0)==258\n'
+        'finally: assert api.CloseHandle(handle)\n'
+        'print("next native gate observed daemon alive",flush=True)\n'
+    )
+    scripts = {script for _, script, _ in (*ci.OFFLINE_TESTS, *ci.FIXTURE_TESTS)}
+    for name in scripts:
+        code = 'import sys\nfrom pathlib import Path\nprint("runner output "+Path(__file__).name+" "+str(sys.argv[1:]),flush=True)\n'
+        if name == 'run_native_store_tests.py':
+            code += live_check + f'raise SystemExit({native_status})\n'
+        (tools / name).write_text(code, encoding='utf-8')
+    monkeypatch.setattr(ci, 'ROOT', root)
+    lanes = ci._write_scripts(plan, Path(sys.executable), 'generated-regression-token')
+    exit_codes = {}
+    status, output = run_owned(lanes, owner_type=owner_type, exit_codes=exit_codes)
+    expected_fixture_exit = int(native_status != 0 or stop_status != 0)
+    assert exit_codes == {'offline': 0, 'fixture': expected_fixture_exit}
+    assert status == expected_fixture_exit
+    assert b'whole deadline exhausted' not in output
+    assert b'native launcher started; normal output redirected' in output
+    assert b'nested PG helper returned with daemon alive' in output
+    assert b'next native gate observed daemon alive' in output
+    assert b'nested helper native output temporal stop' in output
+    assert b'nested helper native output postgres stop' in output
+    assert stopped.read_text() == 'ordinary stop observed'
+    assert b'private daemon log' in server_log.read_bytes()
+    results = [json.loads(line[len(ci.PREFIX):]) for line in output.decode().splitlines()
+               if line.startswith(ci.PREFIX)]
+    expected = [gate for lane in lanes for gate in lane.expected]
+    assert [row['gate'] for row in results] == expected
+    assert len(results) == 27  # every offline13 and fixture14 result, once
+    statuses = {row['gate']: row['status'] for row in results}
+    assert statuses['postgres-start'] == 0 and statuses['temporal-start'] == 0
+    assert statuses['native-store'] == native_status
+    assert statuses['temporal-stop'] == stop_status and statuses['postgres-stop'] == 0
+    assert all(statuses[gate] == 0 for gate in lanes[0].expected)
+    assert all(statuses[gate] == 0 for gate in lanes[1].expected
+               if gate not in ('native-store', 'temporal-stop'))
