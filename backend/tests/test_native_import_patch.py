@@ -1,5 +1,8 @@
 """Synthetic patch wiring; actual locked OASIS/native proof is Main-owned."""
 import builtins
+import ast
+import importlib
+from importlib import metadata
 from types import ModuleType, SimpleNamespace
 
 import pytest
@@ -10,6 +13,9 @@ from tools import apply_native_import_patch as patch
 SOURCE = b'''# upstream license retained
 import torch
 from sentence_transformers import SentenceTransformer
+from .process_recsys_posts import (generate_post_vector,
+                                   generate_post_vector_openai)
+from .typing import ActionType, RecsysType
 device = "cpu"
 def rec_sys_random(posts):
     return posts
@@ -24,12 +30,24 @@ def load_model(model_name):
         raise ValueError("unknown model")
     except Exception as error:
         raise Exception("Failed to load model") from error
+def rec_sys_personalized_twh(corpus, twhin_model, twhin_tokenizer, use_openai_embedding):
+    if use_openai_embedding:
+            all_post_vector_list = generate_post_vector_openai(corpus,
+                                                               batch_size=1000)
+    else:
+            all_post_vector_list = generate_post_vector(twhin_model,
+                                                        twhin_tokenizer,
+                                                        corpus,
+                                                        batch_size=1000)
+    return all_post_vector_list
 '''
 
 
 @pytest.fixture
 def fingerprint(monkeypatch):
     monkeypatch.setattr(patch, 'BEFORE_SHA256', patch.digest(SOURCE))
+    monkeypatch.setattr(patch, 'SENTENCE_SHA256', patch.digest(patch.transform_sentence_source(SOURCE)))
+    monkeypatch.setattr(patch, 'AFTER_SHA256', patch.digest(patch.transform_source(SOURCE)))
 
 
 def installed(tmp_path):
@@ -48,6 +66,8 @@ def namespace(monkeypatch, model):
         if name == 'sentence_transformers':
             calls.append(name)
             return SimpleNamespace(SentenceTransformer=model)
+        if name == 'typing' and args and args[-1] == 1:
+            return SimpleNamespace(ActionType=object(), RecsysType=object())
         return original_import(name, *args, **kwargs)
     monkeypatch.setattr(builtins, '__import__', controlled_import)
     result = {'__name__': 'synthetic_recsys'}
@@ -148,7 +168,10 @@ def test_pinned_before_after_idempotent_and_exact_other_source(fingerprint, tmp_
     after = patch.transform_source(SOURCE)
     assert patch.classify(SOURCE)[0] == 'before'
     assert patch.classify(after)[0] == 'after'
-    unchanged = after.decode().replace(patch.HELPER, '').replace(patch.LAZY_CALL, patch.CALL)
+    unchanged = after.decode().replace(patch.COMBINED_HELPER, '').replace(patch.LAZY_CALL, patch.CALL)
+    unchanged = unchanged.replace(patch.VECTOR_ANCHOR, patch.VECTOR_IMPORT + patch.VECTOR_ANCHOR)
+    for before_call, after_call in patch.VECTOR_CALLS:
+        unchanged = unchanged.replace(after_call, before_call)
     unchanged = unchanged.replace('import torch\n', 'import torch\n' + patch.EAGER)
     assert unchanged.encode() == SOURCE  # All algorithms/license/imports otherwise exact.
     with pytest.raises(patch.PatchRefused):
@@ -160,6 +183,84 @@ def test_pinned_before_after_idempotent_and_exact_other_source(fingerprint, tmp_
     assert patch.patch_target(target, tmp_path, apply=True)['status'] == 'verified'
     assert patch.patch_target(target, tmp_path, apply=False)['status'] == 'verified'
     assert patch.classify(SOURCE.replace(b'\n', b'\r\n'))[1] == SOURCE
+
+
+def test_sentence_only_patch_requires_upgrade(fingerprint, tmp_path):
+    target = installed(tmp_path)
+    sentence = patch.transform_sentence_source(SOURCE)
+    target.write_bytes(sentence)
+    assert patch.classify(sentence)[0] == 'sentence'
+    with pytest.raises(patch.PatchRefused):
+        patch.patch_target(target, tmp_path, apply=False)
+    assert target.read_bytes() == sentence
+    assert patch.patch_target(target, tmp_path, apply=True)['status'] == 'applied'
+    assert target.read_bytes() == patch.transform_source(SOURCE)
+    assert patch.patch_target(target, tmp_path, apply=True)['status'] == 'verified'
+
+
+def test_combined_fingerprint_cannot_be_overridden_by_cached_shape(fingerprint, tmp_path, monkeypatch):
+    target = installed(tmp_path)
+    target.write_bytes(patch.transform_source(SOURCE))
+    before = target.read_bytes()
+    monkeypatch.setattr(patch, 'AFTER_SHA256', '0' * 64)
+    with pytest.raises(patch.PatchRefused):
+        patch.patch_target(target, tmp_path, apply=True)
+    assert target.read_bytes() == before
+
+
+def test_twh_arguments_and_other_body_ast_preserved():
+    after = patch.transform_source(SOURCE).decode()
+    for before_call, after_call in patch.VECTOR_CALLS:
+        after = after.replace(after_call, before_call)
+    before_tree, after_tree = ast.parse(SOURCE), ast.parse(after)
+    original = next(n for n in before_tree.body if isinstance(n, ast.FunctionDef) and n.name == 'rec_sys_personalized_twh')
+    restored = next(n for n in after_tree.body if isinstance(n, ast.FunctionDef) and n.name == original.name)
+    assert ast.dump(original, include_attributes=False) == ast.dump(restored, include_attributes=False)
+
+
+@pytest.mark.parametrize('first', ['named', 'star'])
+def test_actual_vector_functions_exports_dir_and_injection(monkeypatch, first):
+    # Optional dependency absence in generic unit environments is explicit.
+    # Main's locked native targeted run must exercise this case, not count skip.
+    try:
+        dist = metadata.distribution('camel-oasis')
+    except metadata.PackageNotFoundError:
+        pytest.skip('actual locked OASIS required for real-function witness')
+    assert dist.version == patch.VERSION
+    raw = dist.locate_file(patch.TARGET).read_bytes()
+    _, _, combined = patch.classify(raw)
+    module = ModuleType('oasis.social_platform.recsys_witness')
+    module.__package__ = 'oasis.social_platform'
+    exec(combined, module.__dict__)
+    assert {'generate_post_vector', 'generate_post_vector_openai'} <= set(dir(module))
+    original_import = builtins.__import__
+    def witness_import(name, *args, **kwargs):
+        if name == 'actual_recsys_witness':
+            return module
+        return original_import(name, *args, **kwargs)
+    monkeypatch.setattr(builtins, '__import__', witness_import)
+    named, exports = {}, {}
+    if first == 'star':
+        exec('from actual_recsys_witness import *', exports)
+    exec('from actual_recsys_witness import generate_post_vector, generate_post_vector_openai', named)
+    if first == 'named':
+        exec('from actual_recsys_witness import *', exports)
+    vectors = importlib.import_module('oasis.social_platform.process_recsys_posts')
+    for name in ('generate_post_vector', 'generate_post_vector_openai'):
+        assert exports[name] is getattr(vectors, name)
+        assert named[name] is getattr(vectors, name)
+        assert getattr(module, name) is getattr(vectors, name)
+    for value in (None, 17, RuntimeError('identity witness')):
+        module.generate_post_vector_openai = value
+        del module.generate_post_vector
+        assert module._nexaweave_vector_function('generate_post_vector') is vectors.generate_post_vector
+        assert module._nexaweave_vector_function('generate_post_vector_openai') is value
+    with pytest.raises((ValueError, RuntimeError)) as direct:
+        vectors.generate_post_vector(None, None, [], batch_size=1)
+    with pytest.raises(type(direct.value)) as delegated:
+        module.generate_post_vector(None, None, [], batch_size=1)
+    assert direct.value.args == delegated.value.args == ('torch.cat(): expected a non-empty list of Tensors',)
+    # NEVER invoke OpenAI vector callable or construct weights/providers.
 
 
 def test_bad_fingerprint_and_changed_after_leave_bytes_untouched(fingerprint, tmp_path):
