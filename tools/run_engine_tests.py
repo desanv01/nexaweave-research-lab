@@ -46,6 +46,7 @@ def main() -> int:
         return child()
     with tempfile.TemporaryDirectory(prefix="nexaweave-native-engine-") as directory:
         env = _unit_environment(Path(directory))
+        env["PYTHONPATH"] += os.pathsep + str(ROOT / "backend" / "tests")
         env["PYTHONPATH"] += os.pathsep + str(ROOT / "services" / "knowledge" / "src")
         env["NEXAWEAVE_NATIVE_TEST_OFFLINE"] = "1"
         env.update(HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1", HF_HUB_DISABLE_TELEMETRY="1", DO_NOT_TRACK="1")

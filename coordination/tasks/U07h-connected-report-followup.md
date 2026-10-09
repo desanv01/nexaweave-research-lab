@@ -1,0 +1,9 @@
+# U07h grounded report follow-up
+
+Issue97 connects a completed receipt-bound report to actual inherited ReportAgent.chat with trusted server history, source/native tools and immutable per-turn outputs. Separate backend/UI source authors supply the journal, shared fifth allowance purpose, one-shot Temporal owner, isolated report copy, cold protected operations and EN/ZH/MS panel. Main owns shared route factories/workbench wiring, meaningful qualification and Git/CI/acceptance.
+
+The model prompt includes the last5 completed pairs, at most4000 characters per admitted prior message and15000 report-prefix characters; full answers and conversation exports remain separate bounded artifacts. Full conversation<=2MiB/1000 pairs; current pair content is included with external final publication proof to avoid a manifest/receipt digest cycle. Existing READY/ACK10, SDK/activity15, whole fixture120/contract600 and cleanup20 remain unchanged. Source/native references are admitted; semantic support remains not_reviewed.
+
+Admission locks the same allowance account, immutable parent and scoped history/active-turn claim in one PostgreSQL transaction. Replays recover one turn, newer history conflicts require explicit Review and unknown cleanup remains fenced. Protected older reads/history/downloads remain usable with model generation disabled, fresh source/native authorization and exact artifact hashes. The accepted parent report/evidence is byte-identical after chat.
+
+Current status: source authoring/qualification pending. Main must review stable source, actual inherited child/PGTemporal and fresh quiet headless browser behavior, then exact complete PR/push/postmerge eight-job logs before accepting this packet. Accepted U07g report evidence is reused where unchanged. Full original24+20 project, interviews/surveys and semantic/release qualification remain open.

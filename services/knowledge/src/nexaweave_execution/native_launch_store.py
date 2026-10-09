@@ -6,6 +6,7 @@ import hashlib
 import json
 import psycopg
 from psycopg.types.json import Jsonb
+from nexaweave_storage.transaction_settings import apply_runtime_settings
 from .native_launch_contracts import LaunchAuthorityError, validate_identity, validate_declaration, digest, identifier, sha
 from .native_run_contracts import NativeRunRequest, NativeRunReceipt, InvalidNativeRun
 from uuid import UUID
@@ -16,10 +17,12 @@ def transaction(factory):
     try:
         with factory() as conn:
             with conn.transaction():
-                conn.execute("SET LOCAL statement_timeout='5s'")
-                conn.execute("SET LOCAL lock_timeout='2s'")
-                conn.execute("SET LOCAL idle_in_transaction_session_timeout='10s'")
-                conn.execute('SET LOCAL search_path=pg_catalog')
+                apply_runtime_settings(conn, (
+                    "SET LOCAL statement_timeout='5s'",
+                    "SET LOCAL lock_timeout='2s'",
+                    "SET LOCAL idle_in_transaction_session_timeout='10s'",
+                    "SET LOCAL search_path=pg_catalog",
+                ))
                 yield conn
     except psycopg.Error:
         raise LaunchAuthorityError('native_launch_unavailable') from None

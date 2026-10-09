@@ -4,14 +4,79 @@ import base64
 from dataclasses import dataclass
 import hashlib
 import json
+import math
 from pathlib import Path
 import re
+import sys
+import time
 from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
 
 pytestmark = [pytest.mark.postgres, pytest.mark.connected_report_temporal]
+
+
+_fixture_phase_sink = None
+
+
+class FixturePhases:
+    """Bounded diagnostics only; no lifecycle or qualification authority."""
+    def __init__(self, suite):
+        self.suite = suite
+        self.count = 0
+        self.started = {}
+
+    def emit(self, phase, event, started, *, cleanup=False):
+        active_error = sys.exception() if cleanup else None
+        try:
+            if self.count >= 128:
+                return
+            now = time.monotonic()
+            elapsed = max(0.0, now - started)
+            if not math.isfinite(now) or not math.isfinite(elapsed) or now < 0:
+                return
+            self.count += 1
+            record = dict(
+                schema_version=1, suite=self.suite, phase=phase, event=event,
+                monotonic_seconds=now, elapsed_seconds=elapsed)
+            if _fixture_phase_sink is not None:
+                _fixture_phase_sink(record)
+            else:
+                print('NEXAWEAVE_FIXTURE_PHASE ' + json.dumps(record, allow_nan=False), flush=True)
+        except (KeyboardInterrupt, SystemExit):
+            # Called only after all original cleanup assertions have succeeded.
+            # An existing work/cleanup exception must retain its exact identity.
+            if not cleanup or active_error is None:
+                raise
+        except Exception:
+            pass
+
+    def start(self, phase):
+        try:
+            started = time.monotonic()
+            self.started[phase] = started
+            self.emit(phase, 'start', started)
+        except Exception:
+            pass
+
+    def end(self, phase):
+        try:
+            started = self.started.pop(phase, None)
+            if started is not None:
+                self.emit(phase, 'end', started)
+        except Exception:
+            pass
+
+    def observed_closed(self):
+        active_error = sys.exception()
+        try:
+            self.emit('cleanup', 'observed_closed', time.monotonic(), cleanup=True)
+        except (KeyboardInterrupt, SystemExit):
+            if active_error is None:
+                raise
+        except Exception:
+            pass
 
 
 @dataclass(frozen=True)
@@ -81,20 +146,6 @@ def factory():
 @pytest.mark.asyncio
 @pytest.mark.parametrize('slow_authorization', [False, True], ids=['ordinary', 'cooperative-heartbeat'])
 async def test_actual_native_receipt_to_inherited_report_preserves_inputs_and_disabled_reads(factory, tmp_path, monkeypatch, slow_authorization):
-    import threading
-    # Main private fixture observer: preserve the concrete refusal while keeping
-    # fixed product errors, journal claims and every acceptance assertion intact.
-    diagnostic_errors = []
-    def report_exception_trace(frame, event, arg):
-        if event == 'exception' and Path(frame.f_code.co_filename).name in (
-                'durable_report_host.py', 'report_store.py', 'report_process.py'):
-            if len(diagnostic_errors) < 100:
-                diagnostic_errors.append(dict(file=Path(frame.f_code.co_filename).name,
-                    function=frame.f_code.co_name, line=frame.f_lineno,
-                    type=arg[0].__name__, code=getattr(arg[1], 'code', None), text=str(arg[1])[:512]))
-        return report_exception_trace
-    previous_trace = threading.gettrace()
-    threading.settrace(report_exception_trace)
     from test_connected_preparation_native_launch import RichConnectedChat
     from test_preparation_store import real_host, request, reference as prep_reference
     from test_native_launch_store import migrate_all, launch_host, declaration
@@ -121,6 +172,8 @@ async def test_actual_native_receipt_to_inherited_report_preserves_inputs_and_di
                         dict(poster_type='Person', content='Final same actor E')]), ensure_ascii=False)
             return response
 
+    phases = FixturePhases('report-cooperative-heartbeat' if slow_authorization else 'report-ordinary')
+    phases.start('setup')
     monkeypatch.chdir(tmp_path)
     migrate_all(factory)
     with factory() as conn:
@@ -187,26 +240,36 @@ async def test_actual_native_receipt_to_inherited_report_preserves_inputs_and_di
         reports.generate = generate_with_slow_first_authorization
     reports.scheduler = report_temporal.scheduler_for(loop)
     try:
+        phases.end('setup')
         async with preparation.worker(), native.worker(), report_temporal.worker():
+            phases.start('preparation-plan-start')
             payload = request(retained)
             payload['options'].update(types=['Person','Organization'], max_agents=2, max_rounds=1)
             planned = await asyncio.to_thread(prep.plan, payload)
             await asyncio.to_thread(prep.start, prep_reference(planned))
             preparation_row = prep.store.get('owner', planned['operation_id'])
+            phases.end('preparation-plan-start')
+            phases.start('preparation-result')
             await asyncio.wait_for(temporal.get_workflow_handle(preparation_row.dispatch.workflow_id).result(), 60)
             ready = await asyncio.to_thread(prep.status, prep_reference(planned))
             assert ready['state']=='ready' and not ready['simulation_executed']
+            phases.end('preparation-result')
             input_root = prep.root/ready['receipt']['simulation_id']
             original_inputs = {f['name']:(input_root/f['name']).read_bytes() for f in ready['receipt']['files']}
+            phases.start('native-plan-start')
             launch = await asyncio.to_thread(native_host.plan, declaration(planned))
             await asyncio.to_thread(native_host.start, native_reference(launch))
             native_row = native_host.store.get('owner', launch['request']['run_id'])
+            phases.end('native-plan-start')
+            phases.start('native-result')
             native_receipt = await asyncio.wait_for(native.result(native_row.request, NativeWorkflowRef(**native_row.workflow)), 180)
             assert native_receipt.outcome=='completed' and len(native_owners)==1
             launch = await asyncio.to_thread(native_host.status, native_reference(launch))
             assert launch['state']=='completed' and launch['receipt']==native_receipt.to_wire()
+            phases.end('native-result')
             original_outputs = {name:(input_root/name).read_bytes() for platform in ('twitter','reddit')
                 for name in (platform+'_simulation.db', platform+'/actions.jsonl')}
+            phases.start('report-plan-start')
             declared = dict(schema_version=1, report_id=str(uuid4()), launch_id=str(native_row.run_id),
                 launch_sha256=launch['launch_sha256'], requirement='Distinguish retained source and actual observed records.',
                 output_language='en', native_windows=None)
@@ -215,6 +278,8 @@ async def test_actual_native_receipt_to_inherited_report_preserves_inputs_and_di
             reference = dict(schema_version=1, report_id=reviewed['report_id'], plan_sha256=reviewed['plan_sha256'])
             await asyncio.to_thread(reports.start, reference)
             row = reports.store.get('owner', reference['report_id'], reference['plan_sha256'])
+            phases.end('report-plan-start')
+            phases.start('report-result-proof')
             await asyncio.wait_for(temporal.get_workflow_handle(row.workflow['workflow_id']).result(), 180)
             completed = await asyncio.to_thread(reports.status, reference)
             assert completed['state']=='completed' and completed['cleanup']==dict(known=True,pending=False,owner_thread_alive=False)
@@ -247,6 +312,8 @@ async def test_actual_native_receipt_to_inherited_report_preserves_inputs_and_di
             assert ReportBudgetReceipt.from_wire(report_capacity.receipt.json_value()) == report_capacity.receipt
             calls = [json.loads(line) for line in report_log.read_text(encoding='utf-8').splitlines()]
             assert calls[-1]['closed'] and 1<=calls[-1]['calls']<=64 and any(c.get('response_format') for c in calls)
+            phases.end('report-result-proof')
+            phases.start('report-protected-reads-exports-recovery')
             report_enabled[0]=False
             before_calls=report_log.read_bytes()
             before_budget=native_host.budget.status('owner',prep.account_id)
@@ -268,15 +335,17 @@ async def test_actual_native_receipt_to_inherited_report_preserves_inputs_and_di
             assert all((input_root/name).read_bytes()==raw for name,raw in {**original_inputs,**original_outputs}.items())
             recovered=await asyncio.to_thread(reports.start,reference)
             assert recovered['receipt']==completed['receipt'] and report_log.read_bytes()==before_calls
+            phases.end('report-protected-reads-exports-recovery')
+            phases.start('foreign-report-read-refusal')
             foreign=dict(reference,report_id=str(uuid4()))
             with pytest.raises(ReportError):
                 await asyncio.to_thread(reports.read,foreign)
             assert report_log.read_bytes()==before_calls
+            phases.end('foreign-report-read-refusal')
     finally:
-        threading.settrace(previous_trace)
-        print(json.dumps(dict(main_private_report_refusal_diagnostics=diagnostic_errors), ensure_ascii=True), flush=True)
         for owner in native_owners:
             assert await asyncio.to_thread(owner.close,20)
         if native_row is not None:
             local=await native.retry_cleanup(native_row.request)
             assert not local.cleanup_pending and not local.owner_thread_alive
+        phases.observed_closed()

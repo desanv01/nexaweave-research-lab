@@ -65,6 +65,15 @@ jobs:
       - name: Qualify connected report transport and actual workbench components
         run: node --test tests/connectedReports.test.js tests/connectedReports.component.test.js tests/workbenchConnectedReports.component.test.js
         working-directory: frontend
+      - name: Qualify grounded follow-up transport and actual shared workbench
+        run: node --test tests/connectedFollowups.test.js tests/connectedFollowups.component.test.js tests/workbenchConnectedFollowups.component.test.js
+        working-directory: frontend
+      - name: Qualify verified original PDF component and owned downloads
+        run: node --test tests/source-original.component.test.js
+        working-directory: frontend
+      - name: Qualify shared persisted UI languages and keyboard selection
+        run: node --test tests/sharedLocale.component.test.js tests/workbenchSources.component.test.js
+        working-directory: frontend
       - run: npm run build
 
   knowledge-compatibility:
@@ -113,6 +122,8 @@ jobs:
         run: services/knowledge/.venv/bin/python tools/run_pdf_source_tests.py
       - name: Qualify protected retained-source HTTP and installed PG-only child
         run: services/knowledge/.venv/bin/python tools/run_source_library_tests.py
+      - name: Qualify atomic original PDFs, migration, restart and protected byte reads
+        run: services/knowledge/.venv/bin/python tools/run_source_binary_tests.py --postgres
       - name: Qualify connected source ingestion with real stores and local synthetic SDK
         run: services/knowledge/.venv/bin/python tools/run_source_ingestion_tests.py
       - name: Test database diagnostics on failure
@@ -227,6 +238,12 @@ jobs:
           version: '0.11.25'
       - name: Install inherited locked backend runtime
         run: uv sync --project backend --locked --extra dev --extra native-store --extra native-temporal --python 3.12.13
+      - name: Apply fingerprint-checked native optional import correction
+        run: |
+          backend/.venv/Scripts/python.exe tools/apply_native_import_patch.py --apply
+          if ($LASTEXITCODE -ne 0) { throw 'Native optional import correction failed' }
+          backend/.venv/Scripts/python.exe tools/apply_native_import_patch.py --check
+          if ($LASTEXITCODE -ne 0) { throw 'Native optional import fingerprint verification failed' }
       - name: Install fixed experiment child package and select explicit test runtimes
         shell: pwsh
         run: |
@@ -238,73 +255,14 @@ jobs:
           "NEXAWEAVE_EXPERIMENT_TEST_PYTHON=$experimentPython" >> $env:GITHUB_ENV
           "NEXAWEAVE_EXPERIMENT_TEST_HTTP_PYTHON=$experimentPython" >> $env:GITHUB_ENV
           "NEXAWEAVE_EXPERIMENT_TEST_BOOTSTRAP=$experimentBootstrap" >> $env:GITHUB_ENV
-      - name: Qualify durable preparation and directly affected offline generators
-        run: |
-          backend/.venv/Scripts/python.exe tools/run_preparation_tests.py --unit
-          if ($LASTEXITCODE -ne 0) { throw 'Preparation offline qualification failed' }
-      - name: Qualify connected native launch contracts and capped model boundaries
-        run: |
-          backend/.venv/Scripts/python.exe tools/run_native_launch_tests.py --unit
-          if ($LASTEXITCODE -ne 0) { throw 'Native launch offline qualification failed' }
-      - name: Qualify receipt-bound native observation contracts and safe reads
-        run: |
-          backend/.venv/Scripts/python.exe tools/run_native_observations_tests.py --unit
-          if ($LASTEXITCODE -ne 0) { throw 'Native observations offline qualification failed' }
-      - name: Qualify native seed batch and cold pre-model factory gate
-        run: |
-          backend/.venv/Scripts/python.exe tools/run_native_seed_tests.py --unit
-          if ($LASTEXITCODE -ne 0) { throw 'Native seed offline qualification failed' }
-      - name: Qualify actual native seed response, post and trace fidelity
-        run: |
-          backend/.venv/Scripts/python.exe tools/run_native_seed_tests.py --engine
-          if ($LASTEXITCODE -ne 0) { throw 'Native seed engine qualification failed' }
-      - name: Qualify connected report cold contracts and protected boundaries
-        run: |
-          backend/.venv/Scripts/python.exe tools/run_connected_report_tests.py --unit
-          if ($LASTEXITCODE -ne 0) { throw 'Connected report offline qualification failed' }
-      - name: Qualify actual inherited report child and isolated artifacts
-        run: |
-          backend/.venv/Scripts/python.exe tools/run_connected_report_tests.py --engine
-          if ($LASTEXITCODE -ne 0) { throw 'Connected report child qualification failed' }
       - name: Qualify actual owned Windows parser and knowledge process trees
         run: |
           backend/.venv/Scripts/python.exe tools/run_owned_process_tests.py
           if ($LASTEXITCODE -ne 0) { throw 'Owned Windows process qualification failed' }
-      - name: Verify native imports without credentials or downloads
-        run: backend/.venv/Scripts/python.exe tools/check_engine_imports.py
-      - name: Exercise actual native action primitives with temporary SQLite
-        run: backend/.venv/Scripts/python.exe tools/run_engine_tests.py
-      - name: Start job-local PostgreSQL with hosted binaries
-        run: ./tools/native_store_ci_postgres.ps1 -Action start
-      - name: Qualify actual prepared native engine with PostgreSQL ownership
-        run: backend/.venv/Scripts/python.exe tools/run_native_store_tests.py --postgres
-      - name: Qualify prepared native engine through Temporal and PostgreSQL
-        shell: pwsh
+      - name: Qualify all offline modes alongside one serial PostgreSQL and Temporal lane
         run: |
-          # Keep the Windows child server in this shell's lifetime; Actions can
-          # terminate child processes when the step that launched them exits.
-          try {
-            ./tools/native_temporal_ci_server.ps1 -Action start
-            if ($LASTEXITCODE -ne 0) { throw 'Temporal fixture start failed' }
-            backend/.venv/Scripts/python.exe tools/run_native_temporal_tests.py --integration
-            if ($LASTEXITCODE -ne 0) { throw 'Prepared native Temporal qualification failed' }
-            backend/.venv/Scripts/python.exe tools/run_preparation_tests.py --integration
-            if ($LASTEXITCODE -ne 0) { throw 'Durable preparation PG/Temporal qualification failed' }
-            backend/.venv/Scripts/python.exe tools/run_native_launch_tests.py --integration
-            if ($LASTEXITCODE -ne 0) { throw 'Connected native launch PG/Temporal qualification failed' }
-            backend/.venv/Scripts/python.exe tools/run_native_launch_tests.py --engine
-            if ($LASTEXITCODE -ne 0) { throw 'Generated preparation to owned native engine qualification failed' }
-            backend/.venv/Scripts/python.exe tools/run_native_observations_tests.py --integration
-            if ($LASTEXITCODE -ne 0) { throw 'Native observations PG authority qualification failed' }
-            backend/.venv/Scripts/python.exe tools/run_native_observations_tests.py --engine
-            if ($LASTEXITCODE -ne 0) { throw 'Generated native receipt-bound observations qualification failed' }
-            backend/.venv/Scripts/python.exe tools/run_native_seed_tests.py --integration
-            if ($LASTEXITCODE -ne 0) { throw 'Generated PGTemporal native seed fidelity qualification failed' }
-            backend/.venv/Scripts/python.exe tools/run_connected_report_tests.py --integration
-            if ($LASTEXITCODE -ne 0) { throw 'Connected native-receipt-to-report PGTemporal qualification failed' }
-          } finally {
-            ./tools/native_temporal_ci_server.ps1 -Action stop
-          }
+          backend/.venv/Scripts/python.exe tools/run_native_ci_qualification.py
+          if ($LASTEXITCODE -ne 0) { throw 'Owned native CI lanes failed or evidence incomplete' }
       - name: Stop only this job's Temporal fixture
         if: always()
         run: ./tools/native_temporal_ci_server.ps1 -Action stop
@@ -332,6 +290,10 @@ jobs:
         run: uv pip install --python services/knowledge/.venv/bin/python --no-deps --reinstall services/knowledge
       - name: Start disposable PostgreSQL
         run: docker compose -f infra/compose.operations-test.yml up -d --wait --wait-timeout 120
+      - name: Qualify unchanged local transaction settings and guarded batching
+        run: |
+          services/knowledge/.venv/bin/python tools/run_transaction_settings_tests.py --unit
+          services/knowledge/.venv/bin/python tools/run_transaction_settings_tests.py --postgres
       - name: Verify project revision store
         run: services/knowledge/.venv/bin/python tools/run_project_store_tests.py --postgres
       - name: Qualify DOCX source passages and fresh owned CLI

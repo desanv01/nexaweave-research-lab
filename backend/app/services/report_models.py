@@ -25,7 +25,9 @@ class BoundedReportModelFactory:
         except (ValueError, TypeError, UnicodeError):
             return False
 
-    def create(self, *, deadline, checkpoint, first_call):
+    def create(self, *, deadline, checkpoint, first_call, request_admission=None):
+        if request_admission is not None and not callable(request_admission):
+            raise ReportError('report_unavailable')
         if not self.configured() or time.monotonic() >= deadline:
             raise ReportError('model_calls_disabled')
         checkpoint()
@@ -35,7 +37,8 @@ class BoundedReportModelFactory:
                     or not callable(getattr(getattr(getattr(transport, 'chat', None), 'completions', None), 'create', None))
                     or not callable(getattr(transport, 'close', None))):
                 raise ReportError('report_unavailable')
-            return ReportModel(transport, self.model_name, self.limits, deadline, checkpoint, first_call)
+            return ReportModel(transport, self.model_name, self.limits, deadline, checkpoint, first_call,
+                               request_admission=request_admission)
         except BaseException:
             if callable(getattr(transport, 'close', None)):
                 transport.close()
@@ -43,9 +46,12 @@ class BoundedReportModelFactory:
 
 
 class RequestBoundary:
-    def __init__(self, transport, limits, deadline, checkpoint, first_call):
+    def __init__(self, transport, limits, deadline, checkpoint, first_call, request_admission=None):
+        if request_admission is not None and not callable(request_admission):
+            raise ReportError('report_unavailable')
         self.transport, self.limits, self.deadline = transport, dict(validate_limits(limits)), deadline
         self.checkpoint, self.first_call = checkpoint, first_call
+        self.request_admission = request_admission
         self.calls, self.failed = 0, False
         self.lock = threading.Lock()
         self.chat = SimpleNamespace(completions=self)
@@ -71,6 +77,19 @@ class RequestBoundary:
                     raise ReportError('result_too_large')
             except (ValueError, TypeError, UnicodeError):
                 raise ReportError('invalid_request') from None
+            # Optional owned follow-up admission is synchronous for EVERY SDK
+            # call; a failed admission fences inherited catch-and-retry loops.
+            if self.request_admission is not None:
+                try:
+                    self.request_admission(self.calls + 1)
+                    self.checkpoint()
+                    remaining = self.deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise ReportError('timeout')
+                    kwargs['timeout'] = min(15, remaining)
+                except BaseException:
+                    self.failed = True
+                    raise ReportError('report_uncertain') from None
             # Persist/acknowledge BEFORE the first possible transport request.
             if self.calls == 0:
                 self.first_call()
@@ -101,9 +120,10 @@ class RequestBoundary:
 
 class ReportModel:
     """Reuse inherited text cleanup and JSON parsing without its constructor."""
-    def __init__(self, transport, model, limits, deadline, checkpoint, first_call):
+    def __init__(self, transport, model, limits, deadline, checkpoint, first_call, request_admission=None):
         self.transport, self.model = transport, model
-        self.client = RequestBoundary(transport, limits, deadline, checkpoint, first_call)
+        self.client = RequestBoundary(transport, limits, deadline, checkpoint, first_call,
+                                      request_admission=request_admission)
 
     def _create_completion(self, **kwargs):
         from ..utils.openai_chat_compat import create_chat_completion

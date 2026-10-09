@@ -3,7 +3,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { webcrypto, createHash } from 'node:crypto'
 import { createWorkbenchClient } from '../src/api/workbench.js'
-import { prepareSource, sha256, sourcePayload, verifySourceInput, validateSourceResult, TEXT_LIMIT, DOCX_LIMIT } from '../src/api/sourceLibrary.js'
+import { prepareSource, sha256, sourcePayload, verifySourceInput, validateSourceResult, TEXT_LIMIT, DOCX_LIMIT,
+  sourceOriginalPayload, verifyOriginalPdfInput, validateSourceOriginalResult } from '../src/api/sourceLibrary.js'
 Object.defineProperty(globalThis, 'crypto', { value: webcrypto, configurable: true })
 const enc = new TextEncoder(), revision = '11111111-1111-4111-8111-111111111111', project = '22222222-2222-4222-8222-222222222222'
 const evidence = n => `33333333-3333-5333-8333-${String(n).padStart(12, '0')}`
@@ -233,6 +234,80 @@ async function pdfReceipt(payload, texts = ['中😀\n', '', '\u0085', '\uFEFF']
   const text = texts.join('\n\n'), passages = pages.filter(p => !p.empty).map(p => ({ evidence_id: fixturePageId(payload.source_revision, p), start: p.start, end: p.end, page: p.page, excerpt_sha256: p.excerpt_sha256 }))
   return { schema_version: 1, binary_retained: false, graph_ingestion_executed: false, source: { project_id: project, source_revision: payload.source_revision, source_name: payload.source_name, text_sha256: createHash('sha256').update(text).digest('hex'), byte_length: enc.encode(text).length, codepoint_length: Array.from(text).length, recorded_at: '2026-10-03T00:00:00Z' }, offset_unit: 'unicode_codepoint', passages, extraction: { format: 'pdf', input_hash_verified: true, input_sha256: payload.input_sha256, input_digest_persisted: false, blocks_persisted: false, original_document_verified: false, binary_persistently_bound: false, ocr_performed: false, page_layout: 'unknown', semantic_quality: 'unknown', coverage: ['page_text'], page_text: texts, pages, page_count: texts.length, empty_page_count: pages.filter(p => p.empty).length, declared_passage_count: passages.length } }
 }
+test('V2 original PDF codec binds exact source, digest and canonical bytes while V1 stays false', async () => {
+  const prepared = await prepareSource({ name: 'Original 猫', file: pdfFile() })
+  const request = { ...prepared.payload, schema_version: 2 }
+  assert.equal(JSON.parse(sourceOriginalPayload('sourceRetainOriginal', request)).schema_version, 2)
+  await verifyOriginalPdfInput(request)
+  const old = await pdfReceipt(request), v = { ...old, schema_version: 2, binary_retained: true,
+    binary: { contract_version: 1, project_id: project, source_revision: request.source_revision,
+      media_type: 'application/pdf', byte_length: prepared.inputBytes, sha256: request.input_sha256 },
+    extraction: { ...old.extraction, input_digest_persisted: true,
+      original_document_verified: true, binary_persistently_bound: true } }
+  await validateSourceOriginalResult('sourceRetainOriginal', v, request)
+  const metadata = { schema_version: 2, binary_retained: true, graph_ingestion_executed: false,
+    source: v.source, binary: v.binary }
+  const identity = sourceOriginalPayload('sourceOriginalMetadata', { source_revision: request.source_revision })
+  assert.deepEqual(identity, { source_revision: request.source_revision })
+  await validateSourceOriginalResult('sourceOriginalMetadata', metadata, identity)
+  const read = { ...metadata, content_base64: request.content }
+  await validateSourceOriginalResult('sourceOriginalRead', read, identity)
+  for (const altered of [{ ...read, content_base64: read.content_base64 + '=' },
+      { ...read, binary: { ...read.binary, sha256: '0'.repeat(64) } },
+      { ...read, source: { ...read.source, source_revision: project } }])
+    await assert.rejects(validateSourceOriginalResult('sourceOriginalRead', altered, identity), code('invalid_reply'))
+  await assert.rejects(validateSourceResult('sourceRetain', v, prepared.payload), code('invalid_reply'))
+})
+
+test('integrated V2 original GET routes use fixed URLs, no bodies and verified bytes', async () => {
+  const prepared = await prepareSource({ name: 'owned original', file: pdfFile() })
+  const old = await pdfReceipt(prepared.payload)
+  const metadata = { schema_version: 2, binary_retained: true, graph_ingestion_executed: false,
+    source: old.source, binary: { contract_version: 1, project_id: project,
+      source_revision: prepared.payload.source_revision, media_type: 'application/pdf',
+      byte_length: prepared.inputBytes, sha256: prepared.payload.input_sha256 } }
+  const { client, calls } = await connected(url => wrapper(url.includes('/original-metadata/')
+    ? metadata : { ...metadata, content_base64: prepared.payload.content }))
+  const identity = { source_revision: prepared.payload.source_revision }
+  assert.deepEqual(await client.sourceOriginalMetadata(identity), metadata)
+  const read = await client.sourceOriginalRead(identity)
+  assert.equal(read.content_base64, prepared.payload.content)
+  assert.deepEqual(calls.slice(1).map(call => call.url), [
+    `http://127.0.0.1:5001/api/source/original-metadata/graph_1/${identity.source_revision}`,
+    `http://127.0.0.1:5001/api/source/original/graph_1/${identity.source_revision}`])
+  for (const { url, options } of calls.slice(1)) {
+    assert.equal(options.method, 'GET'); assert.equal(options.body, undefined)
+    assert.equal(options.credentials, 'omit'); assert.equal(options.redirect, 'error')
+    assert.equal(options.cache, 'no-store'); assert.equal(options.headers.Authorization, `Bearer ${credentials.token}`)
+    assert.ok(!url.includes(credentials.token) && !url.includes(project))
+  }
+  client.disconnect()
+})
+
+test('integrated V2 retain refuses wrong input digest before fetch', async () => {
+  const prepared = await prepareSource({ name: 'owned original', file: pdfFile() })
+  const { client, calls } = await connected(() => { throw new Error('unexpected network') })
+  await assert.rejects(client.sourceRetainOriginal({ ...prepared.payload, schema_version: 2,
+    input_sha256: '0'.repeat(64) }), code('invalid_request'))
+  assert.equal(calls.length, 1)
+  client.disconnect()
+})
+
+test('integrated V2 caller abort fences late original bytes and stops the owned request', async () => {
+  let resolveFetch
+  const { client, calls } = await connected(() => new Promise(resolve => { resolveFetch = resolve }))
+  const controller = new AbortController()
+  const pending = client.sourceOriginalRead({ source_revision: revision }, { signal: controller.signal })
+  await Promise.resolve()
+  assert.equal(calls.length, 2)
+  controller.abort()
+  await assert.rejects(pending, code('cancelled'))
+  resolveFetch(wrapper({ private: 'late original bytes must not publish' }))
+  await Promise.resolve()
+  assert.equal(calls.length, 2)
+  assert.ok(!calls[1].url.includes(credentials.token))
+  client.disconnect()
+})
 test('P01 PDF preparation is immutable, literal, bounded and native-free', async () => {
   const prepared = await prepareSource({ name: '<script>中😀</script>', file: pdfFile() })
   assert.equal(prepared.payload.format, 'pdf'); assert.equal(prepared.filename, '<img onerror=x>.PDF'); assert.equal(prepared.codepoints, null)

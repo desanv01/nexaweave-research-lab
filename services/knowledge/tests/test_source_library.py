@@ -54,6 +54,24 @@ def test_pdf_child_payload_exact_byte_hash_and_schema():
             validate_payload("retain_pdf", pdf_payload(binary))
 
 
+def test_v2_original_pdf_admission_and_authority_precede_parser(monkeypatch):
+    import nexaweave_storage.pdf as parser
+    monkeypatch.setattr(parser, "extract_pdf", lambda binary: pytest.fail("parser reached"))
+    v2 = dict(pdf_payload(), schema_version=2)
+    validate_payload("retain_pdf_binary", v2)
+    validate_payload("binary_metadata", {"source_revision": v2["source_revision"]})
+    validate_payload("binary_read", {"source_revision": v2["source_revision"]})
+    with pytest.raises(ValueError):
+        validate_payload("retain_pdf_binary", dict(v2, schema_version=1))
+    with pytest.raises(ValueError):
+        validate_payload("binary_read", {"source_revision": v2["source_revision"], "path": "private"})
+    library = SourceLibrary(object(), connection_factory=lambda: pytest.fail("connection reached"))
+    monkeypatch.setattr(library, "authorize", lambda: (_ for _ in ()).throw(SourceError("source_denied")))
+    with pytest.raises(SourceError) as denied:
+        library.execute("retain_pdf_binary", v2)
+    assert denied.value.code == "source_denied"
+
+
 def test_cold_source_and_pdf_module_imports_are_native_and_sdk_free(tmp_path):
     code = r'''
 import importlib.abc,sys

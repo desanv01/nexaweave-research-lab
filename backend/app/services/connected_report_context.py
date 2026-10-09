@@ -115,6 +115,15 @@ def freeze_context(observations, read_facade, payload, *, deadline=None, tick=No
         # Keep the existing projection reader's limits and parsing. Only the
         # trusted private transport wait is clipped to the whole report clock.
         from .knowledge_read_facade import KnowledgeReadFacade
+        if isinstance(read_facade, KnowledgeReadFacade) and read_facade.has_parent_verification_session():
+            from .knowledge_transport import KnowledgeCooperativeAbort
+            try:
+                graph = read_facade.graph_data(observations.display_graph_id)
+            except KnowledgeCooperativeAbort as error:
+                raise ReportError(error.code) from None
+            if time.monotonic() >= deadline:
+                raise ReportError('timeout')
+            return validate_graph(graph, observations.display_graph_id)
         if isinstance(read_facade, KnowledgeReadFacade) and read_facade._client_factory is None:
             from .knowledge_transport import KnowledgeProcessClient, KnowledgeCooperativeAbort
             from .knowledge_reader import KnowledgeGraphReader, ReadLimits

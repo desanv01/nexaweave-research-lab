@@ -13,7 +13,13 @@ import { copyFor, safeError, workbenchCopy } from '../src/i18n/workbench.js'
 const dom = new JSDOM('<!doctype html><html><body></body></html>', { url: 'http://127.0.0.1:5173/research' })
 Object.defineProperty(globalThis, 'crypto', { value: webcrypto, configurable: true })
 for (const name of ['window', 'document', 'Element', 'HTMLElement', 'SVGElement', 'Node']) globalThis[name] = name === 'window' ? dom.window : dom.window[name]
+globalThis.localStorage = dom.window.localStorage
 const { createApp, nextTick, h } = await import('vue')
+const localeFiles = Object.fromEntries(['en', 'zh', 'ms'].map(key => [`../../../locales/${key}.json`, { default: JSON.parse(readFileSync(new URL(`../../locales/${key}.json`, import.meta.url), 'utf8')) }]))
+let localeSource = readFileSync(new URL('../src/i18n/index.js', import.meta.url), 'utf8')
+localeSource = localeSource.replace(/import languages from [^\n]+/, `const languages = ${readFileSync(new URL('../../locales/languages.json', import.meta.url), 'utf8')}`)
+localeSource = localeSource.replace(/import\.meta\.glob\([^\n]+\)/, JSON.stringify(localeFiles)).replace(/from (['"])(vue|vue-i18n)\1/g, (_m, _q, name) => `from ${JSON.stringify(import.meta.resolve(name))}`)
+const localeUrl = `data:text/javascript;base64,${Buffer.from(localeSource).toString('base64')}`, sharedLocale = await import(localeUrl)
 async function compile(path, replacements = {}) {
   const file = new URL(path, import.meta.url)
   const { descriptor } = parse(readFileSync(file, 'utf8'), { filename: file.pathname })
@@ -33,10 +39,13 @@ const preparation = await compile('../src/components/workbench/SimulationPrepara
 const nativeLaunch = await compile('../src/components/workbench/NativeLaunch.vue')
 const nativeObservations = await compile('../src/components/workbench/NativeObservations.vue')
 const connectedReports = await compile('../src/components/workbench/ConnectedReports.vue')
-const workbench = await compile('../src/views/ResearchWorkbench.vue', { '../components/workbench/EvidenceResults.vue': evidence.url, '../components/workbench/SourceLibrary.vue': sources.url, '../components/workbench/SourceIngestion.vue': ingestion.url, '../components/workbench/ExperimentComparison.vue': experiments.url, '../components/workbench/PopulationWorkbench.vue': population.url, '../components/workbench/SimulationPreparation.vue': preparation.url, '../components/workbench/NativeLaunch.vue': nativeLaunch.url, '../components/workbench/NativeObservations.vue': nativeObservations.url, '../components/workbench/ConnectedReports.vue': connectedReports.url })
+const connectedFollowup = await compile('../src/components/workbench/ConnectedFollowup.vue')
+const workbench = await compile('../src/views/ResearchWorkbench.vue', { '../i18n/index.js': localeUrl, '../components/workbench/EvidenceResults.vue': evidence.url, '../components/workbench/SourceLibrary.vue': sources.url, '../components/workbench/SourceIngestion.vue': ingestion.url, '../components/workbench/ExperimentComparison.vue': experiments.url, '../components/workbench/PopulationWorkbench.vue': population.url, '../components/workbench/SimulationPreparation.vue': preparation.url, '../components/workbench/NativeLaunch.vue': nativeLaunch.url, '../components/workbench/NativeObservations.vue': nativeObservations.url, '../components/workbench/ConnectedReports.vue': connectedReports.url, '../components/workbench/ConnectedFollowup.vue': connectedFollowup.url })
 function mount(component, props) {
+  if (component === workbench.component) sharedLocale.setUiLocale('en')
   const root = document.createElement('div'); document.body.append(root)
   const app = createApp(component, props)
+  app.use(sharedLocale.default)
   app.component('RouterLink', { props: ['to'], setup: (p, { slots }) => () => h('a', { href: p.to }, slots.default?.()) })
   app.mount(root)
   return { root, app, cleanup() { app.unmount(); root.remove() } }

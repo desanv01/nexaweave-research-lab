@@ -1,6 +1,6 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
-import { prepareSource } from '../../api/sourceLibrary.js'
+import { prepareSource, validateSourceOriginalResult } from '../../api/sourceLibrary.js'
 import { copyFor } from '../../i18n/workbench.js'
 const props = defineProps({ methods: { type: Object, required: true }, connected: Boolean, busy: Boolean, resetVersion: Number, locale: { type: String, default: 'en' } })
 const emit = defineEmits(['inspected'])
@@ -9,6 +9,8 @@ const windowData = ref(null), loadedAt = ref(''), inspected = ref(null), receipt
 const name = ref(''), draft = ref(''), inputMode = ref('paste'), selectedFile = ref(null), fileInput = ref(null)
 const prepared = ref(null), attempt = ref(null), preparing = ref(false), pending = ref(false), message = ref(''), error = ref('')
 const inspector = ref(null), excerptPanel = ref(null), activePassage = ref(null)
+const originalRevision = ref(''), originalInfo = ref(null)
+let originalUrl = null, originalAbort = null, originalOperation = null
 let generation = 0, inspectorReturnFocus = null, passageReturnFocus = null
 const disabled = computed(() => !props.connected || props.busy || preparing.value || pending.value)
 const points = computed(() => inspected.value ? Array.from(inspected.value.text) : [])
@@ -31,12 +33,25 @@ function errorText() {
 }
 function clearDraft() { name.value = ''; draft.value = ''; selectedFile.value = null; prepared.value = null; if (fileInput.value) fileInput.value.value = '' }
 function clearAll() {
+  originalAbort?.abort(); originalAbort = null
+  originalOperation = null
+  if (originalUrl) URL.revokeObjectURL(originalUrl)
+  originalUrl = null; originalRevision.value = ''; originalInfo.value = null
   generation++; clearDraft(); windowData.value = null; loadedAt.value = ''; inspected.value = null; receipt.value = null
   inputMode.value = 'paste'
   attempt.value = null; activePassage.value = null; preparing.value = false; pending.value = false; error.value = ''; message.value = ''; inspectorReturnFocus = null; passageReturnFocus = null
 }
 watch(() => [props.connected, props.resetVersion], clearAll, { flush: 'sync' })
 watch([name, draft, inputMode, selectedFile], () => { prepared.value = null; if (preparing.value) { generation++; preparing.value = false } })
+watch(originalRevision, value => {
+  originalInfo.value = null
+  if (originalOperation && value.trim() !== originalOperation.revision) {
+    originalOperation.controller.abort()
+    originalOperation = null
+    generation++
+    pending.value = false
+  }
+}, { flush: 'sync' })
 onBeforeUnmount(clearAll)
 function fileChanged(event) {
   const files = event.target.files
@@ -62,7 +77,7 @@ async function read(action, apply) {
   try {
     const data = await action()
     if (epoch !== generation || !props.connected) return
-    await apply(data)
+    await apply(data, () => epoch === generation && props.connected)
   } catch (e) { if (epoch === generation && props.connected) error.value = e.code || 'invalid_reply' }
   finally { if (epoch === generation) pending.value = false }
 }
@@ -83,7 +98,8 @@ function inspect(source, event) {
     if (source.text_sha256 && data.source.text_sha256 !== source.text_sha256) throw { code: 'invalid_reply' }
     if (source.format === 'text' && source.input_sha256 !== data.source.text_sha256 || source.source_name !== undefined && source.source_name !== data.source.source_name) throw { code: 'invalid_reply' }
     inspected.value = data; message.value = 'inspected'
-    if (attempt.value?.source_revision === data.source.source_revision) attempt.value = { ...attempt.value, uncertain: false }
+    // A V1 text view cannot reconcile an original-byte retention attempt.
+    if (!attempt.value?.original && attempt.value?.source_revision === data.source.source_revision) attempt.value = { ...attempt.value, uncertain: false }
     await nextTick(); inspector.value?.focus()
   })
 }
@@ -106,6 +122,79 @@ async function retain() {
     // Even an unreadable receipt can follow a completed mutation. Conservatively
     // reconcile every submitted attempt; do not make a rollback assertion.
   } finally { if (epoch === generation) pending.value = false }
+}
+async function retainOriginal() {
+  if (disabled.value || !prepared.value || prepared.value.payload.format !== 'pdf' || attempt.value?.uncertain) return
+  const epoch = ++generation, payload = { ...prepared.value.payload, schema_version: 2 }
+  const project = windowData.value?.sources[0]?.project_id || inspected.value?.source.project_id || receipt.value?.source.project_id || originalInfo.value?.source.project_id
+  attempt.value = { source_revision: payload.source_revision, input_sha256: payload.input_sha256,
+    source_name: payload.source_name, ...(project ? { project_id: project } : {}), format: 'pdf', original: true, uncertain: true }
+  clearDraft(); receipt.value = null; inspected.value = null; originalInfo.value = null
+  pending.value = true; message.value = ''; error.value = ''
+  originalAbort?.abort(); originalAbort = new AbortController()
+  const controller = originalAbort
+  originalOperation = { controller, revision: payload.source_revision }
+  try {
+    const data = await props.methods.retainOriginal(payload, { signal: controller.signal })
+    if (epoch !== generation || !props.connected || controller.signal.aborted || originalOperation?.controller !== controller) return
+    await validateSourceOriginalResult('sourceRetainOriginal', data, payload)
+    if (epoch !== generation || !props.connected || controller.signal.aborted || originalOperation?.controller !== controller) return
+    if (project && data.source.project_id !== project) throw { code: 'invalid_reply' }
+    receipt.value = data; originalRevision.value = payload.source_revision; originalInfo.value = data
+    attempt.value = { ...attempt.value, uncertain: false, project_id: data.source.project_id }
+    message.value = 'saved'
+  } catch (e) { if (epoch === generation && props.connected) error.value = e.code || 'invalid_reply' }
+  finally {
+    if (originalOperation?.controller === controller) originalOperation = null
+    if (epoch === generation) pending.value = false
+  }
+}
+function originalMetadata() {
+  if (disabled.value) return
+  const revision = originalRevision.value.trim()
+  const project = (attempt.value?.source_revision === revision ? attempt.value.project_id : null)
+    || windowData.value?.sources[0]?.project_id || inspected.value?.source.project_id || receipt.value?.source.project_id || originalInfo.value?.source.project_id
+  originalAbort?.abort(); originalAbort = new AbortController()
+  const controller = originalAbort
+  originalOperation = { controller, revision }
+  return read(() => props.methods.originalMetadata({ source_revision: revision }, { signal: controller.signal }), async (data, current) => {
+    await validateSourceOriginalResult('sourceOriginalMetadata', data, { source_revision: revision, ...(project ? { project_id: project } : {}) })
+    if (!current() || controller.signal.aborted || originalOperation?.controller !== controller || originalRevision.value.trim() !== revision) return
+    if (attempt.value?.original && attempt.value.source_revision === revision) {
+      if (attempt.value.input_sha256 !== data.binary.sha256
+        || attempt.value.source_name !== data.source.source_name
+        || attempt.value.project_id && attempt.value.project_id !== data.source.project_id) throw { code: 'invalid_reply' }
+      attempt.value = { ...attempt.value, uncertain: false, project_id: data.source.project_id }
+    }
+    originalInfo.value = data; message.value = 'inspected'
+  }).finally(() => { if (originalOperation?.controller === controller) originalOperation = null })
+}
+function originalRead() {
+  if (disabled.value || !originalInfo.value) return
+  const revision = originalInfo.value.source.source_revision
+  const expectedBinary = { ...originalInfo.value.binary }
+  originalAbort?.abort(); originalAbort = new AbortController()
+  const controller = originalAbort, signal = controller.signal
+  originalOperation = { controller, revision }
+  return read(() => props.methods.originalRead({ source_revision: revision }, { signal }), async (data, current) => {
+    await validateSourceOriginalResult('sourceOriginalRead', data, { source_revision: revision })
+    if (!current() || signal.aborted || originalOperation?.controller !== controller || originalRevision.value.trim() !== revision) return
+    if (!originalInfo.value || originalInfo.value.source.source_revision !== revision
+      || data.binary.sha256 !== expectedBinary.sha256 || data.binary.byte_length !== expectedBinary.byte_length
+      || originalInfo.value.binary.sha256 !== expectedBinary.sha256 || originalInfo.value.binary.byte_length !== expectedBinary.byte_length) throw { code: 'invalid_reply' }
+    const bytes = Uint8Array.from(atob(data.content_base64), c => c.charCodeAt(0))
+    if (originalUrl) URL.revokeObjectURL(originalUrl)
+    originalUrl = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }))
+    const url = originalUrl
+    try {
+      const link = document.createElement('a')
+      link.href = url; link.download = `${revision}.pdf`; link.click()
+    } finally {
+      if (originalUrl === url) originalUrl = null
+      URL.revokeObjectURL(url)
+    }
+    message.value = 'saved'
+  }).finally(() => { if (originalOperation?.controller === controller) originalOperation = null })
 }
 function discard() { if (disabled.value) return; generation++; clearDraft(); message.value = ''; error.value = '' }
 async function selectPassage(p, event) { passageReturnFocus = event.currentTarget; activePassage.value = p; await nextTick(); excerptPanel.value?.focus() }
@@ -132,18 +221,19 @@ async function closeInspection() { inspected.value = null; activePassage.value =
         <div class="choices"><label><input v-model="inputMode" type="radio" value="paste">{{ copy.paste }}</label><label><input v-model="inputMode" type="radio" value="file">{{ copy.file }}</label></div>
         <label v-if="inputMode === 'paste'" for="source-text">{{ copy.text }}<textarea id="source-text" v-model="draft" rows="5" required spellcheck="false"></textarea></label>
         <label v-else for="source-file">{{ copy.choose }}<input id="source-file" ref="fileInput" type="file" accept=".txt,.md,.docx,.pdf" required aria-describedby="source-file-help" @change="fileChanged"></label>
-        <p id="source-file-help" class="help">{{ copy.fileHint }}</p><button type="submit">{{ copy.prepare }}</button>
+        <p id="source-file-help" class="help">{{ copy.originalFileHint }}</p><button type="submit">{{ copy.prepare }}</button>
       </fieldset>
     </form>
-    <div v-if="prepared" class="prepared"><p v-if="prepared.payload.format === 'pdf'" class="notice">{{ copy.pdfPrepare }}</p><h3>{{ copy.prepared }}</h3><dl><dt>{{ copy.name }}</dt><dd>{{ prepared.payload.source_name }}</dd><template v-if="prepared.filename"><dt>{{ copy.filename }}</dt><dd>{{ prepared.filename }}</dd></template><dt>{{ copy.format }}</dt><dd>{{ prepared.payload.format }}</dd><dt>{{ copy.bytes }}</dt><dd>{{ prepared.inputBytes }}</dd><dt>{{ copy.codepoints }}</dt><dd>{{ prepared.codepoints ?? copy.unknownLayout }}</dd><dt>{{ copy.inputDigest }}</dt><dd class="mono">{{ prepared.payload.input_sha256 }}</dd><dt>{{ copy.revision }}</dt><dd class="mono">{{ prepared.payload.source_revision }}</dd></dl><button class="primary" type="button" :disabled="disabled" @click="retain">{{ copy.retain }}</button></div>
+    <div v-if="prepared" class="prepared"><p v-if="prepared.payload.format === 'pdf'" class="notice">{{ copy.pdfPrepare }}</p><h3>{{ copy.prepared }}</h3><dl><dt>{{ copy.name }}</dt><dd>{{ prepared.payload.source_name }}</dd><template v-if="prepared.filename"><dt>{{ copy.filename }}</dt><dd>{{ prepared.filename }}</dd></template><dt>{{ copy.format }}</dt><dd>{{ prepared.payload.format }}</dd><dt>{{ copy.bytes }}</dt><dd>{{ prepared.inputBytes }}</dd><dt>{{ copy.codepoints }}</dt><dd>{{ prepared.codepoints ?? copy.unknownLayout }}</dd><dt>{{ copy.inputDigest }}</dt><dd class="mono">{{ prepared.payload.input_sha256 }}</dd><dt>{{ copy.revision }}</dt><dd class="mono">{{ prepared.payload.source_revision }}</dd></dl><button class="primary" type="button" :disabled="disabled" @click="retain">{{ copy.retain }}</button><button v-if="prepared.payload.format === 'pdf'" type="button" :disabled="disabled || !methods.retainOriginal" @click="retainOriginal">{{ copy.originalRetain }}</button></div>
+    <div class="source-form"><h3>{{ copy.originalTitle }}</h3><p id="source-original-help" class="help">{{ copy.originalNotice }}</p><label for="source-original-revision">{{ copy.revision }}<input id="source-original-revision" v-model="originalRevision" autocomplete="off" spellcheck="false" aria-describedby="source-original-help source-feedback"></label><div class="source-actions"><button type="button" :disabled="disabled || !methods.originalMetadata" @click="originalMetadata">{{ copy.originalLookup }}</button><button v-if="originalInfo" type="button" :disabled="disabled || !methods.originalRead" @click="originalRead">{{ copy.originalDownload }}</button></div><dl v-if="originalInfo"><dt>{{ copy.inputDigest }}</dt><dd class="mono">{{ originalInfo.binary.sha256 }}</dd><dt>{{ copy.bytes }}</dt><dd>{{ originalInfo.binary.byte_length }}</dd></dl></div>
     <div class="source-actions"><button type="button" :disabled="disabled" @click="discard">{{ copy.discard }}</button></div>
     <div v-if="attempt" class="attempt"><h3>{{ attempt.uncertain ? copy.uncertain : copy.revision }}</h3><p>{{ attempt.source_name }}</p><dl><dt>{{ copy.revision }}</dt><dd class="mono">{{ attempt.source_revision }}</dd><dt>{{ copy.inputDigest }}</dt><dd class="mono">{{ attempt.input_sha256 }}</dd></dl><button type="button" :disabled="disabled" @click="inspect(attempt, $event)">{{ copy.inspectAttempt }}</button></div>
-    <article v-if="receipt" class="receipt"><h3>{{ copy.receipt }}</h3><p>{{ receipt.source.source_name }}</p><dl><dt>{{ copy.revision }}</dt><dd class="mono">{{ receipt.source.source_revision }}</dd><dt>{{ copy.digest }}</dt><dd class="mono">{{ receipt.source.text_sha256 }}</dd><dt>{{ copy.bytes }}</dt><dd>{{ receipt.source.byte_length }}</dd><dt>{{ copy.codepoints }}</dt><dd>{{ receipt.source.codepoint_length }}</dd><dt>{{ copy.recorded }}</dt><dd><time>{{ receipt.source.recorded_at }}</time></dd></dl><p class="notice">{{ copy.flags }}</p><p>{{ copy.noGraph }}</p><h4>{{ copy.extraction }}</h4><p>{{ receipt.extraction.format === 'pdf' ? copy.pdfExtraction : receipt.extraction.format === 'docx' ? copy.docxExtraction : copy.textExtraction }}</p><dl><dt>{{ copy.format }}</dt><dd>{{ receipt.extraction.format }}</dd><dt>{{ copy.inputDigest }}</dt><dd class="mono">{{ receipt.extraction.input_sha256 }}</dd></dl>
+    <article v-if="receipt" class="receipt"><h3>{{ copy.receipt }}</h3><p>{{ receipt.source.source_name }}</p><dl><dt>{{ copy.revision }}</dt><dd class="mono">{{ receipt.source.source_revision }}</dd><dt>{{ copy.digest }}</dt><dd class="mono">{{ receipt.source.text_sha256 }}</dd><dt>{{ copy.bytes }}</dt><dd>{{ receipt.source.byte_length }}</dd><dt>{{ copy.codepoints }}</dt><dd>{{ receipt.source.codepoint_length }}</dd><dt>{{ copy.recorded }}</dt><dd><time>{{ receipt.source.recorded_at }}</time></dd></dl><p class="notice">{{ receipt.binary_retained ? copy.originalNotice : copy.flags }}</p><p>{{ copy.noGraph }}</p><h4>{{ copy.extraction }}</h4><p>{{ receipt.binary_retained ? copy.originalExtraction : receipt.extraction.format === 'pdf' ? copy.pdfExtraction : receipt.extraction.format === 'docx' ? copy.docxExtraction : copy.textExtraction }}</p><dl><dt>{{ copy.format }}</dt><dd>{{ receipt.extraction.format }}</dd><dt>{{ copy.inputDigest }}</dt><dd class="mono">{{ receipt.extraction.input_sha256 }}</dd></dl>
       <details v-if="receipt.extraction.blocks"><summary>{{ copy.blocks }} ({{ receipt.extraction.blocks.length }})</summary><ol><li v-for="block in receipt.extraction.blocks" :key="block.ordinal">{{ block.ordinal }} · {{ block.kind }} · {{ block.start }}–{{ block.end }}</li></ol></details>
       <div v-if="receipt.extraction.format === 'pdf'" class="pdf-summary"><dl><dt>{{ copy.pages }}</dt><dd>{{ receipt.extraction.page_count }}</dd><dt>{{ copy.emptyPages }}</dt><dd>{{ receipt.extraction.empty_page_count }}</dd><dt>{{ copy.pagePassages }}</dt><dd>{{ receipt.extraction.declared_passage_count }}</dd></dl><p>{{ copy.pdfEligibility }}</p><details><summary>{{ copy.pageDeclarations }}</summary><ol><li v-for="page in receipt.extraction.pages" :key="page.page">{{ copy.page }} {{ page.page }} · {{ page.start }}–{{ page.end }} · {{ page.empty ? copy.emptyPage : copy.textPage }}</li></ol></details></div><h4>{{ copy.passages }}</h4><ol><li v-for="p in receipt.passages" :key="p.evidence_id"><span v-if="p.page !== null">{{ copy.page }} {{ p.page }} · </span><span class="mono">{{ p.evidence_id }}</span> · {{ p.start }}–{{ p.end }}<p class="mono">{{ p.excerpt_sha256 }}</p></li></ol>
     </article>
     <article v-if="inspected" id="source-inspector" ref="inspector" class="source-inspector" tabindex="-1" aria-labelledby="source-inspector-title" @keydown.esc.stop.prevent="closeInspection">
-      <h3 id="source-inspector-title">{{ inspected.source.source_name }}</h3><p class="notice">{{ copy.flags }}</p><p>{{ copy.noGraph }}</p><p class="mono">{{ inspected.source.source_revision }}</p>
+      <h3 id="source-inspector-title">{{ inspected.source.source_name }}</h3><p class="notice">{{ copy.v1ViewNotice }}</p><p>{{ copy.noGraph }}</p><p class="mono">{{ inspected.source.source_revision }}</p>
       <details><summary>{{ copy.exact }}</summary><pre class="exact-text">{{ inspected.text }}</pre></details>
       <h4>{{ copy.passages }}</h4><p v-if="!inspected.passages.length">{{ copy.noPassages }}</p><ol><li v-for="p in inspected.passages" :key="p.evidence_id"><button type="button" :aria-expanded="activePassage?.evidence_id === p.evidence_id" aria-controls="source-excerpt" @click="selectPassage(p, $event)"><span v-if="p.page !== null">{{ copy.page }} {{ p.page }} · </span>{{ p.start }}–{{ p.end }} · {{ p.evidence_id }}</button></li></ol>
       <div v-if="activePassage" id="source-excerpt" ref="excerptPanel" class="source-excerpt" tabindex="-1" @keydown.esc.stop.prevent="closePassage"><dl><dt>{{ copy.evidence }}</dt><dd class="mono">{{ activePassage.evidence_id }}</dd><dt>{{ copy.offsets }}</dt><dd>{{ activePassage.start }}–{{ activePassage.end }}</dd><dt>{{ copy.page }}</dt><dd>{{ activePassage.page ?? copy.unknownLayout }}</dd><dt>{{ copy.excerptDigest }}</dt><dd class="mono">{{ activePassage.excerpt_sha256 }}</dd></dl><pre class="excerpt-text">{{ excerpt }}</pre><button type="button" @click="closePassage">{{ copy.close }}</button></div>

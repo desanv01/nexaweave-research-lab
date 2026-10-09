@@ -24,11 +24,11 @@ CHILD_KEYS = ("KNOWLEDGE_PRINCIPAL", "KNOWLEDGE_DISPLAY_GRAPH_ID", "KNOWLEDGE_BO
 HASH = re.compile(r"[0-9a-f]{64}\Z")
 
 
-def pdf_upload(value):
+def pdf_upload(value, *, version=1):
     """Native-free, strict PDF bytes admission shared by facade and transport."""
     if (type(value) is not dict or set(value) != {"schema_version", "source_revision",
             "source_name", "format", "content", "input_sha256"}
-            or type(value["schema_version"]) is not int or value["schema_version"] != 1
+            or type(value["schema_version"]) is not int or value["schema_version"] != version
             or type(value["format"]) is not str or value["format"] != "pdf"):
         raise ValueError
     _uuid(value["source_revision"])
@@ -123,6 +123,74 @@ def pdf_receipt(value, scope, payload):
     return value
 
 
+def original_binary(value, scope, revision):
+    if (type(value) is not dict or set(value) != {"contract_version", "project_id",
+            "source_revision", "media_type", "byte_length", "sha256"}
+            or type(value["contract_version"]) is not int or value["contract_version"] != 1
+            or value["project_id"] != scope["project_id"] or value["source_revision"] != revision
+            or value["media_type"] != "application/pdf" or type(value["byte_length"]) is not int
+            or not 0 < value["byte_length"] <= 2 * TEXT_BYTES
+            or type(value["sha256"]) is not str or not HASH.fullmatch(value["sha256"])):
+        raise ValueError
+    return value
+
+
+def original_result(method, value, scope, payload):
+    if method not in {"retain_pdf_binary", "binary_metadata", "binary_read"}:
+        raise ValueError
+    if method == "retain_pdf_binary":
+        if (type(value) is not dict or set(value) != {"schema_version", "binary_retained",
+                "graph_ingestion_executed", "source", "passages", "offset_unit", "extraction", "binary"}
+                or type(value["schema_version"]) is not int or value["schema_version"] != 2
+                or value["binary_retained"] is not True or value["graph_ingestion_executed"] is not False):
+            raise ValueError
+        binary = original_binary(value["binary"], scope, payload["source_revision"])
+        if binary["sha256"] != payload["input_sha256"]:
+            raise ValueError
+        extraction = value["extraction"]
+        if (type(extraction) is not dict or extraction.get("input_hash_verified") is not True
+                or any(extraction.get(k) is not True for k in ("input_digest_persisted",
+                    "original_document_verified", "binary_persistently_bound"))
+                or extraction.get("blocks_persisted") is not False
+                or extraction.get("ocr_performed") is not False):
+            raise ValueError
+        old = {k: v for k, v in value.items() if k != "binary"}
+        old["schema_version"] = 1
+        old["binary_retained"] = False
+        old["extraction"] = dict(extraction, input_digest_persisted=False,
+            original_document_verified=False, binary_persistently_bound=False)
+        pdf_receipt(old, scope, dict(payload, schema_version=1))
+        if value["source"]["project_id"] != binary["project_id"]:
+            raise ValueError
+        if len(encoded(value)) > MAX_BYTES:
+            raise ValueError
+        return value
+    fields = {"schema_version", "binary_retained", "graph_ingestion_executed", "source", "binary"}
+    if method == "binary_read":
+        fields.add("content_base64")
+    if (type(value) is not dict or set(value) != fields
+            or type(value["schema_version"]) is not int or value["schema_version"] != 2
+            or value["binary_retained"] is not True or value["graph_ingestion_executed"] is not False):
+        raise ValueError
+    metadata(value["source"], scope)
+    binary = original_binary(value["binary"], scope, payload["source_revision"])
+    if value["source"]["source_revision"] != payload["source_revision"]:
+        raise ValueError
+    if method == "binary_read":
+        encoded_bytes = value["content_base64"]
+        if (type(encoded_bytes) is not str or not encoded_bytes.isascii()
+                or len(encoded_bytes) > 4 * ((2 * TEXT_BYTES + 2) // 3)):
+            raise ValueError
+        raw = base64.b64decode(encoded_bytes, validate=True)
+        if (base64.b64encode(raw).decode("ascii") != encoded_bytes
+                or len(raw) != binary["byte_length"]
+                or hashlib.sha256(raw).hexdigest() != binary["sha256"]):
+            raise ValueError
+    if len(encoded(value)) > MAX_BYTES:
+        raise ValueError
+    return value
+
+
 def encoded(value):
     return json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
 
@@ -197,7 +265,7 @@ def validate_payload(method, value):
         if method in {"context", "list"}:
             if value:
                 raise ValueError
-        elif method == "get":
+        elif method in {"get", "binary_metadata", "binary_read"}:
             if set(value) != {"source_revision"}:
                 raise ValueError
             _uuid(value["source_revision"])
@@ -208,8 +276,8 @@ def validate_payload(method, value):
             text_value(value["source_name"], 1024, name=True)
             text_value(value["text"])
             declarations(value["source_revision"], value["text"], value["blocks"])
-        elif method == "retain_pdf":
-            pdf_upload(value)
+        elif method in {"retain_pdf", "retain_pdf_binary"}:
+            pdf_upload(value, version=2 if method == "retain_pdf_binary" else 1)
         else:
             raise ValueError
         if len(encoded(value)) > MAX_BYTES:
@@ -244,6 +312,11 @@ def metadata(value, scope):
 
 def validate_result(method, value, scope, payload):
     try:
+        if method in {"retain_pdf_binary", "binary_metadata", "binary_read"}:
+            result = original_result(method, value, scope, payload)
+            if len(encoded(result)) > MAX_BYTES:
+                raise ValueError
+            return result
         if method == "retain_pdf":
             return pdf_receipt(value, scope, payload)
         if (type(value) is not dict or type(value.get("schema_version")) is not int

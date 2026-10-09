@@ -153,7 +153,7 @@ def test_v1_upgrade_preserves_rows_and_rolls_back_failed_v2(factory, monkeypatch
                 assert conn.execute("SELECT version FROM mf_app.schema_migrations").fetchall() == [(1,)]
                 migrate(conn)
                 migrate(conn)
-                assert conn.execute("SELECT version FROM mf_app.schema_migrations ORDER BY version").fetchall() == [(1,), (2,), (3,)]
+                assert conn.execute("SELECT version FROM mf_app.schema_migrations ORDER BY version").fetchall() == [(1,), (2,), (3,), (4,)]
                 assert conn.execute("SELECT count(*) FROM mf_app.projects WHERE project_id=%s", (owner_project,)).fetchone()[0] == 1
                 conn.execute("ALTER TABLE mf_app.source_revisions ADD COLUMN rogue integer")
                 with pytest.raises(MigrationMismatch):
@@ -161,7 +161,7 @@ def test_v1_upgrade_preserves_rows_and_rolls_back_failed_v2(factory, monkeypatch
                 raise RollbackFixture()
 
 
-def test_fresh_v3_install_and_sql_checksum_denial(factory):
+def test_fresh_v4_install_and_sql_checksum_denial(factory):
     class RollbackFixture(Exception):
         pass
     with factory() as conn:
@@ -169,11 +169,56 @@ def test_fresh_v3_install_and_sql_checksum_denial(factory):
             with conn.transaction():
                 conn.execute("DROP SCHEMA mf_app CASCADE")
                 migrate(conn)
-                assert conn.execute("SELECT version FROM mf_app.schema_migrations ORDER BY version").fetchall() == [(1,), (2,), (3,)]
+                assert conn.execute("SELECT version FROM mf_app.schema_migrations ORDER BY version").fetchall() == [(1,), (2,), (3,), (4,)]
                 assert conn.execute("SELECT to_regclass('mf_app.passage_evidence')").fetchone()[0] is not None
                 conn.execute("UPDATE mf_app.schema_migrations SET sql_sha256=%s WHERE version=1", ("0" * 64,))
                 with pytest.raises(MigrationMismatch):
                     migrate(conn)
+                raise RollbackFixture()
+
+
+def test_v3_catalog_upgrades_additively_to_v4_without_rewriting_sources(factory, monkeypatch):
+    class RollbackFixture(Exception):
+        pass
+    with factory() as conn:
+        with pytest.raises(RollbackFixture):
+            with conn.transaction():
+                conn.execute("DROP SCHEMA mf_app CASCADE")
+                for version, filename in ((1, "0001_project_revisions.sql"),
+                                          (2, "0002_source_evidence.sql"),
+                                          (3, "0003_research_imports.sql")):
+                    sql = files("nexaweave_storage").joinpath("migrations", filename).read_text("utf-8")
+                    conn.execute(sql)
+                    conn.execute("INSERT INTO mf_app.schema_migrations VALUES (%s,%s,%s)",
+                                 (version, hashlib.sha256(sql.encode()).hexdigest(), _catalog(conn)))
+                owner_project, revision, workspace = uuid4(), uuid4(), uuid4()
+                snap, evidence, digest = canonical_payload(snapshot(), [], "proj_1")
+                conn.execute("INSERT INTO mf_app.projects (project_id,principal,workspace_id,display_id,current_revision) VALUES (%s,'owner',%s,'proj_1',1)",
+                             (owner_project, workspace))
+                conn.execute("INSERT INTO mf_app.project_revisions (project_id,revision,snapshot,evidence,digest) VALUES (%s,1,%s,%s,%s)",
+                             (owner_project, Jsonb(snap), Jsonb(evidence), digest))
+                text = "legacy 猫"
+                conn.execute("INSERT INTO mf_app.source_revisions (source_revision,project_id,name,retained_text,text_sha256,byte_length,codepoint_length) VALUES (%s,%s,'old.pdf',%s,%s,%s,%s)",
+                             (revision, owner_project, text, hashlib.sha256(text.encode()).hexdigest(),
+                              len(text.encode()), len(text)))
+                before = conn.execute("SELECT name,retained_text,text_sha256 FROM mf_app.source_revisions WHERE source_revision=%s", (revision,)).fetchone()
+                original_catalog = store_module._catalog
+                def fail_after_binary_ddl(connection):
+                    if connection.execute("SELECT to_regclass('mf_app.source_binaries')").fetchone()[0] is not None:
+                        raise MigrationMismatch()
+                    return original_catalog(connection)
+                monkeypatch.setattr(store_module, "_catalog", fail_after_binary_ddl)
+                with pytest.raises(MigrationMismatch):
+                    migrate(conn)
+                monkeypatch.setattr(store_module, "_catalog", original_catalog)
+                assert conn.execute("SELECT to_regclass('mf_app.source_binaries')").fetchone()[0] is None
+                assert conn.execute("SELECT version FROM mf_app.schema_migrations ORDER BY version").fetchall() == [(1,), (2,), (3,)]
+                assert conn.execute("SELECT name,retained_text,text_sha256 FROM mf_app.source_revisions WHERE source_revision=%s", (revision,)).fetchone() == before
+                migrate(conn)
+                migrate(conn)
+                assert conn.execute("SELECT version FROM mf_app.schema_migrations ORDER BY version").fetchall() == [(1,), (2,), (3,), (4,)]
+                assert conn.execute("SELECT name,retained_text,text_sha256 FROM mf_app.source_revisions WHERE source_revision=%s", (revision,)).fetchone() == before
+                assert conn.execute("SELECT count(*) FROM mf_app.source_binaries").fetchone()[0] == 0
                 raise RollbackFixture()
 
 
