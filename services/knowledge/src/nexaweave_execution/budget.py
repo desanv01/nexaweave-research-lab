@@ -13,6 +13,7 @@ from uuid import UUID, uuid4
 
 import psycopg
 from psycopg.types.json import Jsonb
+from nexaweave_storage.transaction_settings import apply_runtime_settings
 
 from nexaweave_knowledge.contracts import KnowledgeScope
 from nexaweave_knowledge.operations import CompletionReceipt, _receipt
@@ -123,10 +124,12 @@ def _transaction(factory: Callable[[], psycopg.Connection]) -> Iterator[psycopg.
     try:
         with factory() as conn:
             with conn.transaction():
-                conn.execute("SET LOCAL statement_timeout = '5s'")
-                conn.execute("SET LOCAL lock_timeout = '2s'")
-                conn.execute("SET LOCAL idle_in_transaction_session_timeout = '10s'")
-                conn.execute("SET LOCAL search_path = pg_catalog")
+                apply_runtime_settings(conn, (
+                    "SET LOCAL statement_timeout = '5s'",
+                    "SET LOCAL lock_timeout = '2s'",
+                    "SET LOCAL idle_in_transaction_session_timeout = '10s'",
+                    "SET LOCAL search_path = pg_catalog",
+                ))
                 yield conn
     except psycopg.Error:
         raise BudgetUnavailable() from None

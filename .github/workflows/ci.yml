@@ -290,6 +290,10 @@ jobs:
         run: uv pip install --python services/knowledge/.venv/bin/python --no-deps --reinstall services/knowledge
       - name: Start disposable PostgreSQL
         run: docker compose -f infra/compose.operations-test.yml up -d --wait --wait-timeout 120
+      - name: Qualify unchanged local transaction settings and guarded batching
+        run: |
+          services/knowledge/.venv/bin/python tools/run_transaction_settings_tests.py --unit
+          services/knowledge/.venv/bin/python tools/run_transaction_settings_tests.py --postgres
       - name: Verify project revision store
         run: services/knowledge/.venv/bin/python tools/run_project_store_tests.py --postgres
       - name: Qualify DOCX source passages and fresh owned CLI

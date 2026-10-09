@@ -11,6 +11,8 @@ from uuid import UUID
 
 import psycopg
 
+from nexaweave_storage.transaction_settings import apply_runtime_settings
+
 from .store import Conflict, NotFound, StorageError
 from .validation import InvalidProject, principal_id, uuid_value
 
@@ -134,10 +136,12 @@ def _transaction(factory: Callable[[], psycopg.Connection]) -> Iterator[psycopg.
     try:
         with factory() as conn:
             with conn.transaction():
-                conn.execute("SET LOCAL statement_timeout = '5s'")
-                conn.execute("SET LOCAL lock_timeout = '2s'")
-                conn.execute("SET LOCAL idle_in_transaction_session_timeout = '10s'")
-                conn.execute("SET LOCAL TIME ZONE 'UTC'")
+                apply_runtime_settings(conn, (
+                    "SET LOCAL statement_timeout = '5s'",
+                    "SET LOCAL lock_timeout = '2s'",
+                    "SET LOCAL idle_in_transaction_session_timeout = '10s'",
+                    "SET LOCAL TIME ZONE 'UTC'",
+                ))
                 yield conn
     except psycopg.errors.UniqueViolation:
         raise Conflict() from None
