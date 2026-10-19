@@ -123,3 +123,48 @@ def test_authority_rechecked_after_pdf_extraction_before_storage_mutation(monkey
         library.execute("retain_pdf", pdf_payload())
     assert error.value.code == "source_denied"
     assert calls == ["authorize", "extract", "authorize"]
+
+
+@pytest.mark.parametrize("method", ["list", "get", "retain", "retain_pdf"])
+def test_authority_revoked_during_storage_prevents_source_result_publication(method, monkeypatch):
+    import nexaweave_knowledge.source_library as module
+    import nexaweave_storage.pdf as parser
+
+    scope = SimpleNamespace(project_id=uuid4())
+    library = SourceLibrary(SimpleNamespace(principal="owner"),
+        connection_factory=lambda: pytest.fail("unexpected real connection"))
+    events, revoked = [], False
+
+    def authorize():
+        events.append("authorize")
+        if revoked:
+            raise SourceError("source_denied")
+        return scope
+
+    def storage(*args, **kwargs):
+        nonlocal revoked
+        events.append("storage")
+        revoked = True
+        return [] if method == "list" else object()
+
+    def extract(binary):
+        events.append("extract")
+        return parser.PdfExtraction("猫", ({"page": 1, "start": 0, "end": 1,
+            "empty": False, "excerpt_sha256": hashlib.sha256("猫".encode()).hexdigest()},), 1, 0)
+
+    monkeypatch.setattr(library, "authorize", authorize)
+    monkeypatch.setattr(module, "SourceStore", lambda factory: SimpleNamespace(
+        list_sources=storage, get_source=storage, ingest_text=storage))
+    monkeypatch.setattr(module, "source_result", lambda *args, **kwargs: pytest.fail(
+        "revoked source result reached publication"))
+    monkeypatch.setattr(parser, "extract_pdf", extract)
+    revision = str(uuid4())
+    payload = ({"source_revision": revision} if method == "get" else
+        {"source_revision": revision, "source_name": "text", "text": "猫", "blocks": None}
+        if method == "retain" else pdf_payload() if method == "retain_pdf" else {})
+
+    with pytest.raises(SourceError) as error:
+        library.execute(method, payload)
+    assert error.value.code == "source_denied"
+    assert events.count("storage") == 1
+    assert events[-2:] == ["storage", "authorize"]

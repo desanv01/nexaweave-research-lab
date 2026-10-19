@@ -5,7 +5,7 @@ import { connectedReportPayload, newReportId, reportIdentity, reportSnapshot, va
 import { connectedReportsCopyFor, connectedReportsError } from '../../i18n/connectedReports.js'
 import { connectedFollowupsCopyFor } from '../../i18n/connectedFollowups.js'
 import { MAX_MARKDOWN_CHARS, renderSafeMarkdown } from '../../utils/safeMarkdown.js'
-const props = defineProps({ methods: { type: Object, required: true }, selection: { type: Object, default: null }, connected: Boolean, busy: Boolean, displayGraphId: { type: String, default: '' }, resetVersion: { type: Number, default: 0 }, locale: { type: String, default: 'en' } })
+const props = defineProps({ methods: { type: Object, required: true }, selection: { type: Object, default: null }, sourceCatalog: { type: Array, default: null }, connected: Boolean, busy: Boolean, displayGraphId: { type: String, default: '' }, resetVersion: { type: Number, default: 0 }, locale: { type: String, default: 'en' } })
 const emit = defineEmits(['followup'])
 const copy = computed(() => connectedReportsCopyFor(props.locale))
 const followupCopy = computed(() => connectedFollowupsCopyFor(props.locale))
@@ -13,15 +13,27 @@ const selected = ref(null), requirement = ref(''), outputLanguage = ref('en'), c
 const plan = ref(null), history = ref([]), pending = ref(false), error = ref(''), notice = ref(''), feedback = ref(null)
 const recoveryId = ref(''), recoveryHash = ref(''), content = ref(null), artifact = ref('report'), sectionIndex = ref('1'), download = ref(null)
 const attempted = new Set()
-let epoch = 0, declaration = null, url = null
+const selectedExtras = ref([])
+let epoch = 0, selectionEpoch = 0, declaration = null, url = null
 const clone = reportSnapshot
 const locked = computed(() => !props.connected || props.busy || pending.value)
+const anchor = computed(() => selected.value?.preparation.source || null)
+const preparedSources = computed(() => selected.value?.preparation.schema_version === 2 ? selected.value.preparation.sources : null)
+const additionalSources = computed(() => {
+  if (preparedSources.value) return []
+  const project = selected.value?.preparation.scope.project_id
+  const seen = new Set(anchor.value ? [anchor.value.source_revision] : [])
+  return (props.sourceCatalog || []).filter(source => {
+    if (!project || source.project_id !== project || seen.has(source.source_revision)) return false
+    seen.add(source.source_revision); return true
+  })
+})
 const records = computed(() => [plan.value && { value: plan.value, reviewed: true }, ...history.value.filter(v => v.report_id !== plan.value?.report_id).map(value => ({ value, reviewed: false }))].filter(Boolean))
 const canStart = v => !locked.value && v === plan.value && v.state === 'planned' && !attempted.has(v.report_id) && v.authorization.model_calls_enabled && v.authorization.budget_configured && !!v.ceiling_microusd
 const rendered = computed(() => content.value && content.value.content.length <= MAX_MARKDOWN_CHARS ? renderSafeMarkdown(content.value.content) : '')
 function discardArtifacts() { content.value = null; download.value = null; if (url) { URL.revokeObjectURL(url); url = null } }
 function invalidate() { epoch++; props.methods.clear?.(); pending.value = false; declaration = null; discardArtifacts() }
-function clear() { invalidate(); selected.value = null; plan.value = null; history.value = []; requirement.value = ''; recoveryId.value = ''; recoveryHash.value = ''; error.value = ''; notice.value = '' }
+function clear() { selectionEpoch++; invalidate(); selectedExtras.value = []; selected.value = null; plan.value = null; history.value = []; requirement.value = ''; recoveryId.value = ''; recoveryHash.value = ''; error.value = ''; notice.value = '' }
 function retain(value) { const index = history.value.findIndex(v => v.report_id === value.report_id); if (index < 0) history.value.push(value); else history.value[index] = value }
 async function announce() { await nextTick(); feedback.value?.focus() }
 function changeOptions() {
@@ -31,17 +43,18 @@ function changeOptions() {
   plan.value = null; error.value = ''
 }
 async function select(value) {
-  changeOptions(); selected.value = null; declared.value = []
+  const life = ++selectionEpoch
+  changeOptions(); selectedExtras.value = []; selected.value = null; declared.value = []
   if (!value || !props.connected) return
-  const life = epoch
   try {
     const admitted = await nativeObservationSelection(value, props.displayGraphId)
-    if (life !== epoch || !props.connected) return
+    if (life !== selectionEpoch || !props.connected) return
     selected.value = admitted; declared.value = admitted.launch.request.platforms.map(platform => ({ platform, enabled: true, offset: '0', count: '1' }))
-  } catch (e) { if (life === epoch) { error.value = e?.code || 'invalid_reply'; await announce() } }
+  } catch (e) { if (life === selectionEpoch) { error.value = e?.code || 'invalid_reply'; await announce() } }
 }
 watch(() => props.selection, select, { deep: true, immediate: true, flush: 'sync' })
-watch([requirement, outputLanguage, coverageMode, declared], changeOptions, { deep: true, flush: 'sync' })
+watch([requirement, outputLanguage, coverageMode, declared, selectedExtras], changeOptions, { deep: true, flush: 'sync' })
+watch(() => props.sourceCatalog, () => { if (!preparedSources.value) { selectedExtras.value = []; changeOptions() } }, { deep: true, flush: 'sync' })
 watch(() => props.connected, value => { if (!value) clear() }, { flush: 'sync' })
 watch(() => props.resetVersion, clear, { flush: 'sync' })
 watch(() => props.displayGraphId, clear, { flush: 'sync' })
@@ -55,6 +68,13 @@ async function review() {
   try {
     declaration ||= newReportId()
     payload = { schema_version: 1, report_id: declaration, launch_id: selected.value.launch.request.run_id, launch_sha256: selected.value.launch.launch_sha256, requirement: requirement.value, output_language: outputLanguage.value, native_windows: coverageMode.value === 'complete' ? null : declared.value.filter(w => w.enabled).map(w => ({ platform: w.platform, offset: windowNumber(w.offset), count: windowNumber(w.count) })) }
+    if (preparedSources.value) {
+      payload.schema_version = 2; payload.source_revisions = preparedSources.value.map(source => source.source_revision)
+    } else if (selectedExtras.value.length) {
+      const revisions = additionalSources.value.filter(source => selectedExtras.value.includes(source.source_revision)).map(source => source.source_revision)
+      if (revisions.length !== selectedExtras.value.length || revisions.length > 99) throw { code: 'invalid_request' }
+      payload.schema_version = 2; payload.source_revisions = [anchor.value.source_revision, ...revisions]
+    }
     connectedReportPayload(payload, 'plan')
   } catch (e) { error.value = e?.code || 'invalid_request'; await announce(); return }
   const life = epoch, selection = clone(selected.value)
@@ -137,6 +157,9 @@ async function selectFollowup(target) {
   <section class="connected-reports" :lang="locale" aria-labelledby="connected-reports-title" :aria-busy="pending">
     <h2 id="connected-reports-title">{{ copy.title }}</h2><p>{{ copy.intro }}</p><p v-if="!selected">{{ copy.missing }}</p>
     <form @submit.prevent="review"><fieldset :disabled="locked || !selected">
+      <div v-if="anchor" class="report-anchor"><strong>{{ copy.anchor }}</strong><p>{{ anchor.source_name }}<br><span class="mono">{{ anchor.source_revision }}</span></p></div>
+      <div v-if="preparedSources" class="report-prepared-sources"><strong>{{ copy.preparedSources }}</strong><p class="limitations">{{ copy.preparedSourcesHint }}</p><ol><li v-for="source in preparedSources" :key="source.source_revision">{{ source.source_name }}<br><span class="mono">{{ source.source_revision }}</span></li></ol></div>
+      <fieldset v-else class="report-sources" aria-describedby="report-sources-help"><legend>{{ copy.additionalSources }}</legend><p id="report-sources-help" class="limitations">{{ copy.sourcesHint }}</p><p v-if="!additionalSources.length" class="limitations">{{ copy.noAdditionalSources }}</p><label v-for="source in additionalSources" :key="source.source_revision" class="check"><input v-model="selectedExtras" class="report-source-checkbox" type="checkbox" :value="source.source_revision" :disabled="selectedExtras.length >= 99 && !selectedExtras.includes(source.source_revision)"><span>{{ source.source_name }}<br><span class="mono">{{ source.source_revision }}</span></span></label></fieldset>
       <label for="report-requirement">{{ copy.requirement }}<textarea id="report-requirement" v-model="requirement" rows="3" required aria-describedby="report-context-help report-feedback"></textarea></label>
       <div class="options"><label for="report-output-language">{{ copy.outputLanguage }}<select id="report-output-language" v-model="outputLanguage"><option value="en">English</option><option value="zh">中文</option><option value="ms">Bahasa Melayu</option></select></label><label for="report-coverage">{{ copy.coverageMode }}<select id="report-coverage" v-model="coverageMode"><option value="complete">{{ copy.complete }}</option><option value="selected">{{ copy.selected }}</option></select></label></div>
       <div v-if="coverageMode === 'selected'" class="windows"><div v-for="w in declared" :key="w.platform" class="window"><label class="check"><input v-model="w.enabled" type="checkbox">{{ w.platform }}</label><label :for="`report-offset-${w.platform}`">{{ copy.offset }}<input :id="`report-offset-${w.platform}`" v-model="w.offset" :disabled="!w.enabled" inputmode="numeric" autocomplete="off" spellcheck="false"></label><label :for="`report-count-${w.platform}`">{{ copy.count }}<input :id="`report-count-${w.platform}`" v-model="w.count" :disabled="!w.enabled" inputmode="numeric" autocomplete="off" spellcheck="false"></label></div><p>{{ copy.windowHint }}</p></div>
@@ -147,6 +170,7 @@ async function selectFollowup(target) {
     <form class="recovery" @submit.prevent="recover"><h3>{{ copy.recovery }}</h3><p id="report-recovery-help">{{ copy.recoveryHint }}</p><fieldset :disabled="locked"><label for="report-recovery-id">{{ copy.reportId }}<input id="report-recovery-id" v-model="recoveryId" required maxlength="36" autocomplete="off" spellcheck="false" aria-describedby="report-recovery-help report-feedback"></label><label for="report-recovery-hash">{{ copy.planHash }}<input id="report-recovery-hash" v-model="recoveryHash" required maxlength="64" autocomplete="off" spellcheck="false" aria-describedby="report-recovery-help report-feedback"></label><button class="report-recover" type="submit">{{ copy.recover }}</button></fieldset></form>
     <article v-for="record in records" :key="record.value.report_id" class="report-record" :data-report-id="record.value.report_id">
       <h3>{{ copy.states[record.value.state] }}</h3>
+      <template v-if="record.value.binding.source_set"><h4>{{ copy.sourceSet }}</h4><ol class="report-source-set"><li v-for="revision in record.value.binding.source_set.source_revisions" :key="revision" class="mono">{{ revision }}</li></ol></template>
       <dl><dt>{{ copy.reportId }}</dt><dd class="mono">{{ record.value.report_id }}</dd><dt>{{ copy.planHash }}</dt><dd class="mono">{{ record.value.plan_sha256 }}</dd><dt>{{ copy.requirement }}</dt><dd>{{ record.value.options.requirement }}</dd><dt>{{ copy.outputLanguage }}</dt><dd>{{ record.value.options.output_language }}</dd><dt>{{ copy.source }}</dt><dd>{{ record.value.binding.source.source_name }}<br><span class="mono">{{ record.value.binding.source.source_revision }}<br>{{ record.value.binding.source.source_sha256 }}</span></dd><dt>{{ copy.native }}</dt><dd class="mono">{{ record.value.binding.native.run_id }}</dd><dt>{{ copy.nativeHash }}</dt><dd class="mono">{{ record.value.binding.native.evidence_sha256 }}</dd><dt>{{ copy.contextHash }}</dt><dd class="mono">{{ record.value.context_sha256 }}</dd><dt>{{ copy.projectionHash }}</dt><dd class="mono">{{ record.value.source_projection_sha256 }}</dd><dt>{{ copy.model }}</dt><dd>{{ record.value.model_label }}</dd><dt>{{ copy.ceiling }}</dt><dd>{{ record.value.ceiling_microusd ?? copy.unknown }}</dd><dt>{{ copy.calls }}</dt><dd>{{ record.value.limits.max_calls }}</dd><dt>{{ copy.input }}</dt><dd>{{ record.value.limits.max_input_bytes }}</dd><dt>{{ copy.output }}</dt><dd>{{ record.value.limits.max_output_tokens }}</dd><dt>{{ copy.seconds }}</dt><dd>{{ record.value.limits.max_run_seconds }}</dd><dt>{{ copy.progress }}</dt><dd>{{ copy.stages[record.value.progress.stage] }} · {{ record.value.progress.percent }}% · {{ copy.sections }}: {{ record.value.progress.completed_sections }} / {{ record.value.progress.total_sections }}</dd></dl>
       <h4>{{ copy.coverageMode }}</h4><p>{{ record.value.options.native_windows === null ? copy.fullCoverage : copy.partialCoverage }}</p><ul class="coverage"><li v-for="c in record.value.binding.coverage" :key="c.platform">{{ c.platform }} · {{ copy.records }}: {{ c.selected_records }} / {{ c.total_records }} · {{ c.complete ? copy.complete : copy.partialCoverage }}<span v-for="w in c.windows" :key="w.offset"> · {{ copy.windows }}: {{ w.offset }} + {{ w.count }}</span></li></ul>
       <details class="references"><summary>{{ copy.references }}</summary><h4>{{ copy.sourceReferences }}</h4><ul><li v-for="key in record.value.binding.reference_keys.filter(k => k.startsWith('source:'))" :key="key" class="mono">{{ key }}</li></ul><h4>{{ copy.nativeReferences }}</h4><ul><li v-for="key in record.value.binding.reference_keys.filter(k => k.startsWith('native:'))" :key="key" class="mono">{{ key }}</li></ul></details>

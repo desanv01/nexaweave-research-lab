@@ -140,13 +140,23 @@ def validate_payload(method, value):
             raise ValueError
         keys = {'schema_version', 'report_id'}
         keys |= {'launch_id', 'launch_sha256', 'requirement', 'output_language', 'native_windows'} if method == 'plan' else {'plan_sha256'}
+        if method == 'plan' and type(value) is dict and value.get('schema_version') == 2:
+            keys.add('source_revisions')
         if method == 'download':
             keys |= {'kind', 'section_index'}
         exact(value, keys); scalar_tree(value)
-        integer(value['schema_version'], 1, 1); uuid_string(value['report_id'])
+        integer(value['schema_version'], 1, 2 if method == 'plan' else 1); uuid_string(value['report_id'])
         if method == 'plan':
             uuid_string(value['launch_id']); sha(value['launch_sha256'])
             options({k: value[k] for k in ('requirement', 'output_language', 'native_windows')})
+            if value['schema_version'] == 2:
+                revisions = value['source_revisions']
+                if type(revisions) is not list or not 1 <= len(revisions) <= 100:
+                    raise ValueError
+                for revision in revisions:
+                    uuid_string(revision)
+                if len(set(revisions)) != len(revisions):
+                    raise ValueError
         else:
             sha(value['plan_sha256'])
         if method == 'download':
@@ -178,8 +188,11 @@ def reference_key(value):
 
 
 def validate_binding(value):
-    exact(value, ('display_graph_id', 'principal', 'scope', 'project_revision', 'source',
-                  'preparation', 'native', 'coverage', 'reference_keys'))
+    keys = ('display_graph_id', 'principal', 'scope', 'project_revision', 'source',
+            'preparation', 'native', 'coverage', 'reference_keys')
+    if type(value) is dict and 'source_set' in value:
+        keys += ('source_set',)
+    exact(value, keys)
     text(value['display_graph_id'], 200)
     if type(value['principal']) is not str or not re.fullmatch(r'[\x20-\x7e]{1,128}', value['principal']) or not value['principal'].strip():
         raise ValueError
@@ -192,6 +205,16 @@ def validate_binding(value):
     integer(value['project_revision'], 1, 2147483647)
     source = exact(value['source'], ('source_revision', 'source_name', 'source_sha256'))
     uuid_string(source['source_revision']); text(source['source_name'], 256); sha(source['source_sha256'])
+    if 'source_set' in value:
+        selected = exact(value['source_set'], ('schema_version', 'source_revisions'))
+        integer(selected['schema_version'], 1, 1)
+        revisions = selected['source_revisions']
+        if type(revisions) is not list or not 1 <= len(revisions) <= 100:
+            raise ValueError
+        for revision in revisions:
+            uuid_string(revision)
+        if len(set(revisions)) != len(revisions) or revisions[0] != source['source_revision']:
+            raise ValueError
     prep = exact(value['preparation'], ('operation_id', 'plan_sha256', 'simulation_id', 'artifact_sha256'))
     uuid_string(prep['operation_id']); sha(prep['plan_sha256']); sha(prep['artifact_sha256'])
     if prep['simulation_id'] != 'sim_' + UUID(prep['operation_id']).hex:
@@ -285,6 +308,12 @@ def validate_result(value, graph_id, scope, payload, method, principal=None, kno
             if (binding['native']['run_id'] != payload['launch_id']
                     or binding['native']['launch_sha256'] != payload['launch_sha256']
                     or value['options'] != {k: payload[k] for k in ('requirement', 'output_language', 'native_windows')}):
+                raise ValueError
+            if payload.get('schema_version') == 2:
+                selected = validate_payload('plan', payload)['source_revisions']
+                if binding.get('source_set') != dict(schema_version=1, source_revisions=selected):
+                    raise ValueError
+            elif 'source_set' in binding:
                 raise ValueError
         elif value['plan_sha256'] != payload['plan_sha256']:
             raise ValueError

@@ -101,7 +101,7 @@ def admission_trace(trace):
     return [json.loads(line) for line in trace.read_text(encoding='utf-8').splitlines()] if trace.exists() else []
 
 
-def frozen_report(*, language='en', report_id=None):
+def frozen_report(*, language='en', report_id=None, context_version=1):
     from test_connected_report_client import public_result, fixture_context, declaration
     from app.services.connected_report_client import IDENTITY, digest
     from app.services.report_models import BoundedReportModelFactory
@@ -113,17 +113,26 @@ def frozen_report(*, language='en', report_id=None):
     identity['options']['output_language'] = language
     factory = BoundedReportModelFactory(ScriptedReportTransportFactory(), 'scripted-local', identity['limits'])
     payload = declaration(); payload.update(report_id=identity['report_id'], output_language=language)
-    return dict(identity=identity, declaration=payload, context=fixture_context(),
+    context = fixture_context()
+    if context_version == 2:
+        from test_connected_report_sources import selected_context
+        context = selected_context()
+        identity.update(binding=context['binding'], context_sha256=digest(context),
+                        source_projection_sha256=digest(context['graph']))
+        payload.update(schema_version=2,
+                       source_revisions=context['binding']['source_set']['source_revisions'][:])
+    return dict(identity=identity, declaration=payload, context=context,
         configuration=dict(account_id=str(uuid4()), factory_sha256=hashlib.sha256(pickle.dumps(factory)).hexdigest())), factory
 
 
 @pytest.mark.parametrize('language', ['en', 'zh', 'ms'])
-def test_actual_inherited_child_react_assembly_native_refs_locale_and_isolation(tmp_path, language):
+@pytest.mark.parametrize('context_version', [1, 2])
+def test_actual_inherited_child_react_assembly_native_refs_locale_and_isolation(tmp_path, language, context_version):
     from app.services.report_process import ReportProcess, report_files
     from app.services.report_agent import ReportManager
     from app.utils.locale import get_locale
     from app.services.connected_report_client import digest
-    frozen, factory = frozen_report(language=language)
+    frozen, factory = frozen_report(language=language, context_version=context_version)
     root = tmp_path / 'op'; root.mkdir()
     before_cwd, before_root, before_locale = os.getcwd(), ReportManager.REPORTS_DIR, get_locale()
     first, progress = [], []
@@ -136,8 +145,25 @@ def test_actual_inherited_child_react_assembly_native_refs_locale_and_isolation(
     with report_files(root/'output'/frozen['identity']['report_id'], outcome.manifest) as content:
         assert len(outcome.manifest['files']) == 7
         assert b'[[native:' in content['full_report.md'] and b'[[source:' in content['full_report.md']
-        assert json.loads(content['native_evidence.json'])['semantic_support_status'] == 'not_reviewed'
-        assert json.loads(content['native_evidence.json'])['context_sha256'] == digest(frozen['context'])
+        evidence = json.loads(content['native_evidence.json'])
+        assert evidence['semantic_support_status'] == 'not_reviewed'
+        assert evidence['context_sha256'] == digest(frozen['context'])
+        assert evidence['schema_version'] == context_version
+        if context_version == 2:
+            assert evidence['source_set'] == frozen['identity']['binding']['source_set']
+            assert evidence['sources'] == [{key: source[key] for key in
+                ('source_revision', 'source_name', 'source_sha256', 'passages')}
+                for source in frozen['context']['sources']]
+            assert [source['source_revision'] for source in evidence['sources']] == evidence['source_set']['source_revisions']
+            assert len(evidence['sources']) == 2
+            assert evidence['sources'][1]['source_name'] == 'DOCX 雪 <literal>'
+            assert all('text' not in source for source in evidence['sources'])
+            assert {passage['evidence_id'] for source in evidence['sources']
+                    for passage in source['passages']} == {
+                        key.split(':', 1)[1] for key in evidence['reference_keys'] if key.startswith('source:')}
+        else:
+            assert set(evidence) == {'schema_version', 'context_sha256', 'native', 'coverage',
+                'reference_keys', 'records', 'manifest', 'search_ranking', 'semantic_support_status'}
         assert json.loads(content['retrieval_evidence.json'])['schema_version'] == 1
         assert (root/'output'/frozen['identity']['report_id']/'agent_log.jsonl').is_file()
         assert b'Final Answer' not in content['full_report.md']

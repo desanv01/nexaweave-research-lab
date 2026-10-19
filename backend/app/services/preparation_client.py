@@ -5,6 +5,7 @@ import hashlib
 import json
 import re
 from uuid import UUID
+from nexaweave_execution.preparation_contracts import source_revisions, source_metadata
 
 REQUEST_BYTES = 65536
 RESULT_BYTES = 262144
@@ -89,13 +90,17 @@ def options(value):
 def validate_payload(method, value):
     try:
         keys = {'schema_version', 'operation_id'} | ({'source_revision', 'options'} if method == 'plan' else {'plan_sha256'})
+        if method == 'plan' and type(value) is dict and value.get('schema_version') == 2:
+            keys.add('source_revisions')
         if method not in {'plan', 'start', 'status'} or type(value) is not dict or set(value) != keys:
             raise ValueError
-        integer(value['schema_version'], 1, 1)
+        integer(value['schema_version'], 1, 2 if method == 'plan' else 1)
         uuid_string(value['operation_id'])
         if method == 'plan':
             uuid_string(value['source_revision'])
             options(value['options'])
+            if value['schema_version'] == 2:
+                source_revisions(value['source_revisions'], value['source_revision'])
         else:
             sha(value['plan_sha256'])
         if len(encoded(value)) > REQUEST_BYTES:
@@ -134,9 +139,11 @@ def validate_result(value, graph_id, scope, payload, method):
                 'source', 'options', 'actors', 'projection_sha256', 'plan_sha256', 'state',
                 'progress', 'error_code', 'authorization', 'receipt', 'graph_snapshot_atomic',
                 'model_calls_started', 'simulation_executed'}
+        if type(value) is dict and value.get('schema_version') == 2:
+            keys.add('sources')
         if type(value) is not dict or set(value) != keys:
             raise ValueError
-        integer(value['schema_version'], 1, 1)
+        integer(value['schema_version'], 1, 2)
         integer(value['project_revision'], 1, 9007199254740991)
         if value['display_graph_id'] != graph_id or canonical(value['scope']) != canonical(scope) or value['operation_id'] != payload['operation_id']:
             raise ValueError
@@ -146,9 +153,20 @@ def validate_result(value, graph_id, scope, payload, method):
         if type(source) is not dict or set(source) != {'source_revision', 'source_name', 'source_sha256'}:
             raise ValueError
         uuid_string(source['source_revision']); text(source['source_name'], 256); sha(source['source_sha256'])
+        if value['schema_version'] == 2:
+            sources = value['sources']
+            if type(sources) is not list or not 1 <= len(sources) <= 100:
+                raise ValueError
+            for item in sources:
+                source_metadata(item)
+            source_revisions([item['source_revision'] for item in sources], source['source_revision'])
+            if sources[0] != source:
+                raise ValueError
         options(value['options'])
         if method == 'plan':
-            if source['source_revision'] != payload['source_revision'] or value['options'] != payload['options']:
+            if (value['schema_version'] != payload['schema_version'] or source['source_revision'] != payload['source_revision']
+                    or value['options'] != payload['options']
+                    or value['schema_version'] == 2 and [s['source_revision'] for s in value['sources']] != payload['source_revisions']):
                 raise ValueError
         elif value['plan_sha256'] != payload['plan_sha256']:
             raise ValueError
@@ -168,6 +186,8 @@ def validate_result(value, graph_id, scope, payload, method):
         sha(value['projection_sha256']); sha(value['plan_sha256'])
         identity = {key: value[key] for key in ('schema_version', 'display_graph_id', 'scope',
                     'project_revision', 'operation_id', 'source', 'options', 'actors', 'projection_sha256')}
+        if value['schema_version'] == 2:
+            identity['sources'] = value['sources']
         if digest(identity) != value['plan_sha256']:
             raise ValueError
         state, progress = value['state'], value['progress']

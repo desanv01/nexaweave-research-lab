@@ -254,11 +254,14 @@ class SourceLibrary:
             return {**common, "scope": scope.model_dump(mode="json")}
         if method == "list":
             records = store.list_sources(self.settings.principal, scope.project_id, limit=21)
+            self.authorize()
             return {**common, "sources": [metadata(r) for r in records[:20]],
                     "has_more": len(records) > 20, "window_limit": 20}
         if method == "get":
-            return source_result(store.get_source(self.settings.principal, scope.project_id,
-                                 payload["source_revision"]), include_text=True)
+            record = store.get_source(self.settings.principal, scope.project_id,
+                                      payload["source_revision"])
+            self.authorize()
+            return source_result(record, include_text=True)
         if method in {"binary_metadata", "binary_read"}:
             original = store.get_original(self.settings.principal, scope.project_id,
                                           payload["source_revision"])
@@ -322,6 +325,7 @@ class SourceLibrary:
             self.authorize()
             record = store.ingest_text(self.settings.principal, scope.project_id, payload["source_revision"],
                 payload["source_name"], extracted.text, passages)
+            self.authorize()
             return {**source_result(record), "extraction": extraction}
         passages = declarations(payload["source_revision"], payload["text"], payload["blocks"])
         # The mutation result contains at most 100 small metadata records, no full text.
@@ -332,6 +336,7 @@ class SourceLibrary:
         self.authorize()
         record = store.ingest_text(self.settings.principal, scope.project_id, payload["source_revision"],
                                    payload["source_name"], payload["text"], passages)
+        self.authorize()
         return source_result(record)
 
     def dispatch(self, raw):

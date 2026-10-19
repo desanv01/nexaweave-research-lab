@@ -1,9 +1,9 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
-import { prepareSource, validateSourceOriginalResult } from '../../api/sourceLibrary.js'
+import { prepareSource, validateSourceResult, validateSourceOriginalResult } from '../../api/sourceLibrary.js'
 import { copyFor } from '../../i18n/workbench.js'
 const props = defineProps({ methods: { type: Object, required: true }, connected: Boolean, busy: Boolean, resetVersion: Number, locale: { type: String, default: 'en' } })
-const emit = defineEmits(['inspected'])
+const emit = defineEmits(['inspected', 'catalog'])
 const copy = computed(() => copyFor(props.locale).sources)
 const windowData = ref(null), loadedAt = ref(''), inspected = ref(null), receipt = ref(null)
 const name = ref(''), draft = ref(''), inputMode = ref('paste'), selectedFile = ref(null), fileInput = ref(null)
@@ -33,6 +33,7 @@ function errorText() {
 }
 function clearDraft() { name.value = ''; draft.value = ''; selectedFile.value = null; prepared.value = null; if (fileInput.value) fileInput.value.value = '' }
 function clearAll() {
+  emit('catalog', null)
   originalAbort?.abort(); originalAbort = null
   originalOperation = null
   if (originalUrl) URL.revokeObjectURL(originalUrl)
@@ -82,10 +83,14 @@ async function read(action, apply) {
   finally { if (epoch === generation) pending.value = false }
 }
 function load() {
-  return read(() => props.methods.list(), data => {
+  return read(() => props.methods.list(), async (data, current) => {
+    await validateSourceResult('sourceList', data)
+    if (!current()) return
     const project = data.sources[0]?.project_id
     if (project && (inspected.value && inspected.value.source.project_id !== project || receipt.value && receipt.value.source.project_id !== project)) throw { code: 'invalid_reply' }
-    windowData.value = data; loadedAt.value = new Date().toISOString(); message.value = 'loaded'
+    const sources = data.sources.map(source => ({ ...source }))
+    windowData.value = { ...data, sources }; loadedAt.value = new Date().toISOString(); message.value = 'loaded'
+    emit('catalog', sources.map(source => ({ ...source })))
   })
 }
 function inspect(source, event) {
@@ -172,14 +177,16 @@ function originalMetadata() {
 function originalRead() {
   if (disabled.value || !originalInfo.value) return
   const revision = originalInfo.value.source.source_revision
+  const expectedSource = { ...originalInfo.value.source }
   const expectedBinary = { ...originalInfo.value.binary }
   originalAbort?.abort(); originalAbort = new AbortController()
   const controller = originalAbort, signal = controller.signal
   originalOperation = { controller, revision }
   return read(() => props.methods.originalRead({ source_revision: revision }, { signal }), async (data, current) => {
-    await validateSourceOriginalResult('sourceOriginalRead', data, { source_revision: revision })
+    await validateSourceOriginalResult('sourceOriginalRead', data, { source_revision: revision, project_id: expectedSource.project_id })
     if (!current() || signal.aborted || originalOperation?.controller !== controller || originalRevision.value.trim() !== revision) return
     if (!originalInfo.value || originalInfo.value.source.source_revision !== revision
+      || Object.keys(expectedSource).some(key => data.source[key] !== expectedSource[key] || originalInfo.value.source[key] !== expectedSource[key])
       || data.binary.sha256 !== expectedBinary.sha256 || data.binary.byte_length !== expectedBinary.byte_length
       || originalInfo.value.binary.sha256 !== expectedBinary.sha256 || originalInfo.value.binary.byte_length !== expectedBinary.byte_length) throw { code: 'invalid_reply' }
     const bytes = Uint8Array.from(atob(data.content_base64), c => c.charCodeAt(0))

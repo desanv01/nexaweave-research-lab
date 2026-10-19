@@ -11,7 +11,7 @@ from uuid import uuid4
 import psycopg
 from psycopg.types.json import Jsonb
 from nexaweave_storage.transaction_settings import apply_runtime_settings
-from .preparation_contracts import PreparationAuthorityError, PreparationDispatch, digest, identifier, sha
+from .preparation_contracts import PreparationAuthorityError, PreparationDispatch, digest, identifier, sha, validate_preparation_sources
 
 
 @contextmanager
@@ -104,8 +104,12 @@ def _record(row):
                 or result.project_revision != public['project_revision']
                 or result.display_graph_id != public['display_graph_id']
                 or result.frozen['plan_identity'] != {k: v for k, v in public.items() if k != 'plan_sha256'}
-                or result.request_sha256 != digest(result.frozen['request'])
-                or hashlib.sha256(result.frozen['source_text'].encode('utf-8')).hexdigest() != public['source']['source_sha256']):
+                or result.request_sha256 != digest(result.frozen['request'])):
+            raise ValueError
+        if (public['schema_version'] == 2 or 'sources' in result.frozen
+                or type(result.frozen['request']) is dict and result.frozen['request'].get('schema_version') == 2):
+            validate_preparation_sources(result.frozen)
+        elif hashlib.sha256(result.frozen['source_text'].encode('utf-8')).hexdigest() != public['source']['source_sha256']:
             raise ValueError
         sha(result.plan_sha256); identifier(result.operation_id)
     except (KeyError, TypeError, ValueError, UnicodeError):

@@ -229,12 +229,15 @@ class SimulationConfigGenerator:
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
         model_name: Optional[str] = None,
-        *, chat_client=None, strict_generation: bool = False
+        *, chat_client=None, strict_generation: bool = False, require_complete_document: bool = False
     ):
         self.api_key = None if chat_client is not None else api_key or Config.LLM_API_KEY
         self.base_url = base_url or Config.LLM_BASE_URL
         self.model_name = model_name or Config.LLM_MODEL_NAME
         self.strict_generation = strict_generation
+        if type(require_complete_document) is not bool:
+            raise ValueError('invalid complete document policy')
+        self.require_complete_document = require_complete_document
         
         if chat_client is not None:
             self.client = chat_client
@@ -409,6 +412,15 @@ class SimulationConfigGenerator:
         
         current_length = sum(len(p) for p in context_parts)
         remaining_length = self.MAX_CONTEXT_LENGTH - current_length - 500  # 留500字符余量
+        if getattr(self, 'require_complete_document', False):
+            if type(document_text) is not str or len(document_text) > max(0, remaining_length):
+                raise ValueError('complete document context would be truncated')
+            if document_text:
+                context_parts.append(f"\n## 原始文档内容\n{document_text}")
+            context = "\n".join(context_parts)
+            if len(context) > min(self.TIME_CONFIG_CONTEXT_LENGTH, self.EVENT_CONFIG_CONTEXT_LENGTH):
+                raise ValueError('complete document context exceeds configuration limit')
+            return context
         
         if remaining_length > 0 and document_text:
             doc_text = document_text[:remaining_length]
@@ -556,6 +568,8 @@ class SimulationConfigGenerator:
     
     def _generate_time_config(self, context: str, num_entities: int) -> Dict[str, Any]:
         """生成时间配置"""
+        if getattr(self, 'require_complete_document', False) and len(context) > min(self.TIME_CONFIG_CONTEXT_LENGTH, self.EVENT_CONFIG_CONTEXT_LENGTH):
+            raise ValueError('complete document context exceeds configuration limit')
         # 使用配置的上下文截断长度
         context_truncated = context[:self.TIME_CONFIG_CONTEXT_LENGTH]
         
@@ -674,6 +688,8 @@ class SimulationConfigGenerator:
         entities: List[EntityNode]
     ) -> Dict[str, Any]:
         """生成事件配置"""
+        if getattr(self, 'require_complete_document', False) and len(context) > min(self.TIME_CONFIG_CONTEXT_LENGTH, self.EVENT_CONFIG_CONTEXT_LENGTH):
+            raise ValueError('complete document context exceeds configuration limit')
         
         # 获取可用的实体类型列表，供 LLM 参考
         entity_types_available = list(set(

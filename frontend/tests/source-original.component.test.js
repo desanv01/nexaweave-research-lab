@@ -67,6 +67,74 @@ function mountOriginal(methods) {
   return { props, root, app, button, input, close: () => { app.unmount(); root.remove() } }
 }
 
+for (const field of ['project_id', 'source_name', 'text_sha256', 'byte_length', 'codepoint_length', 'recorded_at']) {
+  test(`original download rejects changed lookup source ${field} even with the same valid PDF bytes`, async () => {
+    const effects = [], oldCreate = URL.createObjectURL, oldRevoke = URL.revokeObjectURL
+    const oldClick = dom.window.HTMLAnchorElement.prototype.click
+    URL.createObjectURL = () => { effects.push('blob'); return 'blob:swapped-source' }
+    URL.revokeObjectURL = () => effects.push('revoke')
+    dom.window.HTMLAnchorElement.prototype.click = () => effects.push('click')
+    const changedSource = { ...source, [field]: {
+      project_id: '33333333-3333-4333-8333-333333333333', source_name: 'different.pdf',
+      text_sha256: '0'.repeat(64), byte_length: 5, codepoint_length: 3,
+      recorded_at: '2026-10-08T00:00:00Z'
+    }[field] }
+    let changed = true
+    const mounted = mountOriginal({ originalMetadata: async () => metadata,
+      originalRead: async () => ({ ...metadata,
+        source: changed ? changedSource : source,
+        binary: changed && field === 'project_id' ? { ...binary, project_id: changedSource.project_id } : binary,
+        content_base64: encoded }) })
+    try {
+      mounted.input('#source-original-revision', revision)
+      mounted.button(copy.originalLookup).click(); await cryptoSettle()
+      mounted.button(copy.originalDownload).click(); await cryptoSettle()
+      assert.deepEqual(effects, [])
+      assert.ok(mounted.root.querySelector('#source-feedback').textContent.includes(copy.invalidReply))
+      // A failed read must not prevent a later exact read of the verified binding.
+      changed = false
+      mounted.button(copy.originalDownload).click(); await cryptoSettle()
+      assert.deepEqual(effects, ['blob', 'click', 'revoke'])
+    } finally {
+      mounted.close(); URL.createObjectURL = oldCreate; URL.revokeObjectURL = oldRevoke
+      dom.window.HTMLAnchorElement.prototype.click = oldClick
+    }
+  })
+}
+
+for (const late of ['success', 'failure']) {
+  test(`superseded original metadata ${late} cannot replace a newer revision or its feedback`, async () => {
+    const newer = '44444444-4444-4444-8444-444444444444'
+    let release, firstSignal
+    const newerMetadata = { ...metadata, source: { ...source, source_revision: newer },
+      binary: { ...binary, source_revision: newer } }
+    const mounted = mountOriginal({ originalMetadata: (identity, options) => {
+      if (identity.source_revision === revision) {
+        firstSignal = options.signal
+        return new Promise((resolve, reject) => { release = () => late === 'success'
+          ? resolve(metadata) : reject({ code: 'source_denied' }) })
+      }
+      assert.equal(identity.source_revision, newer)
+      return Promise.resolve(newerMetadata)
+    } })
+    try {
+      mounted.input('#source-original-revision', revision)
+      mounted.button(copy.originalLookup).click(); await settle()
+      mounted.input('#source-original-revision', newer); await settle()
+      assert.equal(firstSignal.aborted, true)
+      assert.equal(mounted.button(copy.originalLookup).disabled, false)
+      mounted.button(copy.originalLookup).click(); await cryptoSettle()
+      const feedback = mounted.root.querySelector('#source-feedback').textContent
+      assert.ok(mounted.button(copy.originalDownload))
+      release(); await cryptoSettle()
+      assert.equal(mounted.root.querySelector('#source-original-revision').value, newer)
+      assert.equal(mounted.root.querySelector('#source-feedback').textContent, feedback)
+      assert.ok(mounted.button(copy.originalDownload))
+      assert.equal(mounted.button(copy.originalLookup).disabled, false)
+    } finally { mounted.close() }
+  })
+}
+
 for (const mismatch of ['name', 'project']) {
   test(`uncertain original retention rejects changed ${mismatch} and keeps reconciliation identity`, async () => {
     let submitted, changed = true, submissions = 0

@@ -208,3 +208,168 @@ def test_oversize_input_and_unconfigured_factory_make_zero_requests():
     assert not factory.configured()
     with pytest.raises(ReportError):
         factory.create(deadline=time.monotonic()+30, checkpoint=lambda: None, first_call=forbidden)
+
+
+def freshness_fixture(tmp_path):
+    from tools import run_connected_report_tests as runner
+    root, prefix = tmp_path / 'reviewed', tmp_path / 'python'
+    specs, installed, reviewed = {}, {}, {}
+    for package in ('nexaweave_execution', 'nexaweave_storage', 'nexaweave_knowledge'):
+        package_root = prefix / 'Lib' / 'site-packages' / package
+        package_root.mkdir(parents=True)
+        origin = package_root / '__init__.py'; origin.write_bytes(b'')
+        specs[package] = SimpleNamespace(origin=str(origin), submodule_search_locations=[str(package_root)])
+    for package, filename, cap in runner.FRESH_SOURCES:
+        content = ('reviewed:' + package + ':' + filename + '\n').encode().ljust(cap, b' ')
+        installed[package] = prefix / 'Lib' / 'site-packages' / package / filename
+        reviewed[package] = root / 'services' / 'knowledge' / 'src' / package / filename
+        reviewed[package].parent.mkdir(parents=True)
+        installed[package].write_bytes(content); reviewed[package].write_bytes(content)
+    return SimpleNamespace(runner=runner, root=root, prefix=prefix, specs=specs,
+                           installed=installed, reviewed=reviewed)
+
+
+def test_installed_freshness_matches_both_files_without_target_spec_discovery(tmp_path, monkeypatch):
+    fixture = freshness_fixture(tmp_path)
+    def forbidden(*args, **kwargs):
+        pytest.fail('freshness gate tried to discover or import a target module')
+    monkeypatch.setattr(fixture.runner.importlib.util, 'find_spec', forbidden)
+    assert fixture.runner.require_installed_freshness(fixture.specs, root=fixture.root, prefix=fixture.prefix) is None
+
+
+@pytest.mark.parametrize('package', ['nexaweave_execution', 'nexaweave_knowledge'])
+@pytest.mark.parametrize('kind', ['same-size-stale', 'missing-installed', 'missing-reviewed'])
+def test_installed_freshness_refuses_either_stale_or_missing_file(tmp_path, package, kind):
+    fixture = freshness_fixture(tmp_path)
+    if kind == 'same-size-stale':
+        original = fixture.installed[package].read_bytes()
+        fixture.installed[package].write_bytes(b'X' + original[1:])
+    else:
+        (fixture.installed if kind == 'missing-installed' else fixture.reviewed)[package].unlink()
+    with pytest.raises(ValueError, match='^connected_report_installed_source_mismatch$'):
+        fixture.runner.require_installed_freshness(fixture.specs, root=fixture.root, prefix=fixture.prefix)
+
+
+@pytest.mark.parametrize('kind', ['missing-spec', 'no-origin', 'relative', 'escape', 'outside-prefix',
+                                  'wrong-origin', 'missing-location', 'different-location'])
+def test_installed_freshness_refuses_bad_package_locations(tmp_path, kind):
+    fixture = freshness_fixture(tmp_path)
+    package = 'nexaweave_execution'; spec = fixture.specs[package]
+    if kind == 'missing-spec':
+        fixture.specs.pop(package)
+    elif kind == 'no-origin':
+        spec.origin = None
+    elif kind == 'relative':
+        spec.origin = 'Lib/site-packages/nexaweave_execution/__init__.py'
+    elif kind == 'escape':
+        spec.origin = str(fixture.prefix / '..' / 'python' / 'Lib' / 'site-packages' / package / '__init__.py')
+    elif kind == 'outside-prefix':
+        outside = tmp_path / 'other' / 'site-packages' / package
+        outside.mkdir(parents=True); (outside / '__init__.py').write_bytes(b'')
+        spec.origin = str(outside / '__init__.py'); spec.submodule_search_locations = [str(outside)]
+    elif kind == 'wrong-origin':
+        spec.origin = str(fixture.installed[package])
+    elif kind == 'missing-location':
+        spec.submodule_search_locations = None
+    else:
+        spec.submodule_search_locations = [str(fixture.installed['nexaweave_knowledge'].parent)]
+    with pytest.raises(ValueError, match='^connected_report_installed_source_mismatch$'):
+        fixture.runner.require_installed_freshness(fixture.specs, root=fixture.root, prefix=fixture.prefix)
+
+
+@pytest.mark.parametrize('location', ['installed', 'reviewed'])
+@pytest.mark.parametrize('package,cap', [('nexaweave_execution', 24865), ('nexaweave_knowledge', 18952)])
+@pytest.mark.parametrize('kind', ['empty', 'oversize'])
+def test_installed_freshness_checks_size_before_opening_or_allocating_file(tmp_path, monkeypatch, location, package, cap, kind):
+    fixture = freshness_fixture(tmp_path)
+    path = getattr(fixture, location)[package]
+    path.write_bytes(b'x' * (0 if kind == 'empty' else cap + 1))
+    actual_open = fixture.runner.os.open
+    opened = []
+    def tracked_open(value, *args, **kwargs):
+        opened.append(value)
+        assert value != path, 'out-of-bound file reached content open'
+        return actual_open(value, *args, **kwargs)
+    monkeypatch.setattr(fixture.runner.os, 'open', tracked_open)
+    with pytest.raises(ValueError, match='^connected_report_installed_source_mismatch$'):
+        fixture.runner.require_installed_freshness(fixture.specs, root=fixture.root, prefix=fixture.prefix)
+    assert path not in opened
+
+
+@pytest.mark.parametrize('location', ['file', 'package-directory', 'reviewed-file'])
+@pytest.mark.parametrize('kind', ['symlink', 'windows-reparse'])
+def test_installed_freshness_refuses_link_or_reparse_metadata_without_privileged_link_creation(tmp_path, monkeypatch, location, kind):
+    import stat
+    fixture = freshness_fixture(tmp_path)
+    path = (fixture.reviewed['nexaweave_execution'] if location == 'reviewed-file'
+            else fixture.installed['nexaweave_execution'])
+    if location == 'package-directory':
+        path = path.parent
+    actual_lstat = fixture.runner.os.lstat
+    def marked(value, *args, **kwargs):
+        info = actual_lstat(value, *args, **kwargs)
+        if value == path:
+            return SimpleNamespace(st_mode=stat.S_IFLNK if kind == 'symlink' else info.st_mode,
+                                   st_file_attributes=0x400 if kind == 'windows-reparse' else 0)
+        return info
+    monkeypatch.setattr(fixture.runner.os, 'lstat', marked)
+    with pytest.raises(ValueError, match='^connected_report_installed_source_mismatch$'):
+        fixture.runner.require_installed_freshness(fixture.specs, root=fixture.root, prefix=fixture.prefix)
+
+
+def test_installed_freshness_refuses_an_open_file_changed_during_bounded_read(tmp_path, monkeypatch):
+    fixture = freshness_fixture(tmp_path)
+    actual_fstat = fixture.runner.os.fstat
+    calls = []
+    def changed(descriptor):
+        info = actual_fstat(descriptor); calls.append(descriptor)
+        if len(calls) == 2:
+            return SimpleNamespace(**{key: getattr(info, key) + (1 if key == 'st_ctime_ns' else 0)
+                for key in ('st_dev', 'st_ino', 'st_size', 'st_mtime_ns', 'st_ctime_ns')})
+        return info
+    monkeypatch.setattr(fixture.runner.os, 'fstat', changed)
+    with pytest.raises(ValueError, match='^connected_report_installed_source_mismatch$'):
+        fixture.runner.require_installed_freshness(fixture.specs, root=fixture.root, prefix=fixture.prefix)
+    assert len(calls) == 2
+
+
+def test_installed_freshness_growth_cannot_expand_the_descriptor_read(tmp_path, monkeypatch):
+    fixture = freshness_fixture(tmp_path)
+    path = fixture.installed['nexaweave_execution']
+    original_size = path.stat().st_size
+    actual_read = fixture.runner.os.read
+    requested = []
+    def growing_read(descriptor, size):
+        requested.append(size)
+        with path.open('ab') as source:
+            source.write(b'x')
+        return actual_read(descriptor, size)
+    monkeypatch.setattr(fixture.runner.os, 'read', growing_read)
+    with pytest.raises(ValueError, match='^connected_report_installed_source_mismatch$'):
+        fixture.runner.require_installed_freshness(fixture.specs, root=fixture.root, prefix=fixture.prefix)
+    assert requested == [original_size]
+    assert path.stat().st_size == original_size + 1
+
+
+def test_child_freshness_refusal_precedes_pytest_import_and_restores_socket_guard(tmp_path, monkeypatch, capsys):
+    import builtins
+    fixture = freshness_fixture(tmp_path); runner = fixture.runner
+    fixture.installed['nexaweave_knowledge'].write_bytes(b'stale')
+    effects = []
+    monkeypatch.setattr(runner, 'ROOT', fixture.root)
+    monkeypatch.setattr(runner.sys, 'prefix', str(fixture.prefix))
+    monkeypatch.setattr(runner, 'LoopbackOnlySockets', lambda: SimpleNamespace(
+        install=lambda: effects.append('install'), restore=lambda: effects.append('restore')))
+    def package_spec(name):
+        assert name in fixture.specs, 'must inspect top-level specs only'
+        effects.append(name); return fixture.specs[name]
+    monkeypatch.setattr(runner.importlib.util, 'find_spec', package_spec)
+    actual_import = builtins.__import__
+    def import_guard(name, *args, **kwargs):
+        if name == 'pytest' or name.startswith(('nexaweave_execution', 'nexaweave_knowledge')):
+            pytest.fail('freshness refusal reached pytest or target import')
+        return actual_import(name, *args, **kwargs)
+    monkeypatch.setattr(builtins, '__import__', import_guard)
+    assert runner.child('unit') == 1
+    assert effects == ['install', 'nexaweave_execution', 'nexaweave_storage', 'nexaweave_knowledge', 'restore']
+    assert capsys.readouterr().err.strip() == 'connected_report_installed_source_mismatch'

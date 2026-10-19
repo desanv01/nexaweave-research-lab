@@ -2,9 +2,11 @@
 from __future__ import annotations
 import argparse
 import importlib.util
+import hashlib
 import json
 import math
 import os
+import stat
 from pathlib import Path
 import subprocess
 import sys
@@ -17,7 +19,8 @@ from tools.run_unit_tests import LoopbackOnlySockets, _unit_environment
 
 UNIT_TARGETS = tuple(ROOT / 'backend/tests' / name for name in (
     'test_connected_report_client.py', 'test_connected_report_host.py',
-    'test_connected_report_api.py', 'test_connected_report_dependencies.py'))
+    'test_connected_report_api.py', 'test_connected_report_dependencies.py',
+    'test_connected_report_sources.py', 'test_connected_report_source_prompts.py'))
 ENGINE_TARGET = ROOT / 'backend/engine_tests/test_connected_report_process.py'
 PG_TARGET = ROOT / 'services/knowledge/tests/test_connected_native_report.py'
 PG_STORE_TARGET = ROOT / 'services/knowledge/tests/test_report_store.py'
@@ -27,11 +30,81 @@ MARKERS = ('postgres: approved disposable PostgreSQL authority\n'
            'native_launch_temporal: inherited actual connected Temporal native launch\n'
            'native_launch_engine: inherited actual generated-preparation owned OASIS native launch')
 
+# Reviewed Group1 input sizes are read caps, not new application allowances.
+FRESH_SOURCES = (('nexaweave_execution', 'report_contracts.py', 24865),
+                 ('nexaweave_knowledge', 'source_library.py', 18952))
+
+
+def _plain_source_path(value, *, directory=False):
+    path = Path(value)
+    if not path.is_absolute() or '..' in path.parts:
+        raise ValueError('installed_source_path')
+    for index, part in enumerate((path, *path.parents)):
+        info = os.lstat(part)
+        if (stat.S_ISLNK(info.st_mode) or getattr(info, 'st_file_attributes', 0) & 0x400
+                or not (stat.S_ISDIR(info.st_mode) if index or directory else stat.S_ISREG(info.st_mode))):
+            raise ValueError('installed_source_path')
+    if path.resolve(strict=True) != path:
+        raise ValueError('installed_source_path')
+    return path
+
+
+def _source_stamp(info):
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def _bounded_source_digest(path, cap):
+    path = _plain_source_path(path)
+    before = os.lstat(path)
+    if not 1 <= before.st_size <= cap:
+        raise ValueError('installed_source_size')
+    flags = os.O_RDONLY | getattr(os, 'O_BINARY', 0) | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0)
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if (not stat.S_ISREG(opened.st_mode) or getattr(opened, 'st_file_attributes', 0) & 0x400
+                or _source_stamp(opened) != _source_stamp(before)):
+            raise ValueError('installed_source_changed')
+        _plain_source_path(path)
+        data = os.read(descriptor, before.st_size)
+        if (len(data) != before.st_size or _source_stamp(os.fstat(descriptor)) != _source_stamp(before)
+                or _source_stamp(os.lstat(_plain_source_path(path))) != _source_stamp(before)):
+            raise ValueError('installed_source_changed')
+        return hashlib.sha256(data).digest()
+    finally:
+        os.close(descriptor)
+
+
+def require_installed_freshness(package_specs, *, root=None, prefix=None):
+    """Inspect ordinary files from top-level specs only; never import targets."""
+    try:
+        root = _plain_source_path(ROOT if root is None else root, directory=True)
+        prefix = _plain_source_path(sys.prefix if prefix is None else prefix, directory=True)
+        for package, filename, cap in FRESH_SOURCES:
+            spec = package_specs[package]
+            origin = _plain_source_path(spec.origin)
+            package_root = origin.parent
+            locations = spec.submodule_search_locations
+            if (origin.name != '__init__.py' or package_root.name != package
+                    or not origin.is_relative_to(prefix)
+                    or 'site-packages' not in origin.relative_to(prefix).parts
+                    or locations is None or len(locations) != 1
+                    or _plain_source_path(locations[0], directory=True) != package_root):
+                raise ValueError('installed_source_location')
+            installed_source = package_root / filename
+            reviewed_source = root / 'services' / 'knowledge' / 'src' / package / filename
+            if _bounded_source_digest(installed_source, cap) != _bounded_source_digest(reviewed_source, cap):
+                raise ValueError('installed_source_stale')
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        raise ValueError('connected_report_installed_source_mismatch') from None
+
+
 def child(mode: str, journey: bool = False) -> int:
     guard = LoopbackOnlySockets()
     guard.install()
     try:
         installed = Path(sys.prefix).resolve()
+        package_specs = {}
         for package in ('nexaweave_execution', 'nexaweave_storage', 'nexaweave_knowledge'):
             spec = importlib.util.find_spec(package)
             if (spec is None or spec.origin is None or
@@ -39,6 +112,12 @@ def child(mode: str, journey: bool = False) -> int:
                     'site-packages' not in Path(spec.origin).parts):
                 print('connected_report_installed_package_required', file=sys.stderr)
                 return 1
+            package_specs[package] = spec
+        try:
+            require_installed_freshness(package_specs)
+        except ValueError:
+            print('connected_report_installed_source_mismatch', file=sys.stderr)
+            return 1
         import pytest
         class Accounting:
             collected = 0

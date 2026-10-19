@@ -566,6 +566,19 @@ def test_v2_original_codec_rejects_corrupt_binding_without_weakening_v1():
         original_result("retain_pdf_binary", pdf_receipt_fixture(payload), scope(), payload)
 
 
+@pytest.mark.parametrize("delta", [-1, 1])
+def test_v2_original_retention_rejects_inconsistent_submitted_byte_length(delta):
+    payload = dict(pdf_upload_fixture(), schema_version=2)
+    result = original_pdf_fixture(payload)
+    assert original_result("retain_pdf_binary", result, scope(), payload) == result
+    result["binary"]["byte_length"] += delta
+    with pytest.raises(ValueError):
+        original_result("retain_pdf_binary", result, scope(), payload)
+    with pytest.raises(KnowledgeTransportFailure) as error:
+        validate_result("retain_pdf_binary", result, scope(), payload)
+    assert error.value.outcome_unknown is True
+
+
 def install_pdf_wire_reply(child, *, corrupt_result=None):
     original = child.call
     def call(raw):

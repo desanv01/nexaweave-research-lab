@@ -3,7 +3,7 @@ import { sourcePayload, sourceReadRequest, verifySourceInput, validateSourceResu
 import { ingestionPayload, validateIngestionResult } from './sourceIngestion.js'
 import { experimentSelection, validateExperimentCatalog, validateExperimentComparison } from './experimentComparison.js'
 import { populationOptions, validatePopulationPreview, validatePopulationExport } from './populationWorkbench.js'
-import { preparationPayload, preparationSource, validatePreparationResult, PREPARATION_CODES } from './simulationPreparation.js'
+import { preparationPayload, preparationSource, preparationSources, validatePreparationResult, PREPARATION_CODES } from './simulationPreparation.js'
 import { nativeLaunchPayload, validateNativeLaunchResult, NATIVE_LAUNCH_CODES, NATIVE_ERROR_STATUS } from './nativeLaunch.js'
 import { createNativeObservationsChannel } from './nativeObservations.js'
 import { createConnectedReportsChannel } from './connectedReports.js'
@@ -262,7 +262,7 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
       payload = JSON.parse(preparationRaw)
       if (method === 'preparationPlan' && !preparationPlans.has(payload.operation_id) && preparationPlans.size >= 100) fail('busy')
       try {
-        preparationContext = method === 'preparationPlan' ? { source: preparationSource(ingestionContext), known: preparationPlans.get(payload.operation_id) } : { known: preparationPlans.get(payload.operation_id) }
+        preparationContext = method === 'preparationPlan' ? { source: payload.schema_version === 2 ? preparationSources(ingestionContext, payload) : preparationSource(ingestionContext), known: preparationPlans.get(payload.operation_id) } : { known: preparationPlans.get(payload.operation_id) }
         if (method !== 'preparationPlan' && (!preparationContext.known || preparationContext.known.plan_sha256 !== payload.plan_sha256)) fail('invalid_request')
         if (method === 'preparationStart' && (preparationStarted.has(payload.operation_id) || preparationContext.known.state !== 'planned')) fail('conflict')
         if (method === 'preparationStart' && (!preparationContext.known.authorization.model_calls_enabled || !preparationContext.known.authorization.ceiling_microusd)) fail('model_calls_disabled')
@@ -330,7 +330,7 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
       responseBody = response.body
       owned()
       if (response.status === 401) { disconnect(); fail('unauthorized') }
-      if ((experiment || population || preparation || native) && response.status === 403) { disconnect(); fail('origin_denied') }
+      if ((method === 'graph' || experiment || population || preparation || native) && response.status === 403) { disconnect(); fail('origin_denied') }
       if (native && [404, 501, 503].includes(response.status) && !/^application\/json(?:\s*;|$)/i.test(response.headers.get('content-type') || '')) fail('native_launch_unavailable')
       if (preparation && [404, 501, 503].includes(response.status) && !/^application\/json(?:\s*;|$)/i.test(response.headers.get('content-type') || '')) fail('preparation_unavailable')
       if ((source || ingestion) && response.status === 404 && !/^application\/json(?:\s*;|$)/i.test(response.headers.get('content-type') || '')) fail('source_unavailable')
@@ -423,6 +423,10 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
       connection = { origin: canonical, graph, token }
       const epoch = generation
       try { const data = await request('graph'); if (generation !== epoch + 1) fail('cancelled'); authenticated = true; return data } catch (e) { if (generation === epoch + 1) disconnect(); throw e }
+    },
+    async refreshGraph() {
+      if (!connection || !authenticated) fail('disconnected')
+      return request('graph')
     },
     research: payload => request('research', payload),
     dossier: payload => request('dossier', payload),

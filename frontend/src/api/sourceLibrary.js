@@ -263,7 +263,8 @@ export async function validateSourceOriginalResult(method, value, payload, crypt
     if (value.schema_version !== 2 || value.binary_retained !== true || value.graph_ingestion_executed !== false) bad()
     metadata(value.source); originalBinary(value.binary, value.source, payload)
     if (retain) {
-      if (payload.schema_version !== 2 || payload.format !== 'pdf' || value.binary.sha256 !== payload.input_sha256) bad()
+      if (payload.schema_version !== 2 || payload.format !== 'pdf' || value.binary.sha256 !== payload.input_sha256
+          || value.binary.byte_length !== atob(payload.content).length) bad()
       const x = value.extraction
       if (x?.input_hash_verified !== true || x.input_digest_persisted !== true ||
           x.original_document_verified !== true || x.binary_persistently_bound !== true ||

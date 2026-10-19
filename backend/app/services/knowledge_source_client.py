@@ -145,7 +145,8 @@ def original_result(method, value, scope, payload):
                 or value["binary_retained"] is not True or value["graph_ingestion_executed"] is not False):
             raise ValueError
         binary = original_binary(value["binary"], scope, payload["source_revision"])
-        if binary["sha256"] != payload["input_sha256"]:
+        if (binary["sha256"] != payload["input_sha256"]
+                or binary["byte_length"] != len(pdf_upload(payload, version=2))):
             raise ValueError
         extraction = value["extraction"]
         if (type(extraction) is not dict or extraction.get("input_hash_verified") is not True

@@ -68,6 +68,45 @@ def reference(dto):
     return {'schema_version': 1, 'operation_id': dto['operation_id'], 'plan_sha256': dto['plan_sha256']}
 
 
+def test_pg_v2_selected_sources_reload_generation_and_full_snapshot_tamper(factory, tmp_path):
+    from nexaweave_storage import SourceStore
+    from nexaweave_execution.preparation_contracts import document_envelope
+    host, scope, first, chat, wires, transport = real_host(factory, tmp_path)
+    text = 'Second owned DOCX 雪 😀'
+    second = SourceStore(factory).ingest_text('owner', scope.project_id, uuid4(), 'second document', text,
+        [{'evidence_id': str(uuid4()), 'start': 0, 'end': len(text)}])
+    original = transport.call
+    def projected(raw):
+        response = json.loads(original(raw))
+        for fact in response['result']['facts']:
+            fact['evidence_ids'].extend(str(p.evidence_id) for p in second.passages)
+        return json.dumps(response, ensure_ascii=False).encode()
+    transport.call = projected
+    payload = dict(request(first), schema_version=2,
+        source_revisions=[str(first.source_revision), str(second.source_revision)])
+    planned = host.plan(payload)
+    reloaded = PreparationStore(factory).get('owner', payload['operation_id'], planned['plan_sha256'])
+    assert reloaded.frozen['source_text'] == document_envelope(reloaded.frozen['sources'])
+    assert [s['source_revision'] for s in reloaded.frozen['public']['sources']] == payload['source_revisions']
+    assert host.plan(payload)['plan_sha256'] == planned['plan_sha256']
+    host.start(reference(planned)); host.generate(wires[0])
+    assert PreparationStore(factory).get('owner', payload['operation_id']).state == 'ready'
+    config = [call['messages'][-1]['content'] for call in chat.calls
+              if any(key in call['messages'][-1]['content'] for key in ('total_simulation_hours', 'hot_topics'))]
+    assert len(config) == 2 and all(reloaded.frozen['source_text'] in prompt for prompt in config)
+    for path, changed in [(['sources', '1', 'text'], 'corrupt'), (['source_text'], first.text)]:
+        with factory() as conn:
+            conn.execute('UPDATE mf_preparation.plans SET frozen=jsonb_set(frozen,%s,%s::jsonb) WHERE operation_id=%s',
+                (path, json.dumps(changed), UUID(payload['operation_id'])))
+        with pytest.raises(PreparationAuthorityError) as caught:
+            PreparationStore(factory).get('owner', payload['operation_id'])
+        assert caught.value.code == 'preparation_uncertain'
+        with factory() as conn:
+            from psycopg.types.json import Jsonb
+            conn.execute('UPDATE mf_preparation.plans SET frozen=%s WHERE operation_id=%s',
+                (Jsonb(reloaded.frozen), UUID(payload['operation_id'])))
+
+
 def test_pg_restart_duplicate_race_and_actual_inherited_publication(factory, tmp_path):
     host, scope, retained, chat, wires, transport = real_host(factory, tmp_path)
     payload = request(retained)

@@ -80,10 +80,17 @@ function parentBinding(v, graph) {
   fields(v.report, 'report_id plan_sha256 receipt_sha256 manifest_sha256 full_report_sha256')
   uuid(v.report.report_id); for (const k of ['plan_sha256', 'receipt_sha256', 'manifest_sha256', 'full_report_sha256']) hash(v.report[k])
   const b = v.native_binding
-  fields(b, 'display_graph_id principal scope project_revision source preparation native coverage reference_keys')
+  fields(b, 'display_graph_id principal scope project_revision source preparation native coverage reference_keys' + (b && Object.hasOwn(b, 'source_set') ? ' source_set' : ''))
   if (b.display_graph_id !== graph || b.principal !== v.principal || !same(b.scope, v.scope)) fail()
   integer(b.project_revision, 2147483647, 1)
   fields(b.source, 'source_revision source_name source_sha256'); uuid(b.source.source_revision); scalar(b.source.source_name, 256, 1); hash(b.source.source_sha256)
+  if (Object.hasOwn(b, 'source_set')) {
+    fields(b.source_set, 'schema_version source_revisions')
+    const revisions = b.source_set.source_revisions
+    if (b.source_set.schema_version !== 1 || !Array.isArray(revisions) || revisions.length < 1 || revisions.length > 100) fail()
+    revisions.forEach(uuid)
+    if (new Set(revisions).size !== revisions.length || revisions[0] !== b.source.source_revision) fail()
+  }
   fields(b.preparation, 'operation_id plan_sha256 simulation_id artifact_sha256'); uuid(b.preparation.operation_id); hash(b.preparation.plan_sha256); hash(b.preparation.artifact_sha256)
   if (b.preparation.simulation_id !== 'sim_' + b.preparation.operation_id.replaceAll('-', '')) fail()
   fields(b.native, 'run_id launch_sha256 request_fingerprint evidence_sha256 platforms'); uuid(b.native.run_id)

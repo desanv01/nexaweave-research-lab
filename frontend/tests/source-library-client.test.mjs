@@ -245,6 +245,11 @@ test('V2 original PDF codec binds exact source, digest and canonical bytes while
     extraction: { ...old.extraction, input_digest_persisted: true,
       original_document_verified: true, binary_persistently_bound: true } }
   await validateSourceOriginalResult('sourceRetainOriginal', v, request)
+  for (const byte_length of [prepared.inputBytes - 1, prepared.inputBytes + 1]) {
+    await assert.rejects(validateSourceOriginalResult('sourceRetainOriginal', {
+      ...v, binary: { ...v.binary, byte_length }
+    }, request), code('invalid_reply'))
+  }
   const metadata = { schema_version: 2, binary_retained: true, graph_ingestion_executed: false,
     source: v.source, binary: v.binary }
   const identity = sourceOriginalPayload('sourceOriginalMetadata', { source_revision: request.source_revision })
