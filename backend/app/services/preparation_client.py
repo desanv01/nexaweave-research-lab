@@ -5,7 +5,6 @@ import hashlib
 import json
 import re
 from uuid import UUID
-from nexaweave_execution.preparation_contracts import source_revisions, source_metadata
 
 REQUEST_BYTES = 65536
 RESULT_BYTES = 262144
@@ -100,6 +99,7 @@ def validate_payload(method, value):
             uuid_string(value['source_revision'])
             options(value['options'])
             if value['schema_version'] == 2:
+                from nexaweave_execution.preparation_contracts import source_revisions
                 source_revisions(value['source_revisions'], value['source_revision'])
         else:
             sha(value['plan_sha256'])
@@ -154,6 +154,7 @@ def validate_result(value, graph_id, scope, payload, method):
             raise ValueError
         uuid_string(source['source_revision']); text(source['source_name'], 256); sha(source['source_sha256'])
         if value['schema_version'] == 2:
+            from nexaweave_execution.preparation_contracts import source_revisions, source_metadata
             sources = value['sources']
             if type(sources) is not list or not 1 <= len(sources) <= 100:
                 raise ValueError

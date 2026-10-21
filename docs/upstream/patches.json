@@ -96,8 +96,8 @@
     {
       "imported_path": "backend/app/services/simulation_config_generator.py",
       "original_sha256": "3bb128db01398dd344a2a4c12875f424f7b9ae9c2a7b89f99c42e1ac555396d1",
-      "current_sha256": "081577429779a1d486d4e7a19dd522db459ba4db23283a3339a34abedc1ca90f",
-      "reason": "Defer SDK imports and inject trusted chat client; explicit strict neutral configuration rejects incomplete/truncated responses without changing legacy defaults. NexaWeave canonical package/configuration and ordinary display names; reviewed derived source change preserving legal/provenance and persisted v1 identities.",
+      "current_sha256": "d9c1cd892c7cda92de517dbc927003f1d3574c12fbeee0ba039478d388cc0622",
+      "reason": "Defer SDK imports and inject trusted chat client; explicit strict neutral configuration rejects incomplete/truncated responses without changing legacy defaults. NexaWeave canonical package/configuration and ordinary display names; reviewed derived source change preserving legal/provenance and persisted v1 identities. Group1 multi-source preparation adds an explicit require_complete_document policy that rejects document/context truncation before time/event generation; the default legacy truncation path remains unchanged.",
       "phase": "NexaWeave canonical rebrand"
     },
     {

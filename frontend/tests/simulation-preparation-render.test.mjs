@@ -73,7 +73,12 @@ test('preparation explicitly selects same-project documents in catalog order and
     assert.ok([...m.root.querySelectorAll('.preparation-source-checkbox')].every(n => !n.checked && n.closest('label')))
     assert.equal(calls.length, 0); begin(m.root); await settle()
     assert.equal(calls[0].payload.schema_version, 1); assert.equal(Array.isArray(calls[0].sources), false)
-    checked(m.root, uid(32)); checked(m.root, uid(31)); await settle(); assert.equal(m.root.querySelector('.start'), null)
+    // Separate user events let Vue refresh each checkbox's array-model binding.
+    checked(m.root, uid(32)); await nextTick()
+    assert.deepEqual([...m.root.querySelectorAll('.preparation-source-checkbox')].filter(n => n.checked).map(n => n.value), [uid(32)])
+    checked(m.root, uid(31)); await nextTick()
+    assert.deepEqual([...m.root.querySelectorAll('.preparation-source-checkbox')].filter(n => n.checked).map(n => n.value), [uid(31), uid(32)])
+    await settle(); assert.equal(m.root.querySelector('.start'), null); assert.equal(calls.length, 1)
     begin(m.root); await settle()
     assert.deepEqual(calls[1].payload.source_revisions, [uid(5), uid(31), uid(32)])
     assert.deepEqual(calls[1].sources, catalog())
