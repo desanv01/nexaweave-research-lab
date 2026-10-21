@@ -50,7 +50,16 @@ def _plain_source_path(value, *, directory=False):
 
 
 def _source_stamp(info):
-    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns,
+            getattr(info, 'st_birthtime_ns', None), getattr(info, 'st_birthtime', None))
+
+
+def _source_identity(info):
+    if os.name == 'nt':
+        # Windows path ctime is birthtime in CPython 3.12, while fstat uses ChangeTime.
+        # Cross-bind birthtime; each API still checks its own full stamp for drift.
+        return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_birthtime_ns)
+    return _source_stamp(info)
 
 
 def _bounded_source_digest(path, cap):
@@ -63,11 +72,11 @@ def _bounded_source_digest(path, cap):
     try:
         opened = os.fstat(descriptor)
         if (not stat.S_ISREG(opened.st_mode) or getattr(opened, 'st_file_attributes', 0) & 0x400
-                or _source_stamp(opened) != _source_stamp(before)):
+                or _source_identity(opened) != _source_identity(before)):
             raise ValueError('installed_source_changed')
         _plain_source_path(path)
         data = os.read(descriptor, before.st_size)
-        if (len(data) != before.st_size or _source_stamp(os.fstat(descriptor)) != _source_stamp(before)
+        if (len(data) != before.st_size or _source_stamp(os.fstat(descriptor)) != _source_stamp(opened)
                 or _source_stamp(os.lstat(_plain_source_path(path))) != _source_stamp(before)):
             raise ValueError('installed_source_changed')
         return hashlib.sha256(data).digest()

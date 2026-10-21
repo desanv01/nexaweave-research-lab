@@ -373,3 +373,50 @@ def test_child_freshness_refusal_precedes_pytest_import_and_restores_socket_guar
     assert runner.child('unit') == 1
     assert effects == ['install', 'nexaweave_execution', 'nexaweave_storage', 'nexaweave_knowledge', 'restore']
     assert capsys.readouterr().err.strip() == 'connected_report_installed_source_mismatch'
+
+
+@pytest.mark.parametrize('drift', [None, 'path', 'descriptor'],
+                         ids=['stable-cross-api-ctime-difference', 'path-ctime-drift', 'descriptor-ctime-drift'])
+def test_windows_source_identity_preserves_independent_timestamp_stability(tmp_path, monkeypatch, drift):
+    import hashlib
+    from tools import run_connected_report_tests as runner
+    path = tmp_path / 'source.py'
+    content = b'reviewed source\n'
+    path.write_bytes(content)
+    actual = runner.os
+    state = {'read': False}
+
+    def stamp(info, api):
+        fields = {key: getattr(info, key) for key in
+                  ('st_mode', 'st_dev', 'st_ino', 'st_size', 'st_mtime_ns')}
+        fields.update(st_file_attributes=getattr(info, 'st_file_attributes', 0),
+                      st_birthtime_ns=123000000000, st_birthtime=123.0,
+                      st_ctime_ns=(10 if api == 'path' else 20) +
+                                  (1 if state['read'] and drift == api else 0))
+        return SimpleNamespace(**fields)
+
+    def path_stat(value, *args, **kwargs):
+        info = actual.lstat(value, *args, **kwargs)
+        return stamp(info, 'path') if value == path else info
+
+    def descriptor_stat(descriptor):
+        return stamp(actual.fstat(descriptor), 'descriptor')
+
+    def read(descriptor, size):
+        data = actual.read(descriptor, size)
+        state['read'] = True
+        return data
+
+    # Replace only the runner binding: pathlib and the global os module stay native.
+    simulated = SimpleNamespace(**vars(actual))
+    simulated.name = 'nt'
+    simulated.lstat = path_stat
+    simulated.fstat = descriptor_stat
+    simulated.read = read
+    monkeypatch.setattr(runner, 'os', simulated)
+    if drift is None:
+        assert runner._bounded_source_digest(path, len(content)) == hashlib.sha256(content).digest()
+    else:
+        with pytest.raises(ValueError, match='^installed_source_changed$'):
+            runner._bounded_source_digest(path, len(content))
+    assert state['read']
