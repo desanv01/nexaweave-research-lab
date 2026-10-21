@@ -137,6 +137,116 @@ class ScriptedReportTransport:
             output.write(json.dumps(dict(closed=True, calls=self.count))+'\n')
 
 
+def _retain_four_formats(factory, directory, monkeypatch, prep, scope):
+    """Real public parsing/retention; projection below remains explicitly scripted."""
+    from importlib.util import find_spec
+    from nexaweave_storage import SourceStore
+    from nexaweave_storage.pdf import extract_pdf
+    from test_pdf_source import pdf_bytes
+    from test_document_source_integration import _package, _paragraph
+    from test_source_library_http_integration import _host, _exchange, _payload
+
+    # Reuse this Main-selected locked interpreter and its installed fixed source child.
+    # Missing parser/installed bootstrap is a failure, never a format-labelled text fake.
+    python = str(Path(sys.executable).resolve())
+    bootstrap = find_spec('nexaweave_knowledge.read_bootstrap').origin
+    assert bootstrap and 'site-packages' in Path(bootstrap).parts
+    monkeypatch.setenv('NEXAWEAVE_WORKBENCH_BACKEND_PYTHON', python)
+    monkeypatch.setenv('KNOWLEDGE_PYTHON', python)
+    monkeypatch.setenv('KNOWLEDGE_BOOTSTRAP_SCRIPT', bootstrap)
+    pdf = pdf_bytes(['PDF assertions 猫', 'Second PDF page 雪'])
+    markdown = '# Markdown assertions\n\nRetained **Markdown** evidence 猫.\n'
+    plain = 'Plain text assertions 雪 😀\n'
+    docx = _package(_paragraph('Office assertions 猫') +
+                    '<w:tbl><w:tr><w:tc>' + _paragraph('Table evidence 雪') + '</w:tc></w:tr></w:tbl>')
+    documents = [('original.pdf', 'pdf', pdf, extract_pdf(pdf).text),
+                 ('notes.md', 'text', markdown, markdown),
+                 ('notes.txt', 'text', plain, plain),
+                 ('office.docx', 'docx', docx, 'Office assertions 猫\n\nTable evidence 雪')]
+    upload_root = directory / 'uploaded-documents'
+    upload_root.mkdir()
+    http_root = directory / 'source-http'
+    http_root.mkdir()
+    records, snapshots, receipts = [], [], []
+    store = SourceStore(factory)
+    with _host(http_root, scope, prep.display_graph_id) as (port, token, _):
+        for name, kind, content, expected in documents:
+            binary = content.encode('utf-8') if isinstance(content, str) else content
+            (upload_root / name).write_bytes(binary)
+            revision = uuid4()
+            payload = _payload(revision, name, content, kind)
+            route = '/api/source/retain/' + prep.display_graph_id
+            if kind == 'pdf':
+                payload['schema_version'] = 2
+                route = '/api/source/retain-original/' + prep.display_graph_id
+            status, headers, reply = _exchange(port, 'POST', route, payload, token=token)
+            assert status == 200 and reply['success'] is True
+            assert headers['Cache-Control'] == 'no-store' and headers['X-Content-Type-Options'] == 'nosniff'
+            receipt = reply['data']
+            assert receipt['extraction']['format'] == kind
+            assert receipt['extraction']['input_hash_verified'] is True
+            assert receipt['extraction']['input_sha256'] == hashlib.sha256(binary).hexdigest()
+            assert receipt['graph_ingestion_executed'] is False
+            record = store.get_source('owner', scope.project_id, revision)
+            assert record.name == name and record.text == expected and record.passages
+            assert record.text_sha256 == hashlib.sha256(expected.encode('utf-8')).hexdigest()
+            if kind == 'pdf':
+                assert receipt['schema_version'] == 2 and receipt['binary_retained'] is True
+                assert receipt['binary']['sha256'] == hashlib.sha256(pdf).hexdigest()
+                original = store.get_original('owner', scope.project_id, revision)
+                assert original.content == pdf and original.source == record
+                assert [p.page for p in record.passages] == [1, 2]
+            else:
+                assert receipt['binary_retained'] is False
+            if kind == 'docx':
+                assert [p.excerpt for p in record.passages] == ['Office assertions 猫', 'Table evidence 雪']
+            passages = []
+            for p in record.passages:
+                assert expected[p.start:p.end] == p.excerpt
+                assert hashlib.sha256(p.excerpt.encode('utf-8')).hexdigest() == p.excerpt_sha256
+                passages.append(dict(evidence_id=str(p.evidence_id), start=p.start, end=p.end, page=p.page,
+                                     excerpt=p.excerpt, excerpt_sha256=p.excerpt_sha256))
+            snapshots.append(dict(source_revision=str(revision), source_name=name,
+                                  source_sha256=record.text_sha256, text=expected, passages=passages))
+            records.append(record)
+            receipts.append(receipt)
+    return SimpleNamespace(records=records, snapshots=snapshots, receipts=receipts, pdf=pdf,
+                           revisions=[str(record.source_revision) for record in records], upload_root=upload_root)
+
+
+def _assert_four_format_restart(factory, directory, prep, scope, selected):
+    from nexaweave_storage import SourceStore, NotFound
+    from test_source_library_http_integration import _host, _exchange
+    restart = directory / 'source-http-restarted'
+    restart.mkdir()
+    with _host(restart, scope, prep.display_graph_id) as (port, token, _):
+        for record, snapshot in zip(selected.records, selected.snapshots, strict=True):
+            status, _, reply = _exchange(port, 'GET',
+                f'/api/source/item/{prep.display_graph_id}/{record.source_revision}', token=token)
+            assert status == 200 and reply['data']['text'] == snapshot['text']
+            assert reply['data']['passages'] == [
+                {key: p[key] for key in ('evidence_id', 'start', 'end', 'page', 'excerpt_sha256')}
+                for p in snapshot['passages']]
+            assert SourceStore(factory).get_source('owner', scope.project_id, record.source_revision) == record
+        revision = selected.revisions[0]
+        route = f'/api/source/original/{prep.display_graph_id}/{revision}'
+        status, headers, reply = _exchange(port, 'GET', route, token=token)
+        assert status == 200 and headers['Cache-Control'] == 'no-store'
+        assert headers['X-Content-Type-Options'] == 'nosniff'
+        assert base64.b64decode(reply['data']['content_base64'], validate=True) == selected.pdf
+        assert reply['data']['binary'] == selected.receipts[0]['binary']
+        assert reply['data']['binary']['sha256'] == hashlib.sha256(selected.pdf).hexdigest()
+        assert _exchange(port, 'GET', route)[0] == 401
+        assert _exchange(port, 'GET', route, token='foreign-token')[0] == 401
+        assert _exchange(port, 'GET', route, token=token, origin='http://denied.example')[0] == 403
+        assert _exchange(port, 'GET', f'/api/source/original/foreign_graph/{revision}', token=token)[0] == 404
+        assert _exchange(port, 'GET', f'/api/source/original/{prep.display_graph_id}/{uuid4()}', token=token)[0] == 404
+    with pytest.raises(NotFound):
+        SourceStore(factory).get_original('other', scope.project_id, selected.records[0].source_revision)
+    for record, receipt in zip(selected.records, selected.receipts, strict=True):
+        binary = (selected.upload_root / record.name).read_bytes()
+        assert hashlib.sha256(binary).hexdigest() == receipt['extraction']['input_sha256']
+
 @pytest.fixture(scope='module')
 def factory():
     from test_native_launch_store import factory as actual_factory
@@ -181,7 +291,18 @@ async def test_actual_native_receipt_to_inherited_report_preserves_inputs_and_di
     temporal = await loopback_client()
     input_artifacts = tmp_path/'native-inputs'
     input_artifacts.mkdir()
-    prep, _, retained, chat, _, projection_transport = real_host(factory, input_artifacts, cap=12, chat=SeedChat())
+    prep, source_scope, retained, chat, _, projection_transport = real_host(factory, input_artifacts, cap=12, chat=SeedChat())
+    selected = None
+    if not slow_authorization:
+        selected = await asyncio.to_thread(_retain_four_formats, factory, tmp_path, monkeypatch, prep, source_scope)
+        original_projection = projection_transport.call
+        def projected(raw):
+            # Explicitly scripted graph projection, NOT Graphiti/Neo4j ingestion.
+            response = json.loads(original_projection(raw))
+            for fact in response['result']['facts']:
+                fact['evidence_ids'] = [p['evidence_id'] for source in selected.snapshots for p in source['passages']]
+            return json.dumps(response, ensure_ascii=False).encode()
+        projection_transport.call = projected
     loop = asyncio.get_running_loop()
     preparation = TemporalPreparationHost(client=temporal, task_queue='mf-report-prep-'+uuid4().hex,
         trusted_host=prep, allow_dispatch=lambda: True)
@@ -244,10 +365,19 @@ async def test_actual_native_receipt_to_inherited_report_preserves_inputs_and_di
         async with preparation.worker(), native.worker(), report_temporal.worker():
             phases.start('preparation-plan-start')
             payload = request(retained)
+            if selected is not None:
+                payload = dict(request(selected.records[0]), schema_version=2, source_revisions=selected.revisions[:])
             payload['options'].update(types=['Person','Organization'], max_agents=2, max_rounds=1)
             planned = await asyncio.to_thread(prep.plan, payload)
             await asyncio.to_thread(prep.start, prep_reference(planned))
             preparation_row = prep.store.get('owner', planned['operation_id'])
+            if selected is not None:
+                assert planned['schema_version'] == 2
+                assert planned['source'] == planned['sources'][0]
+                assert planned['sources'] == [{key: source[key] for key in
+                    ('source_revision', 'source_name', 'source_sha256')} for source in selected.snapshots]
+                assert preparation_row.frozen['sources'] == selected.snapshots
+                assert preparation_row.frozen['request']['source_revisions'] == selected.revisions
             phases.end('preparation-plan-start')
             phases.start('preparation-result')
             await asyncio.wait_for(temporal.get_workflow_handle(preparation_row.dispatch.workflow_id).result(), 60)
@@ -256,10 +386,21 @@ async def test_actual_native_receipt_to_inherited_report_preserves_inputs_and_di
             phases.end('preparation-result')
             input_root = prep.root/ready['receipt']['simulation_id']
             original_inputs = {f['name']:(input_root/f['name']).read_bytes() for f in ready['receipt']['files']}
+            if selected is not None:
+                assert prep.store.get('owner', planned['operation_id']).frozen['sources'] == selected.snapshots
+                grounding = json.loads(original_inputs['source_grounding.json'])
+                expected_evidence = {p['evidence_id'] for source in selected.snapshots for p in source['passages']}
+                assert grounding and all(set(actor['evidence_ids']) == expected_evidence for actor in grounding.values())
             phases.start('native-plan-start')
             launch = await asyncio.to_thread(native_host.plan, declaration(planned))
             await asyncio.to_thread(native_host.start, native_reference(launch))
             native_row = native_host.store.get('owner', launch['request']['run_id'])
+            if selected is not None:
+                assert native_row.frozen['identity']['preparation'] == launch['preparation']
+                assert launch['preparation']['operation_id'] == planned['operation_id']
+                assert launch['preparation']['plan_sha256'] == planned['plan_sha256']
+                assert native_row.request.artifact_sha256 == ready['receipt']['artifact_sha256']
+                assert native_row.request.simulation_id == ready['receipt']['simulation_id']
             phases.end('native-plan-start')
             phases.start('native-result')
             native_receipt = await asyncio.wait_for(native.result(native_row.request, NativeWorkflowRef(**native_row.workflow)), 180)
@@ -273,11 +414,21 @@ async def test_actual_native_receipt_to_inherited_report_preserves_inputs_and_di
             declared = dict(schema_version=1, report_id=str(uuid4()), launch_id=str(native_row.run_id),
                 launch_sha256=launch['launch_sha256'], requirement='Distinguish retained source and actual observed records.',
                 output_language='en', native_windows=None)
+            if selected is not None:
+                declared.update(schema_version=2, source_revisions=selected.revisions[:])
             reviewed = await asyncio.to_thread(reports.plan, declared)
             assert reviewed['state']=='planned' and not report_log.exists()
             reference = dict(schema_version=1, report_id=reviewed['report_id'], plan_sha256=reviewed['plan_sha256'])
             await asyncio.to_thread(reports.start, reference)
             row = reports.store.get('owner', reference['report_id'], reference['plan_sha256'])
+            if selected is not None:
+                assert row.frozen['context']['schema_version'] == 2
+                assert row.frozen['context']['sources'] == selected.snapshots
+                assert row.frozen['identity']['binding']['source_set'] == dict(
+                    schema_version=1, source_revisions=selected.revisions)
+                assert row.frozen['identity']['binding']['preparation'] == launch['preparation']
+                assert row.frozen['identity']['binding']['native']['run_id'] == str(native_row.run_id)
+                assert row.frozen['identity']['context_sha256'] == digest(row.frozen['context'])
             phases.end('report-plan-start')
             phases.start('report-result-proof')
             await asyncio.wait_for(temporal.get_workflow_handle(row.workflow['workflow_id']).result(), 180)
@@ -330,11 +481,26 @@ async def test_actual_native_receipt_to_inherited_report_preserves_inputs_and_di
                 validate_download(downloaded,body,completed)
                 artifact=downloaded['artifact'];raw=base64.b64decode(artifact['content_base64'],validate=True)
                 assert len(raw)==artifact['size'] and hashlib.sha256(raw).hexdigest()==artifact['sha256']
+                if selected is not None and kind == 'native_evidence':
+                    evidence = json.loads(raw)
+                    assert evidence['schema_version'] == 2
+                    assert evidence['source_set'] == dict(schema_version=1, source_revisions=selected.revisions)
+                    assert evidence['sources'] == [{key: source[key] for key in
+                        ('source_revision', 'source_name', 'source_sha256', 'passages')} for source in selected.snapshots]
+                    assert evidence['context_sha256'] == digest(row.frozen['context'])
+                    assert evidence['native'] == row.frozen['identity']['binding']['native']
+                    assert {key[7:] for key in evidence['reference_keys'] if key.startswith('source:')} == expected_evidence
             assert reports.store.get('owner',reference['report_id'],reference['plan_sha256'])==before_journal
             assert native_host.budget.status('owner',prep.account_id)==before_budget and report_log.read_bytes()==before_calls
             assert all((input_root/name).read_bytes()==raw for name,raw in {**original_inputs,**original_outputs}.items())
             recovered=await asyncio.to_thread(reports.start,reference)
             assert recovered['receipt']==completed['receipt'] and report_log.read_bytes()==before_calls
+            if selected is not None:
+                assert reports.store.get('owner', reference['report_id']).frozen['context']['sources'] == selected.snapshots
+                assert prep.store.get('owner', planned['operation_id']).frozen['sources'] == selected.snapshots
+                await asyncio.to_thread(_assert_four_format_restart, factory, tmp_path, prep, source_scope, selected)
+                assert native_host.budget.status('owner', prep.account_id) == before_budget
+                assert report_log.read_bytes() == before_calls
             phases.end('report-protected-reads-exports-recovery')
             phases.start('foreign-report-read-refusal')
             foreign=dict(reference,report_id=str(uuid4()))
