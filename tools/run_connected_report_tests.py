@@ -108,7 +108,8 @@ def require_installed_freshness(package_specs, *, root=None, prefix=None):
         raise ValueError('connected_report_installed_source_mismatch') from None
 
 
-def child(mode: str, journey: bool = False, actual_graph: bool = False, store_only: bool = False) -> int:
+def child(mode: str, journey: bool = False, actual_graph: bool = False, store_only: bool = False,
+          browser: bool = False) -> int:
     guard = LoopbackOnlySockets()
     guard.install()
     try:
@@ -187,6 +188,7 @@ def child(mode: str, journey: bool = False, actual_graph: bool = False, store_on
                 for item in session.items:
                     if Path(item.path).resolve() == PG_TARGET.resolve():
                         item.module._actual_graph_journey = actual_graph
+                        item.module._research_browser_journey = browser
                 try:
                     self.capture_manager = session.config.pluginmanager.getplugin('capturemanager')
                     for item in session.items:
@@ -251,7 +253,8 @@ def child(mode: str, journey: bool = False, actual_graph: bool = False, store_on
                                       or 'site-packages' not in Path(origin).parts):
                 print('connected_report_loaded_source_package_refused', file=sys.stderr)
                 complete = False
-        print(json.dumps(dict(connected_report_mode=mode, actual_graph_journey=actual_graph, store_only=store_only,
+        print(json.dumps(dict(connected_report_mode=mode, actual_graph_journey=actual_graph,
+            research_browser_journey=browser, store_only=store_only,
             collected=accounting.collected,
             passed=accounting.passed, skipped=accounting.skipped, targets=accounting.targets,
             complete=complete), sort_keys=True))
@@ -276,6 +279,8 @@ def main() -> int:
     subset.add_argument('--store-only', action='store_true', help='Require exact database store/budget case counts without the native journey')
     parser.add_argument('--actual-graph', action='store_true',
                         help='Require the ordinary four-format journey with real co-located Graphiti stores')
+    parser.add_argument('--browser', action='store_true',
+                        help='Drive the same real graph journey through a fresh isolated research browser')
     args = parser.parse_args()
     mode = 'engine' if args.engine else 'integration' if args.integration else 'unit'
     if args.journey and mode != 'integration':
@@ -286,8 +291,10 @@ def main() -> int:
         parser.error('--store-only requires --integration')
     if args.store_only and args.actual_graph:
         parser.error('--store-only is incompatible with --actual-graph')
+    if args.browser and (mode != 'integration' or not args.journey or not args.actual_graph):
+        parser.error('--browser requires --integration --journey --actual-graph')
     if args.child:
-        return child(mode, args.journey, args.actual_graph, args.store_only)
+        return child(mode, args.journey, args.actual_graph, args.store_only, args.browser)
     password = os.environ.get('PROJECT_STORE_TEST_PASSWORD')
     if mode == 'integration' and not password:
         parser.error('explicit approved disposable PostgreSQL fixture required')
@@ -318,6 +325,27 @@ def main() -> int:
             NEXAWEAVE_WORKBENCH_BACKEND_PYTHON=str(Path(sys.executable).absolute()),
             KNOWLEDGE_TEST_PASSWORD=neo_password, KNOWLEDGE_INTEGRATION='1',
             GRAPHITI_TELEMETRY_ENABLED='false')
+    browser_environment = {}
+    if args.browser:
+        node = Path(os.environ.get('NEXAWEAVE_RESEARCH_BROWSER_NODE', ''))
+        chrome = Path(os.environ.get('NEXAWEAVE_RESEARCH_BROWSER_CHROME', ''))
+        if (sys.platform != 'linux' or os.environ.get('GITHUB_ACTIONS') != 'true'
+                or os.environ.get('RUNNER_ENVIRONMENT') != 'github-hosted'
+                or not node.is_absolute() or '..' in node.parts
+                or not node.is_file() or not os.access(node, os.X_OK)
+                or str(chrome) != '/opt/google/chrome/chrome'
+                or not chrome.is_file() or not os.access(chrome, os.X_OK)
+                or not (ROOT / 'frontend/node_modules/playwright-core/package.json').is_file()):
+            parser.error('explicit installed hosted Node/Chrome/browser runtime required')
+        for path in (ROOT / 'services/knowledge/tests/research_browser_fixture.py',
+                     ROOT / 'frontend/tests/run-research-browser.mjs'):
+            try:
+                _bounded_source_digest(path, 50000)
+            except (OSError, ValueError):
+                parser.error('reviewed browser fixture sources required')
+        browser_environment = dict(NEXAWEAVE_RESEARCH_BROWSER_NODE=str(node),
+            NEXAWEAVE_RESEARCH_BROWSER_CHROME=str(chrome),
+            NEXAWEAVE_RESEARCH_BROWSER_ALLOWED='1')
     spec = importlib.util.spec_from_file_location('_connected_report_owned', ROOT / 'backend/app/utils/owned_process.py')
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
@@ -333,6 +361,7 @@ def main() -> int:
         env.update(HF_HUB_OFFLINE='1', TRANSFORMERS_OFFLINE='1', HF_HUB_DISABLE_TELEMETRY='1',
                    DO_NOT_TRACK='1', NEXAWEAVE_NATIVE_TEST_OFFLINE='1', NEXAWEAVE_REPORT_TEST_OFFLINE='1')
         env.update(graph_environment)
+        env.update(browser_environment)
         if mode == 'integration':
             from psycopg.conninfo import make_conninfo
             env.update(PROJECT_STORE_POSTGRES_INTEGRATION='1', KNOWLEDGE_POSTGRES_INTEGRATION='1')
@@ -344,7 +373,7 @@ def main() -> int:
         process = owner.start(subprocess.Popen,
             [sys.executable, str(Path(__file__).resolve()), '--child', '--' + mode,
              *(['--journey'] if args.journey else []), *(['--actual-graph'] if args.actual_graph else []),
-             *(['--store-only'] if args.store_only else [])],
+             *(['--store-only'] if args.store_only else []), *(['--browser'] if args.browser else [])],
             cwd=directory.name, env=env, stdin=subprocess.DEVNULL, shell=False, close_fds=True,
             creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
         try:

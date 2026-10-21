@@ -1,7 +1,7 @@
 """Main actual inherited preparation/native/report journey; offline envelopes."""
 import asyncio
 import base64
-from contextlib import contextmanager, ExitStack
+from contextlib import contextmanager, ExitStack, AsyncExitStack
 from dataclasses import dataclass, replace
 import hashlib
 import json
@@ -21,6 +21,7 @@ pytestmark = [pytest.mark.postgres, pytest.mark.connected_report_temporal]
 
 _fixture_phase_sink = None
 _actual_graph_journey = False
+_research_browser_journey = False
 
 
 class FixturePhases:
@@ -377,6 +378,7 @@ async def test_actual_native_receipt_to_inherited_report_preserves_inputs_and_di
     from app.services.connected_report_client import digest, validate_read, validate_download, ReportError
 
     assert not (_actual_graph_journey and slow_authorization)
+    assert not _research_browser_journey or (_actual_graph_journey and not slow_authorization)
     seed_types = ['Person', 'Organization']
     class SeedChat(RichConnectedChat):
         def create(self, **kwargs):
@@ -466,17 +468,29 @@ async def test_actual_native_receipt_to_inherited_report_preserves_inputs_and_di
         reports.scheduler = report_temporal.scheduler_for(loop)
         try:
             phases.end('setup')
-            async with preparation.worker(), native.worker(), report_temporal.worker():
+            async with preparation.worker(), native.worker(), report_temporal.worker(), AsyncExitStack() as browser_lifecycle:
+                browser = None
+                if _research_browser_journey:
+                    from research_browser_fixture import ResearchBrowserSession
+                    browser = await browser_lifecycle.enter_async_context(
+                        ResearchBrowserSession(tmp_path, prep, native_host, reports, selected, report_log))
+                    browser.ordered_sources()
                 phases.start('preparation-plan-start')
                 payload = request(retained)
                 if selected is not None:
                     payload = dict(request(selected.records[0]), schema_version=2, source_revisions=selected.revisions[:])
                 payload['options'].update(types=['Person','Organization'], max_agents=2, max_rounds=1)
-                planned = await asyncio.to_thread(prep.plan, payload)
+                if browser:
+                    planned = await asyncio.to_thread(browser.perform, 'preparation-plan', payload)
+                else:
+                    planned = await asyncio.to_thread(prep.plan, payload)
                 if selected is not None:
                     assert len(planned['actors']) == 2
                     seed_types[:] = [actor['labels'][0] for actor in planned['actors']]
-                await asyncio.to_thread(prep.start, prep_reference(planned))
+                if browser:
+                    await asyncio.to_thread(browser.perform, 'preparation-start')
+                else:
+                    await asyncio.to_thread(prep.start, prep_reference(planned))
                 preparation_row = prep.store.get('owner', planned['operation_id'])
                 if selected is not None:
                     assert planned['schema_version'] == 2
@@ -488,7 +502,10 @@ async def test_actual_native_receipt_to_inherited_report_preserves_inputs_and_di
                 phases.end('preparation-plan-start')
                 phases.start('preparation-result')
                 await asyncio.wait_for(temporal.get_workflow_handle(preparation_row.dispatch.workflow_id).result(), 60)
-                ready = await asyncio.to_thread(prep.status, prep_reference(planned))
+                if browser:
+                    ready = await asyncio.to_thread(browser.perform, 'preparation-ready')
+                else:
+                    ready = await asyncio.to_thread(prep.status, prep_reference(planned))
                 assert ready['state']=='ready' and not ready['simulation_executed']
                 phases.end('preparation-result')
                 input_root = prep.root/ready['receipt']['simulation_id']
@@ -518,8 +535,11 @@ async def test_actual_native_receipt_to_inherited_report_preserves_inputs_and_di
                     assert capacity.receipt.artifact_sha256 == ready['receipt']['artifact_sha256']
                     _assert_accounted(prep, 6)
                 phases.start('native-plan-start')
-                launch = await asyncio.to_thread(native_host.plan, declaration(planned))
-                await asyncio.to_thread(native_host.start, native_reference(launch))
+                if browser:
+                    launch = await asyncio.to_thread(browser.perform, 'native-start', declaration(planned))
+                else:
+                    launch = await asyncio.to_thread(native_host.plan, declaration(planned))
+                    await asyncio.to_thread(native_host.start, native_reference(launch))
                 native_row = native_host.store.get('owner', launch['request']['run_id'])
                 if selected is not None:
                     assert native_row.frozen['identity']['preparation'] == launch['preparation']
@@ -531,7 +551,10 @@ async def test_actual_native_receipt_to_inherited_report_preserves_inputs_and_di
                 phases.start('native-result')
                 native_receipt = await asyncio.wait_for(native.result(native_row.request, NativeWorkflowRef(**native_row.workflow)), 180)
                 assert native_receipt.outcome=='completed' and len(native_owners)==1
-                launch = await asyncio.to_thread(native_host.status, native_reference(launch))
+                if browser:
+                    launch = await asyncio.to_thread(browser.perform, 'native-ready')
+                else:
+                    launch = await asyncio.to_thread(native_host.status, native_reference(launch))
                 assert launch['state']=='completed' and launch['receipt']==native_receipt.to_wire()
                 if selected is not None:
                     from nexaweave_execution.native_launch_contracts import NativeBudgetReceipt
@@ -553,10 +576,15 @@ async def test_actual_native_receipt_to_inherited_report_preserves_inputs_and_di
                     output_language='en', native_windows=None)
                 if selected is not None:
                     declared.update(schema_version=2, source_revisions=selected.revisions[:])
-                reviewed = await asyncio.to_thread(reports.plan, declared)
-                assert reviewed['state']=='planned' and not report_log.exists()
+                if browser:
+                    reviewed = await asyncio.to_thread(browser.perform, 'report-start', declared)
+                    assert reviewed['state'] == 'planned' and browser.report_plan_no_calls
+                else:
+                    reviewed = await asyncio.to_thread(reports.plan, declared)
+                    assert reviewed['state']=='planned' and not report_log.exists()
                 reference = dict(schema_version=1, report_id=reviewed['report_id'], plan_sha256=reviewed['plan_sha256'])
-                await asyncio.to_thread(reports.start, reference)
+                if not browser:
+                    await asyncio.to_thread(reports.start, reference)
                 row = reports.store.get('owner', reference['report_id'], reference['plan_sha256'])
                 if selected is not None:
                     assert row.frozen['context']['schema_version'] == 2
@@ -610,7 +638,10 @@ async def test_actual_native_receipt_to_inherited_report_preserves_inputs_and_di
                 assert before_budget.accounted_ceiling_microusd==12
                 assert before_budget.remaining_microusd == 0 and before_budget.actual_usage_microusd is None
                 before_journal=reports.store.get('owner',reference['report_id'],reference['plan_sha256'])
-                read=await asyncio.to_thread(reports.read,reference)
+                if browser:
+                    read = await asyncio.to_thread(browser.perform, 'report-read')
+                else:
+                    read=await asyncio.to_thread(reports.read,reference)
                 validate_read(read,prep.display_graph_id,reports.scope_dto,reference,'owner')
                 assert read['report']['receipt']==completed['receipt'] and '[[source:' in read['content'] and '[[native:' in read['content']
                 assert not read['report']['authorization']['model_calls_enabled']
@@ -637,7 +668,11 @@ async def test_actual_native_receipt_to_inherited_report_preserves_inputs_and_di
                 if selected is not None:
                     assert reports.store.get('owner', reference['report_id']).frozen['context']['sources'] == selected.snapshots
                     assert prep.store.get('owner', planned['operation_id']).frozen['sources'] == selected.snapshots
-                    await asyncio.to_thread(_assert_four_format_restart, factory, tmp_path, prep, source_scope, selected)
+                    if browser:
+                        await asyncio.to_thread(browser.restart)
+                        await asyncio.to_thread(browser.perform, 'pdf-read-after-restart')
+                    else:
+                        await asyncio.to_thread(_assert_four_format_restart, factory, tmp_path, prep, source_scope, selected)
                     assert native_host.budget.status('owner', prep.account_id) == before_budget
                     assert report_log.read_bytes() == before_calls
                 phases.end('report-protected-reads-exports-recovery')
