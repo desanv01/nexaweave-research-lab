@@ -106,7 +106,11 @@ test('catalog retains fixed anchor, filters project, defaults V1 and sends expli
     assert.ok(m.root.querySelector('.report-sources legend').textContent)
     assert.equal(calls.length, 0)
     await reviewed(m); assert.equal(calls[0].schema_version, 1); assert.equal(Object.hasOwn(calls[0], 'source_revisions'), false)
-    checkSource(m, uid(32)); checkSource(m, uid(31)); await nextTick()
+    // Separate user events let Vue refresh each checkbox's array-model binding.
+    checkSource(m, uid(32)); await nextTick()
+    assert.deepEqual(fields.filter(e => e.checked).map(e => e.value), [uid(32)])
+    checkSource(m, uid(31)); await nextTick()
+    assert.deepEqual(fields.filter(e => e.checked).map(e => e.value), [uid(31), uid(32)])
     assert.equal(m.root.querySelector('.report-start'), null); assert.equal(calls.length, 1)
     await reviewed(m)
     assert.equal(calls[1].schema_version, 2)
