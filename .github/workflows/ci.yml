@@ -126,6 +126,13 @@ jobs:
         run: services/knowledge/.venv/bin/python tools/run_source_binary_tests.py --postgres
       - name: Qualify connected source ingestion with real stores and local synthetic SDK
         run: services/knowledge/.venv/bin/python tools/run_source_ingestion_tests.py
+      - name: Select pinned Node for the real research browser
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24.14.1'
+      - name: Install locked workbench browser dependencies without scripts
+        working-directory: frontend
+        run: npm ci --ignore-scripts
       - name: Connect four retained formats through actual graph and native report
         shell: bash
         run: |
@@ -137,6 +144,11 @@ jobs:
           export KNOWLEDGE_PYTHON="$GITHUB_WORKSPACE/services/knowledge/.venv/bin/python"
           export KNOWLEDGE_BOOTSTRAP_SCRIPT="$("$KNOWLEDGE_PYTHON" -I -c "import importlib.util; print(importlib.util.find_spec('nexaweave_knowledge.read_bootstrap').origin)")"
           export TEMPORAL_TEST_ADDRESS='127.0.0.1:17233'
+          export NEXAWEAVE_RESEARCH_BROWSER_NODE="$(command -v node)"
+          export NEXAWEAVE_RESEARCH_BROWSER_CHROME='/opt/google/chrome/chrome'
+          test -x "$NEXAWEAVE_RESEARCH_BROWSER_CHROME"
+          "$NEXAWEAVE_RESEARCH_BROWSER_NODE" --version
+          "$NEXAWEAVE_RESEARCH_BROWSER_CHROME" --version
           mkdir -p "$RUNNER_TEMP/nexaweave-group1-temporal"
           curl --fail --location --retry 3 --max-time 120 --output "$RUNNER_TEMP/nexaweave-group1-temporal/temporal.tar.gz" https://github.com/temporalio/cli/releases/download/v1.9.1/temporal_cli_1.9.1_linux_amd64.tar.gz
           printf '%s\n' "09a0326a51db84d02735e53542b9ebd8c4758daf47482a9ab0abce15844e60d5  $RUNNER_TEMP/nexaweave-group1-temporal/temporal.tar.gz" | sha256sum --check --strict
@@ -158,7 +170,7 @@ jobs:
             tail -100 "$RUNNER_TEMP/nexaweave-group1-temporal/server.log"
             exit 1
           fi
-          backend/.venv/bin/python tools/run_connected_report_tests.py --integration --journey --actual-graph
+          backend/.venv/bin/python tools/run_connected_report_tests.py --integration --journey --actual-graph --browser
           backend/.venv/bin/python tools/run_connected_report_tests.py --integration --store-only
           backend/.venv/bin/python tools/run_connected_followup_tests.py --integration --store-only
       - name: Test database diagnostics on failure
