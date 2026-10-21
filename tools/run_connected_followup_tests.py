@@ -29,7 +29,7 @@ MARKERS = ('postgres: approved disposable PostgreSQL authority\n'
            'native_launch_temporal: inherited actual connected Temporal native launch\n'
            'native_launch_engine: inherited actual generated-preparation owned OASIS native launch')
 
-def child(mode: str, journey: bool = False) -> int:
+def child(mode: str, journey: bool = False, store_only: bool = False) -> int:
     guard = LoopbackOnlySockets()
     guard.install()
     try:
@@ -120,9 +120,10 @@ def child(mode: str, journey: bool = False) -> int:
             selection = 'not postgres'
             required = (ENGINE_TARGET.name,)
         elif mode == 'integration':
-            targets = (PG_TARGET,) if journey else (PG_STORE_TARGET, PG_BUDGET_TARGET, PG_TARGET)
+            targets = ((PG_STORE_TARGET, PG_BUDGET_TARGET) if store_only else
+                       (PG_TARGET,) if journey else (PG_STORE_TARGET, PG_BUDGET_TARGET, PG_TARGET))
             selection = 'postgres'
-            required = (PG_TARGET.name,) if journey else (PG_STORE_TARGET.name, PG_BUDGET_TARGET.name, PG_TARGET.name)
+            required = tuple(path.name for path in targets)
         else:
             targets = UNIT_TARGETS
             selection = 'not postgres'
@@ -138,6 +139,13 @@ def child(mode: str, journey: bool = False) -> int:
         complete = (result == 0 and accounting.collected > 0 and
                     accounting.collected == accounting.passed and accounting.skipped == 0 and
                     all(accounting.targets[name] > 0 for name in required))
+        if store_only:
+            expected = {PG_STORE_TARGET.name: 4, PG_BUDGET_TARGET.name: 1}
+            collected_targets = {name: sum(path == name for path in accounting.paths.values())
+                                 for name in set(accounting.paths.values())}
+            passed_targets = {name: count for name, count in accounting.targets.items() if count}
+            complete = (complete and accounting.collected == accounting.passed == sum(expected.values())
+                        and accounting.skipped == 0 and collected_targets == passed_targets == expected)
         # Native runner legacy path fallback must never shadow an installed
         # execution/storage/knowledge package during this owned qualification.
         for name, module in tuple(sys.modules.items()):
@@ -148,7 +156,7 @@ def child(mode: str, journey: bool = False) -> int:
                                       or 'site-packages' not in Path(origin).parts):
                 print('connected_followup_loaded_source_package_refused', file=sys.stderr)
                 complete = False
-        print(json.dumps(dict(connected_followup_mode=mode, collected=accounting.collected,
+        print(json.dumps(dict(connected_followup_mode=mode, store_only=store_only, collected=accounting.collected,
             passed=accounting.passed, skipped=accounting.skipped, targets=accounting.targets,
             complete=complete), sort_keys=True))
         if not complete:
@@ -167,13 +175,17 @@ def main() -> int:
     for mode in ('unit', 'integration', 'engine'):
         group.add_argument('--' + mode, action='store_true')
     parser.add_argument('--child', action='store_true', help=argparse.SUPPRESS)
-    parser.add_argument('--journey', action='store_true', help='Select only the actual combined journey for concrete fixture corrections')
+    subset = parser.add_mutually_exclusive_group()
+    subset.add_argument('--journey', action='store_true', help='Select only the actual combined journey for concrete fixture corrections')
+    subset.add_argument('--store-only', action='store_true', help='Require exact database store/budget case counts without the native journey')
     args = parser.parse_args()
     mode = 'engine' if args.engine else 'integration' if args.integration else 'unit'
     if args.journey and mode != 'integration':
         parser.error('--journey requires --integration')
+    if args.store_only and mode != 'integration':
+        parser.error('--store-only requires --integration')
     if args.child:
-        return child(mode, args.journey)
+        return child(mode, args.journey, args.store_only)
     password = os.environ.get('PROJECT_STORE_TEST_PASSWORD')
     if mode == 'integration' and not password:
         parser.error('explicit approved disposable PostgreSQL fixture required')
@@ -202,7 +214,8 @@ def main() -> int:
             env['KNOWLEDGE_POSTGRES_TEST_DSN'] = dsn
             env.update(TEMPORAL_EXECUTION_INTEGRATION='1', TEMPORAL_TEST_ADDRESS='127.0.0.1:17233')
         process = owner.start(subprocess.Popen,
-            [sys.executable, str(Path(__file__).resolve()), '--child', '--' + mode, *(['--journey'] if args.journey else [])],
+            [sys.executable, str(Path(__file__).resolve()), '--child', '--' + mode,
+             *(['--journey'] if args.journey else []), *(['--store-only'] if args.store_only else [])],
             cwd=directory.name, env=env, stdin=subprocess.DEVNULL, shell=False, close_fds=True,
             creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
         try:

@@ -49,8 +49,8 @@ FIXTURE_TESTS = (
     ('observations-integration', 'run_native_observations_tests.py', '--integration'),
     ('observations-engine', 'run_native_observations_tests.py', '--engine'),
     ('seed-integration', 'run_native_seed_tests.py', '--integration'),
-    ('report-integration', 'run_connected_report_tests.py', '--integration'),
-    ('followup-integration', 'run_connected_followup_tests.py', '--integration'),
+    ('report-integration', 'run_connected_report_tests.py', '--integration --journey'),
+    ('followup-integration', 'run_connected_followup_tests.py', '--integration --journey'),
 )
 
 
@@ -356,7 +356,7 @@ def _write_scripts(directory, python, token):
              f"  Invoke-Gate 'native-store' {{ & {_quote_ps(python)} {_quote_ps(ROOT / 'tools/run_native_store_tests.py')} --postgres }}",
              f"  Invoke-Gate 'temporal-start' {{ & {temporal} -Action start }}",
              '  if (-not $script:gateSucceeded) { throw \'Temporal prerequisite failed\' }']
-    # Native store then all nine original final-shell modes: no selection changes.
+    # Keep actual Windows journeys; the same CI runs database-only cases on Linux.
     for gate, script, mode in FIXTURE_TESTS[1:]:
         lines.append(f"  Invoke-Gate {_quote_ps(gate)} {{ & {_quote_ps(python)} {_quote_ps(ROOT / 'tools' / script)} {mode} }}")
     lines.extend(['} catch { Write-Output $_; $failed = $true } finally {',

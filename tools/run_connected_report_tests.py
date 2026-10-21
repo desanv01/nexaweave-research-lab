@@ -108,7 +108,7 @@ def require_installed_freshness(package_specs, *, root=None, prefix=None):
         raise ValueError('connected_report_installed_source_mismatch') from None
 
 
-def child(mode: str, journey: bool = False, actual_graph: bool = False) -> int:
+def child(mode: str, journey: bool = False, actual_graph: bool = False, store_only: bool = False) -> int:
     guard = LoopbackOnlySockets()
     guard.install()
     try:
@@ -209,9 +209,10 @@ def child(mode: str, journey: bool = False, actual_graph: bool = False) -> int:
             selection = 'not postgres'
             required = (ENGINE_TARGET.name,)
         elif mode == 'integration':
-            targets = (PG_TARGET,) if journey else (PG_STORE_TARGET, PG_TARGET)
+            targets = ((PG_STORE_TARGET,) if store_only else
+                       (PG_TARGET,) if journey else (PG_STORE_TARGET, PG_TARGET))
             selection = 'postgres'
-            required = (PG_TARGET.name,) if journey else (PG_STORE_TARGET.name, PG_TARGET.name)
+            required = tuple(path.name for path in targets)
         else:
             targets = UNIT_TARGETS
             selection = 'not postgres'
@@ -233,6 +234,13 @@ def child(mode: str, journey: bool = False, actual_graph: bool = False) -> int:
         if actual_graph:
             complete = (complete and accounting.collected == accounting.passed == 1
                         and accounting.targets[PG_TARGET.name] == 1)
+        if store_only:
+            expected = {PG_STORE_TARGET.name: 21}
+            collected_targets = {name: sum(path == name for path in accounting.paths.values())
+                                 for name in set(accounting.paths.values())}
+            passed_targets = {name: count for name, count in accounting.targets.items() if count}
+            complete = (complete and accounting.collected == accounting.passed == sum(expected.values())
+                        and accounting.skipped == 0 and collected_targets == passed_targets == expected)
         # Native runner legacy path fallback must never shadow an installed
         # execution/storage/knowledge package during this owned qualification.
         for name, module in tuple(sys.modules.items()):
@@ -243,7 +251,7 @@ def child(mode: str, journey: bool = False, actual_graph: bool = False) -> int:
                                       or 'site-packages' not in Path(origin).parts):
                 print('connected_report_loaded_source_package_refused', file=sys.stderr)
                 complete = False
-        print(json.dumps(dict(connected_report_mode=mode, actual_graph_journey=actual_graph,
+        print(json.dumps(dict(connected_report_mode=mode, actual_graph_journey=actual_graph, store_only=store_only,
             collected=accounting.collected,
             passed=accounting.passed, skipped=accounting.skipped, targets=accounting.targets,
             complete=complete), sort_keys=True))
@@ -263,7 +271,9 @@ def main() -> int:
     for mode in ('unit', 'integration', 'engine'):
         group.add_argument('--' + mode, action='store_true')
     parser.add_argument('--child', action='store_true', help=argparse.SUPPRESS)
-    parser.add_argument('--journey', action='store_true', help='Select only the actual combined journey for concrete fixture corrections')
+    subset = parser.add_mutually_exclusive_group()
+    subset.add_argument('--journey', action='store_true', help='Select only the actual combined journey for concrete fixture corrections')
+    subset.add_argument('--store-only', action='store_true', help='Require exact database store/budget case counts without the native journey')
     parser.add_argument('--actual-graph', action='store_true',
                         help='Require the ordinary four-format journey with real co-located Graphiti stores')
     args = parser.parse_args()
@@ -272,8 +282,12 @@ def main() -> int:
         parser.error('--journey requires --integration')
     if args.actual_graph and (mode != 'integration' or not args.journey):
         parser.error('--actual-graph requires --integration --journey')
+    if args.store_only and mode != 'integration':
+        parser.error('--store-only requires --integration')
+    if args.store_only and args.actual_graph:
+        parser.error('--store-only is incompatible with --actual-graph')
     if args.child:
-        return child(mode, args.journey, args.actual_graph)
+        return child(mode, args.journey, args.actual_graph, args.store_only)
     password = os.environ.get('PROJECT_STORE_TEST_PASSWORD')
     if mode == 'integration' and not password:
         parser.error('explicit approved disposable PostgreSQL fixture required')
@@ -329,7 +343,8 @@ def main() -> int:
             env.update(TEMPORAL_EXECUTION_INTEGRATION='1', TEMPORAL_TEST_ADDRESS='127.0.0.1:17233')
         process = owner.start(subprocess.Popen,
             [sys.executable, str(Path(__file__).resolve()), '--child', '--' + mode,
-             *(['--journey'] if args.journey else []), *(['--actual-graph'] if args.actual_graph else [])],
+             *(['--journey'] if args.journey else []), *(['--actual-graph'] if args.actual_graph else []),
+             *(['--store-only'] if args.store_only else [])],
             cwd=directory.name, env=env, stdin=subprocess.DEVNULL, shell=False, close_fds=True,
             creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
         try:

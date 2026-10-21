@@ -159,6 +159,8 @@ jobs:
             exit 1
           fi
           backend/.venv/bin/python tools/run_connected_report_tests.py --integration --journey --actual-graph
+          backend/.venv/bin/python tools/run_connected_report_tests.py --integration --store-only
+          backend/.venv/bin/python tools/run_connected_followup_tests.py --integration --store-only
       - name: Test database diagnostics on failure
         if: failure()
         run: docker compose -f infra/compose.knowledge-test.yml logs --tail 100 neo4j
