@@ -126,6 +126,39 @@ jobs:
         run: services/knowledge/.venv/bin/python tools/run_source_binary_tests.py --postgres
       - name: Qualify connected source ingestion with real stores and local synthetic SDK
         run: services/knowledge/.venv/bin/python tools/run_source_ingestion_tests.py
+      - name: Connect four retained formats through actual graph and native report
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv sync --project backend --locked --extra dev --extra native-store --extra native-temporal --python 3.12.13
+          backend/.venv/bin/python tools/apply_native_import_patch.py --apply
+          backend/.venv/bin/python tools/apply_native_import_patch.py --check
+          uv pip install --python backend/.venv/bin/python --no-deps --reinstall services/knowledge
+          export KNOWLEDGE_PYTHON="$GITHUB_WORKSPACE/services/knowledge/.venv/bin/python"
+          export KNOWLEDGE_BOOTSTRAP_SCRIPT="$("$KNOWLEDGE_PYTHON" -I -c "import importlib.util; print(importlib.util.find_spec('nexaweave_knowledge.read_bootstrap').origin)")"
+          export TEMPORAL_TEST_ADDRESS='127.0.0.1:17233'
+          mkdir -p "$RUNNER_TEMP/nexaweave-group1-temporal"
+          curl --fail --location --retry 3 --max-time 120 --output "$RUNNER_TEMP/nexaweave-group1-temporal/temporal.tar.gz" https://github.com/temporalio/cli/releases/download/v1.9.1/temporal_cli_1.9.1_linux_amd64.tar.gz
+          printf '%s\n' "09a0326a51db84d02735e53542b9ebd8c4758daf47482a9ab0abce15844e60d5  $RUNNER_TEMP/nexaweave-group1-temporal/temporal.tar.gz" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/nexaweave-group1-temporal/temporal.tar.gz" -C "$RUNNER_TEMP/nexaweave-group1-temporal" temporal
+          temporal_bin="$RUNNER_TEMP/nexaweave-group1-temporal/temporal"
+          "$temporal_bin" server start-dev --headless --ip 127.0.0.1 --port 17233 --http-port 17234 --metrics-port 17235 --db-filename "$RUNNER_TEMP/nexaweave-group1-temporal/test.db" > "$RUNNER_TEMP/nexaweave-group1-temporal/server.log" 2>&1 &
+          temporal_pid=$!
+          trap 'kill "$temporal_pid" 2>/dev/null || true; wait "$temporal_pid" 2>/dev/null || true' EXIT
+          ready=false
+          for attempt in {1..30}; do
+            if "$temporal_bin" operator cluster health --address 127.0.0.1:17233 --command-timeout 2s >/dev/null 2>&1; then
+              ready=true
+              break
+            fi
+            kill -0 "$temporal_pid"
+            sleep 1
+          done
+          if [ "$ready" != true ]; then
+            tail -100 "$RUNNER_TEMP/nexaweave-group1-temporal/server.log"
+            exit 1
+          fi
+          backend/.venv/bin/python tools/run_connected_report_tests.py --integration --journey --actual-graph
       - name: Test database diagnostics on failure
         if: failure()
         run: docker compose -f infra/compose.knowledge-test.yml logs --tail 100 neo4j

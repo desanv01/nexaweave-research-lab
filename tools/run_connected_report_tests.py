@@ -108,7 +108,7 @@ def require_installed_freshness(package_specs, *, root=None, prefix=None):
         raise ValueError('connected_report_installed_source_mismatch') from None
 
 
-def child(mode: str, journey: bool = False) -> int:
+def child(mode: str, journey: bool = False, actual_graph: bool = False) -> int:
     guard = LoopbackOnlySockets()
     guard.install()
     try:
@@ -184,6 +184,9 @@ def child(mode: str, journey: bool = False) -> int:
             def pytest_collection_finish(self, session):
                 self.collected = len(session.items)
                 self.paths = {item.nodeid: Path(item.path).name for item in session.items}
+                for item in session.items:
+                    if Path(item.path).resolve() == PG_TARGET.resolve():
+                        item.module._actual_graph_journey = actual_graph
                 try:
                     self.capture_manager = session.config.pluginmanager.getplugin('capturemanager')
                     for item in session.items:
@@ -216,14 +219,20 @@ def child(mode: str, journey: bool = False) -> int:
         if not all(path.is_file() for path in targets):
             print('connected_report_fixture_missing', file=sys.stderr)
             return 1
+        selected_targets = [
+            str(PG_TARGET) + '::test_actual_native_receipt_to_inherited_report_preserves_inputs_and_disabled_reads[ordinary]'
+        ] if actual_graph else list(map(str, targets))
         result = int(pytest.main([
             '-q', '--durations=0', '--rootdir', str(ROOT), '-p', 'pytest_asyncio.plugin',
             '-o', 'asyncio_default_fixture_loop_scope=function', '-o', 'markers=' + MARKERS,
-            '-m', selection, *map(str, targets),
+            '-m', selection, *selected_targets,
         ], plugins=[accounting]))
         complete = (result == 0 and accounting.collected > 0 and
                     accounting.collected == accounting.passed and accounting.skipped == 0 and
                     all(accounting.targets[name] > 0 for name in required))
+        if actual_graph:
+            complete = (complete and accounting.collected == accounting.passed == 1
+                        and accounting.targets[PG_TARGET.name] == 1)
         # Native runner legacy path fallback must never shadow an installed
         # execution/storage/knowledge package during this owned qualification.
         for name, module in tuple(sys.modules.items()):
@@ -234,7 +243,8 @@ def child(mode: str, journey: bool = False) -> int:
                                       or 'site-packages' not in Path(origin).parts):
                 print('connected_report_loaded_source_package_refused', file=sys.stderr)
                 complete = False
-        print(json.dumps(dict(connected_report_mode=mode, collected=accounting.collected,
+        print(json.dumps(dict(connected_report_mode=mode, actual_graph_journey=actual_graph,
+            collected=accounting.collected,
             passed=accounting.passed, skipped=accounting.skipped, targets=accounting.targets,
             complete=complete), sort_keys=True))
         if not complete:
@@ -254,17 +264,46 @@ def main() -> int:
         group.add_argument('--' + mode, action='store_true')
     parser.add_argument('--child', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--journey', action='store_true', help='Select only the actual combined journey for concrete fixture corrections')
+    parser.add_argument('--actual-graph', action='store_true',
+                        help='Require the ordinary four-format journey with real co-located Graphiti stores')
     args = parser.parse_args()
     mode = 'engine' if args.engine else 'integration' if args.integration else 'unit'
     if args.journey and mode != 'integration':
         parser.error('--journey requires --integration')
+    if args.actual_graph and (mode != 'integration' or not args.journey):
+        parser.error('--actual-graph requires --integration --journey')
     if args.child:
-        return child(mode, args.journey)
+        return child(mode, args.journey, args.actual_graph)
     password = os.environ.get('PROJECT_STORE_TEST_PASSWORD')
     if mode == 'integration' and not password:
         parser.error('explicit approved disposable PostgreSQL fixture required')
     if mode == 'integration' and os.environ.get('TEMPORAL_TEST_ADDRESS') != '127.0.0.1:17233':
         parser.error('explicit approved local Temporal fixture required')
+    graph_environment = {}
+    if args.actual_graph:
+        knowledge_python = Path(os.environ.get('KNOWLEDGE_PYTHON', ''))
+        bootstrap = Path(os.environ.get('KNOWLEDGE_BOOTSTRAP_SCRIPT', ''))
+        knowledge_prefix = ROOT / 'services/knowledge/.venv'
+        expected_python = knowledge_prefix / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python')
+        # Preserve the locked venv executable path; resolving its interpreter
+        # symlink would select the base runtime instead of this environment.
+        if (knowledge_python != expected_python or not knowledge_python.is_file()
+                or not bootstrap.is_absolute() or 'site-packages' not in bootstrap.parts
+                or bootstrap.name != 'read_bootstrap.py'
+                or not bootstrap.is_relative_to(knowledge_prefix)
+                or not bootstrap.is_file()
+                or not bootstrap.with_name('source_ingestion_bootstrap.py').is_file()
+                or not bootstrap.with_name('read_session_bootstrap.py').is_file()):
+            parser.error('explicit installed locked knowledge runtime required')
+        neo_password = os.environ.get('KNOWLEDGE_TEST_PASSWORD')
+        if (not neo_password or len(neo_password) > 128
+                or neo_password.lower() in {'password', 'neo4j', 'test', 'changeme'}):
+            parser.error('explicit disposable Neo4j credential required')
+        graph_environment = dict(KNOWLEDGE_PYTHON=str(knowledge_python),
+            KNOWLEDGE_BOOTSTRAP_SCRIPT=str(bootstrap),
+            NEXAWEAVE_WORKBENCH_BACKEND_PYTHON=str(Path(sys.executable).absolute()),
+            KNOWLEDGE_TEST_PASSWORD=neo_password, KNOWLEDGE_INTEGRATION='1',
+            GRAPHITI_TELEMETRY_ENABLED='false')
     spec = importlib.util.spec_from_file_location('_connected_report_owned', ROOT / 'backend/app/utils/owned_process.py')
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
@@ -279,6 +318,7 @@ def main() -> int:
             str(ROOT / 'services/knowledge/tests')))
         env.update(HF_HUB_OFFLINE='1', TRANSFORMERS_OFFLINE='1', HF_HUB_DISABLE_TELEMETRY='1',
                    DO_NOT_TRACK='1', NEXAWEAVE_NATIVE_TEST_OFFLINE='1', NEXAWEAVE_REPORT_TEST_OFFLINE='1')
+        env.update(graph_environment)
         if mode == 'integration':
             from psycopg.conninfo import make_conninfo
             env.update(PROJECT_STORE_POSTGRES_INTEGRATION='1', KNOWLEDGE_POSTGRES_INTEGRATION='1')
@@ -288,7 +328,8 @@ def main() -> int:
             env['KNOWLEDGE_POSTGRES_TEST_DSN'] = dsn
             env.update(TEMPORAL_EXECUTION_INTEGRATION='1', TEMPORAL_TEST_ADDRESS='127.0.0.1:17233')
         process = owner.start(subprocess.Popen,
-            [sys.executable, str(Path(__file__).resolve()), '--child', '--' + mode, *(['--journey'] if args.journey else [])],
+            [sys.executable, str(Path(__file__).resolve()), '--child', '--' + mode,
+             *(['--journey'] if args.journey else []), *(['--actual-graph'] if args.actual_graph else [])],
             cwd=directory.name, env=env, stdin=subprocess.DEVNULL, shell=False, close_fds=True,
             creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
         try:

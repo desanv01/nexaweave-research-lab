@@ -24,7 +24,8 @@ def migrated(factory):
         migrate(conn)
 
 
-def real_host(factory, tmp_path, *, cap=12, authorized=True, chat=None):
+def real_host(factory, tmp_path, *, cap=12, authorized=True, chat=None, ceiling=4):
+    assert type(ceiling) is int and 1 <= ceiling <= 4
     from app.services.durable_preparation_host import DurablePreparationHost
     from app.services.knowledge_read_facade import KnowledgeReadFacade, ReadHostSettings
     from test_provider_neutral_preparation import ScriptedChat, fact
@@ -53,7 +54,7 @@ def real_host(factory, tmp_path, *, cap=12, authorized=True, chat=None):
     budget = BudgetLedger(factory)
     budget.create_account('owner', scope.project_id, account, cap)
     host = DurablePreparationHost(settings=settings, connection_factory=factory,
-        read_facade=facade, artifact_root=tmp_path, account_id=account, ceiling_microusd=4,
+        read_facade=facade, artifact_root=tmp_path, account_id=account, ceiling_microusd=ceiling,
         authorize=lambda: authorized, chat_client_factory=lambda: chat,
         model_name='scripted', base_url='injected://fixture', scheduler=wires.append)
     return host, scope, retained, chat, wires, transport

@@ -23,7 +23,6 @@ from nexaweave_execution.budget import BudgetLedger, migrate
 from nexaweave_knowledge.operations import Ledger
 from nexaweave_storage import SourceStore
 from test_source_bridge_postgres import factory, owned_fixture
-from test_integration_neo4j import fixture_data
 from test_source_library_http_integration import _HTTP_CHILD, _events, _exchange
 
 pytestmark = [pytest.mark.postgres, pytest.mark.neo4j]
@@ -120,8 +119,9 @@ def model_server():
 
 
 @contextmanager
-def host(directory, scope, display, account, model_port, *, enabled=True):
+def host(directory, scope, display, account, model_port, *, enabled=True, ceiling=4):
     from tools.run_unit_tests import _unit_environment
+    assert type(ceiling) is int and 1 <= ceiling <= 4
     backend, python, bootstrap = (os.environ[k] for k in
         ('NEXAWEAVE_WORKBENCH_BACKEND_PYTHON', 'KNOWLEDGE_PYTHON', 'KNOWLEDGE_BOOTSTRAP_SCRIPT'))
     assert Path(backend).is_absolute() and Path(backend).is_file()
@@ -149,7 +149,7 @@ def host(directory, scope, display, account, model_port, *, enabled=True):
         KNOWLEDGE_NEO4J_PASSWORD=os.environ['KNOWLEDGE_TEST_PASSWORD'],
         KNOWLEDGE_INGESTION_ENABLED='true' if enabled else 'false',
         KNOWLEDGE_MODEL_CALLS_AUTHORIZED='true', KNOWLEDGE_INGESTION_ACCOUNT_ID=str(account),
-        KNOWLEDGE_INGESTION_CEILING_MICROUSD='4', KNOWLEDGE_OPERATING_PROFILE='local_only',
+        KNOWLEDGE_INGESTION_CEILING_MICROUSD=str(ceiling), KNOWLEDGE_OPERATING_PROFILE='local_only',
         KNOWLEDGE_LLM_BASE_URL=f'http://127.0.0.1:{model_port}/v1', KNOWLEDGE_LLM_MODEL='fixture-generation',
         KNOWLEDGE_LLM_API_KEY='explicit-local-dummy',
         KNOWLEDGE_EMBEDDING_BASE_URL=f'http://127.0.0.1:{model_port}/v1',
@@ -219,6 +219,7 @@ def neo_scope(scope):
 
 
 def seed(factory):
+    from test_integration_neo4j import fixture_data
     with factory() as connection: migrate(connection)
     display, scope, retained = owned_fixture(factory, text='Mira Vale works for Harbor Labs.')
     account = uuid4()
@@ -262,7 +263,7 @@ def test_real_production_http_sdk_ingestion_restart_and_denials(factory, tmp_pat
             assert _exchange(port,'POST',execute_url,payload,token=token)[2]['data'] == data
             assert _exchange(port,'GET',status_url,token=token)[2]['data'] == data
             assert len(records) == before
-            changed = {**payload, 'ontology':fixture_data()[2].model_dump(mode='json')}
+            changed = {**payload, 'ontology':{**payload['ontology'], 'revision':str(uuid4())}}
             assert _exchange(port,'POST',execute_url,changed,token=token)[0] == 409
             assert len(records) == before
         rows, _, _ = driver.execute_query(
