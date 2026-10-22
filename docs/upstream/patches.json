@@ -282,15 +282,15 @@
     {
       "imported_path": "frontend/package-lock.json",
       "original_sha256": "a4a188daf04a442b8e23c3291d9062b4e00faa5ff49503db759c85e67c4037be",
-      "current_sha256": "42f4944de1d838030a383a482090ba0490af92f6d9374864b3c1c2502e2eee0d",
-      "reason": "Main locks renderer/test dependency closure and updates PostCSS/nanoid within existing ranges to address current advisories; adds exact dependencyless playwright-core 1.56.1 for the real research browser journey.",
+      "current_sha256": "05f3dc71367d93b8923f16990208af2f708c5ba74a9b61dcc95276e9aca25ecf",
+      "reason": "Main locks renderer/test dependency closure and updates PostCSS/nanoid within existing ranges to address current advisories; adds exact dependencyless playwright-core 1.64.1 for the real research browser journey. Uses the pinned official Chrome 156 stable runtime and supported Chrome channel for the matched browser check.",
       "phase": "U07i"
     },
     {
       "imported_path": "frontend/package.json",
       "original_sha256": "f972113d3cca752acc44f7e63d97fec138b2a34388b173f85f847bf7108fe852",
-      "current_sha256": "48adb756a425e5d34545e57d1a345cafda507e767332d11ede30b7d6e65fae1a",
-      "reason": "Main pins Markdown-it/DOMPurify runtime and jsdom test dependency; adds node:test script without changing frontend framework versions, plus exact playwright-core 1.56.1 and the real research browser driver command.",
+      "current_sha256": "9661423ec1f3036b2b3097d42c50db39f6028bc10b4dd8e864eba4b1c5cdeef7",
+      "reason": "Main pins Markdown-it/DOMPurify runtime and jsdom test dependency; adds node:test script without changing frontend framework versions, plus exact playwright-core 1.64.1 and the real research browser driver command. Uses the pinned official Chrome 156 stable runtime and supported Chrome channel for the matched browser check.",
       "phase": "U07i"
     },
     {

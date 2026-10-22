@@ -130,9 +130,32 @@ jobs:
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '24.14.1'
+      - name: Install pinned official Chrome for the matched Playwright runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          chrome_provider_dir="$(mktemp -d "$RUNNER_TEMP/nexaweave-chrome-provider-XXXXXX")"
+          chrome_provider_cleanup() {
+            chrome_provider_status=$?
+            trap - EXIT
+            rm -f "$chrome_provider_dir/chrome.deb" || chrome_provider_status=1
+            rmdir "$chrome_provider_dir" || chrome_provider_status=1
+            exit "$chrome_provider_status"
+          }
+          trap chrome_provider_cleanup EXIT
+          curl --proto '=https' --proto-redir '=https' --fail --location --max-redirs 3 --max-time 120 --max-filesize 144849192 --output "$chrome_provider_dir/chrome.deb" https://dl.google.com/linux/chrome/deb/pool/main/g/google-chrome-stable/google-chrome-stable_156.0.8078.47-1_amd64.deb
+          test "$(stat -c %s "$chrome_provider_dir/chrome.deb")" = '144849192'
+          printf '%s  %s\n' '6c92cd22e90c6e3e255d782991543fa2091db8614e8536a971a7433a5c4d7ac8' "$chrome_provider_dir/chrome.deb" | sha256sum --check --strict
+          timeout --kill-after=5s 115s sudo env DEBIAN_FRONTEND=noninteractive dpkg --force-confold --install "$chrome_provider_dir/chrome.deb"
+          test "$(dpkg-query -W -f='${Version}' google-chrome-stable)" = '156.0.8078.47-1'
+          chrome_version="$(/opt/google/chrome/chrome --version)"
+          [[ "$chrome_version" =~ ^Google\ Chrome\ 156\.0\.8078\.47[[:space:]]*$ ]]
+          printf '%s\n' "$chrome_version"
       - name: Install locked workbench browser dependencies without scripts
         working-directory: frontend
-        run: npm ci --ignore-scripts
+        run: |
+          npm ci --ignore-scripts
+          node --input-type=commonjs -e "const p=require('./node_modules/playwright-core/package.json'); if(p.version !== '1.64.1') throw new Error('browser_package_version_refused'); console.log('playwright-core ' + p.version)"
       - name: Connect four retained formats through actual graph and native report
         shell: bash
         run: |

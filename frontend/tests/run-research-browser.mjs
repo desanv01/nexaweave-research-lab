@@ -233,6 +233,7 @@ async function prepareBrowser(command) {
   launchStep = 'launch'; launchAttempted = true
   browser = await chromium.launch({
     executablePath: process.env.NEXAWEAVE_RESEARCH_BROWSER_CHROME,
+    channel: 'chrome',
     headless: true, chromiumSandbox: true,
     downloadsPath: downloadRoot, env: environment, timeout: 30000,
     args: ['--no-first-run', '--no-default-browser-check', '--disable-sync', '--no-startup-window'],
