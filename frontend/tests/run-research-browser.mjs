@@ -47,6 +47,96 @@ let mutations = new Map()
 let closing = null
 const deadline = Date.now() + 540000
 const clock = () => { requireTrue(!timedOut && Date.now() < deadline && !fault) }
+// Failure-only public-source positions; no exception message or private path is emitted.
+const FAILURE_MODULES = Object.freeze([
+  'src/App.vue',
+  'src/api/connectedFollowups.js',
+  'src/api/connectedReports.js',
+  'src/api/dossierExport.js',
+  'src/api/experimentComparison.js',
+  'src/api/graph.js',
+  'src/api/index.js',
+  'src/api/nativeLaunch.js',
+  'src/api/nativeObservations.js',
+  'src/api/populationWorkbench.js',
+  'src/api/report.js',
+  'src/api/simulation.js',
+  'src/api/simulationPreparation.js',
+  'src/api/sourceIngestion.js',
+  'src/api/sourceLibrary.js',
+  'src/api/workbench.js',
+  'src/components/GraphPanel.vue',
+  'src/components/HistoryDatabase.vue',
+  'src/components/LanguageSwitcher.vue',
+  'src/components/Step1GraphBuild.vue',
+  'src/components/Step2EnvSetup.vue',
+  'src/components/Step3Simulation.vue',
+  'src/components/Step4Report.vue',
+  'src/components/Step5Interaction.vue',
+  'src/components/workbench/ConnectedFollowup.vue',
+  'src/components/workbench/ConnectedReports.vue',
+  'src/components/workbench/DossierExport.vue',
+  'src/components/workbench/EvidenceResults.vue',
+  'src/components/workbench/ExperimentComparison.vue',
+  'src/components/workbench/NativeLaunch.vue',
+  'src/components/workbench/NativeObservations.vue',
+  'src/components/workbench/PopulationWorkbench.vue',
+  'src/components/workbench/SimulationPreparation.vue',
+  'src/components/workbench/SourceIngestion.vue',
+  'src/components/workbench/SourceLibrary.vue',
+  'src/i18n/connectedFollowups.js',
+  'src/i18n/connectedReports.js',
+  'src/i18n/index.js',
+  'src/i18n/nativeLaunch.js',
+  'src/i18n/nativeObservations.js',
+  'src/i18n/populationWorkbench.js',
+  'src/i18n/simulationPreparation.js',
+  'src/i18n/workbench.js',
+  'src/main.js',
+  'src/router/index.js',
+  'src/store/pendingUpload.js',
+  'src/utils/safeMarkdown.js',
+  'src/views/Home.vue',
+  'src/views/InteractionView.vue',
+  'src/views/MainView.vue',
+  'src/views/Process.vue',
+  'src/views/ReportView.vue',
+  'src/views/ResearchWorkbench.vue',
+  'src/views/SimulationRunView.vue',
+  'src/views/SimulationView.vue',
+])
+let pageFailure = null
+function failureStack(error) {
+  const supplied = error?.stack
+  const raw = typeof supplied === 'string' ? supplied : ''
+  let value = '', bytes = 0
+  // FIRST page-error plus terminal driver-error windows total at most WIRE.
+  for (let at = 0; at < raw.length && bytes <= WIRE / 2 - 4;) {
+    const point = raw.codePointAt(at), part = String.fromCodePoint(point)
+    const width = point < 128 ? 1 : point < 2048 ? 2 : point < 65536 ? 3 : 4
+    value += part; bytes += width; at += part.length
+  }
+  return value
+}
+function sourcePosition(error, driver = false) {
+  for (const frame of failureStack(error).split('\n').slice(1)) {
+    if (driver) {
+      if (/\bat (?:fail|requireTrue)\s*\(/.test(frame)) continue
+      const match = /run-research-browser\.mjs:(\d+):\d+/.exec(frame)
+      if (match && Number(match[1]) >= 1 && Number(match[1]) <= 2048) return { line: Number(match[1]) }
+    } else {
+      const match = /http:\/\/127\.0\.0\.1:4317\/(src\/[A-Za-z0-9_./-]+\.(?:js|vue))(?:\?[^:\s)]*)?:(\d+):\d+/.exec(frame)
+      const module = match ? FAILURE_MODULES.indexOf(match[1]) + 1 : 0
+      if (module && Number(match[2]) >= 1 && Number(match[2]) <= 2048) return { module, line: Number(match[2]) }
+    }
+  }
+  return driver ? { line: 0 } : { module: 0, line: 0 }
+}
+function failureLocation(error) {
+  return { driver_line: sourcePosition(error, true).line,
+    kind: error?.message === 'research_browser_failed' ? 'assertion' : error?.name === 'TimeoutError' ? 'timeout' : 'dependency',
+    fault, page_error: pageFailure !== null, page_module: pageFailure?.module || 0, page_line: pageFailure?.line || 0 }
+}
 function launchError(error) {
   if (launchStep === 'context') return 'context-create-failed'
   if (launchStep === 'page') return 'page-create-failed'
@@ -110,7 +200,12 @@ async function reply(value) {
   await new Promise((resolve, reject) => process.stdout.write(line, error => error ? reject(error) : resolve()))
 }
 function observe(target) {
-  target.on('pageerror', () => { fault = true })
+  target.on('pageerror', error => {
+    fault = true
+    if (pageFailure === null) {
+      try { pageFailure = sourcePosition(error) } catch { pageFailure = { module: 0, line: 0 } }
+    }
+  })
   target.on('request', request => {
     if (!connection || !request.url().startsWith(connection.api_origin + '/api/')) return
     const url = new URL(request.url())
@@ -157,10 +252,10 @@ async function exchange(target, route, method, action, cap, status = 200) {
     if (raw !== null) requireTrue(Buffer.byteLength(raw) <= WIRE)
     const request = raw === null ? null : JSON.parse(raw)
     return { value: envelope.data, request, request_sha256: raw === null ? null : sha(raw) }
-  }).then(value => ({ value }), () => ({ failed: true }))
+  }).then(value => ({ value }), error => ({ failed: true, error }))
   await action()
   const result = await waiting
-  requireTrue(!result.failed)
+  if (result.failed) throw result.error
   clock()
   return result.value
 }
@@ -556,6 +651,7 @@ try {
   process.exitCode = 1
   const failure = { stage, ok: false, error: 'research_browser_failed', phase }
   if (phase === 'browser-launch') failure.launch_error = launchError(error)
+  else { try { failure.location = failureLocation(error) } catch { /* keep the primary failure */ } }
   try { await reply(failure) } catch { /* stdout unavailable */ }
 } finally {
   clearTimeout(hardTimer)

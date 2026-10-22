@@ -54,7 +54,8 @@ def encoded(value):
 def failure_reply(reply, stage):
     require(type(reply) is dict
             and set(reply) in ({'stage', 'ok', 'error'}, {'stage', 'ok', 'error', 'phase'},
-                               {'stage', 'ok', 'error', 'phase', 'launch_error'})
+                               {'stage', 'ok', 'error', 'phase', 'launch_error'},
+                               {'stage', 'ok', 'error', 'phase', 'location'})
             and reply['stage'] == stage and reply['ok'] is False
             and type(reply['error']) is str
             and reply['error'] in {'research_browser_failed', 'research_browser_cleanup_failed'},
@@ -71,6 +72,23 @@ def failure_reply(reply, stage):
                 and type(reply['launch_error']) is str and reply['launch_error'] in LAUNCH_ERRORS,
                 'research_browser_failure_reply_refused')
         code += ':' + reply['launch_error']
+    if 'location' in reply:
+        location = reply['location']
+        require(reply['error'] == 'research_browser_failed' and reply.get('phase') in FAILURE_PHASES
+                and reply['phase'] != 'browser-launch' and type(location) is dict
+                and set(location) == {'driver_line', 'kind', 'fault', 'page_error', 'page_module', 'page_line'}
+                and type(location['kind']) is str and location['kind'] in {'assertion', 'timeout', 'dependency'}
+                and type(location['fault']) is bool and type(location['page_error']) is bool
+                and all(type(location[key]) is int and 0 <= location[key] <= 2048
+                        for key in ('driver_line', 'page_line'))
+                and type(location['page_module']) is int and 0 <= location['page_module'] <= 55
+                and (not location['page_error'] or location['fault'])
+                and ((location['page_module'] == 0) == (location['page_line'] == 0))
+                and (location['page_error'] or location['page_module'] == location['page_line'] == 0),
+                'research_browser_failure_reply_refused')
+        code += ':driver-line-' + str(location['driver_line']) + ':' + location['kind']
+        code += ':fault-' + str(int(location['fault']))
+        code += ':page-' + str(location['page_module']) + '-line-' + str(location['page_line'])
     return RuntimeError(code)
 
 
