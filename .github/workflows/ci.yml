@@ -131,32 +131,46 @@ jobs:
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '24.14.1'
-      - name: Install pinned official Chrome for the matched Playwright runtime
+      - name: Install exact Playwright bundled headless Chromium
         shell: bash
         run: |
           set -euo pipefail
-          chrome_provider_dir="$(mktemp -d "$RUNNER_TEMP/nexaweave-chrome-provider-XXXXXX")"
-          chrome_provider_cleanup() {
-            chrome_provider_status=$?
-            trap - EXIT
-            rm -f "$chrome_provider_dir/chrome.deb" || chrome_provider_status=1
-            rmdir "$chrome_provider_dir" || chrome_provider_status=1
-            exit "$chrome_provider_status"
-          }
-          trap chrome_provider_cleanup EXIT
-          curl --proto '=https' --proto-redir '=https' --fail --location --max-redirs 3 --max-time 120 --max-filesize 144849192 --output "$chrome_provider_dir/chrome.deb" https://dl.google.com/linux/chrome/deb/pool/main/g/google-chrome-stable/google-chrome-stable_156.0.8078.47-1_amd64.deb
-          test "$(stat -c %s "$chrome_provider_dir/chrome.deb")" = '144849192'
-          printf '%s  %s\n' '6c92cd22e90c6e3e255d782991543fa2091db8614e8536a971a7433a5c4d7ac8' "$chrome_provider_dir/chrome.deb" | sha256sum --check --strict
-          timeout --kill-after=5s 115s sudo env DEBIAN_FRONTEND=noninteractive dpkg --force-confold --install "$chrome_provider_dir/chrome.deb"
-          test "$(dpkg-query -W -f='${Version}' google-chrome-stable)" = '156.0.8078.47-1'
-          chrome_version="$(/opt/google/chrome/chrome --version)"
-          [[ "$chrome_version" =~ ^Google\ Chrome\ 156\.0\.8078\.47[[:space:]]*$ ]]
-          printf '%s\n' "$chrome_version"
+          command -v unzip >/dev/null
+          command -v ldd >/dev/null
+          command -v fuser >/dev/null
+          browser_provider_dir="$RUNNER_TEMP/nexaweave-playwright-1.64.1"
+          test "$(realpath "$RUNNER_TEMP")" = "$RUNNER_TEMP"
+          test ! -e "$browser_provider_dir"
+          mkdir -m 700 "$browser_provider_dir"
+          curl --proto '=https' --proto-redir '=https' --fail --location --max-redirs 3 --max-time 120 --max-filesize 125797539 --output "$browser_provider_dir/provider.zip" https://cdn.playwright.dev/builds/cft/156.0.8078.4/linux64/chrome-headless-shell-linux64.zip
+          test "$(stat -c %s "$browser_provider_dir/provider.zip")" = '125797539'
+          printf '%s  %s\n' 'c3e50596aef52c58f8fda3c6b3411c33d34c88b177b3ed1c2243359fd3b8ba20' "$browser_provider_dir/provider.zip" | sha256sum --check --strict
+          timeout --kill-after=5s 115s bash -euo pipefail -s -- "$browser_provider_dir" <<'BUNDLE'
+          provider="$1"
+          # The pinned SHA binds all287 ordinary files/285084594 unpacked bytes.
+          test "$(unzip -Z -1 "$provider/provider.zip" | wc -l)" = '287'
+          unzip -q "$provider/provider.zip" -d "$provider"
+          browser_root="$provider/chrome-headless-shell-linux64"
+          test "$(find "$browser_root" -type f | wc -l)" = '287'
+          test "$(find "$browser_root" -type f -printf '%s\n' | awk '{sum+=$1} END {printf "%.0f",sum}')" = '285084594'
+          test -z "$(find "$provider" -type l -print -quit)"
+          for native in chrome-headless-shell libEGL.so libGLESv2.so libvk_swiftshader.so libvulkan.so.1; do
+            dependencies="$(ldd "$browser_root/$native")"
+            if grep -Fq 'not found' <<<"$dependencies"; then
+              printf '%s\n' 'bundled_browser_native_dependency_missing' >&2
+              exit 1
+            fi
+          done
+          browser_version="$("$browser_root/chrome-headless-shell" --version)"
+          [[ "$browser_version" =~ (^|[[:space:]])156\.0\.8078\.4[[:space:]]*$ ]]
+          printf '%s\n' 'playwright bundled headless Chromium156.0.8078.4'
+          rm -- "$provider/provider.zip"
+          BUNDLE
       - name: Install locked workbench browser dependencies without scripts
         working-directory: frontend
         run: |
           npm ci --ignore-scripts
-          node --input-type=commonjs -e "const p=require('./node_modules/playwright-core/package.json'); if(p.version !== '1.64.1') throw new Error('browser_package_version_refused'); console.log('playwright-core ' + p.version)"
+          node --input-type=commonjs -e "const p=require('./node_modules/playwright-core/package.json'); if(p.version !== '1.64.1') throw new Error('browser_package_version_refused'); const b=require('./node_modules/playwright-core/browsers.json').browsers.find(x=>x.name==='chromium-headless-shell'); if(!b || b.revision!=='1248' || b.browserVersion!=='156.0.8078.4') throw new Error('browser_revision_refused'); console.log('playwright-core ' + p.version)"
       - name: Connect four retained formats through actual graph and native report
         shell: bash
         run: |
@@ -169,7 +183,7 @@ jobs:
           export KNOWLEDGE_BOOTSTRAP_SCRIPT="$("$KNOWLEDGE_PYTHON" -I -c "import importlib.util; print(importlib.util.find_spec('nexaweave_knowledge.read_bootstrap').origin)")"
           export TEMPORAL_TEST_ADDRESS='127.0.0.1:17233'
           export NEXAWEAVE_RESEARCH_BROWSER_NODE="$(command -v node)"
-          export NEXAWEAVE_RESEARCH_BROWSER_CHROME='/opt/google/chrome/chrome'
+          export NEXAWEAVE_RESEARCH_BROWSER_CHROME="$RUNNER_TEMP/nexaweave-playwright-1.64.1/chrome-headless-shell-linux64/chrome-headless-shell"
           test -x "$NEXAWEAVE_RESEARCH_BROWSER_CHROME"
           "$NEXAWEAVE_RESEARCH_BROWSER_NODE" --version
           "$NEXAWEAVE_RESEARCH_BROWSER_CHROME" --version
@@ -206,6 +220,30 @@ jobs:
       - name: Remove only this job's research PostgreSQL
         if: always()
         run: docker compose -f infra/compose.operations-test.yml down -v
+
+      - name: Remove only this job's pinned browser bundle
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(realpath "$RUNNER_TEMP")" = "$RUNNER_TEMP"
+          browser_provider_dir="$RUNNER_TEMP/nexaweave-playwright-1.64.1"
+          if [ -e "$browser_provider_dir" ]; then
+            test -d "$browser_provider_dir"
+            test ! -L "$browser_provider_dir"
+            test "$(realpath "$browser_provider_dir")" = "$browser_provider_dir"
+            browser_binary="$browser_provider_dir/chrome-headless-shell-linux64/chrome-headless-shell"
+            if [ -f "$browser_binary" ]; then
+              command -v fuser >/dev/null
+              if fuser -s -- "$browser_binary"; then
+                printf '%s\n' 'bundled_browser_still_owned_open' >&2
+                exit 1
+              else
+                test "$?" = '1'
+              fi
+            fi
+            timeout --kill-after=5s 10s rm -r -- "$browser_provider_dir"
+          fi
 
   knowledge-operations:
     name: knowledge-operations

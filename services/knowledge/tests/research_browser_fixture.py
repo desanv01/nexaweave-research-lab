@@ -628,7 +628,7 @@ class ResearchBrowserSession:
             observed = self._process(int(child))
             if observed and observed['parent'] == pid:
                 executable = (Path('/proc') / child.decode('ascii') / 'exe').resolve(strict=True)
-                if executable.name in {'chrome', 'chromium', 'chromium-browser', 'google-chrome'}:
+                if executable == self.chrome_executable.resolve(strict=True):
                     matches.append(observed)
         require(len(matches) == 1, 'research_browser_chrome_identity')
         self.chrome = matches[0]

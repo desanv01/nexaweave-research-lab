@@ -329,11 +329,17 @@ def main() -> int:
     if args.browser:
         node = Path(os.environ.get('NEXAWEAVE_RESEARCH_BROWSER_NODE', ''))
         chrome = Path(os.environ.get('NEXAWEAVE_RESEARCH_BROWSER_CHROME', ''))
+        try:
+            provider_root = _plain_source_path(os.environ.get('RUNNER_TEMP', ''), directory=True)
+            expected_chrome = _plain_source_path(provider_root / 'nexaweave-playwright-1.64.1'
+                / 'chrome-headless-shell-linux64' / 'chrome-headless-shell')
+        except (OSError, ValueError):
+            parser.error('explicit installed bundled browser runtime required')
         if (sys.platform != 'linux' or os.environ.get('GITHUB_ACTIONS') != 'true'
                 or os.environ.get('RUNNER_ENVIRONMENT') != 'github-hosted'
                 or not node.is_absolute() or '..' in node.parts
                 or not node.is_file() or not os.access(node, os.X_OK)
-                or str(chrome) != '/opt/google/chrome/chrome'
+                or chrome != expected_chrome
                 or not chrome.is_file() or not os.access(chrome, os.X_OK)
                 or not (ROOT / 'frontend/node_modules/playwright-core/package.json').is_file()):
             parser.error('explicit installed hosted Node/Chrome/browser runtime required')
