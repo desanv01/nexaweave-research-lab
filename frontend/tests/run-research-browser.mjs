@@ -50,13 +50,35 @@ const clock = () => { requireTrue(!timedOut && Date.now() < deadline && !fault) 
 function launchError(error) {
   if (launchStep === 'context') return 'context-create-failed'
   if (launchStep === 'page') return 'page-create-failed'
-  // Inspect only a bounded private prefix. Never serialize the exception.
-  const message = typeof error?.message === 'string' ? error.message.slice(0, 1800) : ''
   if (error?.name === 'TimeoutError') return 'launch-timeout'
+  // One private UTF8-bounded window; never copy/encode the whole exception.
+  // Reserve four bytes before inspecting a codepoint, including at the edge.
+  const raw = typeof error?.message === 'string' ? error.message : ''
+  let message = '', bytes = 0
+  for (let at = 0; at < raw.length && bytes <= WIRE - 4;) {
+    const point = raw.codePointAt(at)
+    const part = String.fromCodePoint(point)
+    const width = point < 128 ? 1 : point < 2048 ? 2 : point < 65536 ? 3 : 4
+    message += part; bytes += width; at += part.length
+  }
+  const targetClosed = message.includes('Target page, context or browser has been closed')
+  const marker = message.indexOf('[err]')
+  if (marker >= 0) message = message.slice(marker)
   if (error?.code === 'ENOENT' || message.includes("Executable doesn't exist")) return 'executable-missing'
+  if (message.includes('Failed to move to new namespace') && message.includes('Operation not permitted')) return 'namespace-refused'
   if (['No usable sandbox', 'Running as root without --no-sandbox', 'Chromium sandboxing failed!'].some(literal => message.includes(literal))) return 'sandbox-refused'
+  if (message.includes('error while loading shared libraries')) return 'runtime-library-missing'
+  if (message.includes('chrome_crashpad_handler') && message.includes('--database is required')) return 'crashpad-database-missing'
+  if (message.includes('Failed to create a ProcessSingleton')) return 'profile-lock-refused'
+  if ((message.includes('pthread_create') && message.includes('Resource temporarily unavailable')) || message.includes('Cannot allocate memory')) return 'runtime-resource-refused'
   if (['EACCES', 'EPERM'].includes(error?.code) || message.includes('Permission denied')) return 'permission-refused'
-  if (message.includes('Target page, context or browser has been closed')) return 'browser-closed'
+  if (message.includes('Protocol error')) return 'cdp-protocol-refused'
+  if (message.includes('process did exit')) {
+    if (message.includes('signal=SIGTRAP')) return 'browser-process-sigtrap'
+    if (message.includes('signal=SIGABRT')) return 'browser-process-sigabrt'
+    if (/exitCode=1(?=[,\s]|$)/.test(message)) return 'browser-process-exit1'
+  }
+  if (targetClosed || message.includes('Target page, context or browser has been closed')) return 'browser-closed'
   return 'launch-unknown'
 }
 const hardTimer = setTimeout(() => { timedOut = true; process.stdin.destroy() }, 540000)
