@@ -296,12 +296,13 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
     const epoch = generation, current = connection, controller = new AbortController()
     active = controller
     activeMethod = method
-    let timedOut = false, reader, responseBody
+    let timedOut = false, reader, responseBody, completed = false
     const timer = setTimeout(() => { timedOut = true; controller.abort() }, deadlineMs)
     const callerAbort = () => controller.abort()
     if (options.signal?.aborted) callerAbort()
     else options.signal?.addEventListener('abort', callerAbort, { once: true })
     const owned = () => { if (generation !== epoch || controller.signal.aborted) fail(timedOut ? 'deadline' : 'cancelled') }
+    const complete = result => { owned(); completed = true; return result }
     const guarded = promise => new Promise((resolve, reject) => {
       const aborted = () => reject(new WorkbenchError(timedOut ? 'deadline' : 'cancelled'))
       if (controller.signal.aborted) { aborted(); return }
@@ -358,7 +359,7 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
         try { admitted = validatePopulationExport(body, payload.platform, ingestionContext) } catch { fail('invalid_reply') }
         const bytes = new Uint8Array(size); let offset = 0
         for (const chunk of exportChunks) { bytes.set(chunk, offset); offset += chunk.byteLength }
-        owned(); return { bytes, mime: response.headers.get('content-type'), filename: payload.platform === 'twitter' ? 'oasis-twitter-profiles.csv' : 'oasis-reddit-profiles.json', rows: admitted }
+        return complete({ bytes, mime: response.headers.get('content-type'), filename: payload.platform === 'twitter' ? 'oasis-twitter-profiles.csv' : 'oasis-reddit-profiles.json', rows: admitted })
       }
       let value
       try { value = uniqueJson(body) } catch { fail() }
@@ -398,7 +399,7 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
       }
       if (ingestion) ingestionScope = { ...result.scope }
       if (method === 'populationPreview') populationAdmission = { options: populationOptions(populationRequest), preview: JSON.parse(JSON.stringify(result)) }
-      return result
+      return complete(result)
     } catch (error) {
       if (generation !== epoch || controller.signal.aborted) {
         if (error instanceof WorkbenchError && ['unauthorized', 'origin_denied'].includes(error.code)) throw error
@@ -409,9 +410,12 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
     } finally {
       clearTimeout(timer)
       options.signal?.removeEventListener('abort', callerAbort)
-      controller.abort()
-      if (reader) { try { void reader.cancel().catch(() => {}) } catch { /* no raw errors */ } reader.releaseLock() }
-      else if (responseBody) { try { void responseBody.cancel().catch(() => {}) } catch { /* no raw errors */ } }
+      if (!completed) controller.abort()
+      if (reader) {
+        if (!completed) { try { void reader.cancel().catch(() => {}) } catch { /* no raw errors */ } }
+        reader.releaseLock()
+      }
+      else if (responseBody && !completed) { try { void responseBody.cancel().catch(() => {}) } catch { /* no raw errors */ } }
       if (active === controller) { active = null; activeMethod = null }
     }
   }

@@ -27,7 +27,10 @@ test('explicit graph refresh uses the existing validated bounded authenticated G
   const current = graph(); current.nodes = [{ uuid: '44444444-4444-4444-4444-444444444444', name: 'New actor 雨', labels: ['Entity', 'Person'],
     summary: 'Retained after ingestion', fact: null, attributes: {}, created_at: null, valid_at: null,
     invalid_at: null, expired_at: null, episodes: [], evidence_ids: [], score: null }]; current.node_count = 1
-  const { client, calls } = await fixture(() => reply(current))
+  let completedBody
+  const { client, calls } = await fixture(() => {
+    const response = reply(current); completedBody = response.body; return response
+  })
   try {
     assert.equal(calls.length, 1)
     assert.deepEqual(await client.refreshGraph(), current)
@@ -37,7 +40,9 @@ test('explicit graph refresh uses the existing validated bounded authenticated G
     assert.equal(options.method, 'GET'); assert.equal(options.body, undefined)
     assert.equal(options.headers.Authorization, 'Bearer secret-token')
     assert.equal(options.credentials, 'omit'); assert.equal(options.redirect, 'error'); assert.equal(options.cache, 'no-store')
-    assert.equal(options.referrerPolicy, 'no-referrer'); assert.equal(options.signal.aborted, true)
+    assert.equal(options.referrerPolicy, 'no-referrer')
+    // Fully drained, admitted success releases its reader without cancelling transport.
+    assert.equal(options.signal.aborted, false); assert.equal(completedBody.locked, false)
     assert.ok(!url.includes('secret-token'))
   } finally { client.disconnect() }
 })
@@ -50,8 +55,9 @@ test('graph refresh refuses malformed or oversized projections and leaves ordina
     const { client, calls } = await fixture(() => invalid ? badReply() : reply(graph()))
     try {
       await assert.rejects(client.refreshGraph(), e => ['invalid_reply', 'result_too_large'].includes(e.code))
-      assert.equal(calls.length, 2)
+      assert.equal(calls.length, 2); assert.equal(calls[1].options.signal.aborted, true)
       invalid = false; assert.deepEqual(await client.refreshGraph(), graph()); assert.equal(calls.length, 3)
+      assert.equal(calls[2].options.signal.aborted, false)
     } finally { client.disconnect() }
   }
   let cancelled = false
