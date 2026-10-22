@@ -78,7 +78,8 @@ jobs:
 
   knowledge-compatibility:
     name: knowledge-compatibility
-    runs-on: ubuntu-latest
+    # Supported browser base; migrate before runner retirement on 2027-04-17.
+    runs-on: ubuntu-22.04
     timeout-minutes: 15
     env:
       KNOWLEDGE_TEST_PASSWORD: nexaweave-ci-disposable-fixture-only
