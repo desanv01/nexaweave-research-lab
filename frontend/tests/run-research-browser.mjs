@@ -138,28 +138,31 @@ async function exchange(target, route, method, action, cap, status = 200) {
   clock()
   const methods = Array.isArray(method) ? method : [method]
   const pending = target.waitForResponse(response => response.url() === connection.api_origin + route && methods.includes(response.request().method()), { timeout: 15000 })
-  // Attach rejection handlers before a fallible action, so failed clicks cannot
-  // leave an unhandled waiter or permit a second dispatch.
-  const waiting = pending.then(response => ({ response }), () => ({ failed: true }))
+  // Capture at the response event, before a completed UI fetch can cancel its
+  // transport. Attach rejection handling before the single fallible action.
+  const waiting = pending.then(async response => {
+    requireTrue(response.status() === status)
+    if (status !== 200) return { status }
+    const headers = response.headers()
+    // This fixture is a trusted local Werkzeug host with explicit plain framing.
+    // Refuse missing length/compression before asking Playwright for body bytes.
+    requireTrue(/^\d+$/.test(headers['content-length'] || '') && !headers['content-encoding'])
+    const length = Number(headers['content-length']); integer(length, cap, 1)
+    requireTrue(/^application\/json(?:\s*;|$)/i.test(headers['content-type'] || ''))
+    const body = await within(response.body())
+    requireTrue(body.length === length && body.length <= cap)
+    const envelope = JSON.parse(decoder.decode(body))
+    requireTrue(envelope && envelope.success === true && envelope.data && typeof envelope.data === 'object')
+    const raw = response.request().postData()
+    if (raw !== null) requireTrue(Buffer.byteLength(raw) <= WIRE)
+    const request = raw === null ? null : JSON.parse(raw)
+    return { value: envelope.data, request, request_sha256: raw === null ? null : sha(raw) }
+  }).then(value => ({ value }), () => ({ failed: true }))
   await action()
   const result = await waiting
-  requireTrue(!result.failed && result.response.status() === status)
-  if (status !== 200) return { status }
-  const response = result.response, headers = response.headers()
-  // This fixture is a trusted local Werkzeug host with explicit plain framing.
-  // Refuse missing length/compression before asking Playwright for body bytes.
-  requireTrue(/^\d+$/.test(headers['content-length'] || '') && !headers['content-encoding'])
-  const length = Number(headers['content-length']); integer(length, cap, 1)
-  requireTrue(/^application\/json(?:\s*;|$)/i.test(headers['content-type'] || ''))
-  const body = await within(response.body())
-  requireTrue(body.length === length && body.length <= cap)
-  const envelope = JSON.parse(decoder.decode(body))
-  requireTrue(envelope && envelope.success === true && envelope.data && typeof envelope.data === 'object')
-  const raw = response.request().postData()
-  if (raw !== null) requireTrue(Buffer.byteLength(raw) <= WIRE)
-  const request = raw === null ? null : JSON.parse(raw)
+  requireTrue(!result.failed)
   clock()
-  return { value: envelope.data, request, request_sha256: raw === null ? null : sha(raw) }
+  return result.value
 }
 const graphRoute = () => `/api/graph/data/${connection.graph_id}`
 const sourceRoute = (name, revision) => `/api/source/${name}/${connection.graph_id}${revision ? '/' + revision : ''}`
