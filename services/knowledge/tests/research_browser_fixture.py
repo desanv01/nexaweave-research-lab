@@ -27,6 +27,8 @@ SECONDS = (60, 60, 60, 60, 60, 180, 180, 120, 60, 15)
 WIRE_BYTES = 7200
 FAILURE_PHASES = frozenset(('browser-launch', 'page-load', 'graph-connect',
     'source-catalog', 'source-inspect', 'pdf-metadata', 'pdf-download', 'protocol', 'close'))
+LAUNCH_ERRORS = frozenset(('launch-timeout', 'executable-missing', 'permission-refused',
+    'sandbox-refused', 'browser-closed', 'context-create-failed', 'page-create-failed', 'launch-unknown'))
 
 
 def require(value, code='research_browser_refused'):
@@ -48,7 +50,8 @@ def encoded(value):
 
 def failure_reply(reply, stage):
     require(type(reply) is dict
-            and set(reply) in ({'stage', 'ok', 'error'}, {'stage', 'ok', 'error', 'phase'})
+            and set(reply) in ({'stage', 'ok', 'error'}, {'stage', 'ok', 'error', 'phase'},
+                               {'stage', 'ok', 'error', 'phase', 'launch_error'})
             and reply['stage'] == stage and reply['ok'] is False
             and type(reply['error']) is str
             and reply['error'] in {'research_browser_failed', 'research_browser_cleanup_failed'},
@@ -60,6 +63,11 @@ def failure_reply(reply, stage):
         require(type(reply['phase']) is str and reply['phase'] in FAILURE_PHASES,
                 'research_browser_failure_reply_refused')
         code += ':' + reply['phase']
+    if 'launch_error' in reply:
+        require(reply['error'] == 'research_browser_failed' and reply['phase'] == 'browser-launch'
+                and type(reply['launch_error']) is str and reply['launch_error'] in LAUNCH_ERRORS,
+                'research_browser_failure_reply_refused')
+        code += ':' + reply['launch_error']
     return RuntimeError(code)
 
 
@@ -462,6 +470,7 @@ class ResearchBrowserSession:
             result = self.catalog
         elif stage == 'close':
             require(reply['proof'].get('context_closed') is True
+                    and reply['proof'].get('browser_closed') is True
                     and reply['proof'].get('private_tree_removed') is True
                     and not any(self.profile_root.iterdir()))
             result = reply['proof']

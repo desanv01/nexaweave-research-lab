@@ -40,12 +40,25 @@ async function physical(absolute, directory = false) {
   return value
 }
 
-let context, page, privateRoot, sessionRoot, downloadRoot, connection, sources, orderedSources, pdf
+let browser, context, page, privateRoot, sessionRoot, downloadRoot, connection, sources, orderedSources, pdf
 let preparation, launch, report, fault = false, timedOut = false, index = 0, stage = 'protocol', phase = 'protocol'
+let launchStep = null, launchAttempted = false, launchReturned = false, temporaryEnvironment = null
 let mutations = new Map()
 let closing = null
 const deadline = Date.now() + 540000
 const clock = () => { requireTrue(!timedOut && Date.now() < deadline && !fault) }
+function launchError(error) {
+  if (launchStep === 'context') return 'context-create-failed'
+  if (launchStep === 'page') return 'page-create-failed'
+  // Inspect only a bounded private prefix. Never serialize the exception.
+  const message = typeof error?.message === 'string' ? error.message.slice(0, 1800) : ''
+  if (error?.name === 'TimeoutError') return 'launch-timeout'
+  if (error?.code === 'ENOENT' || message.includes("Executable doesn't exist")) return 'executable-missing'
+  if (['No usable sandbox', 'Running as root without --no-sandbox', 'Chromium sandboxing failed!'].some(literal => message.includes(literal))) return 'sandbox-refused'
+  if (['EACCES', 'EPERM'].includes(error?.code) || message.includes('Permission denied')) return 'permission-refused'
+  if (message.includes('Target page, context or browser has been closed')) return 'browser-closed'
+  return 'launch-unknown'
+}
 const hardTimer = setTimeout(() => { timedOut = true; process.stdin.destroy() }, 540000)
 hardTimer.unref()
 
@@ -179,7 +192,7 @@ async function prepareBrowser(command) {
   requireTrue((await readdir(command.profile_root)).length === 0)
   privateRoot = command.profile_root
   sessionRoot = await mkdtemp(path.join(privateRoot, 'research-')); inside(privateRoot, sessionRoot)
-  const directories = ['profile', 'downloads', 'home', 'cache', 'config', 'temp']
+  const directories = ['downloads', 'home', 'cache', 'config', 'temp']
   for (const name of directories) await mkdir(path.join(sessionRoot, name), { mode: 0o700 })
   downloadRoot = path.join(sessionRoot, 'downloads')
   const environment = {}
@@ -187,15 +200,28 @@ async function prepareBrowser(command) {
   Object.assign(environment, { HOME: path.join(sessionRoot, 'home'), USERPROFILE: path.join(sessionRoot, 'home'), XDG_CACHE_HOME: path.join(sessionRoot, 'cache'), XDG_CONFIG_HOME: path.join(sessionRoot, 'config'), TMPDIR: path.join(sessionRoot, 'temp'), TMP: path.join(sessionRoot, 'temp'), TEMP: path.join(sessionRoot, 'temp'), BROWSER: 'none', CI: 'true' })
   connection = command.connection; sources = command.sources; pdf = command.pdf
   phase = 'browser-launch'
-  context = await chromium.launchPersistentContext(path.join(sessionRoot, 'profile'), {
+  const temporaryDirectory = path.join(sessionRoot, 'temp')
+  await physical(temporaryDirectory, true)
+  // Playwright's own automatic profile/artifacts use Node's os.tmpdir(), not
+  // the env passed only to Chrome. Bind this private driver process until close.
+  temporaryEnvironment = ['TMPDIR', 'TMP', 'TEMP'].map(key => ({ key, present: Object.hasOwn(process.env, key), value: process.env[key] }))
+  for (const saved of temporaryEnvironment) process.env[saved.key] = temporaryDirectory
+  const startupDeadline = Date.now() + 30000
+  const startupRemaining = () => { const remaining = startupDeadline - Date.now(); requireTrue(remaining > 0); return remaining }
+  launchStep = 'launch'; launchAttempted = true
+  browser = await chromium.launch({
     executablePath: process.env.NEXAWEAVE_RESEARCH_BROWSER_CHROME,
-    headless: true, chromiumSandbox: true, acceptDownloads: true,
+    headless: true, chromiumSandbox: true,
     downloadsPath: downloadRoot, env: environment, timeout: 30000,
     args: ['--no-first-run', '--no-default-browser-check', '--disable-sync', '--no-startup-window'],
   })
+  launchReturned = true; launchStep = 'context'
+  const contextBudget = startupRemaining()
+  context = await within(browser.newContext({ acceptDownloads: true }), contextBudget)
   context.setDefaultTimeout(15000); context.setDefaultNavigationTimeout(30000)
-  // A new persistent profile starts with one blank tab; reuse it if present.
-  page = context.pages()[0] || await context.newPage(); observe(page)
+  launchStep = 'page'
+  const pageBudget = Math.min(15000, startupRemaining())
+  page = await within(context.newPage(), pageBudget); observe(page)
   phase = 'page-load'
   await page.goto(FRONTEND + '/research', { waitUntil: 'domcontentloaded' })
   await page.locator('#workbench-language').selectOption('en')
@@ -447,15 +473,47 @@ async function pdfAfterRestart(command) {
 async function cleanup() {
   if (closing) return closing
   closing = (async () => {
-    // The backend owner must still terminate/assert its owned tree if closure
-    // fails; do not remove a profile while Chrome might remain alive.
-    if (context) { await within(context.close()); context = null }
-    if (sessionRoot) {
-      await physical(privateRoot, true); await physical(sessionRoot, true); inside(privateRoot, sessionRoot)
-      await rm(sessionRoot, { recursive: true, force: false }); sessionRoot = null
+    const errors = [], cleanupDeadline = Date.now() + 15000
+    const remaining = () => Math.max(1, cleanupDeadline - Date.now())
+    try {
+      // Reserve browser-close time inside the SAME overall 15-second budget.
+      // A context error must never skip the independent browser close attempt.
+      if (context) {
+        try { await within(context.close(), Math.min(5000, remaining())); context = null }
+        catch (error) { errors.push(new Error('research_browser_context_close_failed', { cause: error })) }
+      }
+      if (browser) {
+        try { await within(browser.close(), Math.max(1, Math.min(8000, remaining() - 2000))); browser = null }
+        catch (error) { errors.push(new Error('research_browser_browser_close_failed', { cause: error })) }
+      }
+      // Launch rejection without a returned handle cannot prove Chrome closure.
+      // Preserve its private files for the parent's existing owned-tree cleanup.
+      if (launchAttempted && !launchReturned) errors.push(new Error('research_browser_launch_closure_unconfirmed'))
+      if (!errors.length && !context && !browser && sessionRoot) {
+        try {
+          requireTrue(Date.now() < cleanupDeadline)
+          await within((async () => {
+            await physical(privateRoot, true); await physical(sessionRoot, true); inside(privateRoot, sessionRoot)
+            await rm(sessionRoot, { recursive: true, force: false })
+          })(), Math.max(1, remaining() - 1000))
+          sessionRoot = null
+        } catch (error) { errors.push(new Error('research_browser_private_cleanup_failed', { cause: error })) }
+      }
+    } finally {
+      if (temporaryEnvironment) {
+        for (const saved of temporaryEnvironment) {
+          try { if (saved.present) process.env[saved.key] = saved.value; else delete process.env[saved.key] }
+          catch (error) { errors.push(new Error('research_browser_temp_restore_failed', { cause: error })) }
+        }
+        temporaryEnvironment = null
+      }
+      connection = null
     }
-    connection = null
-    return { reference: {}, proof: { context_closed: true, private_tree_removed: true } }
+    // Keep ordered primary/secondary errors internally; protocol emits only its
+    // existing stable cleanup error and the separate primary stage failure.
+    if (errors.length) throw new AggregateError(errors, 'research_browser_cleanup_failed')
+    requireTrue(!context && !browser && !sessionRoot && Date.now() < cleanupDeadline)
+    return { reference: {}, proof: { context_closed: true, browser_closed: true, private_tree_removed: true } }
   })()
   return closing
 }
@@ -469,9 +527,11 @@ try {
     if (stage === 'close') break
   }
   requireTrue(index === STAGES.length)
-} catch {
+} catch (error) {
   process.exitCode = 1
-  try { await reply({ stage, ok: false, error: 'research_browser_failed', phase }) } catch { /* stdout unavailable */ }
+  const failure = { stage, ok: false, error: 'research_browser_failed', phase }
+  if (phase === 'browser-launch') failure.launch_error = launchError(error)
+  try { await reply(failure) } catch { /* stdout unavailable */ }
 } finally {
   clearTimeout(hardTimer)
   try { await cleanup() } catch { process.exitCode = 1; try { await reply({ stage: 'close', ok: false, error: 'research_browser_cleanup_failed', phase: 'close' }) } catch { /* stdout unavailable */ } }
