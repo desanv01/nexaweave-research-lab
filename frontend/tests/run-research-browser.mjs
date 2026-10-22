@@ -229,35 +229,140 @@ async function settled(target = page) {
   }, null, { timeout: 15000 })
   clock()
 }
+function installBodyObserver() {
+  const fetch = globalThis.fetch, getReader = ReadableStream.prototype.getReader
+  const read = ReadableStreamDefaultReader.prototype.read, then = Promise.prototype.then
+  const streams = new WeakMap(), readers = new WeakMap()
+  let active = null
+  const refused = record => { if (record === active) { record.failed = true; record.bytes = null } }
+  const watch = (promise, record, observe) => {
+    Reflect.apply(then, promise, [value => {
+      if (record !== active || record.failed) return
+      try { observe(value) } catch { refused(record) }
+    }, () => refused(record)])
+  }
+  globalThis.fetch = function (...args) {
+    const promise = Reflect.apply(fetch, this, args), record = active
+    if (record && args[0] === record.url) {
+      if (args[1]?.method !== record.method || record.seen++) refused(record)
+      else watch(promise, record, response => {
+        const length = response.headers.get('content-length')
+        if (response.url !== record.url || response.status !== 200 || response.redirected
+          || response.type !== 'cors' || !/^\d+$/.test(length || '')
+          || !Number.isSafeInteger(Number(length)) || Number(length) < 1 || Number(length) > record.cap
+          || response.headers.get('content-encoding')
+          || !/^application\/json(?:\s*;|$)/i.test(response.headers.get('content-type') || '')) throw Error()
+        record.length = Number(length); record.bytes = new Uint8Array(record.length)
+        streams.set(response.body, record)
+      })
+    }
+    return promise
+  }
+  ReadableStream.prototype.getReader = function (...args) {
+    const reader = Reflect.apply(getReader, this, args), record = streams.get(this)
+    if (record === active) readers.set(reader, record)
+    return reader
+  }
+  ReadableStreamDefaultReader.prototype.read = function (...args) {
+    const promise = Reflect.apply(read, this, args), record = readers.get(this)
+    if (record && record === active) watch(promise, record, chunk => {
+      if (record.done) throw Error()
+      if (chunk.done) {
+        if (record.size !== record.length) throw Error()
+        record.done = true
+      } else {
+        if (!(chunk.value instanceof Uint8Array) || chunk.value.byteLength > record.length - record.size) throw Error()
+        record.bytes.set(chunk.value, record.size); record.size += chunk.value.byteLength
+      }
+    })
+    return promise
+  }
+  globalThis.__researchBody = {
+    arm(value) {
+      if (active || !Number.isSafeInteger(value.id) || value.cap < 1 || value.cap > 4195328) throw Error()
+      active = { ...value, seen: 0, size: 0, offset: 0, done: false, failed: false, bytes: null }
+      const record = active
+      record.timer = setTimeout(() => refused(record), value.end - Date.now())
+    },
+    state(id) { return active?.id === id ? { done: active.done, failed: active.failed, length: active.length } : { failed: true } },
+    slice({ id, offset }) {
+      if (active?.id !== id || active.failed || !active.done || offset !== active.offset) throw Error()
+      const bytes = Array.from(active.bytes.subarray(offset, offset + 1024))
+      active.offset += bytes.length
+      return { id, offset, bytes }
+    },
+    clear() { if (active) { clearTimeout(active.timer); active.bytes = null } active = null },
+  }
+}
+let exchangeId = 0, cleanupError = null
 async function exchange(target, route, method, action, cap, status = 200) {
   clock()
-  const methods = Array.isArray(method) ? method : [method]
-  const pending = target.waitForResponse(response => response.url() === connection.api_origin + route && methods.includes(response.request().method()), { timeout: 15000 })
-  // Capture at the response event, before a completed UI fetch can cancel its
-  // transport. Attach rejection handling before the single fallible action.
+  const end = Date.now() + 15000, id = ++exchangeId
+  const remaining = () => {
+    const value = end - Date.now()
+    if (value <= 0) throw new Error('research_browser_deadline')
+    return value
+  }
+  const bounded = task => { const time = remaining(); return within(task(), time) }
+  let primary
+  const cleanup = async task => {
+    try { await bounded(task) } catch (error) {
+      cleanupError = error
+      if (!primary) throw error
+    }
+  }
+  const url = connection.api_origin + route
+  if (status === 200) await bounded(() => target.evaluate(value => globalThis.__researchBody.arm(value), { id, url, method, cap, end }))
+  let stop, cancel
+  const pending = new Promise((resolve, reject) => {
+    cancel = reject
+    const response = value => { if (value.url() === url && value.request().method() === method) { stop(); resolve(value) } }
+    const timer = setTimeout(() => { stop(); reject(new Error('research_browser_deadline')) }, remaining())
+    stop = () => { clearTimeout(timer); target.off('response', response) }
+    target.on('response', response)
+  })
   const waiting = pending.then(async response => {
     requireTrue(response.status() === status)
     if (status !== 200) return { status }
     const headers = response.headers()
-    // This fixture is a trusted local Werkzeug host with explicit plain framing.
-    // Refuse missing length/compression before asking Playwright for body bytes.
     requireTrue(/^\d+$/.test(headers['content-length'] || '') && !headers['content-encoding'])
     const length = Number(headers['content-length']); integer(length, cap, 1)
     requireTrue(/^application\/json(?:\s*;|$)/i.test(headers['content-type'] || ''))
-    const body = await within(response.body())
-    requireTrue(body.length === length && body.length <= cap)
+    const ready = await bounded(() => target.waitForFunction(id => {
+      const state = globalThis.__researchBody.state(id)
+      return state.failed || state.done ? state : false
+    }, id, { timeout: remaining() }))
+    let state
+    try { state = await bounded(() => ready.jsonValue()) }
+    catch (error) { primary = error; throw error }
+    finally { await cleanup(() => ready.dispose()) }
+    requireTrue(state.done && !state.failed && state.length === length)
+    const body = Buffer.alloc(length)
+    for (let offset = 0; offset < length;) {
+      const part = await bounded(() => target.evaluate(value => globalThis.__researchBody.slice(value), { id, offset }))
+      requireTrue(Buffer.byteLength(JSON.stringify(part)) <= WIRE && part.id === id && part.offset === offset
+        && Array.isArray(part.bytes) && part.bytes.length === Math.min(1024, length - offset)
+        && part.bytes.every(value => Number.isInteger(value) && value >= 0 && value <= 255))
+      body.set(part.bytes, offset); offset += part.bytes.length
+    }
     const envelope = JSON.parse(decoder.decode(body))
     requireTrue(envelope && envelope.success === true && envelope.data && typeof envelope.data === 'object')
     const raw = response.request().postData()
     if (raw !== null) requireTrue(Buffer.byteLength(raw) <= WIRE)
     const request = raw === null ? null : JSON.parse(raw)
     return { value: envelope.data, request, request_sha256: raw === null ? null : sha(raw) }
-  }).then(value => ({ value }), error => ({ failed: true, error }))
-  await action()
-  const result = await waiting
-  if (result.failed) throw result.error
-  clock()
-  return result.value
+  })
+  waiting.catch(() => {})
+  try {
+    await bounded(action)
+    const result = await bounded(() => waiting)
+    clock(); return result
+  } catch (error) { primary = error; throw error }
+  finally {
+    try { stop?.(); cancel(primary) }
+    catch (error) { cleanupError = error; primary ||= error; throw primary }
+    finally { if (status === 200) await cleanup(() => target.evaluate(() => globalThis.__researchBody.clear())) }
+  }
 }
 const graphRoute = () => `/api/graph/data/${connection.graph_id}`
 const sourceRoute = (name, revision) => `/api/source/${name}/${connection.graph_id}${revision ? '/' + revision : ''}`
@@ -338,6 +443,7 @@ async function prepareBrowser(command) {
   launchReturned = true; launchStep = 'context'
   const contextBudget = startupRemaining()
   context = await within(browser.newContext({ acceptDownloads: true }), contextBudget)
+  await within(context.addInitScript(installBodyObserver), startupRemaining())
   context.setDefaultTimeout(15000); context.setDefaultNavigationTimeout(30000)
   launchStep = 'page'
   const pageBudget = Math.min(15000, startupRemaining())
@@ -351,7 +457,21 @@ async function connectForm(target, token = connection.token, expectedStatus = 20
   await target.locator('#api-origin').fill(connection.api_origin)
   await target.locator('#graph-id').fill(connection.graph_id)
   await target.locator('#bearer-token').fill(token)
-  const received = await exchange(target, graphRoute(), expectedStatus === 403 ? ['OPTIONS', 'GET'] : 'GET', () => target.locator('.connection-form button[type=submit]').click(), 2098176, expectedStatus)
+  let received
+  if (expectedStatus === 403) {
+    const end = Date.now() + 15000
+    requireTrue(stage === 'pdf-read-after-restart' && new URL(target.url()).origin === 'http://localhost:4317')
+    const waiting = target.waitForEvent('requestfailed', {
+      predicate: request => request.url() === connection.api_origin + graphRoute() && request.method() === 'GET',
+      timeout: 15000,
+    }).then(request => ({ request }), error => ({ error }))
+    await within(target.locator('.connection-form button[type=submit]').click(), end - Date.now())
+    const failed = await within(waiting, end - Date.now())
+    if (failed.error) throw failed.error
+    requireTrue(Boolean(failed.request.failure()?.errorText)); received = { request_failed: true }
+  } else {
+    received = await exchange(target, graphRoute(), 'GET', () => target.locator('.connection-form button[type=submit]').click(), 2098176, expectedStatus)
+  }
   await target.waitForFunction(() => document.querySelector('#bearer-token')?.value === '', null, { timeout: 15000 })
   requireTrue(await target.locator('#bearer-token').inputValue() === '')
   if (expectedStatus === 200) {
@@ -360,6 +480,7 @@ async function connectForm(target, token = connection.token, expectedStatus = 20
   } else {
     await target.locator('.connection-form button[type=submit]').waitFor({ state: 'visible' })
     requireTrue(await target.locator('.graph-refresh').count() === 0)
+    if (expectedStatus === 403) await enabled(target.locator('.connection-form button[type=submit]'))
   }
   return received
 }

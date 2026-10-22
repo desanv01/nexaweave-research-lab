@@ -445,8 +445,9 @@ async def test_actual_native_receipt_to_inherited_report_preserves_inputs_and_di
                 f'facts={facts!r}\ncounter=Path({str(slow_counter)!r})\nlog=Path({str(reader_wait_log)!r})\n'
                 'header=sys.stdin.buffer.read(4)\nrequest=json.loads(sys.stdin.buffer.read(int.from_bytes(header,"big")))\n'
                 'remaining=int(counter.read_text()) if counter.exists() else 0\n'
-                'if remaining:\n counter.write_text(str(remaining-1))\n start=time.monotonic()\n time.sleep(4.25)\n'
-                ' with log.open("a",encoding="utf-8") as stream: stream.write(json.dumps(dict(elapsed=time.monotonic()-start))+"\\n")\n'
+                'if remaining:\n counter.write_text(str(remaining-1))\n start=time.perf_counter()\n elapsed=time.perf_counter()-start\n'
+                ' while elapsed < 4.25:\n  time.sleep(4.25-elapsed)\n  elapsed=time.perf_counter()-start\n'
+                ' with log.open("a",encoding="utf-8") as stream: stream.write(json.dumps(dict(elapsed=elapsed))+"\\n")\n'
                 'reply=json.dumps(dict(version=1,request_id=request["request_id"],ok=True,result=dict(schema_version=1,facts=facts[request["payload"]["kind"]],next_cursor=None)),ensure_ascii=False).encode()\n'
                 'sys.stdout.buffer.write(len(reply).to_bytes(4,"big")+reply)\nsys.stdout.buffer.flush()\n', encoding='utf-8')
             settings = replace(prep.settings, python=str(Path(sys.executable).resolve()),
@@ -605,7 +606,7 @@ async def test_actual_native_receipt_to_inherited_report_preserves_inputs_and_di
                 if slow_authorization:
                     waits = [json.loads(line)['elapsed'] for line in reader_wait_log.read_text().splitlines()]
                     assert len(waits) == 4 and sum(waits) > 15
-                    assert all(4.25 <= seconds < 15 for seconds in waits)
+                    assert all(4.25 <= seconds < 15 for seconds in waits), waits
                     assert slow_counter.read_text() == '0'
                     # Real Temporal server accepted the unchanged 15-second
                     # heartbeat workflow while initial full authorization exceeded it.

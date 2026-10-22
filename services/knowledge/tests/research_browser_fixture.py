@@ -108,6 +108,7 @@ class ResearchBrowserSession:
         self.port = 0
         self.lock = threading.Lock()
         self.events = deque()
+        self.origin_events = deque()
         self.event_bytes = 0
         self.failures = []
         self.mutations = {}
@@ -190,10 +191,27 @@ class ResearchBrowserSession:
         @app.after_request
         def observe(response):
             # Passive response-only witness: never consumes request streams or changes replies.
-            if not request.path.startswith('/api/') or request.method == 'OPTIONS':
+            if not request.path.startswith('/api/'):
                 return response
             try:
                 path = request.path
+                if (request.headers.get('Origin') == 'http://localhost:4317'
+                        and path == '/api/graph/data/' + self.prep.display_graph_id):
+                    witness = (self.active, request.method, 'http://localhost:4317',
+                               path, response.status_code)
+                    raw_witness = encoded(witness)
+                    with self.lock:
+                        require(len(self.events) + len(self.origin_events) < 64
+                                and self.event_bytes + len(raw_witness) <= 2097152,
+                                'research_browser_witness_bound')
+                        self.origin_events.append(witness)
+                        self.event_bytes += len(raw_witness)
+                    require(not request.query_string
+                            and witness[0] == 'pdf-read-after-restart'
+                            and witness[1] == 'OPTIONS' and witness[4] == 403,
+                            'research_browser_origin_witness_refused')
+                if request.method == 'OPTIONS':
+                    return response
                 mutation = (path.startswith('/api/preparation/') and path.rsplit('/', 1)[-1] in {'plan', 'start'}
                     or path.startswith('/api/native-launch/') and path.split('/')[3] in {'plan', 'start', 'cancel'}
                     or path.startswith('/api/connected-report/') and path.split('/')[3] in {'plan', 'start', 'cancel'}
@@ -222,7 +240,8 @@ class ResearchBrowserSession:
                             'research_browser_report_plan_dispatched')
                     self.report_plan_no_calls = True
                 with self.lock:
-                    require(len(self.events) < 64 and self.event_bytes + len(raw) <= 2097152,
+                    require(len(self.events) + len(self.origin_events) < 64
+                            and self.event_bytes + len(raw) <= 2097152,
                             'research_browser_witness_bound')
                     self.events.append((self.active, path, value['data']))
                     self.event_bytes += len(raw)
@@ -445,6 +464,7 @@ class ResearchBrowserSession:
         end = time.monotonic() + timeout
         with self.lock:
             self.active, self.events, self.event_bytes = stage, deque(), 0
+            self.origin_events = deque()
         command = dict(stage=stage)
         if request is not None:
             command['request'] = request
@@ -467,6 +487,7 @@ class ResearchBrowserSession:
                 and type(reply['proof']) is dict and not self.failures, 'research_browser_stage_refused')
         with self.lock:
             events = list(self.events)
+            origin_events = list(self.origin_events)
         self.last_proof = reply['proof']
         if stage == 'connect':
             graph = self.prep.display_graph_id
@@ -544,6 +565,10 @@ class ResearchBrowserSession:
                 require(proof.get('size') == len(raw) and proof.get('sha256') == hashlib.sha256(raw).hexdigest())
                 require(all(reply['proof'].get(key) is True
                             for key in ('auth_denied', 'origin_denied', 'token_cleared')))
+                require(origin_events == [(
+                    'pdf-read-after-restart', 'OPTIONS', 'http://localhost:4317',
+                    '/api/graph/data/' + self.prep.display_graph_id, 403)],
+                    'research_browser_origin_witness_missing')
                 self.verify_restart()
         self.step += 1
         return result
