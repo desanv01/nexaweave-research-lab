@@ -25,6 +25,8 @@ STAGES = ('connect', 'preparation-plan', 'preparation-start', 'preparation-ready
           'pdf-read-after-restart', 'close')
 SECONDS = (60, 60, 60, 60, 60, 180, 180, 120, 60, 15)
 WIRE_BYTES = 7200
+FAILURE_PHASES = frozenset(('browser-launch', 'page-load', 'graph-connect',
+    'source-catalog', 'source-inspect', 'pdf-metadata', 'pdf-download', 'protocol', 'close'))
 
 
 def require(value, code='research_browser_refused'):
@@ -42,6 +44,23 @@ def pairs(items):
 
 def encoded(value):
     return json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(',', ':')).encode('utf-8')
+
+
+def failure_reply(reply, stage):
+    require(type(reply) is dict
+            and set(reply) in ({'stage', 'ok', 'error'}, {'stage', 'ok', 'error', 'phase'})
+            and reply['stage'] == stage and reply['ok'] is False
+            and type(reply['error']) is str
+            and reply['error'] in {'research_browser_failed', 'research_browser_cleanup_failed'},
+            'research_browser_failure_reply_refused')
+    require(reply['error'] != 'research_browser_cleanup_failed' or stage == 'close',
+            'research_browser_failure_reply_refused')
+    code = reply['error']
+    if 'phase' in reply:
+        require(type(reply['phase']) is str and reply['phase'] in FAILURE_PHASES,
+                'research_browser_failure_reply_refused')
+        code += ':' + reply['phase']
+    return RuntimeError(code)
 
 
 class ResearchBrowserSession:
@@ -413,8 +432,7 @@ class ResearchBrowserSession:
         except queue.Empty:
             raise RuntimeError('research_browser_reply_deadline') from None
         if type(reply) is dict and reply.get('ok') is False:
-            require(reply.get('error') in {'research_browser_failed', 'research_browser_cleanup_failed'})
-            raise RuntimeError(reply['error'])
+            raise failure_reply(reply, stage)
         require(type(reply) is dict and set(reply) == {'stage', 'ok', 'reference', 'proof'}
                 and reply['stage'] == stage and reply['ok'] is True
                 and type(reply['proof']) is dict and not self.failures, 'research_browser_stage_refused')
@@ -655,14 +673,6 @@ class ResearchBrowserSession:
                     self.driver['process'].wait(timeout=15)
             except Exception as error:
                 errors.append(error)
-        # Preserve an error-stage's separately emitted cleanup failure, if any.
-        while True:
-            try:
-                pending = self.replies.get_nowait()
-            except queue.Empty:
-                break
-            if type(pending) is dict and pending.get('error') == 'research_browser_cleanup_failed':
-                errors.append(RuntimeError('research_browser_cleanup_failed'))
         if self.chrome:
             try:
                 current = self._process(self.chrome['pid'])
@@ -675,9 +685,10 @@ class ResearchBrowserSession:
         for entry in reversed(self.children):
             process = entry['process']
             try:
-                if entry is getattr(self, 'vite', None) and process and process.poll() is None:
-                    process.stdin.write(b'stop\n')
-                    process.wait(timeout=3)
+                if entry is getattr(self, 'vite', None) and process:
+                    if process.poll() is None:
+                        process.stdin.write(b'stop\n')
+                    require(process.wait(timeout=3) == 0, 'research_browser_vite_stop_failed')
             except Exception as error:
                 errors.append(error)
             try:
@@ -692,6 +703,19 @@ class ResearchBrowserSession:
                     self._stop_group(entry['group'], entry['identity'])
             except Exception as error:
                 errors.append(error)
+        # Drain after owned reader joins so a final cleanup reply cannot race this read.
+        while True:
+            try:
+                pending = self.replies.get_nowait()
+            except queue.Empty:
+                break
+            if type(pending) is dict and (pending.get('ok') is False or 'error' in pending):
+                try:
+                    stage = ('close' if pending.get('error') == 'research_browser_cleanup_failed'
+                             else self.active)
+                    errors.append(failure_reply(pending, stage))
+                except Exception as error:
+                    errors.append(error)
         if self.chrome:
             try:
                 identity = (self.chrome if self.chrome['group'] == self.chrome['pid']

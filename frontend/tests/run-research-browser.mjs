@@ -41,7 +41,7 @@ async function physical(absolute, directory = false) {
 }
 
 let context, page, privateRoot, sessionRoot, downloadRoot, connection, sources, orderedSources, pdf
-let preparation, launch, report, fault = false, timedOut = false, index = 0, stage = 'protocol'
+let preparation, launch, report, fault = false, timedOut = false, index = 0, stage = 'protocol', phase = 'protocol'
 let mutations = new Map()
 let closing = null
 const deadline = Date.now() + 540000
@@ -61,6 +61,7 @@ async function* commands() {
       const bytes = Buffer.concat([line, chunk.subarray(start, i)])
       requireTrue(bytes.length > 0 && bytes[bytes.length - 1] !== 13)
       line = Buffer.alloc(0); start = i + 1
+      phase = 'protocol'
       yield JSON.parse(decoder.decode(bytes))
     }
     requireTrue(line.length + chunk.length - start + 1 <= WIRE)
@@ -185,6 +186,7 @@ async function prepareBrowser(command) {
   for (const key of ['PATH', 'LANG', 'LC_ALL', 'TZ', 'SYSTEMROOT']) if (process.env[key]) environment[key] = process.env[key]
   Object.assign(environment, { HOME: path.join(sessionRoot, 'home'), USERPROFILE: path.join(sessionRoot, 'home'), XDG_CACHE_HOME: path.join(sessionRoot, 'cache'), XDG_CONFIG_HOME: path.join(sessionRoot, 'config'), TMPDIR: path.join(sessionRoot, 'temp'), TMP: path.join(sessionRoot, 'temp'), TEMP: path.join(sessionRoot, 'temp'), BROWSER: 'none', CI: 'true' })
   connection = command.connection; sources = command.sources; pdf = command.pdf
+  phase = 'browser-launch'
   context = await chromium.launchPersistentContext(path.join(sessionRoot, 'profile'), {
     executablePath: process.env.NEXAWEAVE_RESEARCH_BROWSER_CHROME,
     headless: true, chromiumSandbox: true, acceptDownloads: true,
@@ -194,10 +196,12 @@ async function prepareBrowser(command) {
   context.setDefaultTimeout(15000); context.setDefaultNavigationTimeout(30000)
   // A new persistent profile starts with one blank tab; reuse it if present.
   page = context.pages()[0] || await context.newPage(); observe(page)
+  phase = 'page-load'
   await page.goto(FRONTEND + '/research', { waitUntil: 'domcontentloaded' })
   await page.locator('#workbench-language').selectOption('en')
 }
 async function connectForm(target, token = connection.token, expectedStatus = 200) {
+  phase = 'graph-connect'
   await target.locator('#api-origin').fill(connection.api_origin)
   await target.locator('#graph-id').fill(connection.graph_id)
   await target.locator('#bearer-token').fill(token)
@@ -232,12 +236,20 @@ async function hashDownload(download, name, cap) {
   } finally { await file.close(); await download.delete() }
 }
 async function readPdf() {
+  phase = 'pdf-metadata'
   await page.locator('#source-original-revision').fill(pdf.source_revision)
   const panel = page.locator('.source-library .source-form').filter({ has: page.locator('#source-original-revision') })
-  const metadata = await exchange(page, sourceRoute('original-metadata', pdf.source_revision), 'GET', () => panel.locator('button').first().click(), 4195328)
+  const lookupButton = panel.locator('button').nth(0)
+  await enabled(lookupButton)
+  const metadata = await exchange(page, sourceRoute('original-metadata', pdf.source_revision), 'GET', () => lookupButton.click(), 4195328)
   requireTrue(metadata.value.source.source_revision === pdf.source_revision && metadata.value.binary.byte_length === pdf.size && metadata.value.binary.sha256 === pdf.sha256)
+  phase = 'pdf-download'
+  // Download is conditional on asynchronous metadata admission and Vue render.
+  // Its fixed second position cannot alias the always-present Lookup button.
+  const downloadButton = panel.locator('button').nth(1)
+  await enabled(downloadButton)
   const pending = page.waitForEvent('download', { timeout: 15000 }).then(download => ({ download }), () => ({ failed: true }))
-  const content = await exchange(page, sourceRoute('original', pdf.source_revision), 'GET', () => panel.locator('button').last().click(), 4195328)
+  const content = await exchange(page, sourceRoute('original', pdf.source_revision), 'GET', () => downloadButton.click(), 4195328)
   requireTrue(content.value.source.source_revision === pdf.source_revision && content.value.binary.byte_length === pdf.size && content.value.binary.sha256 === pdf.sha256)
   const result = await pending; requireTrue(!result.failed)
   const proof = await hashDownload(result.download, stage === 'connect' ? 'original-before.pdf' : 'original-after.pdf', 2097152)
@@ -246,6 +258,7 @@ async function readPdf() {
 }
 async function connect(command) {
   await prepareBrowser(command); await connectForm(page)
+  phase = 'source-catalog'
   const catalog = await exchange(page, sourceRoute('library'), 'GET', () => page.locator('.source-library > .source-actions button').first().click(), 4195328)
   requireTrue(Array.isArray(catalog.value.sources) && catalog.value.sources.length >= 4 && catalog.value.sources.length <= 20 && catalog.value.has_more === false)
   for (const item of catalog.value.sources) {
@@ -259,8 +272,11 @@ async function connect(command) {
   const selectedSources = catalog.value.sources.filter(s => sources.some(expected => expected.source_revision === s.source_revision))
   requireTrue(selectedSources.length === 4 && sources.every(expected => selectedSources.some(s => s.source_revision === expected.source_revision)))
   orderedSources = [selectedSources.find(s => s.source_revision === pdf.source_revision), ...selectedSources.filter(s => s.source_revision !== pdf.source_revision)]
+  phase = 'source-inspect'
   const item = page.locator('.source-list > li').filter({ hasText: pdf.source_revision })
+  await item.waitFor({ state: 'visible', timeout: 15000 })
   requireTrue(await item.count() === 1)
+  await enabled(item.locator('button').first())
   const inspected = await exchange(page, sourceRoute('item', pdf.source_revision), 'GET', () => item.locator('button').first().click(), 4195328)
   requireTrue(inspected.value.source.source_revision === pdf.source_revision && inspected.value.source.text_sha256 === orderedSources[0].text_sha256)
   await enabled(page.locator('.preparation-workbench .review'))
@@ -420,6 +436,7 @@ async function pdfAfterRestart(command) {
   // Do not override Origin headers, disable CORS, or ignore browser security.
   const denied = await context.newPage(); observe(denied)
   try {
+    phase = 'page-load'
     await denied.goto('http://localhost:4317/research', { waitUntil: 'domcontentloaded' })
     await denied.locator('#workbench-language').selectOption('en')
     await connectForm(denied, connection.token, 403)
@@ -445,7 +462,7 @@ async function cleanup() {
 const handlers = { connect, 'preparation-plan': preparationPlan, 'preparation-start': preparationStart, 'preparation-ready': preparationReady, 'native-start': nativeStart, 'native-ready': nativeReady, 'report-start': reportStart, 'report-read': reportRead, 'pdf-read-after-restart': pdfAfterRestart, close: async command => { commandRequest(command); return cleanup() } }
 try {
   for await (const command of commands()) {
-    stage = STAGES[index] || 'protocol'
+    stage = STAGES[index] || 'protocol'; phase = stage === 'close' ? 'close' : 'protocol'
     requireTrue(command?.stage === stage); clock()
     const result = await handlers[stage](command)
     clock(); await reply({ stage, ok: true, ...result }); index++
@@ -454,9 +471,9 @@ try {
   requireTrue(index === STAGES.length)
 } catch {
   process.exitCode = 1
-  try { await reply({ stage, ok: false, error: 'research_browser_failed' }) } catch { /* stdout unavailable */ }
+  try { await reply({ stage, ok: false, error: 'research_browser_failed', phase }) } catch { /* stdout unavailable */ }
 } finally {
   clearTimeout(hardTimer)
-  try { await cleanup() } catch { process.exitCode = 1; try { await reply({ stage: 'close', ok: false, error: 'research_browser_cleanup_failed' }) } catch { /* stdout unavailable */ } }
+  try { await cleanup() } catch { process.exitCode = 1; try { await reply({ stage: 'close', ok: false, error: 'research_browser_cleanup_failed', phase: 'close' }) } catch { /* stdout unavailable */ } }
   process.stdin.destroy()
 }
