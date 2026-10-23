@@ -12,6 +12,122 @@ def _uid(number):
     return str(UUID(int=number))
 
 
+def _isolated_app_check(script):
+    backend = Path(__file__).resolve().parents[1]
+    environment = os.environ.copy()
+    environment.update(TEST_BACKEND=str(backend), PYTHON_DOTENV_DISABLED='1')
+    result = subprocess.run([sys.executable, '-I', '-c', script], env=environment,
+                            cwd=backend, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == 'lazy app compatibility passed'
+
+
+def test_process_target_imports_without_flask_or_model_sdks():
+    _isolated_app_check(r'''
+import importlib.abc, inspect, os, sys
+sys.path.insert(0, os.environ['TEST_BACKEND'])
+blocked = {'flask', 'openai', 'zep_cloud', 'graphiti_core', 'torch', 'transformers', 'camel', 'oasis'}
+class DenyWebAndModels(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in blocked:
+            raise AssertionError('eager web/model import: ' + fullname)
+sys.meta_path.insert(0, DenyWebAndModels())
+import app
+from app import create_app, Config
+from app.config import Config as OriginalConfig
+from app.services.report_process import ReportProcess
+assert Config is OriginalConfig and create_app.__defaults__ == (OriginalConfig,)
+assert inspect.signature(create_app).parameters['config_class'].default is OriginalConfig
+assert {'Flask', 'jsonify', 'request'} <= set(dir(app))
+assert not {'Flask', 'jsonify', 'request'} & set(vars(app))
+assert not any(name.split('.')[0] in blocked for name in sys.modules)
+try:
+    app.no_such_public_export
+except AttributeError:
+    pass
+else:
+    raise AssertionError('unknown app attribute was accepted')
+print('lazy app compatibility passed')
+''')
+
+
+def test_lazy_public_exports_factory_signature_and_live_monkeypatch_compatibility():
+    _isolated_app_check(r'''
+import inspect, os, sys
+from types import SimpleNamespace
+sys.path.insert(0, os.environ['TEST_BACKEND'])
+import app
+from app.config import Config
+assert app.create_app.__defaults__ == (Config,)
+parameters = inspect.signature(app.create_app).parameters
+expected = ('config_class', 'read_facade', 'evidence_facade', 'source_facade', 'ingestion_facade',
+            'experiment_facade', 'preparation_facade', 'native_launch_facade',
+            'native_observations_facade', 'connected_report_facade', 'connected_followup_facade')
+assert tuple(parameters) == expected
+assert all(parameters[name].kind is inspect.Parameter.KEYWORD_ONLY
+           and parameters[name].default is None for name in expected[1:])
+assert 'flask' not in sys.modules
+# A factory call must retain supplied globals rather than loading fallback Flask.
+patched = {name: object() for name in ('Flask', 'jsonify', 'request')}
+vars(app).update(patched)
+original_mode = app.app_mode
+app.app_mode = lambda *args: 'invalid'
+try:
+    app.create_app()
+except ValueError as error:
+    assert str(error) == 'invalid application mode'
+else:
+    raise AssertionError('invalid mode was accepted')
+assert all(vars(app)[name] is value for name, value in patched.items())
+assert 'flask' not in sys.modules
+for name in patched: delattr(app, name)
+app.app_mode = original_mode
+from app import Flask, jsonify, request
+import flask
+assert Flask is flask.Flask and jsonify is flask.jsonify and request is flask.request
+public = {}
+exec('from app import *', public)
+assert public['Config'] is Config and public['create_app'] is app.create_app
+assert all(public[name] is getattr(flask, name) for name in ('Flask', 'jsonify', 'request'))
+calls = []
+class Logger:
+    def info(self, *args): pass
+    def debug(self, *args): calls.append('request-log')
+app.setup_logger = lambda name: Logger()
+app.get_logger = lambda name: (_ for _ in ()).throw(AssertionError('stale logger'))
+sys.modules['app.services.simulation_runner'] = SimpleNamespace(
+    SimulationRunner=SimpleNamespace(register_cleanup=lambda: calls.append('cleanup-registration')))
+sys.modules['app.api'] = SimpleNamespace(**{name: flask.Blueprint(name, __name__)
+    for name in ('graph_bp', 'simulation_bp', 'report_bp')})
+app.app_mode = lambda *args: 'legacy'
+seen = []
+def flask_factory(*args, **kwargs):
+    seen.append(True)
+    return flask.Flask(*args, **kwargs)
+app.Flask = flask_factory
+class ExplicitConfig(Config):
+    TESTING = True
+    CUSTOM_COMPATIBILITY = 'retained'
+    NEXAWEAVE_ALLOWED_ORIGINS = ('http://localhost:3000',)
+application = app.create_app(ExplicitConfig)
+assert app.Flask is flask_factory and seen == [True]
+assert application.config['CUSTOM_COMPATIBILITY'] == 'retained'
+assert calls == ['cleanup-registration']
+# Callback lookup must see a patch installed AFTER factory construction.
+app.get_logger = lambda name: Logger()
+reply = application.test_client().get('/health')
+assert reply.status_code == 200 and reply.json['service'] == 'NexaWeave Backend'
+assert calls == ['cleanup-registration', 'request-log']
+with application.app_context():
+    original_jsonify = app.jsonify
+    app.jsonify = lambda payload: calls.append('patched-jsonify') or original_jsonify(payload)
+    response, status = app._origin_denied()
+    assert status == 403 and response.json == {'success': False, 'error': 'Origin not allowed'}
+assert calls[-1] == 'patched-jsonify'
+print('lazy app compatibility passed')
+''')
+
+
 def test_readonly_cold_start_blocks_legacy_imports_without_model_keys(tmp_path):
     backend = Path(__file__).resolve().parents[1]
     bootstrap = tmp_path / "site-packages" / "nexaweave_knowledge" / "read_bootstrap.py"

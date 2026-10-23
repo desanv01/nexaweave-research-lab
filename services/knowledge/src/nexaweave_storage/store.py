@@ -12,6 +12,8 @@ from typing import Callable, Iterator
 from uuid import UUID
 
 import psycopg
+
+from nexaweave_storage.transaction_settings import apply_runtime_settings
 from psycopg.types.json import Jsonb
 
 from .validation import (InvalidProject, canonical_payload, display_id,
@@ -85,10 +87,12 @@ def _transaction(factory: Callable[[], psycopg.Connection]) -> Iterator[psycopg.
     try:
         with factory() as conn:
             with conn.transaction():
-                conn.execute("SET LOCAL statement_timeout = '5s'")
-                conn.execute("SET LOCAL lock_timeout = '2s'")
-                conn.execute("SET LOCAL idle_in_transaction_session_timeout = '10s'")
-                conn.execute("SET LOCAL TIME ZONE 'UTC'")
+                apply_runtime_settings(conn, (
+                    "SET LOCAL statement_timeout = '5s'",
+                    "SET LOCAL lock_timeout = '2s'",
+                    "SET LOCAL idle_in_transaction_session_timeout = '10s'",
+                    "SET LOCAL TIME ZONE 'UTC'",
+                ))
                 yield conn
     except psycopg.Error:
         raise StorageError() from None
@@ -112,7 +116,8 @@ def migrate(connection: psycopg.Connection) -> None:
     migrations = []
     for version, filename in ((1, "0001_project_revisions.sql"),
                               (2, "0002_source_evidence.sql"),
-                              (3, "0003_research_imports.sql")):
+                              (3, "0003_research_imports.sql"),
+                              (4, "0004_source_binaries.sql")):
         sql = files("nexaweave_storage").joinpath("migrations", filename).read_text("utf-8")
         migrations.append((version, sql, hashlib.sha256(sql.encode("utf-8")).hexdigest()))
     try:

@@ -9,6 +9,12 @@ import { copyFor } from '../src/i18n/workbench.js'
 import { ingestionFingerprint, ingestionIdentities } from '../src/api/sourceIngestion.js'
 import { sha256 } from '../src/api/sourceLibrary.js'
 Object.defineProperty(globalThis, 'crypto', { value: webcrypto, configurable: true })
+// Drain the WebCrypto work the plan actually starts before inspecting Vue state.
+const pendingDigests = new Set(), actualDigest = webcrypto.subtle.digest.bind(webcrypto.subtle)
+webcrypto.subtle.digest = (...args) => {
+  const work = actualDigest(...args); pendingDigests.add(work)
+  return work.finally(() => pendingDigests.delete(work))
+}
 const dom = new JSDOM('<!doctype html><html><body></body></html>', { url: 'http://127.0.0.1:5173/research' })
 for (const name of ['window', 'document', 'Element', 'HTMLElement', 'SVGElement', 'Node']) globalThis[name] = name === 'window' ? dom.window : dom.window[name]
 const { createApp, nextTick, h, reactive } = await import('vue')
@@ -27,7 +33,21 @@ function mount(initial) {
   return { root, props, cleanup() { app.unmount(); root.remove() } }
 }
 async function settle() { for (let i = 0; i < 18; i++) { await Promise.resolve(); await nextTick() } }
-async function cryptoSettle() { await new Promise(r => setTimeout(r, 40)); await settle() }
+async function cryptoSettle() {
+  const deadline = Date.now() + 2000
+  await settle()
+  while (pendingDigests.size) {
+    const left = deadline - Date.now()
+    assert.ok(left > 0, 'bounded WebCrypto admission did not complete')
+    let timer
+    try {
+      await Promise.race([Promise.all([...pendingDigests]), new Promise((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error('bounded WebCrypto admission did not complete')), left)
+      })])
+    } finally { clearTimeout(timer) }
+    await settle()
+  }
+}
 const cp = copyFor('en').ingestion, enc = new TextEncoder()
 const project = '22222222-2222-4222-8222-222222222222', revision = '55555555-5555-4555-8555-555555555555', evidence = '77777777-7777-4777-8777-777777777777'
 const scope = { schema_version: 1, workspace_id: revision, project_id: project, graph_id: evidence, run_id: null, branch_id: null, layer: 'source' }

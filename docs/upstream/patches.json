@@ -19,9 +19,9 @@
     {
       "imported_path": "backend/app/__init__.py",
       "original_sha256": "f04d262decf6c11437280c0f0c1353774f642888b2ef3f02dfa0e96e992b3c1c",
-      "current_sha256": "636121ae0699586d6a6aa216d9d0a965d951eec584e45fea419b94a1f5d6899f",
-      "reason": "U02d exact Origin/CORS and private logging retained. U03i selects explicit graphiti_readonly factory before inherited blueprints/runner; default legacy unchanged. U11a forwards optional evidence facade only in explicit read-only mode; legacy default unchanged. U04d explicitly selects research_local source-retention routes using the same protected factory/settings; graphiti_readonly and legacy defaults remain. U06b forwards optional protected research source-ingestion facade; legacy/read-only modes preserve inherited behavior. U10b forwards optional protected experiment facade only through the existing research-local factory; no legacy/read-only blueprint or runtime change. U07c forwards the explicitly injected trusted preparation facade through research_local factory without initializing optional engines in ordinary HTTP imports. U07d forwards an explicitly injected protected native-launch facade only through research_local; preserves ordinary import and legacy behavior. U07e passes the optional cold receipt-bound native observations facade into the existing protected research-local app. U07g explicit connected inherited report operation/native evidence and protected app integration; legacy defaults/loops/notices retained. NexaWeave canonical package/configuration and ordinary display names; reviewed derived source change preserving legal/provenance and persisted v1 identities.",
-      "phase": "NexaWeave canonical rebrand"
+      "current_sha256": "3d663bd09ba0a014c2d287203cf565659001b7716fe22e3e5326f7f060e49786",
+      "reason": "U02d exact Origin/CORS and private logging retained. U03i selects explicit graphiti_readonly factory before inherited blueprints/runner; default legacy unchanged. U11a forwards optional evidence facade only in explicit read-only mode; legacy default unchanged. U04d explicitly selects research_local source-retention routes using the same protected factory/settings; graphiti_readonly and legacy defaults remain. U06b forwards optional protected research source-ingestion facade; legacy/read-only modes preserve inherited behavior. U10b forwards optional protected experiment facade only through the existing research-local factory; no legacy/read-only blueprint or runtime change. U07c forwards the explicitly injected trusted preparation facade through research_local factory without initializing optional engines in ordinary HTTP imports. U07d forwards an explicitly injected protected native-launch facade only through research_local; preserves ordinary import and legacy behavior. U07e passes the optional cold receipt-bound native observations facade into the existing protected research-local app. U07g explicit connected inherited report operation/native evidence and protected app integration; legacy defaults/loops/notices retained. NexaWeave canonical package/configuration and ordinary display names; reviewed derived source change preserving legal/provenance and persisted v1 identities. Connected report follow-up preserves original evidence and adds isolated one-shot shared-budget history; owned PDF retains original bytes with protected revision-bound reads. Connected report follow-up preserves original evidence and adds isolated one-shot shared-budget history; owned PDF retains original bytes with protected revision-bound reads.",
+      "phase": "U07h/U07i connected qualification on accepted NexaWeave base"
     },
     {
       "imported_path": "backend/app/api/graph.py",
@@ -89,15 +89,15 @@
     {
       "imported_path": "backend/app/services/report_agent.py",
       "original_sha256": "b1211efa900e2fe73875b6acbf690550ee21a40b76c5170eee4e6ec404a4be47",
-      "current_sha256": "c3710550e2fd2c0cfe603c6c8ee1ca027d904ac5105e0c4952a312c9f95438cf",
-      "reason": "U02a safe paths and U01c forced-final sanitization retained. U03l adds trusted neutral report/chat mode, strict failures, bounded evidence sidecar and scope-bound pinned follow-up context while preserving legacy behavior. U07g explicit connected inherited report operation/native evidence and protected app integration; legacy defaults/loops/notices retained. NexaWeave canonical package/configuration and ordinary display names; reviewed derived source change preserving legal/provenance and persisted v1 identities.",
-      "phase": "NexaWeave canonical rebrand"
+      "current_sha256": "a1f77a6d5932354ae32d093e2d87a8baa5998278d3512dc38b5783d0bab9887b",
+      "reason": "U02a safe paths and U01c forced-final sanitization retained. U03l adds trusted neutral report/chat mode, strict failures, bounded evidence sidecar and scope-bound pinned follow-up context while preserving legacy behavior. U07g explicit connected inherited report operation/native evidence and protected app integration; legacy defaults/loops/notices retained. NexaWeave canonical package/configuration and ordinary display names; reviewed derived source change preserving legal/provenance and persisted v1 identities. Connected report follow-up preserves original evidence and adds isolated one-shot shared-budget history; owned PDF retains original bytes with protected revision-bound reads.",
+      "phase": "U07h/U07i connected qualification on accepted NexaWeave base"
     },
     {
       "imported_path": "backend/app/services/simulation_config_generator.py",
       "original_sha256": "3bb128db01398dd344a2a4c12875f424f7b9ae9c2a7b89f99c42e1ac555396d1",
-      "current_sha256": "081577429779a1d486d4e7a19dd522db459ba4db23283a3339a34abedc1ca90f",
-      "reason": "Defer SDK imports and inject trusted chat client; explicit strict neutral configuration rejects incomplete/truncated responses without changing legacy defaults. NexaWeave canonical package/configuration and ordinary display names; reviewed derived source change preserving legal/provenance and persisted v1 identities.",
+      "current_sha256": "d9c1cd892c7cda92de517dbc927003f1d3574c12fbeee0ba039478d388cc0622",
+      "reason": "Defer SDK imports and inject trusted chat client; explicit strict neutral configuration rejects incomplete/truncated responses without changing legacy defaults. NexaWeave canonical package/configuration and ordinary display names; reviewed derived source change preserving legal/provenance and persisted v1 identities. Group1 multi-source preparation adds an explicit require_complete_document policy that rejects document/context truncation before time/event generation; the default legacy truncation path remains unchanged.",
       "phase": "NexaWeave canonical rebrand"
     },
     {
@@ -282,16 +282,23 @@
     {
       "imported_path": "frontend/package-lock.json",
       "original_sha256": "a4a188daf04a442b8e23c3291d9062b4e00faa5ff49503db759c85e67c4037be",
-      "current_sha256": "4307e35e62fafcf897e4be12977464b67ddbde63ec85ebf90bd360f94a53676b",
-      "reason": "Main locks renderer/test dependency closure and updates PostCSS/nanoid within existing ranges to address current advisories.",
-      "phase": "U02h"
+      "current_sha256": "05f3dc71367d93b8923f16990208af2f708c5ba74a9b61dcc95276e9aca25ecf",
+      "reason": "Main locks renderer/test dependency closure and updates PostCSS/nanoid within existing ranges to address current advisories; adds exact dependencyless playwright-core 1.64.1 for the real research browser journey. Uses the pinned official Chrome 156 stable runtime and supported Chrome channel for the matched browser check.",
+      "phase": "U07i"
     },
     {
       "imported_path": "frontend/package.json",
       "original_sha256": "f972113d3cca752acc44f7e63d97fec138b2a34388b173f85f847bf7108fe852",
-      "current_sha256": "abe2ec6cf0d4676143c13b40eab7cb1b8f52e426e0dc447e6988b8572c54bdac",
-      "reason": "Main pins Markdown-it/DOMPurify runtime and jsdom test dependency; adds node:test script without changing frontend framework versions.",
-      "phase": "U02h"
+      "current_sha256": "9661423ec1f3036b2b3097d42c50db39f6028bc10b4dd8e864eba4b1c5cdeef7",
+      "reason": "Main pins Markdown-it/DOMPurify runtime and jsdom test dependency; adds node:test script without changing frontend framework versions, plus exact playwright-core 1.64.1 and the real research browser driver command. Uses the pinned official Chrome 156 stable runtime and supported Chrome channel for the matched browser check.",
+      "phase": "U07i"
+    },
+    {
+      "imported_path": "frontend/src/components/LanguageSwitcher.vue",
+      "original_sha256": "ada45b2c551c6e818791dfc495ffd492c9d6d9cd6a65a713a08ca9ecc4dedd58",
+      "current_sha256": "48d415d4c27eebbe7b1a9e32accd223efcd0543a70cd7e778949344a176fbb85",
+      "reason": "Use shared persisted UI locale with localized accessible labels, keyboard navigation and focus return; preserve existing language options and visual style.",
+      "phase": "Shared EN/ZH/MS locale foundation and unattended browser operation"
     },
     {
       "imported_path": "frontend/src/components/Step4Report.vue",
@@ -306,6 +313,13 @@
       "current_sha256": "dc83d1d229b8ea15cef26500d8719a237e85fbfbf55343304dec38635d78ea8f",
       "reason": "Use bounded shared sanitized Markdown at report/chat/interview HTML sinks; preserve chat headings and native ordered-list start/nesting semantics.",
       "phase": "U02h"
+    },
+    {
+      "imported_path": "frontend/src/i18n/index.js",
+      "original_sha256": "9dcd879a4408530b52524fdeb956f50f3a93e10ac6813d183e881555d54d838c",
+      "current_sha256": "098cfaddd9e6ccd9e324510b52c0e38c18c92485a3fbc7140855975e4906a4fa",
+      "reason": "Validate and persist the shared UI locale across original routes and the research workbench, tolerate unavailable storage and synchronize document language; explicit generation output language remains independent.",
+      "phase": "Shared EN/ZH/MS locale foundation and unattended browser operation"
     },
     {
       "imported_path": "frontend/src/router/index.js",
@@ -372,19 +386,33 @@
       "review_status": "Main reviewed exact branding source; relevant build/export/browser and exact hosted acceptance pending."
     },
     {
+      "imported_path": "frontend/vite.config.js",
+      "original_sha256": "ad56bf0e786150e8842adcb71456962d527f15fbb0aaff265e9b310ddd4532bb",
+      "current_sha256": "972adf6998fa5c5179b103543a966fcc0df36c870a456eafb89add5d2db50d1f",
+      "reason": "Disable automatic browser opening by default; Main still requires quiet frontend environment and isolated headless controlled Chrome for unattended qualification.",
+      "phase": "Shared EN/ZH/MS locale foundation and unattended browser operation"
+    },
+    {
       "imported_path": "locales/en.json",
       "original_sha256": "b47c61ba64330cf5094ce611ff270c95f22f0ce4e98bfb6fa05ee6c6e5b93f84",
-      "current_sha256": "775c63006124d82b5896eb360342c5b6814171a752ea3040a5af875fb47156b5",
-      "reason": "U13a updates only the English supported-format label for DOCX. U11b adds only the English Home workbench navigation label; inherited catalog remains. Main applies human-authorized visible NexaWeave branding/public repository links; preserves legal provenance, behavior and persisted compatibility. Main correction2 fixes observed Home mobile overflow and removes unqualified scale/cost/ready claims while preserving controls, locale keys and placeholders.",
-      "phase": "U13a/U11b/U00-NexaWeave",
+      "current_sha256": "40f5a32ec8f4877d45d7880de76b190ca1a9fb5b9cc36353bd2f40aa65494fb6",
+      "reason": "U13a updates only the English supported-format label for DOCX. U11b adds only the English Home workbench navigation label; inherited catalog remains. Main applies human-authorized visible NexaWeave branding/public repository links; preserves legal provenance, behavior and persisted compatibility. Main correction2 fixes observed Home mobile overflow and removes unqualified scale/cost/ready claims while preserving controls, locale keys and placeholders. Connected report follow-up preserves original evidence and adds isolated one-shot shared-budget history; owned PDF retains original bytes with protected revision-bound reads.",
+      "phase": "U07h/U07i connected qualification on accepted NexaWeave base",
       "review_status": "Main reviewed exact branding source; relevant build/export/browser and exact hosted acceptance pending."
+    },
+    {
+      "imported_path": "locales/languages.json",
+      "original_sha256": "cc20a91892545e1a646cd997b7d3cd992fc6d85fdcdb8668bc00ca4e69da7b58",
+      "current_sha256": "81e85c986544dc37ca102b9f6c0cdb4244307b89825547378ca3a02805eb739e",
+      "reason": "Add the Malay UI catalog and language instruction while retaining every existing language registration.",
+      "phase": "Shared EN/ZH/MS locale foundation and unattended browser operation"
     },
     {
       "imported_path": "locales/zh.json",
       "original_sha256": "7d44d70ca75e89c79c2ce793ddceab32cf7b251bc9210cf81c04d37daf3daab8",
-      "current_sha256": "f426b18a001914f07612267dd4589da62d8354db8067d60670ca8f87887e87be",
-      "reason": "U13a updates only the Chinese supported-format label for DOCX. U11b adds only the Chinese Home workbench navigation label; inherited catalog remains. Main applies human-authorized visible NexaWeave branding/public repository links; preserves legal provenance, behavior and persisted compatibility. Main correction2 fixes observed Home mobile overflow and removes unqualified scale/cost/ready claims while preserving controls, locale keys and placeholders.",
-      "phase": "U13a/U11b/U00-NexaWeave",
+      "current_sha256": "471dd304b266b2bce614bda2e94283ed39ee88a5dd5bea1f4e939fa103f9ff2b",
+      "reason": "U13a updates only the Chinese supported-format label for DOCX. U11b adds only the Chinese Home workbench navigation label; inherited catalog remains. Main applies human-authorized visible NexaWeave branding/public repository links; preserves legal provenance, behavior and persisted compatibility. Main correction2 fixes observed Home mobile overflow and removes unqualified scale/cost/ready claims while preserving controls, locale keys and placeholders. Connected report follow-up preserves original evidence and adds isolated one-shot shared-budget history; owned PDF retains original bytes with protected revision-bound reads.",
+      "phase": "U07h/U07i connected qualification on accepted NexaWeave base",
       "review_status": "Main reviewed exact branding source; relevant build/export/browser and exact hosted acceptance pending."
     },
     {

@@ -13,6 +13,91 @@ async function fixture(handler) {
   const calls = []; const client = createWorkbenchClient({ fetchImpl: async (url, options) => { calls.push({ url, options }); return calls.length === 1 ? reply(graph()) : handler(url, options) } })
   await client.connect(credentials); return { client, calls }
 }
+test('graph refresh requires completed authentication and never opens a second pending connection', async () => {
+  let finish, calls = 0
+  const client = createWorkbenchClient({ fetchImpl: () => { calls++; return new Promise(resolve => { finish = () => resolve(reply(graph())) }) } })
+  await assert.rejects(client.refreshGraph(), code('disconnected')); assert.equal(calls, 0)
+  const connecting = client.connect(credentials)
+  await assert.rejects(client.refreshGraph(), code('disconnected')); assert.equal(calls, 1)
+  finish(); await connecting; client.disconnect()
+  await assert.rejects(client.refreshGraph(), code('disconnected')); assert.equal(calls, 1)
+})
+
+test('explicit graph refresh uses the existing validated bounded authenticated GET without a body', async () => {
+  const current = graph(); current.nodes = [{ uuid: '44444444-4444-4444-4444-444444444444', name: 'New actor 雨', labels: ['Entity', 'Person'],
+    summary: 'Retained after ingestion', fact: null, attributes: {}, created_at: null, valid_at: null,
+    invalid_at: null, expired_at: null, episodes: [], evidence_ids: [], score: null }]; current.node_count = 1
+  const { client, calls } = await fixture(() => reply(current))
+  try {
+    assert.equal(calls.length, 1)
+    assert.deepEqual(await client.refreshGraph(), current)
+    assert.equal(calls.length, 2)
+    const { url, options } = calls[1]
+    assert.equal(url, calls[0].url); assert.equal(url, 'http://127.0.0.1:5001/api/graph/data/graph_1')
+    assert.equal(options.method, 'GET'); assert.equal(options.body, undefined)
+    assert.equal(options.headers.Authorization, 'Bearer secret-token')
+    assert.equal(options.credentials, 'omit'); assert.equal(options.redirect, 'error'); assert.equal(options.cache, 'no-store')
+    assert.equal(options.referrerPolicy, 'no-referrer'); assert.equal(options.signal.aborted, true)
+    assert.ok(!url.includes('secret-token'))
+  } finally { client.disconnect() }
+})
+
+test('graph refresh refuses malformed or oversized projections and leaves ordinary failures recoverable', async () => {
+  for (const badReply of [() => reply({ ...graph(), graph_id: 'other' }), () => reply({ ...graph(), node_count: 1 }),
+    () => reply({ ...graph(), extra: 'private' }),
+    () => new Response('{}', { headers: { 'Content-Type': 'application/json', 'Content-Length': '2098177' } })]) {
+    let invalid = true
+    const { client, calls } = await fixture(() => invalid ? badReply() : reply(graph()))
+    try {
+      await assert.rejects(client.refreshGraph(), e => ['invalid_reply', 'result_too_large'].includes(e.code))
+      assert.equal(calls.length, 2)
+      invalid = false; assert.deepEqual(await client.refreshGraph(), graph()); assert.equal(calls.length, 3)
+    } finally { client.disconnect() }
+  }
+  let cancelled = false
+  const streamed = await fixture(() => new Response(new ReadableStream({
+    pull(controller) { controller.enqueue(new Uint8Array(2098177)) }, cancel() { cancelled = true }
+  }), { headers: { 'Content-Type': 'application/json' } }))
+  try { await assert.rejects(streamed.client.refreshGraph(), code('result_too_large')); assert.equal(cancelled, true) }
+  finally { streamed.client.disconnect() }
+})
+
+for (const status of [401, 403]) {
+  test(`graph refresh HTTP${status} revokes authentication before parsing any private body`, async () => {
+    const { client, calls } = await fixture(() => new Response('private traceback secret-token', { status }))
+    await assert.rejects(client.refreshGraph(), code(status === 401 ? 'unauthorized' : 'origin_denied'))
+    await assert.rejects(client.refreshGraph(), code('disconnected'))
+    await assert.rejects(client.research(payload()), code('disconnected')); assert.equal(calls.length, 2)
+  })
+}
+
+for (const action of ['cancel', 'disconnect', 'replacement']) {
+  test(`${action} fences a late graph refresh without publishing it or revoking a newer connection`, async () => {
+    let finish
+    const { client, calls } = await fixture(() => calls.length === 2 ? new Promise(resolve => { finish = resolve }) : reply(graph()))
+    try {
+      const pending = client.refreshGraph(), rejected = assert.rejects(pending, code('cancelled'))
+      if (action === 'cancel') client.cancel()
+      else if (action === 'disconnect') client.disconnect()
+      else await client.connect(credentials)
+      finish(reply({ ...graph(), node_count: 99 })); await rejected
+      if (action === 'disconnect') await assert.rejects(client.refreshGraph(), code('disconnected'))
+      else assert.deepEqual(await client.refreshGraph(), graph())
+      assert.equal(calls[1].options.signal.aborted, true)
+    } finally { client.disconnect() }
+  })
+}
+
+test('graph refresh deadline covers the body and releases the shared reader', async () => {
+  let calls = 0, cancelled = false, body
+  const client = createWorkbenchClient({ deadlineMs: 20, fetchImpl: async () => ++calls === 1 ? reply(graph())
+    : new Response(body = new ReadableStream({ cancel() { cancelled = true } }), { headers: { 'Content-Type': 'application/json' } }) })
+  try {
+    await client.connect(credentials); await assert.rejects(client.refreshGraph(), code('deadline'))
+    assert.equal(cancelled, true); assert.equal(body.locked, false); assert.equal(calls, 2)
+  } finally { client.disconnect() }
+})
+
 test('literal canonical origins only; no URL normalization creates an escape', () => {
   for (const origin of ['http://127.0.0.1:1', 'https://[::1]:65535', 'http://127.0.0.1:80']) assert.equal(localOrigin(origin), origin)
   for (const origin of ['http://localhost:5001', 'http://127.1:5001', 'http://127.0.0.1:0', 'http://127.0.0.1:65536', 'http://127.0.0.1:05001', 'http://127.0.0.1:5001/', 'http://user@127.0.0.1:5001', 'https://example.com:443', 'http://[::ffff:127.0.0.1]:5001', 'http://127.0.0.1:5001?x', 'http://127.0.0.1:5001#x']) assert.throws(() => localOrigin(origin), code('invalid_connection'))

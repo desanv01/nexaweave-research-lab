@@ -2,6 +2,7 @@
 import json
 import re
 from .connected_report_client import ReportError, encoded, exact, integer
+from .connected_report_context import admitted_source_passages
 
 
 class RecordedNativeEvents:
@@ -58,7 +59,7 @@ def lexical_selector(context):
 
 def connected_instruction(context, language):
     language_name = {'en': 'English', 'zh': 'Chinese', 'ms': 'Malay'}[language]
-    passages = [dict(p, reference='[[source:' + p['evidence_id'] + ']]') for p in context['passages']]
+    passages = admitted_source_passages(context)
     return ('\nConnected report: write in ' + language_name + '. Source facts, recorded native observations, '
         'and interpretation are distinct channels. No interviews, surveys or live semantic search are available. '
         'Use recorded_native_events to research selected observations. Cite only exact admitted [[source:UUID]] '

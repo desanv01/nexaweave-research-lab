@@ -37,10 +37,15 @@ export function preparationOptions(v) {
 }
 export function preparationPayload(v, planning = false) {
   try {
-    fields(v, planning ? 'schema_version operation_id source_revision options' : 'schema_version operation_id plan_sha256')
-    if (v.schema_version !== 1) bad()
+    const multiple = planning && v?.schema_version === 2
+    fields(v, planning ? 'schema_version operation_id source_revision options' + (multiple ? ' source_revisions' : '') : 'schema_version operation_id plan_sha256')
+    if (v.schema_version !== 1 && !multiple) bad()
     uuid(v.operation_id)
     if (planning) { uuid(v.source_revision); preparationOptions(v.options) } else hash(v.plan_sha256)
+    if (multiple) {
+      list(v.source_revisions, 100, uuid, 1)
+      if (v.source_revisions[0] !== v.source_revision || new Set(v.source_revisions).size !== v.source_revisions.length) bad()
+    }
     const raw = JSON.stringify(v)
     if (enc.encode(raw).length > 65536) bad()
     return raw
@@ -61,6 +66,28 @@ export function preparationSource(v) {
   awareTimestamp(v.recorded_at)
   return JSON.parse(JSON.stringify(v))
 }
+export function preparationSources(value, payload) {
+  try {
+    if (payload?.schema_version !== 2) bad()
+    preparationPayload(payload, true)
+    const sources = [], seen = new Set()
+    let codepoints = 0
+    list(value, 100, (v, index) => {
+      const source = preparationSource(v)
+      if (source.source_revision !== payload.source_revisions[index] || seen.has(source.source_revision)
+          || index && source.project_id !== sources[0].project_id) bad()
+      seen.add(source.source_revision); codepoints += source.codepoint_length
+      if (codepoints > 32768) bad()
+      sources.push(source)
+    }, 1)
+    if (sources.length !== payload.source_revisions.length) bad()
+    return sources
+  } catch { bad('invalid_request') }
+}
+function publicSource(v) {
+  fields(v, 'source_revision source_name source_sha256')
+  uuid(v.source_revision); nonblank(v.source_name, 256); hash(v.source_sha256)
+}
 const immutable = 'schema_version display_graph_id scope project_revision operation_id source options actors projection_sha256 plan_sha256 graph_snapshot_atomic simulation_executed'.split(' ')
 const fingerprintFields = 'schema_version display_graph_id scope project_revision operation_id source options actors projection_sha256'.split(' ')
 export async function validatePreparationResult(value, { graph, payload, source, known, planning = false } = {}) {
@@ -69,15 +96,20 @@ export async function validatePreparationResult(value, { graph, payload, source,
     value = detach(value)
     if (known) known = detach(known)
     payload = detach(payload)
-    if (source) source = detach(source)
+    if (source) source = planning && payload.schema_version === 2 ? preparationSources(source, payload) : detach(source)
     if (enc.encode(JSON.stringify(value)).length > 262144) bad()
-    fields(value, 'schema_version display_graph_id scope project_revision operation_id source options actors projection_sha256 plan_sha256 state progress error_code authorization receipt graph_snapshot_atomic model_calls_started simulation_executed')
-    if (typeof graph !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(graph) || value.display_graph_id !== graph || value.schema_version !== 1 || value.graph_snapshot_atomic !== false || value.simulation_executed !== false || typeof value.model_calls_started !== 'boolean') bad()
+    const multiple = value.schema_version === 2
+    fields(value, 'schema_version display_graph_id scope project_revision operation_id source options actors projection_sha256 plan_sha256 state progress error_code authorization receipt graph_snapshot_atomic model_calls_started simulation_executed' + (multiple ? ' sources' : ''))
+    if (typeof graph !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(graph) || value.display_graph_id !== graph || ![1, 2].includes(value.schema_version) || value.graph_snapshot_atomic !== false || value.simulation_executed !== false || typeof value.model_calls_started !== 'boolean') bad()
     fields(value.scope, 'schema_version workspace_id project_id graph_id run_id branch_id layer')
     if (value.scope.schema_version !== 1 || value.scope.layer !== 'source' || value.scope.run_id !== null || value.scope.branch_id !== null) bad()
     for (const k of ['workspace_id', 'project_id', 'graph_id']) uuid(value.scope[k])
     int(value.project_revision, Number.MAX_SAFE_INTEGER, 1); uuid(value.operation_id)
-    fields(value.source, 'source_revision source_name source_sha256'); uuid(value.source.source_revision); nonblank(value.source.source_name, 256); hash(value.source.source_sha256)
+    publicSource(value.source)
+    if (multiple) {
+      list(value.sources, 100, publicSource, 1)
+      if (!equal(value.sources[0], value.source) || new Set(value.sources.map(s => s.source_revision)).size !== value.sources.length) bad()
+    }
     preparationOptions(value.options); hash(value.projection_sha256); hash(value.plan_sha256)
     list(value.actors, value.options.max_agents, (actor, index) => {
       fields(actor, 'source_entity_uuid name labels'); uuid(actor.source_entity_uuid); nonblank(actor.name, 1024)
@@ -104,15 +136,21 @@ export async function validatePreparationResult(value, { graph, payload, source,
       const digest = await sha256(enc.encode(JSON.stringify(canonical({ schema_version: 1, files: value.receipt.files }))))
       if (value.receipt.artifact_sha256 !== digest) bad()
     } else if (value.receipt !== null) bad()
-    const identity = Object.fromEntries(fingerprintFields.map(key => [key, value[key]]))
+    const identity = Object.fromEntries([...fingerprintFields, ...(multiple ? ['sources'] : [])].map(key => [key, value[key]]))
     if (value.plan_sha256 !== await sha256(enc.encode(canonicalAscii(identity)))) bad()
     preparationPayload(payload, planning)
     if (value.operation_id !== payload.operation_id) bad()
     if (planning) {
-      preparationSource(source)
-      if (value.scope.project_id !== source.project_id || value.source.source_revision !== source.source_revision || value.source.source_revision !== payload.source_revision || value.source.source_sha256 !== source.text_sha256 || value.source.source_name !== source.source_name || !equal(value.options, payload.options) || value.state !== 'planned') bad()
+      if (value.schema_version !== payload.schema_version || !equal(value.options, payload.options) || value.state !== 'planned') bad()
+      if (multiple) {
+        const selected = preparationSources(source, payload)
+        if (value.scope.project_id !== selected[0].project_id || !equal(value.sources, selected.map(s => ({ source_revision: s.source_revision, source_name: s.source_name, source_sha256: s.text_sha256 })))) bad()
+      } else {
+        preparationSource(source)
+        if (value.scope.project_id !== source.project_id || value.source.source_revision !== source.source_revision || value.source.source_revision !== payload.source_revision || value.source.source_sha256 !== source.text_sha256 || value.source.source_name !== source.source_name) bad()
+      }
     } else if (!known || value.plan_sha256 !== payload.plan_sha256) bad()
-    if (known && immutable.some(k => !equal(value[k], known[k]))) bad()
+    if (known && [...immutable, ...(multiple ? ['sources'] : [])].some(k => !equal(value[k], known[k]))) bad()
     if (known?.model_calls_started && !value.model_calls_started || known?.receipt && (value.state !== 'ready' || !equal(value.receipt, known.receipt))) bad()
     if (enc.encode(JSON.stringify(value)).length > 262144) bad()
     return JSON.parse(JSON.stringify(value))

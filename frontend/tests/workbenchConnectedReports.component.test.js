@@ -10,8 +10,14 @@ import { connectedReportsCopyFor } from '../src/i18n/connectedReports.js'
 globalThis.crypto ||= webcrypto
 const dom = new JSDOM('<!doctype html><html><body></body></html>', { url: 'http://127.0.0.1:5173/research' })
 for (const name of ['window', 'document', 'Element', 'HTMLElement', 'SVGElement', 'Node']) globalThis[name] = name === 'window' ? dom.window : dom.window[name]
+globalThis.localStorage = dom.window.localStorage
 const { createApp, h, nextTick } = await import('vue')
 const dataModule = code => `data:text/javascript;base64,${Buffer.from(code).toString('base64')}`
+const localeFiles = Object.fromEntries(['en', 'zh', 'ms'].map(key => [`../../../locales/${key}.json`, { default: JSON.parse(readFileSync(new URL(`../../locales/${key}.json`, import.meta.url), 'utf8')) }]))
+let localeSource = readFileSync(new URL('../src/i18n/index.js', import.meta.url), 'utf8')
+localeSource = localeSource.replace(/import languages from [^\n]+/, `const languages = ${readFileSync(new URL('../../locales/languages.json', import.meta.url), 'utf8')}`)
+localeSource = localeSource.replace(/import\.meta\.glob\([^\n]+\)/, JSON.stringify(localeFiles)).replace(/from (['"])(vue|vue-i18n)\1/g, (_m, _q, name) => `from ${JSON.stringify(import.meta.resolve(name))}`)
+const localeUrl = dataModule(localeSource), sharedLocale = await import(localeUrl)
 async function compile(path, replacements = {}) {
   const file = new URL(path, import.meta.url), { descriptor } = parse(readFileSync(file, 'utf8'), { filename: file.pathname })
   const result = compileScript(descriptor, { id: path, inlineTemplate: true, genDefaultAs: '__component' })
@@ -21,9 +27,17 @@ async function compile(path, replacements = {}) {
 }
 const empty = dataModule('export default {render(){return null}}')
 const preparationSeed = dataModule(`import {h} from ${JSON.stringify(import.meta.resolve('vue'))}; export default {props:['methods','connected'],emits:['ready'],setup(p,{emit}){return ()=>h('button',{class:'fixture-preparation',disabled:!p.connected,onClick:async()=>{const f=globalThis.__u07gParentFixture;const plan=await p.methods.plan(f.prepPayload(),f.source());const ready=await p.methods.start({schema_version:1,operation_id:plan.operation_id,plan_sha256:plan.plan_sha256});emit('ready',ready)}},'Fixture preparation')}}`)
-const native = await compile('../src/components/workbench/NativeLaunch.vue'), observations = await compile('../src/components/workbench/NativeObservations.vue'), reports = await compile('../src/components/workbench/ConnectedReports.vue')
-const replacements = Object.fromEntries(['EvidenceResults', 'SourceLibrary', 'SourceIngestion', 'ExperimentComparison', 'PopulationWorkbench'].map(n => [`../components/workbench/${n}.vue`, empty]))
-const parent = await compile('../src/views/ResearchWorkbench.vue', { ...replacements, '../components/workbench/SimulationPreparation.vue': preparationSeed, '../components/workbench/NativeLaunch.vue': native.url, '../components/workbench/NativeObservations.vue': observations.url, '../components/workbench/ConnectedReports.vue': reports.url })
+const native = await compile('../src/components/workbench/NativeLaunch.vue'), observations = await compile('../src/components/workbench/NativeObservations.vue'), reports = await compile('../src/components/workbench/ConnectedReports.vue'), followups = await compile('../src/components/workbench/ConnectedFollowup.vue')
+const sources = await compile('../src/components/workbench/SourceLibrary.vue')
+const replacements = { ...Object.fromEntries(['EvidenceResults', 'SourceIngestion', 'ExperimentComparison', 'PopulationWorkbench'].map(n => [`../components/workbench/${n}.vue`, empty])), '../components/workbench/SourceLibrary.vue': sources.url }
+const parent = await compile('../src/views/ResearchWorkbench.vue', { ...replacements, '../i18n/index.js': localeUrl, '../components/workbench/SimulationPreparation.vue': preparationSeed, '../components/workbench/NativeLaunch.vue': native.url, '../components/workbench/NativeObservations.vue': observations.url, '../components/workbench/ConnectedReports.vue': reports.url, '../components/workbench/ConnectedFollowup.vue': followups.url })
+const realPreparation = await compile('../src/components/workbench/SimulationPreparation.vue')
+// Only the source-library events are injected here. Preparation, its private
+// client cache, native/report components and the parent invalidation are real.
+const sourceEvents = dataModule(`import {h} from ${JSON.stringify(import.meta.resolve('vue'))}; export default {props:['connected'],emits:['inspected','catalog'],setup(p,{emit}){return ()=>h('div',[
+  h('button',{class:'fixture-inspect',disabled:!p.connected,onClick:()=>emit('inspected',{source:globalThis.__u07gParentFixture.source()})},'Inspect source fixture'),
+  h('button',{class:'fixture-catalog',disabled:!p.connected,onClick:()=>{const s=globalThis.__u07gParentFixture.source();emit('catalog',[s,{...s,source_revision:'00000000-0000-0000-0000-000000000031',source_name:'Prepared DOCX 雨'}])}},'Reload catalog fixture')])}}`)
+const preparationParent = await compile('../src/views/ResearchWorkbench.vue', { ...replacements, '../i18n/index.js': localeUrl, '../components/workbench/SourceLibrary.vue': sourceEvents, '../components/workbench/SimulationPreparation.vue': realPreparation.url, '../components/workbench/NativeLaunch.vue': native.url, '../components/workbench/NativeObservations.vue': observations.url, '../components/workbench/ConnectedReports.vue': reports.url, '../components/workbench/ConnectedFollowup.vue': followups.url })
 const uid = n => `00000000-0000-0000-0000-${String(n).padStart(12, '0')}`, hash = 'a'.repeat(64), clone = v => JSON.parse(JSON.stringify(v))
 function ascii(v) { if (Array.isArray(v)) return '[' + v.map(ascii).join(',') + ']'; if (v && typeof v === 'object') return '{' + Object.keys(v).sort().map(k => ascii(k) + ':' + ascii(v[k])).join(',') + '}'; return JSON.stringify(v).replace(/[\u007f-\uffff]/g, c => '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0')) }
 const digest = v => createHash('sha256').update(ascii(v), 'ascii').digest('hex'), bytesHash = v => createHash('sha256').update(v).digest('hex'), pick = (v, keys) => Object.fromEntries(keys.split(' ').map(k => [k, v[k]]))
@@ -43,6 +57,7 @@ function nativePlan(payload) {
 function nativeDone(known) { const v = clone(known); v.state = 'completed'; v.receipt = { run_id: v.request.run_id, attempt_id: uid(12), instance_id: uid(13), request_fingerprint: digest(v.request), outcome: 'completed', evidence_sha256: hash }; return v }
 function reportPlan(payload, launch) {
   const p = preparation(true), v = { schema_version: 1, report_id: payload.report_id, plan_sha256: null, binding: { display_graph_id: 'graph_1', principal: 'local-research', scope: clone(p.scope), project_revision: 1, source: p.source, preparation: clone(launch.preparation), native: { run_id: launch.request.run_id, launch_sha256: launch.launch_sha256, request_fingerprint: launch.receipt.request_fingerprint, evidence_sha256: hash, platforms: ['twitter'] }, coverage: [{ platform: 'twitter', total_records: 1, selected_records: 1, complete: true, windows: [{ offset: 0, count: 1 }] }], reference_keys: ['source:' + uid(30), 'native:twitter:0:' + hash] }, options: pick(payload, 'requirement output_language native_windows'), context_sha256: hash, source_projection_sha256: hash, model_label: 'scripted', limits: { max_calls: 64, max_input_bytes: 262144, max_output_tokens: 4096, max_run_seconds: 600 }, ceiling_microusd: 12345, authorization: { model_calls_enabled: true, budget_configured: true }, state: 'planned', progress: { stage: 'planned', percent: 0, completed_sections: 0, total_sections: 0 }, workflow: null, receipt: null, receipt_sha256: null, manifest: null, cleanup: { known: false, pending: null, owner_thread_alive: null }, cancel_requested: false, error_code: null }
+  if (payload.schema_version === 2) v.binding.source_set = { schema_version: 1, source_revisions: [...payload.source_revisions] }
   v.plan_sha256 = digest(pick(v, 'schema_version report_id binding options context_sha256 source_projection_sha256 model_label limits ceiling_microusd')); return v
 }
 const prose = '# Fixture report\n\n[[source:' + uid(30) + ']] [[native:twitter:0:' + hash + ']]\n\n中😀 <img src=x onerror=alert(1)>'
@@ -53,7 +68,7 @@ function reportDone(known) {
 }
 globalThis.__u07gParentFixture = { prepPayload, source: sourceRecord }
 const envelope = data => new Response(JSON.stringify({ success: true, data }), { headers: { 'Content-Type': 'application/json' } })
-function mount() { const root = document.createElement('div'); document.body.append(root); const app = createApp(parent.component); app.component('RouterLink', { props: ['to'], setup: (p, { slots }) => () => h('a', { href: p.to }, slots.default?.()) }); app.mount(root); let mounted = true; return { root, cleanup() { if (mounted) { mounted = false; app.unmount(); root.remove() } } } }
+function mount(component = parent.component) { sharedLocale.setUiLocale('en'); const root = document.createElement('div'); document.body.append(root); const app = createApp(component); app.use(sharedLocale.default); app.component('RouterLink', { props: ['to'], setup: (p, { slots }) => () => h('a', { href: p.to }, slots.default?.()) }); app.mount(root); let mounted = true; return { root, cleanup() { if (mounted) { mounted = false; app.unmount(); root.remove() } } } }
 function input(m, selector, value) { const e = m.root.querySelector(selector); e.value = value; e.dispatchEvent(new dom.window.Event(e.tagName === 'SELECT' ? 'change' : 'input', { bubbles: true })) }
 async function waitFor(predicate) { const end = Date.now() + 3000; do { await nextTick(); if (predicate()) return; await new Promise(r => setImmediate(r)) } while (Date.now() < end); assert.ok(predicate(), 'bounded parent condition did not complete') }
 async function connect(m) { input(m, '#graph-id', 'graph_1'); input(m, '#bearer-token', 'private-token'); m.root.querySelector('.connection-form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true })); await waitFor(() => !m.root.querySelector('.fixture-preparation').disabled) }
@@ -63,6 +78,8 @@ function transport(options = {}) {
   return { calls, get report() { return report }, fetch: async (url, request) => {
     calls.push({ url, request }); const p = request.body ? JSON.parse(request.body) : null
     if (url.includes('/data/')) return envelope({ graph_id: 'graph_1', nodes: [], edges: [], node_count: 0, edge_count: 0 })
+    if (url.includes('/source/library/')) return envelope({ schema_version: 1, binary_retained: false, graph_ingestion_executed: false,
+      sources: [sourceRecord(), { ...sourceRecord(), source_revision: uid(31), source_name: 'Additional PDF 雨' }], has_more: false, window_limit: 20 })
     if (url.includes('/preparation/')) return envelope(preparation(url.endsWith('/start')))
     if (url.includes('/native-launch/plan/')) { launch = nativePlan(p); return envelope(launch) }
     if (url.includes('/native-launch/status/')) { launch = nativeDone(launch); return envelope(launch) }
@@ -73,6 +90,89 @@ function transport(options = {}) {
     throw new Error('Unexpected fixture route')
   } }
 }
+
+test('real preparation READY handoff and frozen parent report survive catalog reloads and identical explicit graph refreshes', async () => {
+  const previous = globalThis.fetch, calls = []; let prepared, launch, report
+  globalThis.fetch = async (url, request) => {
+    calls.push({ url, request }); const p = request.body ? JSON.parse(request.body) : null
+    if (url.includes('/data/')) return envelope({ graph_id: 'graph_1', nodes: [], edges: [], node_count: 0, edge_count: 0 })
+    if (url.includes('/preparation/') && url.endsWith('/plan')) {
+      prepared = preparation(); prepared.schema_version = 2; prepared.operation_id = p.operation_id; prepared.options = clone(p.options)
+      prepared.sources = [clone(prepared.source), { source_revision: uid(31), source_name: 'Prepared DOCX 雨', source_sha256: hash }]
+      assert.deepEqual(p.source_revisions, prepared.sources.map(s => s.source_revision))
+      prepared.plan_sha256 = digest(pick(prepared, 'schema_version display_graph_id scope project_revision operation_id source sources options actors projection_sha256'))
+      return envelope(prepared)
+    }
+    if (url.includes('/preparation/') && url.endsWith('/start')) {
+      prepared = { ...clone(prepared), state: 'ready', progress: { stage: 'ready', completed: 100, total: 100 }, model_calls_started: true, receipt: clone(preparation(true).receipt) }
+      prepared.receipt.simulation_id = 'sim_' + prepared.operation_id.replaceAll('-', ''); return envelope(prepared)
+    }
+    if (url.includes('/native-launch/plan/')) {
+      launch = nativePlan(p); launch.preparation = { operation_id: prepared.operation_id, plan_sha256: prepared.plan_sha256, simulation_id: prepared.receipt.simulation_id, artifact_sha256: prepared.receipt.artifact_sha256 }
+      launch.request.simulation_id = prepared.receipt.simulation_id
+      launch.launch_sha256 = digest(pick(launch, 'schema_version display_graph_id scope preparation request limits ceiling_microusd model_label')); return envelope(launch)
+    }
+    if (url.includes('/native-launch/status/')) { launch = nativeDone(launch); return envelope(launch) }
+    if (url.includes('/connected-report/plan/')) { report = reportPlan(p, launch); return envelope(report) }
+    if (url.includes('/connected-report/start/')) { report = reportDone(report); return envelope(report) }
+    throw new Error('Unexpected real-preparation parent fixture route')
+  }
+  const m = mount(preparationParent.component)
+  try {
+    input(m, '#graph-id', 'graph_1'); input(m, '#bearer-token', 'private-token')
+    m.root.querySelector('.connection-form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }))
+    await waitFor(() => !m.root.querySelector('.fixture-inspect').disabled)
+    m.root.querySelector('.fixture-inspect').click(); m.root.querySelector('.fixture-catalog').click(); await nextTick()
+    const checkbox = m.root.querySelector('.preparation-source-checkbox'); assert.ok(checkbox)
+    checkbox.checked = true; checkbox.dispatchEvent(new dom.window.Event('change', { bubbles: true }))
+    input(m, '#preparation-requirement', options.simulation_requirement); input(m, '#preparation-rounds', '24')
+    m.root.querySelector('.preparation-workbench form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }))
+    await waitFor(() => m.root.querySelector('.preparation-workbench .start') && !m.root.querySelector('.preparation-workbench .start').disabled)
+    m.root.querySelector('.preparation-workbench .start').click(); await waitFor(() => !m.root.querySelector('.native-launch .review').disabled)
+    m.root.querySelector('.native-launch .review').click(); await waitFor(() => m.root.querySelector('.native-launch .refresh') && !m.root.querySelector('.native-launch .refresh').disabled)
+    m.root.querySelector('.native-launch .refresh').click(); await waitFor(() => m.root.querySelector('.use-report') && !m.root.querySelector('.use-report').disabled)
+    m.root.querySelector('.use-report').click(); await waitFor(() => m.root.querySelector('.report-prepared-sources'))
+    input(m, '#report-requirement', 'Compare the prepared documents')
+    m.root.querySelector('.connected-reports form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }))
+    await waitFor(() => m.root.querySelector('.report-start') && !m.root.querySelector('.report-start').disabled)
+    const frozen = clone(report), before = calls.length
+    m.root.querySelector('.fixture-catalog').click(); await nextTick()
+    assert.equal(calls.length, before); assert.equal(m.root.querySelector('.report-start').disabled, false)
+    assert.equal(m.root.querySelector('#report-recovery-hash').value, frozen.plan_sha256)
+    assert.deepEqual([...m.root.querySelectorAll('.report-prepared-sources li .mono')].map(n => n.textContent), [uid(5), uid(31)])
+    assert.equal(m.root.querySelector('.native-launch .review').disabled, false)
+    const frozenPreparation = clone(prepared), frozenLaunch = clone(launch), beforeGraph = calls.length
+    m.root.querySelector('.graph-refresh').click()
+    await waitFor(() => calls.length === beforeGraph + 1 && !m.root.querySelector('.graph-refresh').disabled)
+    assert.ok(calls.at(-1).url.includes('/api/graph/data/graph_1')); assert.equal(calls.at(-1).request.method, 'GET')
+    assert.equal(calls.at(-1).request.body, undefined)
+    assert.equal(m.root.querySelector('.report-start').disabled, false)
+    assert.equal(m.root.querySelector('#report-recovery-hash').value, frozen.plan_sha256)
+    assert.deepEqual(prepared, frozenPreparation); assert.deepEqual(launch, frozenLaunch)
+    assert.deepEqual([...m.root.querySelectorAll('.report-prepared-sources li .mono')].map(n => n.textContent), [uid(5), uid(31)])
+    assert.equal(m.root.querySelector('.native-launch .review').disabled, false)
+    m.root.querySelector('.report-start').click(); await waitFor(() => m.root.querySelector('.report-read'))
+    const afterStart = calls.length; m.root.querySelector('.fixture-catalog').click(); await nextTick()
+    assert.equal(calls.length, afterStart); assert.ok(m.root.querySelector('.report-read'))
+    assert.equal(m.root.querySelector('#report-recovery-hash').value, frozen.plan_sha256)
+    const attemptedReport = clone(report), afterAttempt = calls.length
+    m.root.querySelector('.graph-refresh').click()
+    await waitFor(() => calls.length === afterAttempt + 1 && !m.root.querySelector('.graph-refresh').disabled)
+    assert.ok(calls.at(-1).url.includes('/api/graph/data/graph_1')); assert.equal(calls.at(-1).request.method, 'GET')
+    assert.deepEqual(report, attemptedReport)
+    const retained = m.root.querySelector(`[data-report-id="${frozen.report_id}"]`)
+    assert.ok(retained.querySelector('.report-read')); assert.ok(retained.textContent.includes(frozen.plan_sha256))
+    assert.equal(retained.querySelector('.report-start'), null)
+    assert.equal(m.root.querySelector('#report-recovery-id').value, frozen.report_id)
+    assert.equal(m.root.querySelector('#report-recovery-hash').value, frozen.plan_sha256)
+    assert.deepEqual(prepared, frozenPreparation); assert.deepEqual(launch, frozenLaunch)
+    assert.equal(calls.filter(c => c.url.includes('/api/graph/data/')).length, 3)
+    assert.equal(calls.filter(c => c.url.includes('/preparation/') && c.url.endsWith('/plan')).length, 1)
+    assert.equal(calls.filter(c => c.url.includes('/preparation/') && c.url.endsWith('/start')).length, 1)
+    assert.equal(calls.filter(c => c.url.includes('/connected-report/plan/')).length, 1)
+    assert.equal(calls.filter(c => c.url.includes('/connected-report/start/')).length, 1)
+  } finally { m.cleanup(); globalThis.fetch = previous }
+})
 
 test('actual native report action is independent of inspect; parent captures credentials and localized state', async () => {
   const previous = globalThis.fetch, wire = transport(); globalThis.fetch = wire.fetch; const m = mount()
@@ -95,6 +195,41 @@ test('parent disconnect/reconnect/manual recovery preserves a lost Start fence a
     options.denied = true; m.root.querySelector('.report-refresh').click(); await waitFor(() => !m.root.querySelector('.report-record')); assert.equal(m.root.querySelector('.connected-reports .recovery fieldset').disabled, true); assert.equal(m.root.querySelector('#bearer-token').value, '')
   } finally { m.cleanup(); globalThis.fetch = previous }
 })
+test('loading source catalog preserves native report selection and only an explicit extra yields a V2 request', async () => {
+  const previous = globalThis.fetch, wire = transport(); globalThis.fetch = wire.fetch; const m = mount()
+  try {
+    await connect(m); await seedNative(m); m.root.querySelector('.use-report').click()
+    await waitFor(() => !m.root.querySelector('.connected-reports fieldset').disabled)
+    const before = wire.calls.length
+    m.root.querySelector('.source-library .source-actions button').click()
+    await waitFor(() => m.root.querySelector('.report-source-checkbox') && !m.root.querySelector('.connected-reports fieldset').disabled)
+    assert.equal(wire.calls.length, before + 1)
+    assert.equal(m.root.querySelector('.report-source-checkbox').checked, false)
+    assert.ok(m.root.querySelector('.report-anchor').textContent.includes(uid(5)))
+    assert.ok(m.root.querySelector('.use-report'))
+    assert.equal(m.root.querySelector('#source-inspector'), null)
+    input(m, '#report-requirement', 'Compare documents')
+    m.root.querySelector('.connected-reports form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }))
+    await waitFor(() => m.root.querySelector('.report-start'))
+    const first = wire.calls.find(c => c.url.includes('/connected-report/plan/'))
+    assert.equal(JSON.parse(first.request.body).schema_version, 1)
+    const extra = m.root.querySelector('.report-source-checkbox'); extra.checked = true
+    extra.dispatchEvent(new dom.window.Event('change', { bubbles: true })); await nextTick()
+    assert.equal(m.root.querySelector('.report-start'), null)
+    m.root.querySelector('.connected-reports form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }))
+    await waitFor(() => m.root.querySelector('.report-start'))
+    const plans = wire.calls.filter(c => c.url.includes('/connected-report/plan/'))
+    assert.deepEqual(JSON.parse(plans[1].request.body).source_revisions, [uid(5), uid(31)])
+    assert.equal(JSON.parse(plans[1].request.body).schema_version, 2)
+    assert.equal(wire.calls.filter(c => c.url.includes('/connected-report/start/')).length, 0)
+    assert.equal(wire.calls.filter(c => c.url.includes('/source/item/')).length, 0)
+    m.root.querySelector('.connection-form button:last-child').click(); await nextTick(); await connect(m)
+    assert.equal(m.root.querySelector('.report-source-checkbox'), null)
+    assert.equal(m.root.querySelector('.report-record'), null)
+    assert.equal(m.root.querySelector('.connected-reports fieldset').disabled, true)
+  } finally { m.cleanup(); globalThis.fetch = previous }
+})
+
 test('parent shows confirmed Start denials without a lost-reply claim and keeps the fence', async () => {
   for (const startDenial of ['budget_denied', 'conflict']) {
     const previous = globalThis.fetch, wire = transport({ startDenial }); globalThis.fetch = wire.fetch; const m = mount()

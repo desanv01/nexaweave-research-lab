@@ -366,3 +366,41 @@ def test_actual_http_pdf_fixed_child_pg_pages_restart_and_private_denials(factor
             assert evidence.excerpt_sha256==actual['excerpt_sha256'] and evidence.declared_page==actual['page']
         status,_,library=_exchange(port,'GET','/api/source/library/'+display,token=token)
         assert status==200 and library['data']['sources']==[first['source']]
+
+
+def test_actual_http_v2_original_bytes_after_restart(factory, tmp_path):
+    from test_pdf_source import pdf_bytes
+    from nexaweave_storage.pdf import extract_pdf
+    scope, display, _ = _seed(factory)
+    binary = pdf_bytes(['Original 猫', '', 'End 雪'])
+    revision = uuid4()
+    payload = dict(_payload(revision, 'owned original.pdf', binary, 'pdf'), schema_version=2)
+    retained = '/api/source/retain-original/' + display
+    metadata_route = f'/api/source/original-metadata/{display}/{revision}'
+    read_route = f'/api/source/original/{display}/{revision}'
+    with _host(tmp_path, scope, display) as (port, token, _):
+        assert _exchange(port, 'POST', retained, payload)[0] == 401
+        assert _exchange(port, 'POST', retained, payload, token=token,
+                         origin='http://denied.example')[0] == 403
+        status, headers, first = _exchange(port, 'POST', retained, payload, token=token)
+        assert status == 200 and first['success'] is True
+        assert headers['Cache-Control'] == 'no-store' and headers['X-Content-Type-Options'] == 'nosniff'
+        receipt = first['data']
+        assert receipt['schema_version'] == 2 and receipt['binary_retained'] is True
+        assert receipt['binary']['sha256'] == hashlib.sha256(binary).hexdigest()
+        assert receipt['extraction']['ocr_performed'] is False
+        assert _exchange(port, 'POST', retained, payload, token=token)[2]['data'] == receipt
+        assert _exchange(port, 'POST', retained, dict(payload, source_name='changed'), token=token)[0] == 409
+    restart = tmp_path / 'original-restart'; restart.mkdir()
+    with _host(restart, scope, display) as (port, token, _):
+        status, _, meta = _exchange(port, 'GET', metadata_route, token=token)
+        assert status == 200 and meta['data']['binary'] == receipt['binary']
+        status, headers, read = _exchange(port, 'GET', read_route, token=token)
+        assert status == 200 and headers['Cache-Control'] == 'no-store'
+        assert headers['X-Content-Type-Options'] == 'nosniff'
+        assert base64.b64decode(read['data']['content_base64'], validate=True) == binary
+        assert read['data']['binary'] == meta['data']['binary']
+        assert _exchange(port, 'GET', read_route)[0] == 401
+        assert _exchange(port, 'GET', read_route, token=token,
+                         origin='http://denied.example')[0] == 403
+        assert _exchange(port, 'GET', f'/api/source/item/{display}/{revision}', token=token)[2]['data']['text'] == extract_pdf(binary).text

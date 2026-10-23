@@ -18,8 +18,7 @@ class NativeObservationsHost:
     def _authority(self, payload):
         row = self.launch._row(launch_reference(payload))
         prep, _ = self.launch._current(row)
-        _, _, retained = self.launch.preparation._owned(prep.frozen['public']['source']['source_revision'],
-                                                      expected_revision=prep.project_revision)
+        _, _, retained = self.launch.preparation._owned_row(prep, expected_revision=prep.project_revision)
         if retained.text_sha256 != prep.frozen['public']['source']['source_sha256']:
             raise NativeObservationsError('conflict')
         if (row.state != 'completed' or row.receipt is None or not row.dispatch_claimed
@@ -45,6 +44,8 @@ class NativeObservationsHost:
         dto = validate_launch(dto, self.display_graph_id, self.scope_dto, launch_reference(payload), 'status')
         if dto['request']['principal'] != self.principal:
             raise NativeObservationsError('unauthorized')
+        if prep.frozen['public']['schema_version'] == 2:
+            self.launch.preparation._owned_row(prep, expected_revision=prep.project_revision)
         return row, prep, native, dto
 
     def page(self, payload):

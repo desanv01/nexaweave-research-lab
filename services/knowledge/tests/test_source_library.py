@@ -54,6 +54,24 @@ def test_pdf_child_payload_exact_byte_hash_and_schema():
             validate_payload("retain_pdf", pdf_payload(binary))
 
 
+def test_v2_original_pdf_admission_and_authority_precede_parser(monkeypatch):
+    import nexaweave_storage.pdf as parser
+    monkeypatch.setattr(parser, "extract_pdf", lambda binary: pytest.fail("parser reached"))
+    v2 = dict(pdf_payload(), schema_version=2)
+    validate_payload("retain_pdf_binary", v2)
+    validate_payload("binary_metadata", {"source_revision": v2["source_revision"]})
+    validate_payload("binary_read", {"source_revision": v2["source_revision"]})
+    with pytest.raises(ValueError):
+        validate_payload("retain_pdf_binary", dict(v2, schema_version=1))
+    with pytest.raises(ValueError):
+        validate_payload("binary_read", {"source_revision": v2["source_revision"], "path": "private"})
+    library = SourceLibrary(object(), connection_factory=lambda: pytest.fail("connection reached"))
+    monkeypatch.setattr(library, "authorize", lambda: (_ for _ in ()).throw(SourceError("source_denied")))
+    with pytest.raises(SourceError) as denied:
+        library.execute("retain_pdf_binary", v2)
+    assert denied.value.code == "source_denied"
+
+
 def test_cold_source_and_pdf_module_imports_are_native_and_sdk_free(tmp_path):
     code = r'''
 import importlib.abc,sys
@@ -105,3 +123,48 @@ def test_authority_rechecked_after_pdf_extraction_before_storage_mutation(monkey
         library.execute("retain_pdf", pdf_payload())
     assert error.value.code == "source_denied"
     assert calls == ["authorize", "extract", "authorize"]
+
+
+@pytest.mark.parametrize("method", ["list", "get", "retain", "retain_pdf"])
+def test_authority_revoked_during_storage_prevents_source_result_publication(method, monkeypatch):
+    import nexaweave_knowledge.source_library as module
+    import nexaweave_storage.pdf as parser
+
+    scope = SimpleNamespace(project_id=uuid4())
+    library = SourceLibrary(SimpleNamespace(principal="owner"),
+        connection_factory=lambda: pytest.fail("unexpected real connection"))
+    events, revoked = [], False
+
+    def authorize():
+        events.append("authorize")
+        if revoked:
+            raise SourceError("source_denied")
+        return scope
+
+    def storage(*args, **kwargs):
+        nonlocal revoked
+        events.append("storage")
+        revoked = True
+        return [] if method == "list" else object()
+
+    def extract(binary):
+        events.append("extract")
+        return parser.PdfExtraction("猫", ({"page": 1, "start": 0, "end": 1,
+            "empty": False, "excerpt_sha256": hashlib.sha256("猫".encode()).hexdigest()},), 1, 0)
+
+    monkeypatch.setattr(library, "authorize", authorize)
+    monkeypatch.setattr(module, "SourceStore", lambda factory: SimpleNamespace(
+        list_sources=storage, get_source=storage, ingest_text=storage))
+    monkeypatch.setattr(module, "source_result", lambda *args, **kwargs: pytest.fail(
+        "revoked source result reached publication"))
+    monkeypatch.setattr(parser, "extract_pdf", extract)
+    revision = str(uuid4())
+    payload = ({"source_revision": revision} if method == "get" else
+        {"source_revision": revision, "source_name": "text", "text": "猫", "blocks": None}
+        if method == "retain" else pdf_payload() if method == "retain_pdf" else {})
+
+    with pytest.raises(SourceError) as error:
+        library.execute(method, payload)
+    assert error.value.code == "source_denied"
+    assert events.count("storage") == 1
+    assert events[-2:] == ["storage", "authorize"]
