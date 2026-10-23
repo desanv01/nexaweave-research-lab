@@ -276,7 +276,6 @@ async def test_actual_report_followup_history_and_disabled_exports(factory, tmp_
         # Main fixture replaces only the existing synthetic projection byte
         # transport with actual owned children. It does not claim graph quality.
         from dataclasses import replace
-        import sys
         from app.services.knowledge_read_facade import KnowledgeReadFacade
         facts = {}
         for kind in ('node', 'edge'):
