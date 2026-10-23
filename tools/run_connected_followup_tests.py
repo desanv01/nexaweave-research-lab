@@ -29,7 +29,7 @@ MARKERS = ('postgres: approved disposable PostgreSQL authority\n'
            'native_launch_temporal: inherited actual connected Temporal native launch\n'
            'native_launch_engine: inherited actual generated-preparation owned OASIS native launch')
 
-def child(mode: str, journey: bool = False, store_only: bool = False) -> int:
+def child(mode: str, journey: bool = False, store_only: bool = False, browser_journey: bool = False) -> int:
     guard = LoopbackOnlySockets()
     guard.install()
     try:
@@ -52,6 +52,7 @@ def child(mode: str, journey: bool = False, store_only: bool = False) -> int:
             diagnostic_origin = None
             diagnostic_records = 0
             capture_manager = None
+            browser_modules = ()
 
             def diagnostic(self, record, *, fixture=False):
                 try:
@@ -98,6 +99,11 @@ def child(mode: str, journey: bool = False, store_only: bool = False) -> int:
             def pytest_collection_finish(self, session):
                 self.collected = len(session.items)
                 self.paths = {item.nodeid: Path(item.path).name for item in session.items}
+                self.browser_modules = tuple({item.module for item in session.items
+                                              if Path(item.path).resolve() == PG_TARGET.resolve()})
+                for module in self.browser_modules:
+                    module._followup_browser_journey = browser_journey
+                    module._followup_browser_completed = False
                 try:
                     self.capture_manager = session.config.pluginmanager.getplugin('capturemanager')
                     for item in session.items:
@@ -121,7 +127,7 @@ def child(mode: str, journey: bool = False, store_only: bool = False) -> int:
             required = (ENGINE_TARGET.name,)
         elif mode == 'integration':
             targets = ((PG_STORE_TARGET, PG_BUDGET_TARGET) if store_only else
-                       (PG_TARGET,) if journey else (PG_STORE_TARGET, PG_BUDGET_TARGET, PG_TARGET))
+                       (PG_TARGET,) if journey or browser_journey else (PG_STORE_TARGET, PG_BUDGET_TARGET, PG_TARGET))
             selection = 'postgres'
             required = tuple(path.name for path in targets)
         else:
@@ -146,6 +152,10 @@ def child(mode: str, journey: bool = False, store_only: bool = False) -> int:
             passed_targets = {name: count for name, count in accounting.targets.items() if count}
             complete = (complete and accounting.collected == accounting.passed == sum(expected.values())
                         and accounting.skipped == 0 and collected_targets == passed_targets == expected)
+        if browser_journey:
+            complete = (complete and mode == 'integration' and accounting.collected == accounting.passed == 1
+                        and accounting.targets[PG_TARGET.name] == 1 and len(accounting.browser_modules) == 1
+                        and accounting.browser_modules[0]._followup_browser_completed is True)
         # Native runner legacy path fallback must never shadow an installed
         # execution/storage/knowledge package during this owned qualification.
         for name, module in tuple(sys.modules.items()):
@@ -156,7 +166,8 @@ def child(mode: str, journey: bool = False, store_only: bool = False) -> int:
                                       or 'site-packages' not in Path(origin).parts):
                 print('connected_followup_loaded_source_package_refused', file=sys.stderr)
                 complete = False
-        print(json.dumps(dict(connected_followup_mode=mode, store_only=store_only, collected=accounting.collected,
+        print(json.dumps(dict(connected_followup_mode=mode, store_only=store_only,
+            research_browser_journey=browser_journey, collected=accounting.collected,
             passed=accounting.passed, skipped=accounting.skipped, targets=accounting.targets,
             complete=complete), sort_keys=True))
         if not complete:
@@ -178,14 +189,17 @@ def main() -> int:
     subset = parser.add_mutually_exclusive_group()
     subset.add_argument('--journey', action='store_true', help='Select only the actual combined journey for concrete fixture corrections')
     subset.add_argument('--store-only', action='store_true', help='Require exact database store/budget case counts without the native journey')
+    subset.add_argument('--browser-journey', action='store_true', help='Require the separate fresh account12 actual follow-up browser journey')
     args = parser.parse_args()
     mode = 'engine' if args.engine else 'integration' if args.integration else 'unit'
     if args.journey and mode != 'integration':
         parser.error('--journey requires --integration')
     if args.store_only and mode != 'integration':
         parser.error('--store-only requires --integration')
+    if args.browser_journey and (mode != 'integration' or sys.platform != 'linux'):
+        parser.error('--browser-journey requires --integration on the qualified Linux browser host')
     if args.child:
-        return child(mode, args.journey, args.store_only)
+        return child(mode, args.journey, args.store_only, args.browser_journey)
     password = os.environ.get('PROJECT_STORE_TEST_PASSWORD')
     if mode == 'integration' and not password:
         parser.error('explicit approved disposable PostgreSQL fixture required')
@@ -205,6 +219,17 @@ def main() -> int:
             str(ROOT / 'services/knowledge/tests')))
         env.update(HF_HUB_OFFLINE='1', TRANSFORMERS_OFFLINE='1', HF_HUB_DISABLE_TELEMETRY='1',
                    DO_NOT_TRACK='1', MIROFISH_NATIVE_TEST_OFFLINE='1', MIROFISH_REPORT_TEST_OFFLINE='1')
+        if args.browser_journey:
+            for key in ('NEXAWEAVE_RESEARCH_BROWSER_NODE', 'NEXAWEAVE_RESEARCH_BROWSER_CHROME'):
+                raw = os.environ.get(key, '')
+                path = Path(raw)
+                if (not raw or not path.is_absolute() or not path.is_file() or path.is_symlink()
+                        or str(path.resolve(strict=True)) != raw or not os.access(path, os.X_OK)):
+                    parser.error('qualified canonical pinned browser runtime paths required')
+                env[key] = raw
+            # One absolute work deadline starts before this existing owned child.
+            # Reserve thirty seconds inside its unchanged600-second lifetime for cleanup.
+            env['NEXAWEAVE_FOLLOWUP_BROWSER_DEADLINE'] = str(time.monotonic() + 570)
         if mode == 'integration':
             from psycopg.conninfo import make_conninfo
             env.update(PROJECT_STORE_POSTGRES_INTEGRATION='1', KNOWLEDGE_POSTGRES_INTEGRATION='1')
@@ -215,7 +240,8 @@ def main() -> int:
             env.update(TEMPORAL_EXECUTION_INTEGRATION='1', TEMPORAL_TEST_ADDRESS='127.0.0.1:17233')
         process = owner.start(subprocess.Popen,
             [sys.executable, str(Path(__file__).resolve()), '--child', '--' + mode,
-             *(['--journey'] if args.journey else []), *(['--store-only'] if args.store_only else [])],
+             *(['--journey'] if args.journey else []), *(['--store-only'] if args.store_only else []),
+             *(['--browser-journey'] if args.browser_journey else [])],
             cwd=directory.name, env=env, stdin=subprocess.DEVNULL, shell=False, close_fds=True,
             creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
         try:

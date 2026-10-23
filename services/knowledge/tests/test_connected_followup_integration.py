@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import re
 import sys
@@ -18,6 +19,8 @@ pytestmark = [pytest.mark.postgres, pytest.mark.connected_followup_temporal]
 
 
 _fixture_phase_sink = None
+_followup_browser_journey = False
+_followup_browser_completed = False
 
 
 class FixturePhases:
@@ -188,6 +191,25 @@ def factory():
 
 @pytest.mark.asyncio
 async def test_actual_report_followup_history_and_disabled_exports(factory, tmp_path, monkeypatch):
+    global _followup_browser_completed
+    browser_mode = _followup_browser_journey is True
+    _followup_browser_completed = False
+    browser = None
+    deadline = float(os.environ['NEXAWEAVE_FOLLOWUP_BROWSER_DEADLINE']) if browser_mode else None
+    if browser_mode:
+        assert sys.platform == 'linux' and math.isfinite(deadline)
+        assert 0 < deadline - time.monotonic() <= 570
+    def remaining(maximum):
+        if not browser_mode:
+            return maximum
+        seconds = min(maximum, deadline - time.monotonic())
+        assert seconds > 0, 'followup_browser_case_deadline'
+        return seconds
+    def accounted(prep, expected):
+        status = prep.budget.status('owner', prep.account_id)
+        assert status.cap_microusd == 12 and status.accounted_ceiling_microusd == expected
+        assert status.reserved_microusd == status.uncertain_microusd == 0
+        assert status.remaining_microusd == 12 - expected and status.actual_usage_microusd is None
     slow_authorization = False
     from test_connected_preparation_native_launch import RichConnectedChat
     from test_preparation_store import real_host, request, reference as prep_reference
@@ -224,12 +246,17 @@ async def test_actual_report_followup_history_and_disabled_exports(factory, tmp_
     temporal = await loopback_client()
     input_artifacts = tmp_path/'native-inputs'
     input_artifacts.mkdir()
-    prep, _, retained, chat, _, projection_transport = real_host(factory, input_artifacts, cap=20, chat=SeedChat())
+    if browser_mode:
+        prep, _, retained, chat, _, projection_transport = real_host(
+            factory, input_artifacts, cap=12, ceiling=1, chat=SeedChat())
+        accounted(prep, 0)
+    else:
+        prep, _, retained, chat, _, projection_transport = real_host(factory, input_artifacts, cap=20, chat=SeedChat())
     loop = asyncio.get_running_loop()
     preparation = TemporalPreparationHost(client=temporal, task_queue='mf-report-prep-'+uuid4().hex,
         trusted_host=prep, allow_dispatch=lambda: True)
     prep.scheduler = preparation.scheduler_for(loop)
-    native_host = launch_host(prep, factory)
+    native_host = launch_host(prep, factory, ceiling=1) if browser_mode else launch_host(prep, factory)
     native_owners = []
     def construct(native_request):
         owner = native_host.supervisor_factory(native_request)
@@ -270,7 +297,7 @@ async def test_actual_report_followup_history_and_disabled_exports(factory, tmp_
         report_reader = KnowledgeReadFacade(settings)
     reports = DurableReportHost(settings=prep.settings, connection_factory=factory, read_facade=report_reader,
         native_launch_host=native_host, artifact_root=tmp_path/'reports', account_id=prep.account_id,
-        ceiling_microusd=4, authorize=lambda: report_enabled[0], model_label='scripted offline inherited report',
+        ceiling_microusd=2 if browser_mode else 4, authorize=lambda: report_enabled[0], model_label='scripted offline inherited report',
         limits=limits, model_factory=BoundedReportModelFactory(ScriptedReportTransportFactory(str(report_log)),
             'scripted-report', limits), scheduler=lambda _: None)
     report_temporal = TemporalReportHost(client=temporal, task_queue='mf-report-body-'+uuid4().hex,
@@ -293,9 +320,20 @@ async def test_actual_report_followup_history_and_disabled_exports(factory, tmp_
             preparation_row = prep.store.get('owner', planned['operation_id'])
             phases.end('preparation-plan-start')
             phases.start('preparation-result')
-            await asyncio.wait_for(temporal.get_workflow_handle(preparation_row.dispatch.workflow_id).result(), 60)
+            await asyncio.wait_for(temporal.get_workflow_handle(preparation_row.dispatch.workflow_id).result(), remaining(60))
             ready = await asyncio.to_thread(prep.status, prep_reference(planned))
             assert ready['state']=='ready' and not ready['simulation_executed']
+            if browser_mode:
+                from nexaweave_execution.preparation_contracts import PreparedBudgetReceipt
+                with factory() as conn:
+                    capacity = prep.budget._row(conn, prep.account_id, preparation_row.operation_id)
+                assert capacity.state.value == 'settled' and capacity.ceiling_microusd == 1
+                assert type(capacity.receipt) is PreparedBudgetReceipt
+                assert capacity.receipt.operation_id == preparation_row.operation_id
+                assert capacity.receipt.attempt_id == capacity.attempt_id
+                assert capacity.receipt.fingerprint == capacity.fingerprint
+                assert capacity.receipt.artifact_sha256 == ready['receipt']['artifact_sha256']
+                accounted(prep, 1)
             phases.end('preparation-result')
             input_root = prep.root/ready['receipt']['simulation_id']
             original_inputs = {f['name']:(input_root/f['name']).read_bytes() for f in ready['receipt']['files']}
@@ -305,10 +343,21 @@ async def test_actual_report_followup_history_and_disabled_exports(factory, tmp_
             native_row = native_host.store.get('owner', launch['request']['run_id'])
             phases.end('native-plan-start')
             phases.start('native-result')
-            native_receipt = await asyncio.wait_for(native.result(native_row.request, NativeWorkflowRef(**native_row.workflow)), 180)
+            native_receipt = await asyncio.wait_for(native.result(native_row.request, NativeWorkflowRef(**native_row.workflow)), remaining(180))
             assert native_receipt.outcome=='completed' and len(native_owners)==1
             launch = await asyncio.to_thread(native_host.status, native_reference(launch))
             assert launch['state']=='completed' and launch['receipt']==native_receipt.to_wire()
+            if browser_mode:
+                from nexaweave_execution.native_launch_contracts import NativeBudgetReceipt
+                with factory() as conn:
+                    capacity = prep.budget._row(conn, prep.account_id, native_row.run_id)
+                assert capacity.state.value == 'settled' and capacity.ceiling_microusd == 1
+                assert type(capacity.receipt) is NativeBudgetReceipt and capacity.receipt.native_receipt == native_receipt
+                assert capacity.receipt.operation_id == native_row.run_id
+                assert capacity.receipt.attempt_id == capacity.attempt_id
+                assert capacity.receipt.launch_sha256 == launch['launch_sha256']
+                assert capacity.receipt.fingerprint == capacity.fingerprint
+                accounted(prep, 2)
             phases.end('native-result')
             original_outputs = {name:(input_root/name).read_bytes() for platform in ('twitter','reddit')
                 for name in (platform+'_simulation.db', platform+'/actions.jsonl')}
@@ -323,7 +372,7 @@ async def test_actual_report_followup_history_and_disabled_exports(factory, tmp_
             row = reports.store.get('owner', reference['report_id'], reference['plan_sha256'])
             phases.end('report-plan-start')
             phases.start('report-result-proof')
-            await asyncio.wait_for(temporal.get_workflow_handle(row.workflow['workflow_id']).result(), 180)
+            await asyncio.wait_for(temporal.get_workflow_handle(row.workflow['workflow_id']).result(), remaining(180))
             completed = await asyncio.to_thread(reports.status, reference)
             assert completed['state']=='completed' and completed['cleanup']==dict(known=True,pending=False,owner_thread_alive=False)
             assert completed['receipt']['manifest_sha256']==digest(completed['manifest'])
@@ -349,7 +398,12 @@ async def test_actual_report_followup_history_and_disabled_exports(factory, tmp_
             assert report_capacity.receipt.attempt_id == row.attempt_id and report_capacity.receipt.plan_sha256 == completed['plan_sha256']
             assert report_capacity.fingerprint == report_capacity.receipt.fingerprint == budget_fingerprint(completed['plan_sha256'])
             assert report_capacity.episode_id == budget_episode(report_capacity.scope_group_id, row.report_id)
-            assert report_capacity.evidence_ids == () and report_capacity.ceiling_microusd == 4
+            assert report_capacity.evidence_ids == ()
+            if browser_mode:
+                assert report_capacity.ceiling_microusd == 2
+                accounted(prep, 4)
+            else:
+                assert report_capacity.ceiling_microusd == 4
             assert report_capacity.receipt.report_receipt == completed['receipt']
             assert report_capacity.receipt.report_receipt_sha256 == completed['receipt_sha256']
             assert ReportBudgetReceipt.from_wire(report_capacity.receipt.json_value()) == report_capacity.receipt
@@ -360,7 +414,10 @@ async def test_actual_report_followup_history_and_disabled_exports(factory, tmp_
             report_enabled[0]=False
             before_calls=report_log.read_bytes()
             before_budget=native_host.budget.status('owner',prep.account_id)
-            assert before_budget.accounted_ceiling_microusd==12
+            if browser_mode:
+                assert before_budget.accounted_ceiling_microusd == 4 and before_budget.cap_microusd == 12
+            else:
+                assert before_budget.accounted_ceiling_microusd==12
             assert before_budget.remaining_microusd == 8 and before_budget.actual_usage_microusd is None
             before_journal=reports.store.get('owner',reference['report_id'],reference['plan_sha256'])
             read=await asyncio.to_thread(reports.read,reference)
@@ -381,8 +438,9 @@ async def test_actual_report_followup_history_and_disabled_exports(factory, tmp_
             phases.end('report-protected-reads-exports-recovery')
 
             phases.start('followup-setup')
-            # A distinct new fixture allowance20 covers prior12 + two followup4;
-            # the accepted report fixture and all its original assertions stay unchanged.
+            # Original API fixture: allowance20 covers prior12 + two followup4.
+            # Explicit browser mode: a fresh12 account covers parent1+1+2 then4+4.
+            # Both keep actual usage unknown and preserve the original report case.
             from nexaweave_execution.followup_store import migrate as migrate_followups
             from nexaweave_execution.temporal_followup import TemporalFollowupHost
             from nexaweave_execution.followup_contracts import (FollowupError, FollowupBudgetReceipt,
@@ -409,32 +467,61 @@ async def test_actual_report_followup_history_and_disabled_exports(factory, tmp_
             stale = None
             phases.end('followup-setup')
             async with follow_temporal.worker():
+                if browser_mode:
+                    from followup_browser_fixture import FollowupBrowserSession
+                    browser_root = tmp_path / 'followup-browser'
+                    browser_root.mkdir()
+                    browser = FollowupBrowserSession(directory=browser_root, prep=prep, native_host=native_host,
+                        reports=reports, followups=followups, report_reference=reference,
+                        report_result=completed, deadline=deadline)
+                    await asyncio.to_thread(browser.__enter__)
+                    for locale in ('en', 'zh', 'ms'):
+                        proof = await asyncio.to_thread(browser.perform, 'locale', dict(locale=locale))
+                        assert proof == dict(locale=locale, lang=locale)
                 for ordinal,language in enumerate(('en','ms'),1):
                     turn_phase = 'followup-turn-1' if ordinal == 1 else 'followup-turn-2'
                     phases.start(turn_phase + '-plan-start')
                     body = dict(schema_version=1,turn_id=str(uuid4()),report_id=reference['report_id'],
                         report_plan_sha256=reference['plan_sha256'],question='Explain selected evidence 猫 😀 '+str(ordinal),
                         output_language=language,expected_history_sha256=head)
-                    turn = await asyncio.to_thread(followups.plan,body)
+                    if browser:
+                        turn = await asyncio.to_thread(browser.perform, 'followup-plan',
+                            dict(question=body['question'], output_language=language, expected_history_sha256=head))
+                        observed = browser.last_request
+                        assert observed['question'] == body['question'] and observed['output_language'] == language
+                        assert observed['report_id'] == reference['report_id']
+                        assert observed['report_plan_sha256'] == reference['plan_sha256']
+                        assert observed['expected_history_sha256'] == head
+                        body = dict(observed)
+                        assert body['turn_id'] == turn['turn_id']
+                    else:
+                        turn = await asyncio.to_thread(followups.plan,body)
                     assert turn['state']=='planned' and turn['history']['total_completed']==ordinal-1
                     if ordinal==2:
                         pair=turn['history']['pairs'][0]
                         assert pair['truncated'] and pair['admitted_characters']==4000 and pair['answer_characters']>4000
                         stale = await asyncio.to_thread(followups.plan,{**body,'turn_id':str(uuid4())})
                     identity = dict(schema_version=1,turn_id=turn['turn_id'],plan_sha256=turn['plan_sha256'])
-                    await asyncio.to_thread(followups.start,identity)
+                    if browser:
+                        await asyncio.to_thread(browser.perform, 'followup-start', identity)
+                    else:
+                        await asyncio.to_thread(followups.start,identity)
                     owned = followups.store.get('owner',identity['turn_id'],identity['plan_sha256'])
                     phases.end(turn_phase + '-plan-start')
                     phases.start(turn_phase + '-result-proof')
-                    await asyncio.wait_for(temporal.get_workflow_handle(owned.workflow['workflow_id']).result(),180)
+                    await asyncio.wait_for(temporal.get_workflow_handle(owned.workflow['workflow_id']).result(),remaining(180))
                     result = await asyncio.to_thread(followups.status,identity)
+                    if browser:
+                        observed = await asyncio.to_thread(browser.perform, 'followup-ready', identity)
+                        assert observed['receipt'] == result['receipt'] and observed['state'] == 'completed'
                     assert result['state']=='completed' and result['cleanup']==dict(known=True,pending=False,owner_thread_alive=False)
                     assert result['receipt_sha256']==digest(result['receipt'])
                     assert result['receipt']['manifest_sha256']==digest(result['manifest'])
                     assert result['receipt']['semantic_support_status']=='not_reviewed'
                     phases.end(turn_phase + '-result-proof')
                     phases.start(turn_phase + '-protected-read-publication-proof')
-                    read_turn = await asyncio.to_thread(followups.read,identity)
+                    read_turn = (await asyncio.to_thread(browser.perform, 'followup-read', identity) if browser
+                                 else await asyncio.to_thread(followups.read,identity))
                     validate_turn_read(read_turn,prep.display_graph_id,followups.scope_dto,identity,'owner')
                     assert '[[source:' in read_turn['content'] and '[[native:' in read_turn['content']
                     answer_sha = hashlib.sha256(read_turn['content'].encode()).hexdigest()
@@ -449,6 +536,19 @@ async def test_actual_report_followup_history_and_disabled_exports(factory, tmp_
                     assert reservation.ceiling_microusd==4 and reservation.attempt_id==owned.attempt_id
                     assert reservation.receipt.followup_receipt==result['receipt'] and reservation.receipt.followup_receipt_sha256==result['receipt_sha256']
                     assert FollowupBudgetReceipt.from_wire(reservation.receipt.json_value())==reservation.receipt
+                    if browser:
+                        accounted(prep, 4 + ordinal * 4)
+                        for kind in ('answer', 'conversation'):
+                            proof = await asyncio.to_thread(browser.perform, 'followup-export', {**identity, 'kind':kind})
+                            body_download = {**identity, 'kind':kind}
+                            downloaded = await asyncio.to_thread(followups.download, body_download)
+                            validate_turn_download(downloaded, body_download, result)
+                            artifact = downloaded['artifact']
+                            assert proof == dict(turn_id=identity['turn_id'], plan_sha256=identity['plan_sha256'],
+                                kind=kind, name=artifact['name'], size=artifact['size'], sha256=artifact['sha256'])
+                        history = await asyncio.to_thread(browser.perform, 'followup-history',
+                            dict(schema_version=1,report_id=reference['report_id'],report_plan_sha256=reference['plan_sha256'],before_ordinal=None))
+                        assert history['total_completed'] == ordinal and history['head_sha256'] == head
                     finished.append((identity,result,read_turn['content']))
                     phases.end(turn_phase + '-protected-read-publication-proof')
                 phases.start('followup-stale-start-refusal')
@@ -462,12 +562,30 @@ async def test_actual_report_followup_history_and_disabled_exports(factory, tmp_
             assert sum('call' in row for row in rows)==6 and sum(row.get('closed',False) for row in rows)==2
             follow_enabled[0]=False
             final_budget=native_host.budget.status('owner',prep.account_id)
-            assert final_budget.accounted_ceiling_microusd==20 and final_budget.remaining_microusd==0 and final_budget.actual_usage_microusd is None
+            if browser_mode:
+                accounted(prep, 12)
+                assert final_budget.accounted_ceiling_microusd == 12
+            else:
+                assert final_budget.accounted_ceiling_microusd==20
+            assert final_budget.remaining_microusd==0 and final_budget.actual_usage_microusd is None
             final_log=follow_log.read_bytes()
             page=await asyncio.to_thread(followups.history,dict(schema_version=1,report_id=reference['report_id'],
                 report_plan_sha256=reference['plan_sha256'],before_ordinal=None))
             assert page['total_completed']==2 and page['head_sha256']==head and [p['ordinal'] for p in page['pairs']]==[1,2]
             for identity,result,answer in finished:
+                if browser:
+                    recovered_browser = await asyncio.to_thread(browser.perform, 'followup-recover', {**identity, 'reload':True})
+                    assert recovered_browser['receipt'] == result['receipt']
+                    read_browser = await asyncio.to_thread(browser.perform, 'followup-read', identity)
+                    validate_turn_read(read_browser, prep.display_graph_id, followups.scope_dto, identity, 'owner')
+                    assert read_browser['content'] == answer
+                    assert not read_browser['turn']['authorization']['model_calls_enabled']
+                    history_browser = await asyncio.to_thread(browser.perform, 'followup-history',
+                        dict(schema_version=1, report_id=reference['report_id'],
+                            report_plan_sha256=reference['plan_sha256'], before_ordinal=None))
+                    assert history_browser == page
+                    for kind in ('answer', 'conversation'):
+                        await asyncio.to_thread(browser.perform, 'followup-export', {**identity, 'kind':kind})
                 retained=followups.store.get('owner',identity['turn_id'],identity['plan_sha256'])
                 again=await asyncio.to_thread(followups.start,identity)
                 assert again['receipt']==result['receipt']
@@ -500,9 +618,52 @@ async def test_actual_report_followup_history_and_disabled_exports(factory, tmp_
             assert report_log.read_bytes()==before_calls
             phases.end('foreign-report-read-refusal')
     finally:
-        for owner in native_owners:
-            assert await asyncio.to_thread(owner.close,20)
-        if native_row is not None:
-            local=await native.retry_cleanup(native_row.request)
-            assert not local.cleanup_pending and not local.owner_thread_alive
-        phases.observed_closed()
+        if browser_mode:
+            primary = sys.exception()
+            failures = [primary] if primary is not None else []
+            cleanup_failed = False
+            # Runner started the570-second work deadline before its child.
+            # Its existing thirty-second reserve is part of the same600 lifetime.
+            cleanup_end = deadline + 30
+            if browser is not None:
+                try:
+                    await asyncio.to_thread(browser.__exit__, type(primary) if primary else None,
+                                            primary, primary.__traceback__ if primary else None)
+                except BaseException as error:
+                    # __exit__ already preserves a work primary inside its group.
+                    failures = [error]
+                    cleanup_failed = True
+            for owner in native_owners:
+                try:
+                    seconds = min(20, max(0, cleanup_end - time.monotonic()))
+                    assert await asyncio.to_thread(owner.close, seconds)
+                    assert time.monotonic() <= cleanup_end, 'followup_browser_cleanup_deadline'
+                except BaseException as error:
+                    failures.append(error)
+                    cleanup_failed = True
+            if native_row is not None:
+                try:
+                    seconds = cleanup_end - time.monotonic()
+                    assert seconds > 0, 'followup_browser_cleanup_deadline'
+                    local = await asyncio.wait_for(native.retry_cleanup(native_row.request), seconds)
+                    assert not local.cleanup_pending and not local.owner_thread_alive
+                except BaseException as error:
+                    failures.append(error)
+                    cleanup_failed = True
+            if not cleanup_failed:
+                phases.observed_closed()
+            if cleanup_failed:
+                raise BaseExceptionGroup('followup_browser_work_and_owned_cleanup', failures) from None
+        else:
+            for owner in native_owners:
+                assert await asyncio.to_thread(owner.close,20)
+            if native_row is not None:
+                local=await native.retry_cleanup(native_row.request)
+                assert not local.cleanup_pending and not local.owner_thread_alive
+            phases.observed_closed()
+    if browser_mode:
+        assert browser is not None
+        _followup_browser_completed = True
+        print(json.dumps(dict(followup_browser_account=12, declared_ceilings=[1,1,2,4,4],
+            actual_usage_microusd=None, actual_graph_journey=False, completed_turns=2,
+            browser_cleanup_complete=True), sort_keys=True))
