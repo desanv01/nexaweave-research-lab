@@ -16,8 +16,9 @@ import subprocess
 import sys
 import pytest
 
+from app.services.native_checkpoint_memory import capture_native_memory, restore_native_memory
 from app.services.native_simulation import NativeSimulationSession
-from app.services.native_recording_contracts import RecordingAnchors
+from app.services.native_recording_contracts import MAX_JSON, RecordingAnchors, RecordingError
 from app.services.native_recordings import capture_recording, NativeRecording
 from test_native_prepared_workflow import _prepared, _offline_model
 
@@ -108,6 +109,67 @@ def _cli(bundle, revision, anchors, requests, cwd):
     return completed.returncode, [json.loads(line) for line in completed.stdout.splitlines()]
 
 
+def _assert_native_memory_component(agents):
+    for agent in agents:
+        memory = agent.memory
+        original = memory._chat_history_block.storage.load()
+        if any(row["message"]["__class__"] == "FunctionCallingMessage" for row in original):
+            break
+    else:
+        raise AssertionError("the native model did not record a tool message")
+
+    agent_id = memory.agent_id
+    creator = memory.get_context_creator()
+    context = memory.get_context()
+    raw = capture_native_memory(memory, expected_agent_id=agent_id)
+    restored = restore_native_memory(raw, expected_agent_id=agent_id, context_creator=creator)
+    assert restored is not memory
+    records = restored._chat_history_block.storage.load()
+    # The JSON comparison also checks nested key order used in tool arguments.
+    assert json.dumps(records, ensure_ascii=False) == json.dumps(original, ensure_ascii=False)
+    assert restored.get_context() == context
+
+    restored._window_size = 1
+    assert len(restored.retrieve()) < len(original)
+    windowed_raw = capture_native_memory(restored, expected_agent_id=agent_id)
+    windowed = restore_native_memory(windowed_raw, expected_agent_id=agent_id, context_creator=creator)
+    assert windowed._window_size == 1
+    assert windowed._chat_history_block.storage.load() == original
+    assert [row.memory_record.uuid for row in windowed.retrieve()] == [
+        row.memory_record.uuid for row in restored.retrieve()
+    ]
+
+    with pytest.raises(RecordingError, match="^invalid_recording$"):
+        restore_native_memory(raw, expected_agent_id=agent_id + "-wrong", context_creator=creator)
+    malformed = json.loads(raw)
+    malformed["records"][-1]["uuid"] = "invalid-uuid"
+    with pytest.raises(RecordingError, match="^invalid_recording$"):
+        restore_native_memory(json.dumps(malformed).encode("utf-8"),
+                              expected_agent_id=agent_id, context_creator=creator)
+    malformed = json.loads(raw)
+    tool_call = next(row["message"] for row in malformed["records"]
+                     if row["role_at_backend"] == "assistant"
+                     and row["message"]["__class__"] == "FunctionCallingMessage")
+    tool_call["args"] = ["a list is not a tool argument object"]
+    with pytest.raises(RecordingError, match="^invalid_recording$"):
+        restore_native_memory(json.dumps(malformed).encode("utf-8"),
+                              expected_agent_id=agent_id, context_creator=creator)
+
+    # Each string is admissible alone, but their combined size plus the
+    # envelope is over the budget. Only the detached copy is changed.
+    history = windowed._chat_history_block.storage.memory_list
+    large_content = "x" * (MAX_JSON // 2)
+    history[0]["message"]["content"] = large_content
+    history[1]["message"]["content"] = large_content
+    with pytest.raises(RecordingError, match="^limit_exceeded$"):
+        capture_native_memory(windowed, expected_agent_id=agent_id)
+    windowed.clear()
+    assert windowed._chat_history_block.storage.load() == []
+    assert restored._chat_history_block.storage.load() == original
+    assert memory._chat_history_block.storage.load() == original
+    assert memory.get_context() == context
+
+
 def test_actual_native_closed_recording_fresh_process_metrics_and_parent_preservation(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     root = _prepared(tmp_path)
@@ -116,6 +178,8 @@ def test_actual_native_closed_recording_fresh_process_metrics_and_parent_preserv
         models={"twitter": model, "reddit": model}, seed=7, max_rounds=1)
     with session:
         assert set(session._results) == {"twitter", "reddit"}
+        agents = session._results["twitter"].agent_graph.get_agents()
+        _assert_native_memory_component(agent for _, agent in agents)
     assert session._closed and session._results == {}
     before = _hashes(root)
     events = {p: [json.loads(line) for line in (root / p / "actions.jsonl").read_text(
