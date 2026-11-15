@@ -282,15 +282,15 @@
     {
       "imported_path": "frontend/package-lock.json",
       "original_sha256": "a4a188daf04a442b8e23c3291d9062b4e00faa5ff49503db759c85e67c4037be",
-      "current_sha256": "05f3dc71367d93b8923f16990208af2f708c5ba74a9b61dcc95276e9aca25ecf",
-      "reason": "Main locks renderer/test dependency closure and updates PostCSS/nanoid within existing ranges to address current advisories; adds exact dependencyless playwright-core 1.64.1 for the real research browser journey. Uses the pinned official Chrome 156 stable runtime and supported Chrome channel for the matched browser check.",
+      "current_sha256": "c96e34f6f35eb96758b8f6004d00595f0585ab07236c364038f58b356f19bbfc",
+      "reason": "Main locks renderer/test dependency closure and updates PostCSS/nanoid within existing ranges to address current advisories; adds exact dependencyless playwright-core 1.64.1 for the real research browser journey. Uses the pinned official Chrome 156 stable runtime and supported Chrome channel for the matched browser check. Pins DOMPurify 3.4.17 for the reviewed sanitizer security update.",
       "phase": "U07i"
     },
     {
       "imported_path": "frontend/package.json",
       "original_sha256": "f972113d3cca752acc44f7e63d97fec138b2a34388b173f85f847bf7108fe852",
-      "current_sha256": "9661423ec1f3036b2b3097d42c50db39f6028bc10b4dd8e864eba4b1c5cdeef7",
-      "reason": "Main pins Markdown-it/DOMPurify runtime and jsdom test dependency; adds node:test script without changing frontend framework versions, plus exact playwright-core 1.64.1 and the real research browser driver command. Uses the pinned official Chrome 156 stable runtime and supported Chrome channel for the matched browser check.",
+      "current_sha256": "6ceb523560477863bfd00937691c3cc76e6ac43b85e9f95f8bdfb673ae9f5a67",
+      "reason": "Main pins Markdown-it/DOMPurify runtime and jsdom test dependency; adds node:test script without changing frontend framework versions, plus exact playwright-core 1.64.1 and the real research browser driver command. Uses the pinned official Chrome 156 stable runtime and supported Chrome channel for the matched browser check. Pins DOMPurify 3.4.17 for the reviewed sanitizer security update.",
       "phase": "U07i"
     },
     {
