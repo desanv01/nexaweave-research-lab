@@ -316,7 +316,7 @@ async function history(payload) {
   await english()
   await exchange(followupRoute('history'), 'POST', () => click(scope().locator('.history .actions button').first()), 262272, payload)
   await idle()
-  const head = (await boundedText(scope().locator('.history .mono'), 256)).trim().match(/[0-9a-f]{64}$/)?.[0]
+  const head = (await boundedText(scope().locator('.history > p.mono'), 256)).trim().match(/[0-9a-f]{64}$/)?.[0]
   digest(head)
   const totalText = await boundedText(scope().locator('.history > p').first(), 256)
   const total = Number(totalText.match(/:\s*(\d+)\s*$/)?.[1]); integer(total, 1000)
