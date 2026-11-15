@@ -1,6 +1,5 @@
 """Owned offline follow-up UI session; Main alone admits actual evaluation."""
 from collections import deque
-from dataclasses import replace
 import asyncio
 import base64
 import hashlib
@@ -154,6 +153,8 @@ class FollowupBrowserSession:
 
     def _app(self):
         from app import Config, create_app
+        from app.services.knowledge_read_facade import ReadHostSettings
+        from psycopg.conninfo import conninfo_to_dict
         from app.services.knowledge_source_facade import KnowledgeSourceFacade
         from app.services.knowledge_ingestion_facade import KnowledgeIngestionFacade
         from app.services.knowledge_preparation_facade import KnowledgePreparationFacade
@@ -182,12 +183,61 @@ class FollowupBrowserSession:
             NEXAWEAVE_APP_MODE = MIROFISH_APP_MODE = 'research_local'
             NEXAWEAVE_ALLOWED_ORIGINS = MIROFISH_ALLOWED_ORIGINS = (ORIGIN,)
 
-        values = dict(self.settings.child_environment, KNOWLEDGE_PYTHON=self.settings.python,
-            KNOWLEDGE_BOOTSTRAP_SCRIPT=self.settings.bootstrap, KNOWLEDGE_READ_TOKEN=self.token,
+        # Synthetic prep.settings deliberately contains placeholder child paths.
+        # Build the independent HTTP boundary from the explicitly qualified KG
+        # runtime and these same owned stores; never mutate frozen host settings.
+        python = os.environ['KNOWLEDGE_PYTHON']
+        kg_root = ROOT / 'services/knowledge/.venv'
+        require(python == str(kg_root / 'bin/python')
+                and Path(python).is_file() and os.access(python, os.X_OK),
+                'followup_browser_knowledge_runtime_refused')
+        # Preserve the venv interpreter symlink path: resolve() selects the base
+        # interpreter and would lose this locked installed KG environment.
+        bootstrap = os.environ['KNOWLEDGE_BOOTSTRAP_SCRIPT']
+        script = Path(bootstrap)
+        require(script.is_absolute() and script.is_relative_to(kg_root)
+                and script.name == 'read_bootstrap.py'
+                and script.parent.name == 'nexaweave_knowledge'
+                and 'site-packages' in script.parts,
+                'followup_browser_knowledge_bootstrap_refused')
+        for name in ('read_bootstrap.py', 'source_bootstrap.py',
+                     'source_ingestion_bootstrap.py', 'read_session_bootstrap.py'):
+            sibling = script.with_name(name)
+            require(sibling.is_file() and not sibling.is_symlink(),
+                    'followup_browser_knowledge_bootstrap_refused')
+        pg = conninfo_to_dict(os.environ['PROJECT_STORE_POSTGRES_TEST_DSN'])
+        require(set(pg) <= {'host', 'port', 'dbname', 'user', 'password', 'connect_timeout'}
+                and all(pg.get(key) == value for key, value in {
+                    'host': '127.0.0.1', 'port': '15432',
+                    'dbname': 'mirofish_operations_test', 'user': 'mirofish_fixture'}.items())
+                and type(pg.get('password')) is str and bool(pg['password'])
+                and pg.get('connect_timeout', '5') == '5',
+                'followup_browser_owned_postgres_refused')
+        child = dict(KNOWLEDGE_PRINCIPAL=self.prep.settings.principal,
+            KNOWLEDGE_DISPLAY_GRAPH_ID=self.prep.settings.display_graph_id,
+            KNOWLEDGE_BOUND_SCOPE_JSON=encoded(self.prep.settings.scope).decode('utf-8'),
+            KNOWLEDGE_PG_HOST=pg['host'], KNOWLEDGE_PG_PORT=pg['port'],
+            KNOWLEDGE_PG_DATABASE=pg['dbname'], KNOWLEDGE_PG_USER=pg['user'],
+            KNOWLEDGE_PG_PASSWORD=pg['password'], KNOWLEDGE_NEO4J_URI='bolt://127.0.0.1:17687',
+            KNOWLEDGE_NEO4J_USER='neo4j', KNOWLEDGE_NEO4J_PASSWORD=os.environ['KNOWLEDGE_TEST_PASSWORD'])
+        values = dict(child, KNOWLEDGE_PYTHON=python,
+            KNOWLEDGE_BOOTSTRAP_SCRIPT=bootstrap, KNOWLEDGE_READ_TOKEN=self.token,
             FLASK_HOST='127.0.0.1', FLASK_DEBUG='0')
         previous = {key: os.environ.get(key) for key in values}
         try:
             os.environ.update(values)
+            self.settings = ReadHostSettings.from_config(BrowserConfig)
+            # The validator reserializes scope. Check its meaning separately
+            # while retaining exact equality for the complete child mapping.
+            expected_child = dict(child, KNOWLEDGE_BOUND_SCOPE_JSON=
+                self.settings.child_environment['KNOWLEDGE_BOUND_SCOPE_JSON'])
+            require(self.settings.python == python and self.settings.bootstrap == bootstrap
+                    and self.settings.token == self.token
+                    and self.settings.principal == self.prep.settings.principal
+                    and self.settings.display_graph_id == self.prep.settings.display_graph_id
+                    and self.settings.scope == self.prep.settings.scope
+                    and self.settings.child_environment == expected_child,
+                    'followup_browser_http_settings_refused')
             app = create_app(BrowserConfig, read_facade=self.prep.reader,
                 source_facade=KnowledgeSourceFacade(self.settings),
                 ingestion_facade=KnowledgeIngestionFacade(self.settings, environment={
@@ -431,7 +481,6 @@ class FollowupBrowserSession:
             require(self.prep.account_id == self.native_host.account_id == self.reports.account_id
                     == self.followups.account_id and self.followups.parent is self.reports)
             self.token = secrets.token_hex(32)
-            self.settings = replace(self.prep.settings, token=self.token)
             self.node = Path(os.environ['NEXAWEAVE_RESEARCH_BROWSER_NODE'])
             self.chrome_executable = Path(os.environ['NEXAWEAVE_RESEARCH_BROWSER_CHROME'])
             require(all(path.is_absolute() and path.is_file() and os.access(path, os.X_OK)

@@ -220,6 +220,34 @@ def main() -> int:
         env.update(HF_HUB_OFFLINE='1', TRANSFORMERS_OFFLINE='1', HF_HUB_DISABLE_TELEMETRY='1',
                    DO_NOT_TRACK='1', MIROFISH_NATIVE_TEST_OFFLINE='1', MIROFISH_REPORT_TEST_OFFLINE='1')
         if args.browser_journey:
+            knowledge_prefix = ROOT / 'services/knowledge/.venv'
+            knowledge_python = Path(os.environ.get('KNOWLEDGE_PYTHON', ''))
+            bootstrap = Path(os.environ.get('KNOWLEDGE_BOOTSTRAP_SCRIPT', ''))
+            # Preserve the locked KG venv path, including its interpreter symlink;
+            # resolving it would select the base runtime instead of this venv.
+            if (knowledge_python != knowledge_prefix / 'bin/python'
+                    or knowledge_python == Path(sys.executable).absolute()
+                    or not knowledge_python.is_file() or not os.access(knowledge_python, os.X_OK)
+                    or not bootstrap.is_absolute() or not bootstrap.is_relative_to(knowledge_prefix)
+                    or 'site-packages' not in bootstrap.parts
+                    or bootstrap.parent.name != 'nexaweave_knowledge'
+                    or bootstrap.name != 'read_bootstrap.py'
+                    or not bootstrap.is_file() or bootstrap.is_symlink()
+                    or bootstrap.resolve(strict=True) != bootstrap
+                    or not bootstrap.is_relative_to(knowledge_prefix.resolve(strict=True))
+                    or any(not bootstrap.with_name(name).is_file()
+                           or bootstrap.with_name(name).is_symlink()
+                           or bootstrap.with_name(name).resolve(strict=True) != bootstrap.with_name(name)
+                           or not bootstrap.with_name(name).is_relative_to(knowledge_prefix.resolve(strict=True)) for name in
+                           ('source_bootstrap.py', 'source_ingestion_bootstrap.py', 'read_session_bootstrap.py'))):
+                parser.error('explicit installed locked knowledge runtime required for followup browser')
+            neo_password = os.environ.get('KNOWLEDGE_TEST_PASSWORD', '')
+            if (not neo_password or len(neo_password) > 128
+                    or neo_password.lower() in {'password', 'neo4j', 'test', 'changeme'}
+                    or any(not 33 <= ord(char) <= 126 for char in neo_password)):
+                parser.error('explicit disposable Neo4j credential required for followup browser')
+            env.update(KNOWLEDGE_PYTHON=str(knowledge_python),
+                       KNOWLEDGE_BOOTSTRAP_SCRIPT=str(bootstrap), KNOWLEDGE_TEST_PASSWORD=neo_password)
             for key in ('NEXAWEAVE_RESEARCH_BROWSER_NODE', 'NEXAWEAVE_RESEARCH_BROWSER_CHROME'):
                 raw = os.environ.get(key, '')
                 path = Path(raw)
