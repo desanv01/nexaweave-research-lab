@@ -15,6 +15,7 @@ import socket
 import subprocess
 import sys
 import pytest
+from camel.types import OpenAIBackendRole
 
 from app.services.native_checkpoint_memory import capture_native_memory, restore_native_memory
 from app.services.native_simulation import NativeSimulationSession
@@ -109,6 +110,12 @@ def _cli(bundle, revision, anchors, requests, cwd):
     return completed.returncode, [json.loads(line) for line in completed.stdout.splitlines()]
 
 
+def _role_name_for_ordered_comparison(value):
+    if value is OpenAIBackendRole.SYSTEM:
+        return {"observed_enum": "OpenAIBackendRole.SYSTEM"}
+    raise TypeError
+
+
 def _assert_native_memory_component(agents):
     for agent in agents:
         memory = agent.memory
@@ -125,8 +132,21 @@ def _assert_native_memory_component(agents):
     restored = restore_native_memory(raw, expected_agent_id=agent_id, context_creator=creator)
     assert restored is not memory
     records = restored._chat_history_block.storage.load()
-    # The JSON comparison also checks nested key order used in tool arguments.
-    assert json.dumps(records, ensure_ascii=False) == json.dumps(original, ensure_ascii=False)
+    # The independent JSON comparison preserves nested key order and keeps
+    # the actual system enum distinct from a normal string role name.
+    assert json.dumps(records, ensure_ascii=False, default=_role_name_for_ordered_comparison) == (
+        json.dumps(original, ensure_ascii=False, default=_role_name_for_ordered_comparison)
+    )
+    original_names = [record["message"]["role_name"] for record in original]
+    restored_names = [record["message"]["role_name"] for record in records]
+    enum_index = original_names.index(OpenAIBackendRole.SYSTEM)
+    assert any(type(name) is str for name in original_names)
+    for expected, actual in zip(original_names, restored_names, strict=True):
+        assert type(actual) is type(expected)
+        if expected is OpenAIBackendRole.SYSTEM:
+            assert actual is OpenAIBackendRole.SYSTEM
+        else:
+            assert actual == expected
     assert restored.get_context() == context
 
     restored._window_size = 1
@@ -153,6 +173,20 @@ def _assert_native_memory_component(agents):
     tool_call["args"] = ["a list is not a tool argument object"]
     with pytest.raises(RecordingError, match="^invalid_recording$"):
         restore_native_memory(json.dumps(malformed).encode("utf-8"),
+                              expected_agent_id=agent_id, context_creator=creator)
+
+    alternate_role_name = json.loads(raw)
+    message = alternate_role_name["records"][enum_index]["message"]
+    message["role_name"] = "system"
+    string_memory = restore_native_memory(json.dumps(alternate_role_name).encode("utf-8"),
+                                          expected_agent_id=agent_id, context_creator=creator)
+    string_records = string_memory._chat_history_block.storage.load()
+    assert type(string_records[enum_index]["message"]["role_name"]) is str
+    assert string_records[enum_index]["message"]["role_name"] == "system"
+
+    message["role_name"] = {"unknown_tag": "system"}
+    with pytest.raises(RecordingError, match="^invalid_recording$"):
+        restore_native_memory(json.dumps(alternate_role_name).encode("utf-8"),
                               expected_agent_id=agent_id, context_creator=creator)
 
     # Each string is admissible alone, but their combined size plus the

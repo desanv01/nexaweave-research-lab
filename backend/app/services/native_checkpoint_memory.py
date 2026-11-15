@@ -9,7 +9,7 @@ import math
 from camel.memories import ChatHistoryMemory, MemoryRecord, ScoreBasedContextCreator
 from camel.memories.blocks.chat_history_block import ChatHistoryBlock
 from camel.storages.key_value_storages.in_memory import InMemoryKeyValueStorage
-from camel.types import RoleType
+from camel.types import OpenAIBackendRole, RoleType
 
 from .native_recording_contracts import (
     IDENTIFIER,
@@ -28,6 +28,8 @@ _FUNCTION_FIELDS = {"func_name", "args", "result", "tool_call_id", "mask_output"
 _DETAIL_LEVELS = ("auto", "low", "high")
 _MAX_DEPTH = 16
 _MAX_NODES = 100000
+_ROLE_NAME_PATH = ("records", None, "message", "role_name")
+_SYSTEM_ROLE_NAME_TAG = {"$camel_role_name": "system"}
 
 
 def _check_owner(agent_id):
@@ -50,11 +52,18 @@ def _charge_bytes(budget, minimum):
         raise RecordingError("limit_exceeded")
 
 
-def _preflight_tree(value, budget, depth=0):
+def _preflight_tree(value, budget, path=()):
     """Reject impossible live payloads before UTF-8 work or copying."""
     budget[1] -= 1
-    if budget[1] < 0 or depth > _MAX_DEPTH:
+    if budget[1] < 0 or len(path) > _MAX_DEPTH:
         raise RecordingError("limit_exceeded")
+
+    if path == _ROLE_NAME_PATH:
+        # OASIS stores a real enum in this slot for data-driven system history.
+        if value is OpenAIBackendRole.SYSTEM:
+            value = _SYSTEM_ROLE_NAME_TAG
+        elif type(value) is not str:
+            raise RecordingError()
 
     kind = type(value)
     if kind is str:
@@ -75,23 +84,33 @@ def _preflight_tree(value, budget, depth=0):
     elif kind is list:
         _charge_bytes(budget, 2 + max(0, len(value) - 1))
         for item in value:
-            _preflight_tree(item, budget, depth + 1)
+            _preflight_tree(item, budget, path + (None,))
     elif kind is dict:
         _charge_bytes(budget, 2 + len(value) + max(0, len(value) - 1))
         for key, item in value.items():
             if type(key) is not str or len(key) > 256:
                 raise RecordingError()
             _charge_bytes(budget, len(key) + 2)
-            _preflight_tree(item, budget, depth + 1)
+            _preflight_tree(item, budget, path + (key,))
     else:
         raise RecordingError()
+
+
+def _encode_system_role_name(value):
+    # Preflight admits this value only in records[*].message.role_name.
+    if value is OpenAIBackendRole.SYSTEM:
+        return _SYSTEM_ROLE_NAME_TAG
+    raise TypeError
 
 
 def _encode_payload(payload):
     try:
         _preflight_tree(payload, [MAX_JSON, _MAX_NODES])
         encoded = bytearray()
-        encoder = json.JSONEncoder(ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+        encoder = json.JSONEncoder(
+            ensure_ascii=False, allow_nan=False, separators=(",", ":"),
+            default=_encode_system_role_name,
+        )
         for chunk in encoder.iterencode(payload):
             remaining = MAX_JSON - len(encoded)
             if len(chunk) > remaining:
@@ -146,14 +165,20 @@ def _check_function_message(message, backend_role):
         raise RecordingError()
 
 
-def _check_message(message, backend_role):
+def _decode_message(message, backend_role):
     if (type(message) is not dict or not _MESSAGE_FIELDS <= message.keys()
-            or not _nonempty_string(message["role_name"])
             or type(message["role_type"]) is not str or type(message["content"]) is not str
             or any(message.get(key) is not None for key in ("image_list", "video_bytes", "parsed"))
             or any(message.get(key, "auto") not in _DETAIL_LEVELS
                    for key in ("image_detail", "video_detail"))):
         raise RecordingError()
+    role_name = message["role_name"]
+    if (type(role_name) is dict and role_name == _SYSTEM_ROLE_NAME_TAG
+            and message["__class__"] == "BaseMessage" and backend_role == "system"):
+        message["role_name"] = OpenAIBackendRole.SYSTEM
+    elif not _nonempty_string(role_name):
+        raise RecordingError()
+
     try:
         RoleType(message["role_type"])
     except ValueError:
@@ -185,7 +210,7 @@ def _check_record(record, agent_id):
             or any(type(value) is not str for value in record["extra_info"].values())):
         raise RecordingError()
 
-    _check_message(record["message"], record["role_at_backend"])
+    _decode_message(record["message"], record["role_at_backend"])
     # Run the real codec as a second guard on a copy of the validated subset.
     try:
         MemoryRecord.from_dict(deepcopy(record)).to_openai_message()
