@@ -59,10 +59,13 @@ def test_prior_application_upgrade_and_failed_sql3_are_atomic(factory, monkeypat
                     migrate(conn)
                 monkeypatch.setattr(store_module, '_catalog', original_catalog)
                 assert conn.execute("SELECT to_regclass('mf_app.research_imports')").fetchone()[0] is None
+                assert conn.execute("SELECT to_regclass('mf_app.source_binaries')").fetchone()[0] is None
                 assert conn.execute('SELECT version FROM mf_app.schema_migrations ORDER BY version').fetchall() == [(v,) for v in range(1, start_version + 1)]
                 migrate(conn)
                 migrate(conn)
-                assert conn.execute('SELECT version FROM mf_app.schema_migrations ORDER BY version').fetchall() == [(1,), (2,), (3,)]
+                assert conn.execute('SELECT version FROM mf_app.schema_migrations ORDER BY version').fetchall() == [(1,), (2,), (3,), (4,)]
+                assert conn.execute("SELECT to_regclass('mf_app.source_binaries')").fetchone()[0] is not None
+                assert conn.execute('SELECT count(*) FROM mf_app.source_binaries').fetchone()[0] == 0
                 assert conn.execute('SELECT * FROM mf_app.projects WHERE project_id=%s', (project,)).fetchone() == original_project
                 assert conn.execute('SELECT * FROM mf_app.project_revisions WHERE project_id=%s', (project,)).fetchone() == original_revision
                 if start_version == 2:

@@ -16,7 +16,13 @@ webcrypto.subtle.digest = (...args) => {
 }
 const dom = new JSDOM('<!doctype html><html><body></body></html>', { url: 'http://127.0.0.1:5173/research' })
 for (const name of ['window', 'document', 'Element', 'HTMLElement', 'SVGElement', 'Node']) globalThis[name] = name === 'window' ? dom.window : dom.window[name]
+globalThis.localStorage = dom.window.localStorage
 const { createApp, nextTick, h, reactive } = await import('vue')
+const localeFiles = Object.fromEntries(['en', 'zh', 'ms'].map(key => [`../../../locales/${key}.json`, { default: JSON.parse(readFileSync(new URL(`../../locales/${key}.json`, import.meta.url), 'utf8')) }]))
+let localeSource = readFileSync(new URL('../src/i18n/index.js', import.meta.url), 'utf8')
+localeSource = localeSource.replace(/import languages from [^\n]+/, `const languages = ${readFileSync(new URL('../../locales/languages.json', import.meta.url), 'utf8')}`)
+localeSource = localeSource.replace(/import\.meta\.glob\([^\n]+\)/, JSON.stringify(localeFiles)).replace(/from (['"])(vue|vue-i18n)\1/g, (_m, _q, name) => `from ${JSON.stringify(import.meta.resolve(name))}`)
+const localeUrl = `data:text/javascript;base64,${Buffer.from(localeSource).toString('base64')}`, sharedLocale = await import(localeUrl)
 async function compile(path, replacements = {}) {
   const file = new URL(path, import.meta.url), { descriptor } = parse(readFileSync(file, 'utf8'), { filename: file.pathname })
   const compiled = compileScript(descriptor, { id: path, inlineTemplate: true, genDefaultAs: '__component' })
@@ -35,10 +41,13 @@ const preparation = await compile('../src/components/workbench/SimulationPrepara
 const nativeLaunch = await compile('../src/components/workbench/NativeLaunch.vue')
 const nativeObservations = await compile('../src/components/workbench/NativeObservations.vue')
 const connectedReports = await compile('../src/components/workbench/ConnectedReports.vue')
-const route = await compile('../src/views/ResearchWorkbench.vue', { '../components/workbench/SourceLibrary.vue': sources.url, '../components/workbench/EvidenceResults.vue': evidence.url, '../components/workbench/SourceIngestion.vue': ingestion.url, '../components/workbench/ExperimentComparison.vue': experiments.url, '../components/workbench/PopulationWorkbench.vue': population.url, '../components/workbench/SimulationPreparation.vue': preparation.url, '../components/workbench/NativeLaunch.vue': nativeLaunch.url, '../components/workbench/NativeObservations.vue': nativeObservations.url, '../components/workbench/ConnectedReports.vue': connectedReports.url })
+const connectedFollowup = await compile('../src/components/workbench/ConnectedFollowup.vue')
+const route = await compile('../src/views/ResearchWorkbench.vue', { '../i18n/index.js': localeUrl, '../components/workbench/SourceLibrary.vue': sources.url, '../components/workbench/EvidenceResults.vue': evidence.url, '../components/workbench/SourceIngestion.vue': ingestion.url, '../components/workbench/ExperimentComparison.vue': experiments.url, '../components/workbench/PopulationWorkbench.vue': population.url, '../components/workbench/SimulationPreparation.vue': preparation.url, '../components/workbench/NativeLaunch.vue': nativeLaunch.url, '../components/workbench/NativeObservations.vue': nativeObservations.url, '../components/workbench/ConnectedReports.vue': connectedReports.url, '../components/workbench/ConnectedFollowup.vue': connectedFollowup.url })
 function mount(component, initial = {}) {
+  if (component === route.component) sharedLocale.setUiLocale('en')
   const props = reactive(initial), root = document.createElement('div'); document.body.append(root)
   const app = createApp({ setup: () => () => h(component, props) })
+  app.use(sharedLocale.default)
   app.component('RouterLink', { props: ['to'], setup: (p, { slots }) => () => h('a', { href: p.to }, slots.default?.()) })
   app.mount(root)
   return { root, props, cleanup() { app.unmount(); root.remove() } }
@@ -94,6 +103,19 @@ test('EN/ZH/MS source keys are complete; initial empty/loading/window states are
     assert.ok(button(mounted.root, copyFor('ms').sources.load).disabled)
   } finally { mounted.cleanup() }
 })
+
+test('original-PDF controls are explicit and localized without replacing V1 retain', async () => {
+  const mounted = mount(sources.component, { connected: true, resetVersion: 0, locale: 'en', methods: {} })
+  try {
+    assert.ok(mounted.root.textContent.includes(cp.originalTitle))
+    assert.ok(button(mounted.root, cp.originalLookup).disabled)
+    for (const locale of ['zh', 'ms']) {
+      mounted.props.locale = locale; await settle()
+      assert.ok(mounted.root.textContent.includes(copyFor(locale).sources.originalNotice))
+    }
+    assert.ok(mounted.root.querySelector('.source-form button[type="submit"]'))
+  } finally { mounted.cleanup() }
+})
 test('actual source inspection uses literal text, stored declaration order and codepoint excerpts with focus return', async () => {
   const data = await item(); let requests = []
   const mounted = mount(sources.component, { connected: true, resetVersion: 0, locale: 'en', methods: { list: async () => library([data.source]), get: async p => { requests.push(p); return data } } })
@@ -102,6 +124,8 @@ test('actual source inspection uses literal text, stored declaration order and c
     mounted.root.querySelector('.source-list button').click(); await settle()
     assert.deepEqual(requests, [{ source_revision: revision, project_id: project }])
     assert.equal(document.activeElement.id, 'source-inspector')
+    assert.ok(mounted.root.querySelector('.source-inspector .notice').textContent.includes(cp.v1ViewNotice))
+    assert.ok(!mounted.root.querySelector('.source-inspector .notice').textContent.includes(cp.flags))
     assert.equal(mounted.root.querySelector('.exact-text').textContent, data.text)
     const passageButtons = [...mounted.root.querySelectorAll('.source-inspector ol button')]
     assert.ok(passageButtons[0].textContent.startsWith('2–12')); assert.ok(passageButtons[1].textContent.startsWith('0–8'))

@@ -28,7 +28,9 @@ function producerAscii(value) {
   return result
 }
 function producerPlanSha(value) {
-  return createHash('sha256').update(producerAscii({ schema_version: value.schema_version, display_graph_id: value.display_graph_id, scope: value.scope, project_revision: value.project_revision, operation_id: value.operation_id, source: value.source, options: value.options, actors: value.actors, projection_sha256: value.projection_sha256 }), 'ascii').digest('hex')
+  const identity = { schema_version: value.schema_version, display_graph_id: value.display_graph_id, scope: value.scope, project_revision: value.project_revision, operation_id: value.operation_id, source: value.source, options: value.options, actors: value.actors, projection_sha256: value.projection_sha256 }
+  if (value.schema_version === 2) identity.sources = value.sources
+  return createHash('sha256').update(producerAscii(identity), 'ascii').digest('hex')
 }
 function planned(payload) {
   const value = { schema_version: 1, display_graph_id: 'graph_1', scope: { schema_version: 1, workspace_id: uid(1), project_id: uid(2), graph_id: uid(3), run_id: null, branch_id: null, layer: 'source' }, project_revision: 1, operation_id: payload.operation_id, source: { source_revision: source.source_revision, source_name: source.source_name, source_sha256: hash }, options: clone(payload.options), actors: [{ source_entity_uuid: uid(7), name: hostile, labels: ['Person'] }], projection_sha256: hash, plan_sha256: null, state: 'planned', progress: { stage: 'planned', completed: 0, total: 100 }, error_code: null, authorization: { model_calls_enabled: true, ceiling_microusd: '12345' }, receipt: null, graph_snapshot_atomic: false, model_calls_started: false, simulation_executed: false }
@@ -49,6 +51,112 @@ async function settle() { for (let i = 0; i < 20; i++) { await new Promise(resol
 function input(root, selector, value) { const node = root.querySelector(selector); node.value = value; node.dispatchEvent(new dom.window.Event('input', { bubbles: true })) }
 function submit(root) { root.querySelector('form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true })) }
 function begin(root) { input(root, '#preparation-requirement', 'Study responses 中😀'); submit(root) }
+
+const catalog = () => [source, ...[31, 32].map(n => ({ ...source, source_revision: uid(n), source_name: `Document ${n} <literal> 中😀` }))].map(clone)
+function checked(root, revision) {
+  const field = [...root.querySelectorAll('.preparation-source-checkbox')].find(node => node.value === revision)
+  assert.ok(field); field.checked = !field.checked; field.dispatchEvent(new dom.window.Event('change', { bubbles: true }))
+}
+function multiplePlan(payload, sources) {
+  const value = planned(payload); value.schema_version = 2
+  value.sources = sources.map(s => ({ source_revision: s.source_revision, source_name: s.source_name, source_sha256: s.text_sha256 }))
+  value.plan_sha256 = producerPlanSha(value); return value
+}
+
+test('preparation explicitly selects same-project documents in catalog order and retains V1 default', async () => {
+  const calls = [], selectedCatalog = [...catalog(), clone(catalog()[1]), { ...source, source_revision: uid(99), project_id: uid(99) }]
+  const m = mount({ sourceCatalog: selectedCatalog, methods: { plan: async (p, s) => {
+    calls.push({ payload: clone(p), sources: clone(s) }); return p.schema_version === 2 ? multiplePlan(p, s) : planned(p)
+  } } })
+  try {
+    assert.deepEqual([...m.root.querySelectorAll('.preparation-source-checkbox')].map(n => n.value), [uid(31), uid(32)])
+    assert.ok([...m.root.querySelectorAll('.preparation-source-checkbox')].every(n => !n.checked && n.closest('label')))
+    assert.equal(calls.length, 0); begin(m.root); await settle()
+    assert.equal(calls[0].payload.schema_version, 1); assert.equal(Array.isArray(calls[0].sources), false)
+    // Separate user events let Vue refresh each checkbox's array-model binding.
+    checked(m.root, uid(32)); await nextTick()
+    assert.deepEqual([...m.root.querySelectorAll('.preparation-source-checkbox')].filter(n => n.checked).map(n => n.value), [uid(32)])
+    checked(m.root, uid(31)); await nextTick()
+    assert.deepEqual([...m.root.querySelectorAll('.preparation-source-checkbox')].filter(n => n.checked).map(n => n.value), [uid(31), uid(32)])
+    await settle(); assert.equal(m.root.querySelector('.start'), null); assert.equal(calls.length, 1)
+    begin(m.root); await settle()
+    assert.deepEqual(calls[1].payload.source_revisions, [uid(5), uid(31), uid(32)])
+    assert.deepEqual(calls[1].sources, catalog())
+    assert.deepEqual([...m.root.querySelectorAll('.frozen-sources li strong')].map(n => n.textContent), catalog().map(s => s.source_name))
+    assert.equal(m.root.querySelector('img,script'), null)
+    for (const locale of ['en', 'zh', 'ms']) { m.props.locale = locale; await settle(); assert.ok(m.root.textContent.includes(preparationCopyFor(locale).sourcesHint)) }
+  } finally { m.cleanup() }
+})
+
+test('catalog changes fence a pending multi-source review and never start work implicitly', async () => {
+  let finish, calls = 0
+  const m = mount({ sourceCatalog: catalog(), methods: { plan: (p, s) => { calls++; return new Promise(resolve => { finish = () => resolve(multiplePlan(p, s)) }) } } })
+  try {
+    checked(m.root, uid(31)); begin(m.root); await settle(); assert.equal(typeof finish, 'function')
+    m.props.sourceCatalog = catalog().slice(0, 1); finish(); await settle()
+    assert.equal(m.root.querySelector('.plan,.start'), null); assert.equal(calls, 1)
+    assert.equal(m.root.querySelectorAll('.preparation-source-checkbox').length, 0)
+    assert.ok(m.root.textContent.includes(preparationCopy.en.noAdditionalSources))
+  } finally { m.cleanup() }
+})
+
+test('a started multi-source preparation keeps frozen metadata across catalog changes and explicit Refresh', async () => {
+  let known, starts = 0, refreshes = 0; const readyEvents = []
+  const m = mount({ sourceCatalog: catalog(), onReady: value => readyEvents.push(value), methods: {
+    plan: async (p, s) => known = multiplePlan(p, s),
+    start: async () => { starts++; return ready(known) }, status: async () => { refreshes++; return ready(known) }
+  } })
+  try {
+    checked(m.root, uid(31)); begin(m.root); await settle(); m.root.querySelector('.start').click(); await settle()
+    const original = clone(known.sources)
+    const eventCount = readyEvents.length; assert.equal(readyEvents.at(-1).state, 'ready')
+    m.props.sourceCatalog = catalog().map(s => ({ ...s, source_name: 'new catalog name' })); await settle()
+    assert.equal(readyEvents.length, eventCount); assert.equal(readyEvents.at(-1).state, 'ready')
+    assert.equal(m.root.querySelector('.start'), null)
+    m.root.querySelector('.refresh').click(); await settle()
+    assert.deepEqual([...m.root.querySelectorAll('.frozen-sources li strong')].map(n => n.textContent), original.map(s => s.source_name))
+    assert.equal(m.root.textContent.includes('new catalog name'), true)
+    assert.equal(starts, 1); assert.equal(refreshes, 1)
+  } finally { m.cleanup() }
+})
+for (const state of ['planned', 'ready']) {
+  test(`semantic actor choices preserve ${state} identity for equal refreshes but invalidate a real in-place choice change`, async () => {
+    let known, plans = 0, starts = 0; const emissions = []
+    const m = mount({ typeLabels: ['Person', 'Organization'], onReady: value => emissions.push(value), methods: {
+      plan: async p => { plans++; return known = planned(p) }, start: async () => { starts++; return ready(known) }
+    } })
+    try {
+      begin(m.root); await settle()
+      if (state === 'ready') { m.root.querySelector('.start').click(); await settle(); assert.equal(emissions.at(-1).state, 'ready') }
+      const originalHash = known.plan_sha256, eventCount = emissions.length
+      m.props.typeLabels = ['Node', 'Organization', 'Person', 'Entity', 'Person', '<script>']; await settle()
+      m.props.typeLabels.reverse(); await settle()
+      m.props.typeLabels.push('Person', 'not a type'); await settle()
+      assert.equal(emissions.length, eventCount)
+      assert.ok(m.root.querySelector('.plan').textContent.includes(originalHash))
+      if (state === 'planned') assert.equal(m.root.querySelector('.start').disabled, false)
+      else assert.equal(emissions.at(-1).plan_sha256, originalHash)
+      m.props.typeLabels.push('Expert'); await settle()
+      assert.equal(emissions.at(-1), null)
+      assert.equal(m.root.querySelector('.start'), null)
+      assert.ok(m.root.querySelector('.type-choices').textContent.includes('Expert'))
+      if (state === 'ready') assert.ok(m.root.querySelector('.plan').textContent.includes(originalHash))
+      assert.equal(plans, 1); assert.equal(starts, state === 'ready' ? 1 : 0)
+    } finally { m.cleanup() }
+  })
+}
+
+test('in-place semantic label change fences a pending preparation review', async () => {
+  let finish, plans = 0
+  const m = mount({ typeLabels: ['Person'], methods: { plan: p => { plans++; return new Promise(resolve => { finish = () => resolve(planned(p)) }) } } })
+  try {
+    begin(m.root); await settle(); assert.equal(typeof finish, 'function')
+    m.props.typeLabels.push('Organization'); finish(); await settle()
+    assert.equal(m.root.querySelector('.plan,.start'), null)
+    assert.equal(plans, 1)
+  } finally { m.cleanup() }
+})
+
 test('validated READY handoff is deeply detached; edits and reset revoke admission without auto launch', async () => {
   let known, producer; const emissions = [], cleared = []
   const m = mount({ onReady: value => emissions.push(value), onCleared: () => cleared.push(true), methods: { plan: async p => known = planned(p), start: async () => producer = ready(known) } })

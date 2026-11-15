@@ -13,6 +13,7 @@ from uuid import UUID, uuid4
 
 import psycopg
 from psycopg.types.json import Jsonb
+from nexaweave_storage.transaction_settings import apply_runtime_settings
 
 from nexaweave_knowledge.contracts import KnowledgeScope
 from nexaweave_knowledge.operations import CompletionReceipt, _receipt
@@ -23,6 +24,7 @@ from .preparation_contracts import PreparedBudgetReceipt, PreparationAuthorityEr
 from .native_launch_contracts import NativeBudgetReceipt, LaunchAuthorityError, native_budget_fingerprint, native_budget_episode
 from .native_run_contracts import NativeRunRequest, NativeRunReceipt, InvalidNativeRun
 from .report_contracts import ReportBudgetReceipt, ReportError, report_budget_episode
+from .followup_contracts import FollowupBudgetReceipt, FollowupError, budget_episode as followup_budget_episode
 
 MAX_MONEY = 2**63 - 1
 _HEX = re.compile(r"[0-9a-f]{64}\Z")
@@ -72,7 +74,7 @@ class Reservation:
     scope_group_id: str
     episode_id: UUID
     evidence_ids: tuple[UUID, ...]
-    receipt: CompletionReceipt | PreparedBudgetReceipt | NativeBudgetReceipt | ReportBudgetReceipt | None
+    receipt: CompletionReceipt | PreparedBudgetReceipt | NativeBudgetReceipt | ReportBudgetReceipt | FollowupBudgetReceipt | None
     error_code: str | None
 
 @dataclass(frozen=True)
@@ -122,10 +124,12 @@ def _transaction(factory: Callable[[], psycopg.Connection]) -> Iterator[psycopg.
     try:
         with factory() as conn:
             with conn.transaction():
-                conn.execute("SET LOCAL statement_timeout = '5s'")
-                conn.execute("SET LOCAL lock_timeout = '2s'")
-                conn.execute("SET LOCAL idle_in_transaction_session_timeout = '10s'")
-                conn.execute("SET LOCAL search_path = pg_catalog")
+                apply_runtime_settings(conn, (
+                    "SET LOCAL statement_timeout = '5s'",
+                    "SET LOCAL lock_timeout = '2s'",
+                    "SET LOCAL idle_in_transaction_session_timeout = '10s'",
+                    "SET LOCAL search_path = pg_catalog",
+                ))
                 yield conn
     except psycopg.Error:
         raise BudgetUnavailable() from None
@@ -176,6 +180,9 @@ def _reservation(row: tuple) -> Reservation:
         if episode == report_budget_episode(group, operation) and (evidence_ids or
                 receipt is not None and (type(receipt) is not dict or receipt.get('kind') != 'connected_report_budget_v1')):
             raise ValueError
+        if episode == followup_budget_episode(group, operation) and (evidence_ids or
+                receipt is not None and (type(receipt) is not dict or receipt.get('kind') != 'connected_followup_budget_v1')):
+            raise ValueError
         saved = None
         if receipt is not None:
             if episode==native_budget_episode(group,operation) and (type(receipt) is not dict or receipt.get('kind')!='native_run_budget_v1'):
@@ -192,6 +199,12 @@ def _reservation(row: tuple) -> Reservation:
                         or saved.fingerprint != fingerprint or evidence_ids
                         or episode!=native_budget_episode(group,operation)):
                     raise ValueError
+            elif type(receipt) is dict and receipt.get('kind') == 'connected_followup_budget_v1':
+                saved = FollowupBudgetReceipt.from_wire(receipt)
+                if (saved.operation_id != operation or saved.attempt_id != attempt
+                        or saved.fingerprint != fingerprint or evidence_ids
+                        or episode != followup_budget_episode(group, operation)):
+                    raise ValueError
             elif type(receipt) is dict and receipt.get('kind') == 'prepared_budget_v1':
                 saved = PreparedBudgetReceipt.from_wire(receipt)
                 if (saved.operation_id != operation or saved.attempt_id != attempt
@@ -205,7 +218,7 @@ def _reservation(row: tuple) -> Reservation:
                 saved = CompletionReceipt(group, episode, fingerprint, evidence_ids)
         return Reservation(account, operation, _fingerprint(fingerprint), ceiling,
                            ReservationState(state), attempt, group, episode, evidence_ids, saved, error)
-    except (ValueError, TypeError, KeyError, InvalidBudget, PreparationAuthorityError, LaunchAuthorityError, ReportError):
+    except (ValueError, TypeError, KeyError, InvalidBudget, PreparationAuthorityError, LaunchAuthorityError, ReportError, FollowupError):
         raise BudgetUncertain() from None
 
 class BudgetLedger:

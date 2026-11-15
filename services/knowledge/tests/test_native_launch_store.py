@@ -35,14 +35,15 @@ def ready_host(factory,tmp_path,*,cap=40):
     return prep,scope,plan
 
 
-def launch_host(prep,factory,*,enabled=True):
+def launch_host(prep,factory,*,enabled=True,ceiling=4):
+    assert type(ceiling) is int and 1 <= ceiling <= 4
     from app.services.durable_native_launch_host import DurableNativeLaunchHost
     from app.services.native_launch_models import BoundedNativeModelFactory
     from test_durable_native_launch import scripted_native_backends,LIMITS
     model=BoundedNativeModelFactory(('twitter','reddit'),dict(LIMITS),scripted_native_backends,cooperative_transport=True)
     return DurableNativeLaunchHost(preparation_host=prep,connection_factory=factory,runtime_sha256='c'*64,
         model_label='scripted',limits=LIMITS,model_factory=model,account_id=prep.account_id,
-        ceiling_microusd=4 if enabled else None,authorize=lambda:enabled)
+        ceiling_microusd=ceiling if enabled else None,authorize=lambda:enabled)
 
 
 def declaration(plan):

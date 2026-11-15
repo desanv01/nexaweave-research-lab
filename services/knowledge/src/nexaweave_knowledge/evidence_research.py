@@ -17,7 +17,7 @@ from nexaweave_storage.validation import principal_id
 from .bindings import ScopeBindingStore
 from .contracts import GraphPageRequest, KnowledgeScope
 from .operations import Ledger
-from .provider import _native
+from .graph_page_provider import _native
 from .read_runtime import _DirectPageProvider
 from .research_contracts import (Citation, ClaimCandidate, PassageCoverage, ResearchFact,
                                  ResearchRequest, ResearchResult, ScopeCoverage)

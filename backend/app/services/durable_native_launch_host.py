@@ -81,7 +81,7 @@ class DurableNativeLaunchHost:
         from .preparation_client import validate_receipt
         ref = {'schema_version':1,'operation_id':descriptor['operation_id'],'plan_sha256':descriptor['plan_sha256']}
         row = self.preparation._row(ref)
-        self.preparation._owned(row.frozen['public']['source']['source_revision'],expected_revision=row.project_revision)
+        self.preparation._owned_row(row,expected_revision=row.project_revision)
         if row.state != 'ready' or row.receipt is None:
             raise NativeLaunchError('conflict')
         validate_receipt(row.receipt,str(row.operation_id),row.frozen['public']['options']['platforms'])

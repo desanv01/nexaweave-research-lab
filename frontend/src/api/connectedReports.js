@@ -51,14 +51,21 @@ function options(v) {
   if (!v.requirement.trim() || enc.encode(v.requirement).length > 16000 || !['en', 'zh', 'ms'].includes(v.output_language)) fail()
   windows(v.native_windows)
 }
+function sourceRevisions(v) {
+  if (!Array.isArray(v) || v.length < 1 || v.length > 100) fail()
+  v.forEach(uuid)
+  if (new Set(v).size !== v.length) fail()
+}
 export function connectedReportPayload(value, method = 'status') {
   try {
     const v = detach(value)
-    fields(v, method === 'plan' ? 'schema_version report_id launch_id launch_sha256 requirement output_language native_windows' : method === 'download' ? 'schema_version report_id plan_sha256 kind section_index' : 'schema_version report_id plan_sha256')
-    if (!['plan', 'start', 'status', 'cancel', 'read', 'download'].includes(method) || v.schema_version !== 1) fail()
+    const multiple = method === 'plan' && v.schema_version === 2
+    fields(v, method === 'plan' ? 'schema_version report_id launch_id launch_sha256 requirement output_language native_windows' + (multiple ? ' source_revisions' : '') : method === 'download' ? 'schema_version report_id plan_sha256 kind section_index' : 'schema_version report_id plan_sha256')
+    if (!['plan', 'start', 'status', 'cancel', 'read', 'download'].includes(method) || (v.schema_version !== 1 && !multiple)) fail()
     uuid(v.report_id)
     if (method === 'plan') { uuid(v.launch_id); hash(v.launch_sha256); options({ requirement: v.requirement, output_language: v.output_language, native_windows: v.native_windows }) }
     else hash(v.plan_sha256)
+    if (multiple) sourceRevisions(v.source_revisions)
     if (method === 'download') reportArtifactName(v)
     const raw = JSON.stringify(v); if (enc.encode(raw).length > 32768) fail()
     return raw
@@ -71,12 +78,18 @@ export function reportArtifactName({ kind, section_index }) {
   return names[kind]
 }
 function binding(v, opts, graph) {
-  fields(v, 'display_graph_id principal scope project_revision source preparation native coverage reference_keys')
+  fields(v, 'display_graph_id principal scope project_revision source preparation native coverage reference_keys' + (v && Object.hasOwn(v, 'source_set') ? ' source_set' : ''))
   if (typeof graph !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(graph) || v.display_graph_id !== graph || typeof v.principal !== 'string' || !/^[\x20-\x7e]{1,128}$/.test(v.principal) || !v.principal.trim()) fail()
   fields(v.scope, 'schema_version workspace_id project_id graph_id run_id branch_id layer')
   if (v.scope.schema_version !== 1 || v.scope.layer !== 'source' || v.scope.run_id !== null || v.scope.branch_id !== null) fail()
   ;['workspace_id', 'project_id', 'graph_id'].forEach(k => uuid(v.scope[k])); int(v.project_revision, 2147483647, 1)
   fields(v.source, 'source_revision source_name source_sha256'); uuid(v.source.source_revision); text(v.source.source_name, 256, 1); hash(v.source.source_sha256)
+  if (Object.hasOwn(v, 'source_set')) {
+    fields(v.source_set, 'schema_version source_revisions')
+    if (v.source_set.schema_version !== 1) fail()
+    sourceRevisions(v.source_set.source_revisions)
+    if (v.source_set.source_revisions[0] !== v.source.source_revision) fail()
+  }
   fields(v.preparation, 'operation_id plan_sha256 simulation_id artifact_sha256'); uuid(v.preparation.operation_id); hash(v.preparation.plan_sha256); hash(v.preparation.artifact_sha256)
   if (v.preparation.simulation_id !== 'sim_' + v.preparation.operation_id.replaceAll('-', '')) fail()
   fields(v.native, 'run_id launch_sha256 request_fingerprint evidence_sha256 platforms'); uuid(v.native.run_id)
@@ -154,10 +167,14 @@ export async function validateConnectedReportResult(value, { graph, payload, sel
     if (value.plan_sha256 !== await digest(pickIdentity(value))) fail()
     if (planning) {
       if (!selection || value.state !== 'planned' || value.binding.native.run_id !== payload.launch_id || value.binding.native.launch_sha256 !== payload.launch_sha256 || !same(value.options, { requirement: payload.requirement, output_language: payload.output_language, native_windows: payload.native_windows })) fail()
+      if (payload.schema_version === 2) {
+        if (!Object.hasOwn(value.binding, 'source_set') || !same(value.binding.source_set, { schema_version: 1, source_revisions: payload.source_revisions })) fail()
+      } else if (Object.hasOwn(value.binding, 'source_set')) fail()
     } else if (value.plan_sha256 !== payload.plan_sha256) fail()
     if (selection) {
       const selected = await nativeObservationSelection(selection, graph), launch = selected.launch, prep = selected.preparation, b = value.binding
       if (b.principal !== launch.request.principal || !same(b.scope, launch.scope) || b.project_revision !== launch.request.project_revision || !same(b.source, prep.source) || !same(b.preparation, launch.preparation) || !same(b.native, { run_id: launch.request.run_id, launch_sha256: launch.launch_sha256, request_fingerprint: launch.receipt.request_fingerprint, evidence_sha256: launch.receipt.evidence_sha256, platforms: launch.request.platforms })) fail()
+      if (prep.schema_version === 2 && (!same(b.source_set, { schema_version: 1, source_revisions: prep.sources.map(source => source.source_revision) }) || planning && (payload.schema_version !== 2 || !same(payload.source_revisions, prep.sources.map(source => source.source_revision))))) fail()
     }
     if (known && (immutable.some(k => !same(value[k], known[k])) || value.plan_sha256 !== known.plan_sha256 || known.cancel_requested && !value.cancel_requested || known.workflow && !same(value.workflow, known.workflow) || known.receipt && (!same(value.receipt, known.receipt) || !same(value.manifest, known.manifest) || value.receipt_sha256 !== known.receipt_sha256 || value.state !== 'completed'))) fail()
     return value
@@ -272,7 +289,13 @@ export function createConnectedReportsChannel({ fetchImpl, deadlineMs, connectio
       Promise.resolve(promise).then(v => { if (controller.signal.aborted && v?.body?.cancel) { try { void v.body.cancel().catch(() => {}) } catch { /* discarded */ } } resolve(v) }, reject).finally(() => controller.signal.removeEventListener('abort', aborted))
     })
     try {
-      if (method === 'plan') { selection = await guarded(nativeObservationSelection(selection, current.graph)); owned(); if (selection.launch.request.run_id !== payload.launch_id || selection.launch.launch_sha256 !== payload.launch_sha256) fail('invalid_request'); windows(payload.native_windows, selection.launch.request.platforms) }
+      if (method === 'plan') {
+        selection = await guarded(nativeObservationSelection(selection, current.graph)); owned()
+        if (selection.launch.request.run_id !== payload.launch_id || selection.launch.launch_sha256 !== payload.launch_sha256) fail('invalid_request')
+        const prep = selection.preparation
+        if (prep.schema_version === 2 && (payload.schema_version !== 2 || !same(payload.source_revisions, prep.sources.map(source => source.source_revision)))) fail('invalid_request')
+        windows(payload.native_windows, selection.launch.request.platforms)
+      }
       if (known) { known = await guarded(validateConnectedReportResult(known, { graph: current.graph, payload: reportIdentity(known), known })); owned() }
       if (method === 'start' || method === 'cancel') attempted.add(key)
       requestSent = true

@@ -16,7 +16,7 @@ from .bindings import ScopeBindingStore
 from .commands import KnowledgeCommandDispatcher, _validated_facts
 from .contracts import GraphPage, KnowledgeScope
 from .operations import Conflict, Ledger
-from .provider import GraphitiKnowledgeProvider
+from .graph_page_provider import GraphPageProvider
 
 
 def _pairs(items):
@@ -109,9 +109,8 @@ class ReadSettings:
                                          connection_timeout=3, connection_acquisition_timeout=3)
 
 
-class _DirectPageProvider(GraphitiKnowledgeProvider):
+class _DirectPageProvider(GraphPageProvider):
     def __init__(self, driver):
-        super().__init__()
         self._read_driver = driver
 
     @property

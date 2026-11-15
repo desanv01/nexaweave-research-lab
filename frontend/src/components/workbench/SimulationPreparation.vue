@@ -3,22 +3,48 @@ import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { preparationIdentity, preparationInteger, preparationOptions, preparationSource, newPreparationId, validatePreparationResult } from '../../api/simulationPreparation.js'
 import { populationTypeLabels } from '../../api/populationWorkbench.js'
 import { preparationCopyFor, preparationError } from '../../i18n/simulationPreparation.js'
-const props = defineProps({ methods: { type: Object, required: true }, connected: Boolean, busy: Boolean, resetVersion: { type: Number, default: 0 }, locale: { type: String, default: 'en' }, source: { type: Object, default: null }, displayGraphId: { type: String, default: '' }, typeLabels: { type: Array, default: () => [] } })
+const props = defineProps({ methods: { type: Object, required: true }, connected: Boolean, busy: Boolean, resetVersion: { type: Number, default: 0 }, locale: { type: String, default: 'en' }, source: { type: Object, default: null }, sourceCatalog: { type: Array, default: null }, displayGraphId: { type: String, default: '' }, typeLabels: { type: Array, default: () => [] } })
 const emit = defineEmits(['ready', 'cleared'])
 const copy = computed(() => preparationCopyFor(props.locale)), labels = computed(() => populationTypeLabels(props.typeLabels))
 const selected = ref([]), maximum = ref('10'), seed = ref('0'), rounds = ref('10'), requirement = ref(''), twitter = ref(true), reddit = ref(false)
+const selectedExtras = ref([])
+const additionalSources = computed(() => {
+  const anchor = props.source, seen = new Set(anchor ? [anchor.source_revision] : [])
+  return (props.sourceCatalog || []).filter(source => {
+    if (!anchor || !source || source.project_id !== anchor.project_id || seen.has(source.source_revision)) return false
+    seen.add(source.source_revision); return true
+  })
+})
 const plan = ref(null), durable = ref(null), pending = ref(false), attempted = ref(false), error = ref(''), notice = ref(''), feedback = ref(null)
-let lifetime = 0, reviewEpoch = 0
+let lifetime = 0, reviewEpoch = 0, updatingCatalog = false
 const locked = computed(() => !props.connected || props.busy || pending.value)
 const canStart = computed(() => !locked.value && plan.value?.state === 'planned' && plan.value.authorization.model_calls_enabled && !!plan.value.authorization.ceiling_microusd && !(attempted.value && durable.value?.operation_id === plan.value.operation_id))
 const records = computed(() => [plan.value && { key: 'plan', value: plan.value }, durable.value && durable.value.operation_id !== plan.value?.operation_id && { key: 'durable', value: durable.value }].filter(Boolean))
 function changed() { reviewEpoch++; if (plan.value) notice.value = 'changed'; plan.value = null; error.value = ''; emit('ready', null) }
 watch([selected, maximum, seed, rounds, requirement, twitter, reddit], changed, { deep: true, flush: 'sync' })
-watch(() => props.source, changed, { deep: true, flush: 'sync' })
-watch(() => props.typeLabels, changed, { deep: true, flush: 'sync' })
+watch(selectedExtras, () => { if (!updatingCatalog) changed() }, { deep: true, flush: 'sync' })
+watch(() => props.source, () => { selectedExtras.value = []; changed() }, { deep: true, flush: 'sync' })
+watch(() => props.sourceCatalog, () => {
+  const hadExtras = selectedExtras.value.length > 0
+  updatingCatalog = true
+  try { selectedExtras.value = [] } finally { updatingCatalog = false }
+  if (hadExtras) {
+    reviewEpoch++; error.value = ''
+    if (plan.value?.state === 'planned' && !(attempted.value && durable.value?.operation_id === plan.value.operation_id)) {
+      plan.value = null; notice.value = 'changed'
+    }
+  }
+  // Library metadata is a draft input. Existing READY/native/report handoffs
+  // retain their frozen identity until an intentional source/option/reset edit.
+}, { deep: true, flush: 'sync' })
+// Canonical labels are detached, so in-place prop edits retain an old snapshot.
+// Batch array edits before comparing their final semantic choices.
+watch(labels, (current, previous) => {
+  if (current.length !== previous.length || current.some((label, index) => label !== previous[index])) changed()
+}, { flush: 'pre' })
 function clear() {
   lifetime++; reviewEpoch++; plan.value = null; durable.value = null; attempted.value = false; pending.value = false
-  selected.value = []; maximum.value = '10'; seed.value = '0'; rounds.value = '10'; requirement.value = ''; twitter.value = true; reddit.value = false
+  selected.value = []; selectedExtras.value = []; maximum.value = '10'; seed.value = '0'; rounds.value = '10'; requirement.value = ''; twitter.value = true; reddit.value = false
   error.value = ''; notice.value = ''
   emit('ready', null); emit('cleared')
 }
@@ -32,9 +58,16 @@ async function review() {
   if (locked.value) return
   const life = lifetime, epoch = ++reviewEpoch
   plan.value = null; error.value = ''; notice.value = ''; pending.value = true
+  emit('ready', null)
   try {
-    const source = preparationSource(props.source), payload = { schema_version: 1, operation_id: newPreparationId(), source_revision: source.source_revision, options: options() }
-    const value = await props.methods.plan(payload, source)
+    const anchor = preparationSource(props.source), payload = { schema_version: 1, operation_id: newPreparationId(), source_revision: anchor.source_revision, options: options() }
+    let source = anchor
+    if (selectedExtras.value.length) {
+      const extras = additionalSources.value.filter(item => selectedExtras.value.includes(item.source_revision)).map(preparationSource)
+      if (extras.length !== selectedExtras.value.length || extras.length > 99) throw { code: 'invalid_request' }
+      source = [anchor, ...extras]; payload.schema_version = 2; payload.source_revisions = source.map(item => item.source_revision)
+    }
+    const value = await props.methods.plan(JSON.parse(JSON.stringify(payload)), JSON.parse(JSON.stringify(source)))
     const admitted = await validatePreparationResult(value, { graph: props.displayGraphId, payload, source, planning: true })
     if (life !== lifetime || epoch !== reviewEpoch) return
     plan.value = admitted
@@ -67,6 +100,7 @@ async function durableRequest(starting) {
     <p v-if="source" class="source"><strong>{{ copy.source }}</strong>: {{ source.source_name }}<br><span class="mono">{{ source.source_revision }}</span></p><p v-else>{{ copy.selectSource }}</p>
     <form @submit.prevent="review">
       <fieldset :disabled="locked || !source"><legend>{{ copy.review }}</legend>
+        <fieldset class="preparation-sources" aria-describedby="preparation-sources-help"><legend>{{ copy.additionalSources }}</legend><p id="preparation-sources-help" class="limitations">{{ copy.sourcesHint }}</p><p v-if="!additionalSources.length" class="limitations">{{ copy.noAdditionalSources }}</p><label v-for="item in additionalSources" :key="item.source_revision" class="source-choice"><input v-model="selectedExtras" class="preparation-source-checkbox" type="checkbox" :value="item.source_revision" :disabled="selectedExtras.length >= 99 && !selectedExtras.includes(item.source_revision)"><span>{{ item.source_name }}<br><span class="mono">{{ item.source_revision }}</span></span></label></fieldset>
         <fieldset class="type-choices"><legend>{{ copy.types }}</legend><label v-for="name in labels" :key="name"><input v-model="selected" type="checkbox" :value="name">{{ name }}</label></fieldset>
         <div class="options"><label for="preparation-maximum">{{ copy.maximum }} (1–100)<input id="preparation-maximum" v-model="maximum" inputmode="numeric" type="text" required maxlength="3"></label><label for="preparation-seed">{{ copy.seed }} (0–4294967295)<input id="preparation-seed" v-model="seed" inputmode="numeric" type="text" required maxlength="10"></label><label for="preparation-rounds">{{ copy.rounds }} (1–24)<input id="preparation-rounds" v-model="rounds" inputmode="numeric" type="text" required maxlength="2"></label></div>
         <fieldset class="platforms"><legend>{{ copy.platforms }}</legend><label><input v-model="twitter" type="checkbox">Twitter</label><label><input v-model="reddit" type="checkbox">Reddit</label></fieldset>
@@ -78,6 +112,7 @@ async function durableRequest(starting) {
     <p ref="feedback" class="feedback" role="status" aria-live="polite" aria-atomic="true" tabindex="-1"><span v-if="pending">{{ copy.pending }}</span><span v-else-if="error">{{ preparationError(copy, error) }}</span><span v-if="notice"> {{ copy[notice] }}</span><span v-if="!pending && !error && plan"> {{ copy.states[plan.state] }}</span></p>
     <article v-for="record in records" :key="record.key" class="plan" :aria-label="record.key === 'durable' ? copy.recovered : copy.review">
       <h3>{{ record.key === 'durable' ? copy.recovered : copy.states[record.value.state] }}</h3>
+      <details v-if="record.value.sources" class="frozen-sources"><summary>{{ copy.frozenSources }} ({{ record.value.sources.length }})</summary><ol><li v-for="item in record.value.sources" :key="item.source_revision"><strong>{{ item.source_name }}</strong><p class="mono">{{ item.source_revision }}<br>{{ item.source_sha256 }}</p></li></ol></details>
       <dl><dt>{{ copy.project }}</dt><dd class="mono">{{ record.value.scope.project_id }}</dd><dt>{{ copy.revision }}</dt><dd>{{ record.value.project_revision }}</dd><dt>{{ copy.source }}</dt><dd>{{ record.value.source.source_name }}<br><span class="mono">{{ record.value.source.source_revision }}<br>{{ record.value.source.source_sha256 }}</span></dd><dt>{{ copy.operation }}</dt><dd class="mono">{{ record.value.operation_id }}</dd><dt>{{ copy.projection }}</dt><dd class="mono">{{ record.value.projection_sha256 }}</dd><dt>{{ copy.digest }}</dt><dd class="mono">{{ record.value.plan_sha256 }}</dd><dt>{{ copy.ceiling }}</dt><dd>{{ record.value.authorization.ceiling_microusd || '—' }}</dd></dl>
       <p>{{ copy.progress }}: {{ copy.stages[record.value.progress.stage] }} · {{ record.value.progress.completed }} / {{ record.value.progress.total }}</p>
       <dl><dt>{{ copy.maximum }}</dt><dd>{{ record.value.options.max_agents }}</dd><dt>{{ copy.seed }}</dt><dd>{{ record.value.options.seed }}</dd><dt>{{ copy.platforms }}</dt><dd>{{ record.value.options.platforms.join(', ') }}</dd><dt>{{ copy.rounds }}</dt><dd>{{ record.value.options.max_rounds }}</dd><dt>{{ copy.requirement }}</dt><dd>{{ record.value.options.simulation_requirement }}</dd></dl>
@@ -91,4 +126,5 @@ async function durableRequest(starting) {
 </template>
 <style scoped>
 .preparation-workbench{background:var(--surface,#fff);color:var(--ink,#172638);border:1px solid var(--border,#b9c4d2);border-radius:8px;padding:24px;margin-bottom:24px;min-width:0;overflow-wrap:anywhere;font:16px/1.5 system-ui,sans-serif}.preparation-workbench *{box-sizing:border-box}h2{font-size:1.25rem;margin:0 0 16px}h3{font-size:1.1rem}p{margin:8px 0}fieldset{border:0;padding:0;margin:16px 0;min-width:0}legend{color:var(--muted,#526174)}label{display:flex;flex-direction:column;gap:6px;font-weight:550;min-width:0}.options{display:grid;gap:12px}.type-choices,.platforms{display:flex;flex-wrap:wrap;gap:8px 16px}.type-choices label,.platforms label{flex-direction:row;align-items:center;min-height:44px}input,textarea{min-width:0;width:100%;border:1px solid var(--control-border,#7b8797);border-radius:5px;min-height:44px;padding:10px 12px;font:inherit;background:var(--surface,#fff);color:inherit}input[type=checkbox]{width:20px;min-height:20px}textarea{resize:vertical}button{min-height:44px;padding:10px 16px;border:1px solid var(--border,#b9c4d2);border-radius:5px;font:inherit;color:var(--primary,#174d96);background:var(--surface,#fff);cursor:pointer;max-width:100%;overflow-wrap:anywhere}.primary{color:white;background:var(--primary,#174d96);border-color:var(--primary,#174d96)}button:disabled{opacity:.65;cursor:default}button:hover:not(:disabled){filter:brightness(.92)}:is(button,input,textarea,summary,.feedback):focus-visible{outline:3px solid var(--primary,#174d96);outline-offset:3px}.actions{display:flex;flex-wrap:wrap;gap:12px;margin-top:16px}.limitations{color:var(--muted,#526174);font-size:.875rem}.source,.plan{border-top:1px solid var(--border,#b9c4d2);padding-top:16px;margin-top:16px}.feedback{border-left:3px solid var(--primary,#174d96);padding:8px 12px}.feedback:empty{display:none}.mono{font:.875rem/1.6 ui-monospace,Consolas,monospace}dl{display:grid;gap:4px 16px}dt{font-weight:550}dd{margin:0 0 8px;min-width:0}summary{min-height:44px;padding:10px 0;cursor:pointer}li{margin:12px 0}.ready{border-left:3px solid var(--primary,#174d96);padding:8px 12px}@media(min-width:768px){.options{grid-template-columns:repeat(3,minmax(0,1fr))}dl{grid-template-columns:minmax(140px,1fr) minmax(0,3fr)}}@media(max-width:480px){.preparation-workbench{padding:16px}}
+.source-choice{flex-direction:row;align-items:center;gap:12px;min-height:44px;margin:8px 0}.source-choice input{flex-shrink:0}.source-choice span{min-width:0}
 </style>

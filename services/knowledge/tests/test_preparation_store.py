@@ -24,7 +24,8 @@ def migrated(factory):
         migrate(conn)
 
 
-def real_host(factory, tmp_path, *, cap=12, authorized=True, chat=None):
+def real_host(factory, tmp_path, *, cap=12, authorized=True, chat=None, ceiling=4):
+    assert type(ceiling) is int and 1 <= ceiling <= 4
     from app.services.durable_preparation_host import DurablePreparationHost
     from app.services.knowledge_read_facade import KnowledgeReadFacade, ReadHostSettings
     from test_provider_neutral_preparation import ScriptedChat, fact
@@ -53,7 +54,7 @@ def real_host(factory, tmp_path, *, cap=12, authorized=True, chat=None):
     budget = BudgetLedger(factory)
     budget.create_account('owner', scope.project_id, account, cap)
     host = DurablePreparationHost(settings=settings, connection_factory=factory,
-        read_facade=facade, artifact_root=tmp_path, account_id=account, ceiling_microusd=4,
+        read_facade=facade, artifact_root=tmp_path, account_id=account, ceiling_microusd=ceiling,
         authorize=lambda: authorized, chat_client_factory=lambda: chat,
         model_name='scripted', base_url='injected://fixture', scheduler=wires.append)
     return host, scope, retained, chat, wires, transport
@@ -66,6 +67,45 @@ def request(retained):
 
 def reference(dto):
     return {'schema_version': 1, 'operation_id': dto['operation_id'], 'plan_sha256': dto['plan_sha256']}
+
+
+def test_pg_v2_selected_sources_reload_generation_and_full_snapshot_tamper(factory, tmp_path):
+    from nexaweave_storage import SourceStore
+    from nexaweave_execution.preparation_contracts import document_envelope
+    host, scope, first, chat, wires, transport = real_host(factory, tmp_path)
+    text = 'Second owned DOCX 雪 😀'
+    second = SourceStore(factory).ingest_text('owner', scope.project_id, uuid4(), 'second document', text,
+        [{'evidence_id': str(uuid4()), 'start': 0, 'end': len(text)}])
+    original = transport.call
+    def projected(raw):
+        response = json.loads(original(raw))
+        for fact in response['result']['facts']:
+            fact['evidence_ids'].extend(str(p.evidence_id) for p in second.passages)
+        return json.dumps(response, ensure_ascii=False).encode()
+    transport.call = projected
+    payload = dict(request(first), schema_version=2,
+        source_revisions=[str(first.source_revision), str(second.source_revision)])
+    planned = host.plan(payload)
+    reloaded = PreparationStore(factory).get('owner', payload['operation_id'], planned['plan_sha256'])
+    assert reloaded.frozen['source_text'] == document_envelope(reloaded.frozen['sources'])
+    assert [s['source_revision'] for s in reloaded.frozen['public']['sources']] == payload['source_revisions']
+    assert host.plan(payload)['plan_sha256'] == planned['plan_sha256']
+    host.start(reference(planned)); host.generate(wires[0])
+    assert PreparationStore(factory).get('owner', payload['operation_id']).state == 'ready'
+    config = [call['messages'][-1]['content'] for call in chat.calls
+              if any(key in call['messages'][-1]['content'] for key in ('total_simulation_hours', 'hot_topics'))]
+    assert len(config) == 2 and all(reloaded.frozen['source_text'] in prompt for prompt in config)
+    for path, changed in [(['sources', '1', 'text'], 'corrupt'), (['source_text'], first.text)]:
+        with factory() as conn:
+            conn.execute('UPDATE mf_preparation.plans SET frozen=jsonb_set(frozen,%s,%s::jsonb) WHERE operation_id=%s',
+                (path, json.dumps(changed), UUID(payload['operation_id'])))
+        with pytest.raises(PreparationAuthorityError) as caught:
+            PreparationStore(factory).get('owner', payload['operation_id'])
+        assert caught.value.code == 'preparation_uncertain'
+        with factory() as conn:
+            from psycopg.types.json import Jsonb
+            conn.execute('UPDATE mf_preparation.plans SET frozen=%s WHERE operation_id=%s',
+                (Jsonb(reloaded.frozen), UUID(payload['operation_id'])))
 
 
 def test_pg_restart_duplicate_race_and_actual_inherited_publication(factory, tmp_path):

@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from .knowledge_source_client import (KnowledgeSourceProcessClient, MAX_BYTES, HASH,
     TEXT_BYTES, encoded, text_value, declarations, metadata, validate_payload, validate_result,
-    pdf_upload, pdf_receipt)
+    pdf_upload, pdf_receipt, original_result)
 from .knowledge_transport import KnowledgeBusy, KnowledgeTransportFailure, _json_object, _uuid
 from .knowledge_reader import KnowledgeReadError
 
@@ -45,6 +45,20 @@ def validate_upload(value):
         return binary
     except (ValueError, TypeError, KeyError, UnicodeError, RecursionError, OverflowError):
         raise KnowledgeReadError("invalid_request") from None
+
+
+def validate_original_upload(value):
+    try:
+        return pdf_upload(value, version=2)
+    except (ValueError, TypeError, KeyError, UnicodeError, RecursionError, OverflowError):
+        raise KnowledgeReadError("invalid_request") from None
+
+
+def validate_original_public_result(method, data, scope, payload):
+    try:
+        return original_result(method, data, scope, payload)
+    except (ValueError, TypeError, KeyError, UnicodeError, RecursionError, OverflowError):
+        raise KnowledgeTransportFailure(outcome_unknown=True) from None
 
 
 def validate_public_result(method, data, scope, payload):
@@ -132,22 +146,26 @@ class KnowledgeSourceFacade:
             raise KnowledgeReadError(result["error"]["code"])
         data = validate_result(method, result["result"], self._settings.scope, payload)
         if time.monotonic() > deadline:
-            raise KnowledgeTransportFailure(outcome_unknown=method in {"retain", "retain_pdf"})
+            raise KnowledgeTransportFailure(outcome_unknown=method in {"retain", "retain_pdf", "retain_pdf_binary"})
         return data
 
     def execute(self, method, graph_id, payload):
         if graph_id != self._settings.display_graph_id:
             raise KnowledgeReadError("not_found")
         binary = validate_upload(payload) if method == "retain" else None
-        if method != "retain":
+        if method == "retain_pdf_binary":
+            validate_original_upload(payload)
+        if method not in {"retain", "retain_pdf_binary"}:
             validate_payload(method, payload)
         if not self._admission.acquire(blocking=False):
             raise KnowledgeBusy()
         deadline = time.monotonic() + 60
         try:
-            if method != "retain":
+            if method not in {"retain", "retain_pdf_binary"}:
                 return self._call(method, payload, deadline)
             self._call("context", {}, deadline)
+            if method == "retain_pdf_binary":
+                return self._call("retain_pdf_binary", payload, deadline)
             if payload["format"] == "pdf":
                 # Native extraction and retained-source mutation occur together
                 # in the fixed installed source child after persisted authority.

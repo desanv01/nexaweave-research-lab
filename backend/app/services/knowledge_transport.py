@@ -73,7 +73,9 @@ class KnowledgeCooperativeAbort(BaseException):
     """Private trusted report control; bypass the reader's public error sanitizer."""
 
     def __init__(self, code):
-        if code not in ('report_cancelled', 'timeout', 'report_uncertain'):
+        if code not in ('report_cancelled', 'followup_cancelled', 'timeout',
+                        'report_uncertain', 'followup_uncertain', 'model_calls_disabled',
+                        'unauthorized', 'tombstoned'):
             code = 'report_uncertain'
         self.code = code
         super().__init__(code)

@@ -1,5 +1,6 @@
 {
   "common": {
+    "language": "Language",
     "confirm": "Confirm",
     "cancel": "Cancel",
     "loading": "Loading...",

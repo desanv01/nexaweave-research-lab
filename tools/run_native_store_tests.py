@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 import argparse
+import json
+import math
 import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -25,6 +28,82 @@ def child() -> int:
             targets = {'test_native_experiment_http.py': 0,
                        'test_native_experiment_socket.py': 0}
 
+            def __init__(self):
+                self.diagnostic_origin = None
+                self.diagnostic_records = 0
+                self.diagnostic_nodes = frozenset()
+                self.diagnostic_capturemanager = None
+                try:
+                    self.diagnostic_origin = time.monotonic()
+                except Exception:
+                    pass
+
+            def pytest_collection_finish(self, session):
+                # Only source nodes selected by the existing fixed pytest argv.
+                try:
+                    self.diagnostic_nodes = frozenset(item.nodeid for item in session.items)
+                    self.diagnostic_capturemanager = session.config.pluginmanager.getplugin('capturemanager')
+                    for item in session.items:
+                        if Path(item.path).name == 'test_native_experiments.py':
+                            item.module._native_cohort_phase_sink = self.fixture_phase
+                except Exception:
+                    pass
+
+            def diagnostic(self, nodeid, event, when=None, outcome=None, duration_seconds=0.0):
+                if nodeid not in self.diagnostic_nodes or self.diagnostic_records >= 4096:
+                    return
+                # Count attempted records too: a failed sink cannot expand output.
+                self.diagnostic_records += 1
+                try:
+                    if self.diagnostic_origin is None or not math.isfinite(self.diagnostic_origin):
+                        return
+                    now = time.monotonic()
+                    duration = float(duration_seconds)
+                    elapsed = max(0.0, now - self.diagnostic_origin)
+                    if not all(math.isfinite(value) and value >= 0 for value in (now, duration, elapsed)):
+                        return
+                    record = dict(schema_version=1, suite='native-store', nodeid=nodeid,
+                                  event=event, when=when, outcome=outcome,
+                                  duration_seconds=duration, monotonic_seconds=now,
+                                  elapsed_seconds=elapsed)
+                    line = 'NEXAWEAVE_TEST_PHASE ' + json.dumps(record, allow_nan=False)
+                    if self.diagnostic_capturemanager is None:
+                        print(line, flush=True)
+                    else:
+                        # Disable capture only for this fixed metadata record;
+                        # unrelated test output keeps its original capture policy.
+                        with self.diagnostic_capturemanager.global_and_fixture_disabled():
+                            print(line, flush=True)
+                except Exception:
+                    # Diagnostic failures never alter qualification. Controls are
+                    # BaseException and propagate through the existing finally.
+                    pass
+
+            def fixture_phase(self, record):
+                try:
+                    if self.diagnostic_records >= 4096:
+                        return
+                    if (set(record) != {'schema_version', 'suite', 'phase', 'event', 'monotonic_seconds', 'elapsed_seconds'}
+                            or type(record['schema_version']) is not int or record['schema_version'] != 1
+                            or record['suite'] != 'native-store-cohort'
+                            or record['event'] not in ('start', 'end', 'observed_closed')):
+                        return
+                    for key in ('monotonic_seconds', 'elapsed_seconds'):
+                        if type(record[key]) not in (int, float) or not math.isfinite(record[key]) or record[key] < 0:
+                            return
+                    self.diagnostic_records += 1
+                    line = 'NEXAWEAVE_FIXTURE_PHASE ' + json.dumps(record, allow_nan=False)
+                    if self.diagnostic_capturemanager is None:
+                        print(line, flush=True)
+                    else:
+                        with self.diagnostic_capturemanager.global_and_fixture_disabled():
+                            print(line, flush=True)
+                except Exception:
+                    pass
+
+            def pytest_runtest_logstart(self, nodeid, location):
+                self.diagnostic(nodeid, 'start')
+
             def pytest_runtest_logreport(self, report):
                 if "native_store_tests" in report.nodeid:
                     if report.skipped:
@@ -34,10 +113,13 @@ def child() -> int:
                         for name in self.targets:
                             if name + '::' in report.nodeid:
                                 self.targets[name] += 1
+                # Emit only actual reports; no end from finally on interruption.
+                if report.when in ('setup', 'call', 'teardown') and report.outcome in ('passed', 'failed', 'skipped'):
+                    self.diagnostic(report.nodeid, 'end', report.when, report.outcome, report.duration)
 
         qualification = Qualification()
         result = int(pytest.main([
-            "-q", "-p", "pytest_asyncio.plugin",
+            "-q", "--durations=0", "-p", "pytest_asyncio.plugin",
             "-o", "markers=postgres: guarded disposable PostgreSQL integration",
             str(ROOT / "backend" / "native_store_tests"),
         ], plugins=[qualification]))

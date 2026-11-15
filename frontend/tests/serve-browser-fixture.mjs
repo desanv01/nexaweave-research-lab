@@ -15,8 +15,17 @@ delete process.env.BROWSER_ARGS
 let environmentDirectory
 let server
 let closing
+let input = ''
+let stopped
+const lifetime = new Promise(resolve => { stopped = resolve })
 const onSignal = () => { void close() }
-const onInput = (value) => { if (value.trim() === 'stop') void close() }
+const onInput = (value) => {
+  input += value
+  if (Buffer.byteLength(input, 'utf8') > 7200) { void close(true); return }
+  if (input.trim() === 'stop') void close()
+}
+const onEnd = () => { void close(input.trim() !== '' && input.trim() !== 'stop') }
+const onInputError = () => { void close(true) }
 
 const close = (failed = false) => {
   if (closing) return closing
@@ -24,11 +33,24 @@ const close = (failed = false) => {
     process.off('SIGINT', onSignal)
     process.off('SIGTERM', onSignal)
     process.stdin.off('data', onInput)
-    process.stdin.pause()
+    process.stdin.off('end', onEnd)
+    process.stdin.off('error', onInputError)
     let cleanupFailed = false
+    try {
+      process.stdin.pause()
+      process.stdin.destroy()
+    } catch {
+      cleanupFailed = true
+    }
     if (server) {
       try {
-        await server.close()
+        const httpServer = server.httpServer
+        const shutdown = server.close()
+        // Vite's full close still owns/awaits HMR websockets, watchers, plugins
+        // and optimizer resources. This Node API closes only this fixture's
+        // HTTP connections; it does not close upgraded websocket connections.
+        try { httpServer?.closeAllConnections() } catch { cleanupFailed = true }
+        await shutdown
       } catch {
         cleanupFailed = true
       }
@@ -43,6 +65,7 @@ const close = (failed = false) => {
     }
     if (cleanupFailed) console.error('Offline browser fixture cleanup failed')
     if (failed || cleanupFailed) process.exitCode = 1
+    stopped()
   })()
   return closing
 }
@@ -59,8 +82,13 @@ try {
   process.on('SIGINT', onSignal)
   process.on('SIGTERM', onSignal)
   process.stdin.setEncoding('utf8')
+  process.stdin.on('end', onEnd)
+  process.stdin.on('error', onInputError)
   process.stdin.on('data', onInput)
   console.log('NexaWeave offline browser fixture: http://127.0.0.1:4317/tests/browser-rendering.html')
+  // Keep module lifetime bound to complete cleanup, including signal/EOF stops.
+  await lifetime
+  await closing
 } catch {
   console.error('Offline browser fixture failed to start; check Vite setup and port 4317')
   await close(true)

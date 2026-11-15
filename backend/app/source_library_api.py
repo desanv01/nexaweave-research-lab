@@ -5,7 +5,8 @@ from flask import Response, request
 from werkzeug.exceptions import BadRequest
 
 from .services.knowledge_source_client import MAX_BYTES, ENVELOPE_OVERHEAD, encoded
-from .services.knowledge_source_facade import KnowledgeSourceFacade, validate_upload, validate_public_result
+from .services.knowledge_source_facade import (KnowledgeSourceFacade, validate_upload,
+    validate_public_result, validate_original_upload, validate_original_public_result)
 from .services.knowledge_transport import KnowledgeTransportError, _json_object, _uuid
 from .services.knowledge_reader import KnowledgeReadError
 
@@ -45,7 +46,7 @@ def register_source_routes(app, settings, *, source_facade=None):
                 raise KnowledgeReadError("not_found")
             if request.args or request.headers.get("Transfer-Encoding") or request.headers.get("Content-Encoding"):
                 raise KnowledgeReadError("invalid_request")
-            if method == "retain":
+            if method in {"retain", "retain_pdf_binary"}:
                 if (request.mimetype != "application/json" or request.content_length is None
                         or not 0 < request.content_length <= MAX_BYTES):
                     raise KnowledgeReadError("invalid_request")
@@ -53,13 +54,19 @@ def register_source_routes(app, settings, *, source_facade=None):
                 if len(raw) != request.content_length or len(raw) > MAX_BYTES:
                     raise KnowledgeReadError("invalid_request")
                 payload = _json_object(raw)
-                validate_upload(payload)
+                if method == "retain_pdf_binary":
+                    validate_original_upload(payload)
+                else:
+                    validate_upload(payload)
             else:
                 if request.content_length not in (None, 0) or request.stream.read(1):
                     raise KnowledgeReadError("invalid_request")
                 payload = {} if method == "list" else {"source_revision": _uuid(revision)}
             data = reader().execute(method, graph_id, payload)
-            validate_public_result(method, data, settings.scope, payload)
+            if method in {"retain_pdf_binary", "binary_metadata", "binary_read"}:
+                validate_original_public_result(method, data, settings.scope, payload)
+            else:
+                validate_public_result(method, data, settings.scope, payload)
             body = encoded({"success": True, "data": data})
             if len(body) > MAX_BYTES + ENVELOPE_OVERHEAD:
                 raise KnowledgeReadError("result_too_large")
@@ -79,3 +86,13 @@ def register_source_routes(app, settings, *, source_facade=None):
                      lambda graph_id, source_revision: run("get", graph_id, source_revision), methods=["GET"])
     app.add_url_rule("/api/source/retain/<graph_id>", "source_retain",
                      lambda graph_id: run("retain", graph_id), methods=["POST"])
+    app.add_url_rule("/api/source/retain-original/<graph_id>", "source_retain_original",
+                     lambda graph_id: run("retain_pdf_binary", graph_id), methods=["POST"])
+    app.add_url_rule("/api/source/original-metadata/<graph_id>/<source_revision>",
+                     "source_original_metadata",
+                     lambda graph_id, source_revision: run("binary_metadata", graph_id, source_revision),
+                     methods=["GET"])
+    app.add_url_rule("/api/source/original/<graph_id>/<source_revision>",
+                     "source_original_read",
+                     lambda graph_id, source_revision: run("binary_read", graph_id, source_revision),
+                     methods=["GET"])

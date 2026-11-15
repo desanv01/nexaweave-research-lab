@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -102,9 +104,43 @@ class KnowledgeReadFacade:
     def __init__(self, settings: ReadHostSettings, *, client_factory=None):
         self._settings = settings
         self._client_factory = client_factory
+        self._verification_client = ContextVar('nexaweave_parent_read_client', default=None)
+
+    @contextmanager
+    def parent_verification_session(self, *, deadline=None, tick=None):
+        """Reuse only interpreter imports; each page still checks current access."""
+        if self._client_factory is not None:
+            yield
+            return
+        if self._verification_client.get() is not None:
+            raise ValueError('nested parent verification session')
+        from .knowledge_read_session import KnowledgeReadSession
+        from .knowledge_transport import KnowledgeCooperativeAbort
+        def cooperative():
+            if tick is not None:
+                try:
+                    tick()
+                except (KeyboardInterrupt, SystemExit):
+                    raise
+                except BaseException as error:
+                    raise KnowledgeCooperativeAbort(getattr(error, 'code', 'report_uncertain')) from None
+        script = str(Path(self._settings.bootstrap).with_name('read_session_bootstrap.py'))
+        with KnowledgeReadSession(self._settings.python, script,
+                timeout_seconds=15 if deadline is not None else 120,
+                child_environment=dict(self._settings.child_environment), deadline=deadline,
+                cooperative_tick=cooperative if tick is not None else None) as client:
+            token = self._verification_client.set(client)
+            try:
+                yield
+            finally:
+                self._verification_client.reset(token)
+
+    def has_parent_verification_session(self):
+        verification_client = getattr(self, '_verification_client', None)
+        return verification_client is not None and verification_client.get() is not None
 
     def _reader(self):
-        client = (self._client_factory() if self._client_factory is not None else
+        client = self._verification_client.get() or (self._client_factory() if self._client_factory is not None else
                   KnowledgeProcessClient(self._settings.python, self._settings.bootstrap,
                                          timeout_seconds=120,
                                          child_environment=dict(self._settings.child_environment)))

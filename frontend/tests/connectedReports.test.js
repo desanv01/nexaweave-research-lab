@@ -25,13 +25,50 @@ function selection() {
   return { launch, preparation }
 }
 const planning = () => ({ schema_version: 1, report_id: uid(20), launch_id: uid(10), launch_sha256: selection().launch.launch_sha256, requirement: 'Compare 中😀 evidence', output_language: 'en', native_windows: null })
+const planning2 = () => ({ ...planning(), schema_version: 2, source_revisions: [uid(5), uid(50), uid(51)] })
+function multiPreparationSelection() {
+  const s = selection(), p = s.preparation
+  p.schema_version = 2; p.sources = [clone(p.source), ...[50, 51].map(n => ({ source_revision: uid(n), source_name: `Source ${n} 中😀`, source_sha256: hash }))]
+  p.plan_sha256 = digest(pick(p, 'schema_version display_graph_id scope project_revision operation_id source sources options actors projection_sha256'))
+  s.launch.preparation.plan_sha256 = p.plan_sha256
+  s.launch.launch_sha256 = digest(pick(s.launch, 'schema_version display_graph_id scope preparation request limits ceiling_microusd model_label'))
+  return s
+}
 function report(p = planning()) {
   const s = selection(), launch = s.launch
   const value = { schema_version: 1, report_id: p.report_id, plan_sha256: null, binding: { display_graph_id: 'graph_1', principal: launch.request.principal, scope: clone(launch.scope), project_revision: 1, source: clone(s.preparation.source), preparation: clone(launch.preparation), native: { run_id: launch.request.run_id, launch_sha256: launch.launch_sha256, request_fingerprint: launch.receipt.request_fingerprint, evidence_sha256: launch.receipt.evidence_sha256, platforms: ['twitter', 'reddit'] }, coverage: ['twitter', 'reddit'].map(platform => { const w = p.native_windows?.find(v => v.platform === platform), windows = p.native_windows === null ? [{ offset: 0, count: 2 }] : w ? [{ offset: w.offset, count: w.count }] : []; const selected_records = windows.reduce((n, v) => n + v.count, 0); return { platform, total_records: 2, selected_records, complete: selected_records === 2, windows } }), reference_keys: ['source:' + uid(30)] }, options: pick(p, 'requirement output_language native_windows'), context_sha256: hash, source_projection_sha256: hash, model_label: 'scripted 中😀', limits: { max_calls: 64, max_input_bytes: 262144, max_output_tokens: 4096, max_run_seconds: 600 }, ceiling_microusd: 12345, authorization: { model_calls_enabled: true, budget_configured: true }, state: 'planned', progress: { stage: 'planned', percent: 0, completed_sections: 0, total_sections: 0 }, workflow: null, receipt: null, receipt_sha256: null, manifest: null, cleanup: { known: false, pending: null, owner_thread_alive: null }, cancel_requested: false, error_code: null }
+  if (p.schema_version === 2) {
+    value.binding.source_set = { schema_version: 1, source_revisions: [...p.source_revisions] }
+    value.binding.reference_keys.push(...p.source_revisions.slice(1).map((_, i) => 'source:' + uid(31 + i)))
+  }
   for (const c of value.binding.coverage) for (const w of c.windows) for (let i = w.offset; i < w.offset + w.count; i++) value.binding.reference_keys.push(`native:${c.platform}:${i}:${hash}`)
   return rehash(value)
 }
 function rehash(v) { v.plan_sha256 = digest(pick(v, 'schema_version report_id binding options context_sha256 source_projection_sha256 model_label limits ceiling_microusd')); return v }
+
+test('V2 preparation requires its exact document set before HTTP and rejects rehashed reply substitution', async () => {
+  const s = multiPreparationSelection(), p = { ...planning2(), launch_sha256: s.launch.launch_sha256 }
+  const bind = request => {
+    const v = report(request); v.binding.preparation = clone(s.launch.preparation); v.binding.native.launch_sha256 = s.launch.launch_sha256
+    return rehash(v)
+  }
+  let calls = 0
+  const c = channel(async (_url, options) => { calls++; return envelope(bind(JSON.parse(options.body))) })
+  for (const request of [
+    { ...planning(), launch_sha256: s.launch.launch_sha256 },
+    { ...p, source_revisions: [uid(5), uid(50)] },
+    { ...p, source_revisions: [uid(5), uid(51), uid(50)] },
+    { ...p, source_revisions: [...p.source_revisions, uid(52)] }
+  ]) await assert.rejects(c.plan(request, s), code('invalid_request'))
+  assert.equal(calls, 0)
+  const admitted = await c.plan(p, s)
+  assert.deepEqual(admitted.binding.source_set.source_revisions, p.source_revisions); assert.equal(calls, 1)
+  for (const revisions of [null, [uid(5), uid(50)], [uid(5), uid(51), uid(50)], [...p.source_revisions, uid(52)]]) {
+    const request = revisions === null ? { ...planning(), launch_sha256: s.launch.launch_sha256 } : { ...p, source_revisions: revisions }
+    const v = bind(request)
+    await assert.rejects(validateConnectedReportResult(v, { graph: 'graph_1', payload: request, selection: s, planning: true }), code('invalid_reply'))
+  }
+})
 const prose = '# Report 中😀\n\nSource [[source:' + uid(30) + ']]\n\nRecorded [[native:twitter:0:' + hash + ']]\n\n<img src=x onerror=alert(1)> <script>private</script>'
 function completed(known = report(), content = prose) {
   const v = clone(known), contents = { 'meta.json': '{}', 'outline.json': '{}', 'full_report.md': content, 'retrieval_evidence.json': '{}', 'native_evidence.json': '{}', 'section_01.md': content }
@@ -51,6 +88,143 @@ test('report payloads contain exact bounded identifiers, options and download ki
   assert.throws(() => connectedReportPayload({ ...reportIdentity(report()), kind: 'path', section_index: null }, 'download'), code('invalid_request'))
   assert.throws(() => connectedReportPayload({ ...reportIdentity(report()), kind: 'report', section_index: 1 }, 'download'), code('invalid_request'))
   assert.equal(JSON.parse(connectedReportPayload({ ...reportIdentity(report()), kind: 'section', section_index: 8 }, 'download')).kind, 'section')
+})
+test('V2 plan serializes exact ordered unique selections without widening V1 or recovery requests', () => {
+  const v1 = planning(), payload = planning2(), raw = connectedReportPayload(payload, 'plan')
+  assert.deepEqual(JSON.parse(raw), payload)
+  payload.source_revisions.reverse()
+  assert.deepEqual(JSON.parse(raw).source_revisions, planning2().source_revisions)
+  assert.deepEqual(JSON.parse(connectedReportPayload(v1, 'plan')), v1)
+  assert.throws(() => connectedReportPayload({ ...v1, source_revisions: [uid(5)] }, 'plan'), code('invalid_request'))
+  const missing = planning2(); delete missing.source_revisions
+  assert.throws(() => connectedReportPayload(missing, 'plan'), code('invalid_request'))
+  for (const schema_version of [0, 3, true, '2', 2n]) assert.throws(() => connectedReportPayload({ ...planning2(), schema_version }, 'plan'), code('invalid_request'))
+  assert.throws(() => connectedReportPayload({ ...planning2(), source_set: { schema_version: 1, source_revisions: [uid(5)] } }, 'plan'), code('invalid_request'))
+  const full = { ...planning2(), source_revisions: [uid(5), ...Array.from({ length: 99 }, (_, i) => uid(100 + i))] }
+  assert.deepEqual(JSON.parse(connectedReportPayload(full, 'plan')).source_revisions, full.source_revisions)
+  for (const source_revisions of [null, [], {}, uid(5), [true], [1], ['NOT-UUID'], ['ABCDEFAB-0000-0000-0000-000000000000'], [uid(5), uid(5)], [...full.source_revisions, uid(200)]]) {
+    assert.throws(() => connectedReportPayload({ ...planning2(), source_revisions }, 'plan'), code('invalid_request'))
+  }
+  for (const method of ['start', 'status', 'cancel', 'read', 'download']) {
+    const request = { ...reportIdentity(report()), ...(method === 'download' ? { kind: 'report', section_index: null } : {}) }
+    assert.throws(() => connectedReportPayload({ ...request, schema_version: 2 }, method), code('invalid_request'))
+    assert.throws(() => connectedReportPayload({ ...request, source_revisions: [uid(5)] }, method), code('invalid_request'))
+    assert.deepEqual(JSON.parse(connectedReportPayload(request, method)), request)
+  }
+})
+test('V2 planning requires observable exact source_set rather than a valid anchor-only response', async () => {
+  const payload = planning2(), selected = selection(), anchorOnly = report()
+  // Establish the otherwise-valid V1 receipt independently before testing the V2 request.
+  assert.equal((await validateConnectedReportResult(anchorOnly, { graph: 'graph_1', payload: planning(), selection: selected, planning: true })).plan_sha256, anchorOnly.plan_sha256)
+  await assert.rejects(validateConnectedReportResult(anchorOnly, { graph: 'graph_1', payload, selection: selected, planning: true }), code('invalid_reply'))
+  const value = report(payload)
+  const admitted = await validateConnectedReportResult(value, { graph: 'graph_1', payload, selection: selected, planning: true })
+  assert.deepEqual(admitted.binding.source_set, { schema_version: 1, source_revisions: payload.source_revisions })
+  assert.notEqual(admitted.binding.source_set.source_revisions, payload.source_revisions)
+  assert.notEqual(admitted.binding.source_set.source_revisions, value.binding.source_set.source_revisions)
+  await assert.rejects(validateConnectedReportResult(value, { graph: 'graph_1', payload: planning(), selection: selected, planning: true }), code('invalid_reply'))
+  // Each changed response is freshly rehashed: rejection must not rely on a stale digest.
+  for (const mutate of [v => delete v.binding.source_set,
+    v => v.binding.source_set.source_revisions.pop(),
+    v => v.binding.source_set.source_revisions.splice(1, 2, uid(51), uid(50)),
+    v => v.binding.source_set.source_revisions[1] = uid(99),
+    v => v.binding.source_set.source_revisions.push(uid(99))]) {
+    const changed = clone(value); mutate(changed); rehash(changed)
+    assert.notEqual(changed.plan_sha256, value.plan_sha256)
+    // Well-formed altered sets remain valid recovery identities on their own.
+    assert.equal((await validateConnectedReportResult(changed, { graph: 'graph_1', payload: reportIdentity(changed) })).plan_sha256, changed.plan_sha256)
+    await assert.rejects(validateConnectedReportResult(changed, { graph: 'graph_1', payload, selection: selected, planning: true }), code('invalid_reply'))
+  }
+})
+test('source_set nested shape, version, canonical membership and anchor are strict on recovery too', async () => {
+  const value = report(planning2())
+  for (const mutate of [v => v.binding.source_set = null,
+    v => v.binding.source_set.extra = true,
+    v => delete v.binding.source_set.schema_version,
+    ...[0, 2, true, '1', null].map(version => v => v.binding.source_set.schema_version = version),
+    ...[null, [], {}, uid(5), [true], ['BAD'], ['ABCDEFAB-0000-0000-0000-000000000000'], [uid(5), uid(5)], [uid(99), uid(50)], Array.from({ length: 101 }, (_, i) => uid(100 + i))].map(revisions => v => v.binding.source_set.source_revisions = revisions)]) {
+    const changed = clone(value); mutate(changed); rehash(changed)
+    await assert.rejects(validateConnectedReportResult(changed, { graph: 'graph_1', payload: reportIdentity(changed) }), code('invalid_reply'))
+  }
+  const single = { ...planning2(), source_revisions: [uid(5)] }
+  assert.deepEqual((await validateConnectedReportResult(report(single), { graph: 'graph_1', payload: single, selection: selection(), planning: true })).binding.source_set.source_revisions, [uid(5)])
+  const full = { ...planning2(), source_revisions: [uid(5), ...Array.from({ length: 99 }, (_, i) => uid(100 + i))] }
+  assert.deepEqual((await validateConnectedReportResult(report(full), { graph: 'graph_1', payload: full, selection: selection(), planning: true })).binding.source_set.source_revisions, full.source_revisions)
+})
+test('V2 binding survives V1 status/read/download and pins the whole selected set in known identity', async () => {
+  const planned = report(planning2()), content = prose + '\nSecond [[source:' + uid(31) + ']]\nThird [[source:' + uid(32) + ']]'
+  const status = await validateConnectedReportResult(clone(planned), ctx(planned))
+  assert.deepEqual(status.binding.source_set, planned.binding.source_set)
+  const done = completed(planned, content), read = await validateConnectedReportRead({ schema_version: 1, report: done, content }, ctx(planned))
+  assert.deepEqual(read.report.binding.source_set, planned.binding.source_set)
+  const payload = { ...reportIdentity(done), kind: 'report', section_index: null }
+  const download = { schema_version: 1, ...reportIdentity(done), receipt_sha256: done.receipt_sha256,
+    artifact: { ...done.manifest.files[2], mime: 'text/markdown', content_base64: Buffer.from(content).toString('base64') } }
+  assert.deepEqual(await validateConnectedReportDownload(download, { graph: 'graph_1', payload, known: done }), download)
+  for (const mutate of [v => delete v.binding.source_set,
+    v => v.binding.source_set.source_revisions.splice(1, 2, uid(51), uid(50)),
+    v => v.binding.source_set.source_revisions[1] = uid(99)]) {
+    const changed = clone(planned); mutate(changed); rehash(changed)
+    assert.equal((await validateConnectedReportResult(changed, { graph: 'graph_1', payload: reportIdentity(changed) })).plan_sha256, changed.plan_sha256)
+    // Matching the changed hash in the recovery request cannot replace the pinned original.
+    await assert.rejects(validateConnectedReportResult(changed, { graph: 'graph_1', payload: reportIdentity(changed), known: planned }), code('invalid_reply'))
+  }
+  const wide = report(planning2()); wide.ceiling_microusd = 9223372036854775807n; rehash(wide)
+  const decoded = parseConnectedReportJson(canonical(wide))
+  assert.equal((await validateConnectedReportResult(decoded, { graph: 'graph_1', payload: reportIdentity(wide) })).ceiling_microusd, 9223372036854775807n)
+})
+test('V2 selections are detached before asynchronous plan validation can publish a reply', async () => {
+  const payload = planning2(), value = report(payload), expected = [...payload.source_revisions]
+  const pending = validateConnectedReportResult(value, { graph: 'graph_1', payload, selection: selection(), planning: true })
+  payload.source_revisions.reverse(); value.binding.source_set.source_revisions.pop()
+  const admitted = await pending
+  assert.deepEqual(admitted.binding.source_set.source_revisions, expected)
+})
+test('V2 channel plan and V1 recovery/read/download retain the exact selected binding', async () => {
+  const payload = planning2(), planned = report(payload), content = prose + '\nSecond [[source:' + uid(31) + ']]'
+  const done = completed(planned, content), requests = []
+  const download = { schema_version: 1, ...reportIdentity(done), receipt_sha256: done.receipt_sha256,
+    artifact: { ...done.manifest.files[2], mime: 'text/markdown', content_base64: Buffer.from(content).toString('base64') } }
+  let current = planned
+  const c = channel(async (url, request) => {
+    requests.push({ url, body: JSON.parse(request.body), options: request })
+    if (url.includes('/read/')) { current = done; return envelope({ schema_version: 1, report: done, content }) }
+    if (url.includes('/download/')) return envelope(download)
+    return envelope(current)
+  })
+  const admitted = await c.plan(payload, selection())
+  assert.deepEqual(admitted.binding.source_set.source_revisions, payload.source_revisions)
+  assert.deepEqual((await c.status(reportIdentity(admitted), admitted)).binding.source_set, admitted.binding.source_set)
+  assert.deepEqual((await c.read(reportIdentity(admitted), admitted)).report.binding.source_set, admitted.binding.source_set)
+  assert.deepEqual(await c.download({ ...reportIdentity(done), kind: 'report', section_index: null }, done), download)
+  c.clear()
+  const recovered = await c.status(reportIdentity(done), done)
+  assert.deepEqual(recovered.binding.source_set, done.binding.source_set)
+  assert.equal(requests[0].body.schema_version, 2)
+  assert.deepEqual(requests[0].body.source_revisions, payload.source_revisions)
+  for (const request of requests.slice(1)) {
+    assert.equal(request.body.schema_version, 1)
+    assert.equal(Object.hasOwn(request.body, 'source_revisions'), false)
+    assert.equal(Object.hasOwn(request.body, 'source_set'), false)
+    assert.equal(request.options.credentials, 'omit')
+    assert.equal(request.options.cache, 'no-store')
+  }
+  c.clear()
+})
+test('V2 channel refuses a supplied-known set change before dispatch and a returned set change after recovery', async () => {
+  const payload = planning2(), planned = report(payload), requests = []
+  const changed = clone(planned); changed.binding.source_set.source_revisions[1] = uid(99); rehash(changed)
+  let current = planned
+  const c = channel(async url => { requests.push(url); return envelope(current) })
+  const admitted = await c.plan(payload, selection())
+  await assert.rejects(c.status(reportIdentity(changed), changed), e => e.code === 'invalid_request' && e.requestSent === false)
+  assert.equal(requests.length, 1)
+  c.clear(); current = changed
+  await assert.rejects(c.status(reportIdentity(admitted), admitted), e => e.code === 'invalid_reply' && e.requestSent === true)
+  assert.equal(requests.length, 2)
+  current = planned
+  assert.deepEqual((await c.status(reportIdentity(admitted), admitted)).binding.source_set, admitted.binding.source_set)
+  c.clear()
 })
 test('strict raw JSON refuses duplicate escaped keys, depth, numeric rounding and noninteger lexemes', () => {
   for (const raw of ['{"a":1,"\\u0061":2}', '{"n":1.0}', '{"n":1e0}', '{"n":-0}', '{"n":9223372036854775808}', '{"n":1e999}', '{"s":"\\ud800"}', '['.repeat(18) + '0' + ']'.repeat(18)]) assert.throws(() => parseConnectedReportJson(raw))

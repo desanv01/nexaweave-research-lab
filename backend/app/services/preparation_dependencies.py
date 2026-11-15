@@ -44,7 +44,7 @@ class _ProjectionReader:
 
 def create_knowledge_preparation(facade, graph_id: str, *, chat_client,
                                  model_name: str, base_url: str, frozen_graph=None,
-                                 selected_entity_uuids=None) -> PreparationDependencies:
+                                 selected_entity_uuids=None, require_complete_document=False) -> PreparationDependencies:
     """Bind one accepted reader and real generators to the host's display graph.
 
     Only trusted service code should call this helper. The supplied chat client
@@ -107,5 +107,5 @@ def create_knowledge_preparation(facade, graph_id: str, *, chat_client,
             model_name=model_name, base_url=base_url, strict_generation=True),
         config_generator=lambda: SimulationConfigGenerator(
             chat_client=chat_client, model_name=model_name, base_url=base_url,
-            strict_generation=True),
+            strict_generation=True, require_complete_document=require_complete_document),
     )

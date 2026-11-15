@@ -17,6 +17,8 @@ import threading
 import time
 from types import SimpleNamespace
 from uuid import UUID
+from nexaweave_execution.preparation_contracts import (validate_source_snapshots,
+    document_envelope, validate_preparation_sources)
 
 from .preparation_client import (PreparationError, canonical, digest, encoded, file_names,
     labels, text, uuid_string, validate_payload, validate_receipt, validate_result)
@@ -232,6 +234,132 @@ class DurablePreparationHost:
                     graph_snapshot_atomic=False, model_calls_started=row.model_calls_started, simulation_executed=False)
         return validate_result(data, self.display_graph_id, self.scope_dto, payload, method)
 
+    @staticmethod
+    def _source_check(deadline=None):
+        until = time.monotonic() + 15
+        if deadline is not None:
+            until = min(until, deadline)
+        def check():
+            if time.monotonic() >= until:
+                raise PreparationError('timeout')
+        return check
+
+    @staticmethod
+    def _source_snapshot(retained, check):
+        check()
+        if len(retained.text) > 32768 or not 1 <= len(retained.passages) <= 100:
+            raise PreparationError('result_too_large')
+        passages = []
+        for p in retained.passages:
+            check()
+            passages.append(dict(evidence_id=str(p.evidence_id), start=p.start, end=p.end,
+                page=p.page, excerpt=p.excerpt, excerpt_sha256=p.excerpt_sha256))
+        snapshot = dict(source_revision=str(retained.source_revision), source_name=retained.name,
+            source_sha256=retained.text_sha256, text=retained.text, passages=passages)
+        check()
+        return json.loads(encoded(snapshot))
+
+    def _owned_row(self, row, *, expected_revision=None, deadline=None, check=None):
+        """Reauthorize all frozen documents; status may use current project revision."""
+        if row.frozen['public']['schema_version'] == 1:
+            return self._owned(row.frozen['public']['source']['source_revision'], expected_revision=expected_revision)
+        check = check or self._source_check(deadline)
+        try:
+            validate_preparation_sources(row.frozen, check)
+            initial_scope = initial_project = anchor = None
+            for source in row.frozen['sources']:
+                check()
+                scope, project, retained = self._owned(source['source_revision'], expected_revision=expected_revision)
+                check()
+                if (scope.model_dump(mode='json') != row.frozen['public']['scope']
+                        or str(project.project_id) != row.frozen['public']['scope']['project_id']
+                        or self._source_snapshot(retained, check) != source):
+                    raise PreparationError('conflict')
+                if initial_scope is None:
+                    initial_scope, initial_project, anchor = scope, project, retained
+                    current_revision = project.revision
+                elif scope != initial_scope or project.revision != current_revision or project != initial_project:
+                    raise PreparationError('conflict')
+            check()
+            return initial_scope, initial_project, anchor
+        except (ValueError, TypeError, KeyError, UnicodeError, AttributeError):
+            raise PreparationError('conflict') from None
+
+    def _plan_sources(self, payload):
+        from nexaweave_execution.preparation_contracts import PreparationAuthorityError
+        check = self._source_check()
+        snapshots, metadata = [], []
+        characters = passage_count = 0
+        scope = project = None
+        for revision in payload['source_revisions']:
+            check()
+            current_scope, current_project, retained = self._owned(revision,
+                expected_revision=None if project is None else project.revision)
+            check()
+            if project is None:
+                scope, project = current_scope, current_project
+                project_revision = project.revision
+            elif current_scope != scope or current_project != project or current_project.revision != project_revision:
+                raise PreparationError('conflict')
+            characters += len(retained.text); passage_count += len(retained.passages)
+            if characters > 32768 or passage_count > 100:
+                raise PreparationError('result_too_large')
+            snapshot = self._source_snapshot(retained, check)
+            if snapshot['source_revision'] != revision or retained.project_id != scope.project_id:
+                raise PreparationError('conflict')
+            snapshots.append(snapshot)
+            metadata.append({k: snapshot[k] for k in ('source_revision', 'source_name', 'source_sha256')})
+        try:
+            validate_source_snapshots(snapshots, check)
+            source_text = document_envelope(snapshots)
+        except (ValueError, TypeError, KeyError, UnicodeError):
+            raise PreparationError('invalid_request') from None
+        check()
+        try:
+            prior = self.store.get(self.principal, payload['operation_id'])
+        except PreparationAuthorityError as error:
+            if error.code != 'not_found':
+                raise
+        else:
+            if prior.request_sha256 != digest(payload) or prior.display_graph_id != self.display_graph_id:
+                raise PreparationError('conflict')
+            self._owned_row(prior, expected_revision=project_revision, check=check)
+            result = self._dto(prior, 'plan', payload)
+            self._owned_row(prior, expected_revision=project_revision, check=check)
+            return result
+        check()
+        graph = validate_graph(self.reader.graph_data(self.display_graph_id), self.display_graph_id)
+        check()
+        allowed = set(payload['options']['types'] or [])
+        selected = []
+        for node in graph['nodes']:
+            check()
+            if any(v not in {'Entity', 'Node'} and (not allowed or v in allowed) for v in node['labels']):
+                selected.append(node)
+                if len(selected) == payload['options']['max_agents']:
+                    break
+        if not selected:
+            raise PreparationError('empty_selection')
+        public = dict(schema_version=2, display_graph_id=self.display_graph_id, scope=self.scope_dto,
+            project_revision=project_revision, operation_id=payload['operation_id'], source=metadata[0], sources=metadata,
+            options=payload['options'], actors=[dict(source_entity_uuid=n['uuid'], name=n['name'],
+                labels=[v for v in n['labels'] if v not in {'Entity', 'Node'}]) for n in selected],
+            projection_sha256=digest(graph))
+        identity = json.loads(encoded(public))
+        public['plan_sha256'] = digest(identity)
+        frozen = dict(public=public, plan_identity=identity, request=payload, source_text=source_text,
+            graph=graph, sources=snapshots)
+        candidate = SimpleNamespace(frozen=frozen, project_revision=project_revision, state='planned', stage='planned',
+            completed=0, model_calls_started=False, receipt=None, error_code=None)
+        self._owned_row(candidate, expected_revision=project_revision, check=check)
+        self._dto(candidate, 'plan', payload)
+        self._owned_row(candidate, expected_revision=project_revision, check=check)
+        row = self.store.put(self.principal, frozen)
+        self._owned_row(row, expected_revision=project_revision, check=check)
+        result = self._dto(row, 'plan', payload)
+        self._owned_row(row, expected_revision=project_revision, check=check)
+        return result
+
     def _row(self, payload):
         row = self.store.get(self.principal, payload['operation_id'], payload.get('plan_sha256'))
         if row.display_graph_id != self.display_graph_id or row.frozen['public']['scope'] != self.scope_dto:
@@ -241,6 +369,8 @@ class DurablePreparationHost:
     def plan(self, payload):
         from nexaweave_execution.preparation_contracts import PreparationAuthorityError
         payload = validate_payload('plan', payload)
+        if payload['schema_version'] == 2:
+            return self._plan_sources(payload)
         # Existing request recovers its original snapshot; never silently reread.
         scope, project, retained = self._owned(payload['source_revision'])
         try:
@@ -279,7 +409,7 @@ class DurablePreparationHost:
         from nexaweave_execution.budget import ReservationState
         payload = validate_payload('start', payload)
         row = self._row(payload)
-        scope, _, retained = self._owned(row.frozen['public']['source']['source_revision'], expected_revision=row.project_revision)
+        scope, _, retained = self._owned_row(row, expected_revision=row.project_revision)
         if retained.text_sha256 != row.frozen['public']['source']['source_sha256']:
             raise PreparationError('conflict')
         if row.state != 'planned':
@@ -288,6 +418,8 @@ class DurablePreparationHost:
             raise PreparationError('model_calls_disabled')
         if not callable(self.scheduler):
             raise PreparationError('preparation_unavailable')
+        if row.frozen['public']['schema_version'] == 2:
+            self._owned_row(row, expected_revision=row.project_revision)
         reservation = self.budget.reserve_prepared(self.principal, self.account_id, scope,
                                                    row.operation_id, row.plan_sha256, self.ceiling)
         if reservation.state != ReservationState.reserved:
@@ -307,8 +439,11 @@ class DurablePreparationHost:
         row = self._row(payload)
         # Historical completed plans survive project revision changes, but still
         # require owned binding and retained source. No filesystem/provider IO.
-        self._owned(row.frozen['public']['source']['source_revision'])
-        return self._dto(row, 'status', payload)
+        self._owned_row(row)
+        result = self._dto(row, 'status', payload)
+        if row.frozen['public']['schema_version'] == 2:
+            self._owned_row(row)
+        return result
 
     def _artifacts(self, row, root):
         from nexaweave_execution.native_owned_binding import _regular_bound_file, _manifest
@@ -416,14 +551,17 @@ class DurablePreparationHost:
             nonlocal started
             if not self.authorization()['model_calls_enabled']:
                 raise PreparationError('model_calls_disabled')
-            self._owned(row.frozen['public']['source']['source_revision'], expected_revision=row.project_revision)
+            self._owned_row(row, expected_revision=row.project_revision, deadline=deadline)
             self.budget.start(self.principal, self.account_id, row.operation_id, row.budget_attempt_id)
             started = True
             self.store.update(self.principal, dispatch, stage='generating_profiles', completed=10, calls_started=True)
+            if row.frozen['public']['schema_version'] == 2:
+                self._owned_row(row, expected_revision=row.project_revision, deadline=deadline)
 
         try:
-            scope, _, retained = self._owned(row.frozen['public']['source']['source_revision'], expected_revision=row.project_revision)
-            if retained.text != row.frozen['source_text'] or not self.authorization()['model_calls_enabled']:
+            scope, _, retained = self._owned_row(row, expected_revision=row.project_revision, deadline=deadline)
+            if (row.frozen['public']['schema_version'] == 1 and retained.text != row.frozen['source_text']
+                    or not self.authorization()['model_calls_enabled']):
                 raise PreparationError('model_calls_disabled')
             checkpoint()
             if not _safe_ancestors(self.root) or self.root.resolve(strict=True) != self.root or not self.root.is_dir():
@@ -437,13 +575,16 @@ class DurablePreparationHost:
                     component.mkdir()
                 if not _safe_ancestors(component):
                     raise PreparationError('preparation_unavailable')
+            if row.frozen['public']['schema_version'] == 2:
+                self._owned_row(row, expected_revision=row.project_revision, deadline=deadline)
             client = self._new_client(dispatch.attempt_id)
             bounded = BoundedChat(client, checkpoint=checkpoint, first_call=first_call,
                                   deadline=deadline, max_calls=len(row.frozen['public']['actors']) * 3 + 4)
             dependencies = create_knowledge_preparation(self.reader, self.display_graph_id,
                 chat_client=bounded, model_name=self.model_name, base_url=self.base_url,
                 frozen_graph=validate_graph(row.frozen['graph'], self.display_graph_id),
-                selected_entity_uuids=[a['source_entity_uuid'] for a in row.frozen['public']['actors']])
+                selected_entity_uuids=[a['source_entity_uuid'] for a in row.frozen['public']['actors']],
+                require_complete_document=row.frozen['public']['schema_version'] == 2)
             manager = SimulationManager(preparation=dependencies, simulation_data_dir=attempt)
             opts = row.frozen['public']['options']
             state = manager.create_simulation(str(row.project_id), self.display_graph_id,
@@ -461,7 +602,11 @@ class DurablePreparationHost:
             checkpoint()
             self.store.update(self.principal, dispatch, stage='publishing', completed=95)
             source = attempt / state.simulation_id
+            if row.frozen['public']['schema_version'] == 2:
+                self._owned_row(row, expected_revision=row.project_revision, deadline=deadline)
             receipt = self._artifacts(row, source)
+            if row.frozen['public']['schema_version'] == 2:
+                self._owned_row(row, expected_revision=row.project_revision, deadline=deadline)
             destination = self.root / state.simulation_id
             # Exclusive directory creation. Partial/orphan publication is never
             # authoritative; it is preserved and cannot be overwritten/retried.
@@ -479,9 +624,13 @@ class DurablePreparationHost:
                 raise PreparationError('preparation_uncertain')
             client = None
             checkpoint()
+            if row.frozen['public']['schema_version'] == 2:
+                self._owned_row(row, expected_revision=row.project_revision, deadline=deadline)
             self.budget.settle_prepared(self.principal, self.account_id, scope, row.operation_id,
                 row.budget_attempt_id, row.plan_sha256, receipt['artifact_sha256'])
             checkpoint()
+            if row.frozen['public']['schema_version'] == 2:
+                self._owned_row(row, expected_revision=row.project_revision, deadline=deadline)
             self.store.update(self.principal, dispatch, state='ready', stage='ready', completed=100, receipt=receipt)
             return {'schema_version': 1, 'operation_id': str(row.operation_id),
                     'plan_sha256': row.plan_sha256, 'state': 'ready', 'artifact_sha256': receipt['artifact_sha256']}
@@ -514,7 +663,7 @@ class DurablePreparationHost:
         import pickle
         payload = validate_payload('status', payload)
         row = self._row(payload)
-        self._owned(row.frozen['public']['source']['source_revision'], expected_revision=row.project_revision)
+        self._owned_row(row, expected_revision=row.project_revision)
         if row.state != 'ready' or row.receipt is None:
             raise PreparationError('conflict')
         opts = row.frozen['public']['options']
@@ -531,8 +680,12 @@ class DurablePreparationHost:
         root = self.root / ('sim_' + row.operation_id.hex)
         if self._artifacts(row, root) != row.receipt:
             raise PreparationError('preparation_uncertain')
+        if row.frozen['public']['schema_version'] == 2:
+            self._owned_row(row, expected_revision=row.project_revision)
         factory = NativeOwnedSessionFactory(str(root), self.display_graph_id, request.simulation_id,
             self.principal, str(row.project_id), row.project_revision, request.platforms,
             request.seed, request.max_rounds, runtime_sha256, model_factory)
         factory.validate(request)
+        if row.frozen['public']['schema_version'] == 2:
+            self._owned_row(row, expected_revision=row.project_revision)
         return request, factory

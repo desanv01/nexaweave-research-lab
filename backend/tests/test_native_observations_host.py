@@ -26,7 +26,7 @@ def pure_host(tmp_path):
         launch_sha256=dto['launch_sha256'], state='completed', receipt=deepcopy(dto['receipt']),
         dispatch_claimed=True, budget_attempt_id=uuid4(), workflow=dto['workflow'], error_code=None, cancel_requested=False)
     prep = SimpleNamespace(operation_id=UUID(dto['preparation']['operation_id']), project_revision=1,
-        frozen={'public': {'source': {'source_revision': str(UUID(int=8)), 'source_sha256': 'e' * 64}}},
+        frozen={'public': {'schema_version': 1, 'source': {'source_revision': str(UUID(int=8)), 'source_sha256': 'e' * 64}}},
         receipt={'opaque': 'unit READY receipt'})
     native = SimpleNamespace(request=request, fingerprint=request.fingerprint, state=SimpleNamespace(value='completed'),
         owner_id=uuid4(), attempt_id=UUID(row.receipt['attempt_id']), child=SimpleNamespace(instance_id=UUID(row.receipt['instance_id'])),
@@ -37,8 +37,12 @@ def pure_host(tmp_path):
     launch._current = lambda value: (prep, {})
     launch.authorization = lambda value: {'model_calls_enabled': False}
     launch.native = SimpleNamespace(get=lambda principal, run: native)
+    def owned_row(value, *, expected_revision):
+        assert value is prep
+        assert expected_revision == prep.project_revision
+        return None, None, SimpleNamespace(text_sha256='e' * 64)
     launch.preparation = SimpleNamespace(root=tmp_path,
-        _owned=lambda source, expected_revision=None: (None, None, SimpleNamespace(text_sha256='e' * 64)),
+        _owned_row=owned_row,
         _artifacts=lambda value, root: calls.append('inputs') or deepcopy(prep.receipt))
     def forbidden(*args, **kwargs): pytest.fail('observations invoked a mutation/model/runtime seam')
     launch._recover = launch._dto = launch.start = launch.cancel = launch.status = forbidden

@@ -1,0 +1,4 @@
+# These source files are compared byte-for-byte with the installed package.
+# Preserve their reviewed LF bytes and fixed read bounds on Windows checkouts.
+services/knowledge/src/nexaweave_execution/report_contracts.py text eol=lf
+services/knowledge/src/nexaweave_knowledge/source_library.py text eol=lf

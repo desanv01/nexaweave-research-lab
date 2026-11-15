@@ -7,6 +7,10 @@
     "label": "English",
     "llmInstruction": "Please respond in English."
   },
+  "ms": {
+    "label": "Bahasa Melayu",
+    "llmInstruction": "Sila jawab dalam Bahasa Melayu."
+  },
   "es": {
     "label": "Español",
     "llmInstruction": "Por favor, responde en español."

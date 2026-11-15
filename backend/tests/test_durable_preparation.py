@@ -127,6 +127,295 @@ def offline_host(tmp_path, *, chat=None, authorized=True):
     return host, chat, transport, project
 
 
+def multisource_host(tmp_path, *, chat=None, contents=('PDF 原文 😀', 'DOCX 表格 雪')):
+    """Real inherited generators, injected authority/projection; no real PG here."""
+    host, chat, transport, project = offline_host(tmp_path, chat=chat)
+    scope = KnowledgeScope.model_validate_json(json.dumps(SCOPE))
+    project.project_id = scope.project_id
+    records = {}
+    for index, content in enumerate(contents):
+        revision, evidence = str(uuid4()), UUID(uid(900 + index))
+        passage = SimpleNamespace(evidence_id=evidence, start=0, end=len(content), page=index + 1,
+            excerpt=content, excerpt_sha256=hashlib.sha256(content.encode()).hexdigest())
+        records[revision] = SimpleNamespace(project_id=scope.project_id, source_revision=UUID(revision),
+            name=('PDF original', 'DOCX table')[index] if index < 2 else 'text source %d' % index, text=content,
+            text_sha256=hashlib.sha256(content.encode()).hexdigest(), codepoint_length=len(content),
+            passages=(passage,))
+    def owned(revision, *, expected_revision=None):
+        if expected_revision is not None and expected_revision != project.revision:
+            raise PreparationError('conflict')
+        if revision not in records:
+            raise PreparationError('not_found')
+        return scope, project, records[revision]
+    host._owned = owned
+    original_call = transport.call
+    def projected(raw):
+        reply = json.loads(original_call(raw))
+        for fact in reply['result']['facts']:
+            fact['evidence_ids'] = [uid(900 + index) for index in range(len(records))]
+        return json.dumps(reply, ensure_ascii=False).encode()
+    transport.call = projected
+    payload = dict(plan_request(next(iter(records))), schema_version=2, source_revisions=list(records))
+    return host, chat, transport, project, records, payload
+
+
+def test_v2_preparation_complete_envelope_reaches_inherited_config_and_recovery(tmp_path):
+    host, chat, transport, project, records, payload = multisource_host(tmp_path)
+    planned = host.plan(payload)
+    assert planned['schema_version'] == 2 and planned['sources'][0] == planned['source']
+    assert [s['source_revision'] for s in planned['sources']] == payload['source_revisions']
+    row = host.store.get('owner', payload['operation_id'])
+    from nexaweave_execution.preparation_contracts import document_envelope
+    assert row.frozen['source_text'] == document_envelope(row.frozen['sources'])
+    assert json.loads(row.frozen['source_text'])['sources'][1]['text'] == 'DOCX 表格 雪'
+    before_reads = len(transport.calls)
+    assert host.plan(payload)['plan_sha256'] == planned['plan_sha256']
+    assert len(transport.calls) == before_reads and not chat.calls
+    host.start(status_request(planned))
+    host.generate(host.store.get('owner', payload['operation_id']).dispatch.to_wire())
+    ready = host.status(status_request(planned))
+    assert ready['schema_version'] == 2 and ready['state'] == 'ready'
+    config_calls = [call['messages'][-1]['content'] for call in chat.calls
+                    if any(key in call['messages'][-1]['content'] for key in ('total_simulation_hours', 'hot_topics'))]
+    assert len(config_calls) == 2
+    assert all(row.frozen['source_text'] in prompt for prompt in config_calls)
+    root = tmp_path / ready['receipt']['simulation_id']
+    grounding = json.loads((root / 'source_grounding.json').read_bytes())
+    assert set(grounding) == {uid(10)} and grounding[uid(10)]['evidence_ids'] == [uid(900), uid(901)]
+    request, native = host.bind_native(status_request(planned), run_id=uuid4(), runtime_sha256='a' * 64, model_factory=dict)
+    assert request.artifact_sha256 == ready['receipt']['artifact_sha256']
+    project.revision = 2
+    assert host.status(status_request(planned))['state'] == 'ready'
+    with pytest.raises(PreparationError):
+        host.bind_native(status_request(planned), run_id=uuid4(), runtime_sha256='a' * 64, model_factory=dict)
+
+
+def test_v2_request_and_fingerprint_preserve_explicit_anchor_and_source_order(tmp_path):
+    host, _, _, _, records, payload = multisource_host(tmp_path)
+    planned = host.plan(payload)
+    for revisions in ([], list(records)[::-1], [payload['source_revision']] * 2, [True]):
+        with pytest.raises(PreparationError):
+            validate_payload('plan', dict(payload, source_revisions=revisions))
+    with pytest.raises(PreparationError):
+        validate_payload('plan', dict(payload, schema_version=1))
+    from app.services.preparation_client import validate_result
+    altered = deepcopy(planned)
+    altered['sources'][1]['source_name'] += ' changed'
+    with pytest.raises(PreparationError):
+        validate_result(altered, host.display_graph_id, SCOPE, payload, 'plan')
+    changed = dict(payload, source_revisions=[payload['source_revision']])
+    with pytest.raises(PreparationError):
+        host.plan(changed)
+
+
+def test_v2_same_operation_reordered_nonanchor_documents_have_a_distinct_valid_fingerprint(tmp_path):
+    from nexaweave_execution.preparation_contracts import document_envelope
+    host, _, _, _, records, payload = multisource_host(tmp_path, contents=('PDF A', 'DOCX B', 'text C'))
+    planned = host.plan(payload)
+    row = host.store.get('owner', payload['operation_id'])
+    frozen = deepcopy(row.frozen)
+    frozen['sources'][1:] = frozen['sources'][1:][::-1]
+    frozen['public']['sources'][1:] = frozen['public']['sources'][1:][::-1]
+    frozen['request']['source_revisions'][1:] = frozen['request']['source_revisions'][1:][::-1]
+    frozen['source_text'] = document_envelope(frozen['sources'])
+    frozen['plan_identity'] = {k: v for k, v in frozen['public'].items() if k != 'plan_sha256'}
+    changed_hash = digest(frozen['plan_identity'])
+    frozen['public']['plan_sha256'] = changed_hash
+    changed = replace(row, frozen=frozen, plan_sha256=changed_hash, request_sha256=digest(frozen['request']))
+    assert _record(tuple(changed.__dict__.values())).plan_sha256 == changed_hash != planned['plan_sha256']
+    assert frozen['public']['source'] == row.frozen['public']['source']
+    assert frozen['graph'] == row.frozen['graph']
+
+
+@pytest.mark.parametrize('mode', ['disconnected', 'duplicate-evidence', 'aggregate-text', 'envelope', 'aggregate-passages'])
+def test_v2_plan_refuses_unused_or_overbudget_sources_without_persistence(tmp_path, mode):
+    host, chat, transport, _, records, payload = multisource_host(tmp_path)
+    second = records[payload['source_revisions'][1]]
+    if mode == 'disconnected':
+        original_reader = host.reader
+        def projected(_):
+            graph = validate_graph(original_reader.graph_data(host.display_graph_id), host.display_graph_id)
+            graph['nodes'][0]['evidence_ids'] = [uid(900)]
+            graph['edges'][0]['evidence_ids'] = [uid(900)]
+            # The unselected Organization retains source2; it is insufficient.
+            return graph
+        host.reader = SimpleNamespace(graph_data=projected)
+    elif mode == 'duplicate-evidence':
+        second.passages[0].evidence_id = UUID(uid(900))
+    elif mode in ('aggregate-text', 'envelope'):
+        for record, size in zip(records.values(), (17000, 17000) if mode == 'aggregate-text' else (16300, 16300)):
+            record.text = 'x' * size; record.text_sha256 = hashlib.sha256(record.text.encode()).hexdigest()
+            record.passages[0].excerpt = record.text; record.passages[0].end = size
+            record.passages[0].excerpt_sha256 = record.text_sha256
+    else:
+        second.passages = tuple(SimpleNamespace(**dict(second.passages[0].__dict__, evidence_id=uuid4())) for _ in range(100))
+    with pytest.raises(PreparationError):
+        host.plan(payload)
+    assert not host.store.rows and not chat.calls and not host.budget.rows
+
+
+@pytest.mark.parametrize('when', ['graph', 'persist', 'reply'])
+def test_v2_plan_rechecks_every_source_after_fallible_graph_store_and_reply_steps(tmp_path, when):
+    host, chat, _, _, records, payload = multisource_host(tmp_path)
+    second = payload['source_revisions'][1]
+    if when == 'graph':
+        original = host.reader.graph_data
+        def read(graph_id):
+            graph = original(graph_id); records[second].name = 'changed'; return graph
+        host.reader.graph_data = read
+    elif when == 'persist':
+        original = host.store.put
+        def put(principal, frozen):
+            row = original(principal, frozen); records.pop(second); return row
+        host.store.put = put
+    else:
+        original = host._dto
+        def reply(row, method, value):
+            result = original(row, method, value); records[second].name = 'changed'; return result
+        host._dto = reply
+    with pytest.raises(PreparationError):
+        host.plan(payload)
+    assert not chat.calls and not host.budget.rows
+
+
+@pytest.mark.parametrize('stage', ['start', 'before-client', 'first-call', 'first-admission', 'publication', 'settle', 'ready'])
+def test_v2_all_source_authority_blocks_paid_or_ready_effects_at_each_gate(tmp_path, stage):
+    host, chat, _, _, records, payload = multisource_host(tmp_path)
+    planned = host.plan(payload)
+    second = payload['source_revisions'][1]
+    if stage == 'start':
+        records.pop(second)
+        with pytest.raises(PreparationError): host.start(status_request(planned))
+        assert not host.budget.rows and not chat.calls
+        return
+    host.start(status_request(planned))
+    row = host.store.get('owner', payload['operation_id'])
+    if stage == 'before-client':
+        records.pop(second)
+        host.client_factory = lambda: pytest.fail('revoked source reached client construction')
+    elif stage == 'first-call':
+        def client(): records.pop(second); return chat
+        host.client_factory = client
+    elif stage == 'first-admission':
+        original = host.budget.start
+        def begin(*args): original(*args); records.pop(second, None)
+        host.budget.start = begin
+    elif stage == 'publication':
+        original = host._artifacts
+        def artifacts(*args):
+            receipt = original(*args); records.pop(second, None); return receipt
+        host._artifacts = artifacts
+    elif stage == 'settle':
+        chat.close = lambda: records.pop(second, None)
+    else:
+        original = host.budget.settle_prepared
+        def settle(*args): original(*args); records.pop(second)
+        host.budget.settle_prepared = settle
+    with pytest.raises(PreparationError): host.generate(row.dispatch.to_wire())
+    after = host.store.get('owner', payload['operation_id'])
+    assert after.state != 'ready' and after.receipt is None
+    if stage in ('before-client', 'first-call'):
+        assert not chat.calls and host.budget.starts == host.budget.settles == 0
+        assert host.budget.rows[str(row.operation_id)].state == ReservationState.released
+    elif stage != 'ready':
+        assert host.budget.starts == 1 and host.budget.settles == 0
+        if stage == 'first-admission': assert not chat.calls
+    else:
+        assert host.budget.settles == 1  # Honest post-settlement failure, not rollback.
+
+
+def test_v2_source_snapshot_corruption_and_stale_status_are_not_hidden_by_anchor(tmp_path):
+    host, _, _, _, records, payload = multisource_host(tmp_path)
+    planned = host.plan(payload)
+    row = host.store.get('owner', payload['operation_id'])
+    for mutate in (lambda f: f.update(source_text=f['sources'][0]['text']),
+                   lambda f: f['sources'][1]['passages'][0].update(excerpt='corrupt'),
+                   lambda f: f['sources'][1].update(source_sha256='0' * 64)):
+        frozen = deepcopy(row.frozen); mutate(frozen)
+        with pytest.raises(PreparationAuthorityError):
+            _record(tuple(replace(row, frozen=frozen).__dict__.values()))
+    records[payload['source_revisions'][1]].name = 'changed'
+    with pytest.raises(PreparationError): host.status(status_request(planned))
+
+
+@pytest.mark.parametrize('kind', ['missing', 'foreign', 'revoked'])
+def test_v2_plan_missing_foreign_or_revoked_second_source_has_no_model_or_durable_effect(tmp_path, kind):
+    host, chat, _, _, records, payload = multisource_host(tmp_path)
+    second = payload['source_revisions'][1]
+    if kind == 'missing': records.pop(second)
+    elif kind == 'foreign': records[second].project_id = uuid4()
+    else:
+        owned = host._owned
+        def denied(revision, **kwargs):
+            if revision == second: raise PreparationError('unauthorized')
+            return owned(revision, **kwargs)
+        host._owned = denied
+    with pytest.raises(PreparationError): host.plan(payload)
+    assert not host.store.rows and not host.budget.rows and not chat.calls
+
+
+def test_v2_native_consumers_reauthorize_second_source_before_artifact_or_runtime_access(tmp_path, monkeypatch):
+    from app.services.durable_native_launch_host import DurableNativeLaunchHost
+    from app.services.native_observations_host import NativeObservationsHost
+    host, _, _, _, records, payload = multisource_host(tmp_path)
+    planned = host.plan(payload)
+    row = host.store.get('owner', payload['operation_id'])
+    records.pop(payload['source_revisions'][1])
+    host._artifacts = lambda *_: pytest.fail('revoked source reached artifact read')
+    with pytest.raises(PreparationError) as caught:
+        host.bind_native(status_request(planned), run_id=uuid4(), runtime_sha256='a' * 64, model_factory=dict)
+    assert caught.value.code == 'not_found'
+    native = object.__new__(DurableNativeLaunchHost)
+    native.preparation = host
+    with pytest.raises(PreparationError) as caught:
+        native._preparation({'operation_id': planned['operation_id'], 'plan_sha256': planned['plan_sha256']})
+    assert caught.value.code == 'not_found'
+    observed = object.__new__(NativeObservationsHost)
+    observed.launch = SimpleNamespace(_row=lambda _: object(), _current=lambda _: (row, None), preparation=host)
+    with pytest.raises(PreparationError) as caught:
+        observed._authority({'schema_version': 1, 'launch_id': str(uuid4()), 'launch_sha256': 'a' * 64,
+            'platform': 'twitter', 'offset': 0, 'limit': 1})
+    assert caught.value.code == 'not_found'
+
+
+@pytest.mark.parametrize('count', [8100, 50000])
+def test_complete_document_policy_refuses_before_any_config_call_without_raising_caps(count):
+    from app.services.simulation_config_generator import SimulationConfigGenerator
+    chat = ScriptedChat()
+    generator = SimulationConfigGenerator(chat_client=chat, model_name='scripted', base_url='injected://fixture',
+        strict_generation=True, require_complete_document=True)
+    with pytest.raises(ValueError):
+        generator.generate_config('sim_fixture', 'project', 'graph', 'requirement', 'x' * count, [], True, True)
+    assert not chat.calls
+    assert (generator.TIME_CONFIG_CONTEXT_LENGTH, generator.EVENT_CONFIG_CONTEXT_LENGTH) == (10000, 8000)
+
+
+def test_complete_document_policy_is_opt_in_and_legacy_context_truncation_is_unchanged():
+    from app.services.simulation_config_generator import SimulationConfigGenerator
+    legacy = SimulationConfigGenerator(chat_client=ScriptedChat(), model_name='scripted', base_url='injected://fixture')
+    content = 'x' * 50000
+    context = legacy._build_context('requirement', content, [])
+    assert content not in context and '文档已截断' in context
+    strict = SimulationConfigGenerator(chat_client=ScriptedChat(), model_name='scripted', base_url='injected://fixture',
+        require_complete_document=True)
+    with pytest.raises(ValueError): strict._build_context('requirement', content, [])
+
+
+def test_v2_plan_source_clock_is_shared_and_refuses_late_additional_access(tmp_path, monkeypatch):
+    from app.services import durable_preparation_host as module
+    host, chat, _, _, records, payload = multisource_host(tmp_path)
+    clock = [100.0]
+    monkeypatch.setattr(module.time, 'monotonic', lambda: clock[0])
+    owned = host._owned
+    def slow(revision, **kwargs):
+        result = owned(revision, **kwargs)
+        if revision == payload['source_revisions'][1]: clock[0] = 116.0
+        return result
+    host._owned = slow
+    with pytest.raises(PreparationError) as caught: host.plan(payload)
+    assert caught.value.code == 'timeout' and not host.store.rows and not chat.calls
+
+
 def test_actual_inherited_generation_and_exact_native_binding(tmp_path):
     host, chat, transport, project = offline_host(tmp_path)
     request = plan_request()

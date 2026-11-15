@@ -1,5 +1,6 @@
 """Authored owned-PG/cold-installed-process regressions. Main alone executes."""
 from dataclasses import asdict, replace
+import base64
 import hashlib
 import json
 import os
@@ -38,7 +39,7 @@ def factory():
     def connect():
         return psycopg.connect(dsn, connect_timeout=3)
     with connect() as connection:
-        migrate(connection)  # current accepted schema3, never an old2-only fixture
+        migrate(connection)  # additive binary schema4; accepted earlier catalogs stay immutable
         migrate_knowledge(connection)
     return connect
 
@@ -358,3 +359,31 @@ def test_actual_pdf_child_rejects_unauthorized_scope_and_bad_pdf_without_mutatio
     result = json.loads(SourceLibrary(settings, connection_factory=factory).dispatch(request(settings, "retain_pdf", malformed)))
     assert result["ok"] is False and result["error"]["code"] == "invalid_request"
     assert SourceStore(factory).list_sources("owner", project) == []
+
+
+@pytest.mark.postgres
+def test_v2_original_pdf_owned_receipt_and_restarted_read(factory):
+    from test_pdf_source import pdf_bytes
+    from test_source_library import pdf_payload
+    settings, project = owned(factory)
+    binary = pdf_bytes(["Beginning 猫", "", "End 雪"])
+    value = dict(pdf_payload(binary), schema_version=2)
+    library = SourceLibrary(settings, connection_factory=factory)
+    first = library.execute("retain_pdf_binary", value)
+    assert first["schema_version"] == 2 and first["binary_retained"] is True
+    assert first["binary"]["sha256"] == value["input_sha256"]
+    assert first["extraction"]["ocr_performed"] is False
+    assert all(first["extraction"][key] is True for key in (
+        "input_digest_persisted", "original_document_verified", "binary_persistently_bound"))
+    assert library.execute("retain_pdf_binary", value) == first
+    fresh = SourceLibrary(settings, connection_factory=factory)
+    metadata = fresh.execute("binary_metadata", {"source_revision": value["source_revision"]})
+    content = fresh.execute("binary_read", {"source_revision": value["source_revision"]})
+    assert metadata == {key: item for key, item in content.items() if key != "content_base64"}
+    assert base64.b64decode(content["content_base64"]) == binary
+    assert fresh.execute("get", {"source_revision": value["source_revision"]})["passages"] == first["passages"]
+    assert SourceStore(factory).get_original("owner", project, value["source_revision"]).content == binary
+    with pytest.raises(NotFound):
+        SourceStore(factory).get_original("other", project, value["source_revision"])
+    with pytest.raises(Conflict):
+        library.execute("retain_pdf_binary", dict(value, source_name="changed"))

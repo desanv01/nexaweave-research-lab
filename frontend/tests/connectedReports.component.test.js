@@ -6,7 +6,7 @@ import { createHash, webcrypto } from 'node:crypto'
 import { JSDOM } from 'jsdom'
 import { parse, compileScript } from '@vue/compiler-sfc'
 import { connectedReportsCopy, connectedReportsCopyFor } from '../src/i18n/connectedReports.js'
-import { validateConnectedReportRead } from '../src/api/connectedReports.js'
+import { validateConnectedReportRead, validateConnectedReportResult } from '../src/api/connectedReports.js'
 globalThis.crypto ||= webcrypto
 const dom = new JSDOM('<!doctype html><html><body></body></html>', { url: 'http://127.0.0.1:5173/research' })
 for (const name of ['window', 'document', 'Element', 'HTMLElement', 'SVGElement', 'Node']) globalThis[name] = name === 'window' ? dom.window : dom.window[name]
@@ -22,6 +22,12 @@ globalThis.__u07gTrackReadValidation = (...args) => {
   promise.then(() => activeReadValidations.delete(promise), () => activeReadValidations.delete(promise)); return promise
 }
 source = source.replace(/\bvalidateConnectedReportRead\(/g, 'globalThis.__u07gTrackReadValidation(')
+const activeResultValidations = new Set(); let resultValidations = 0
+globalThis.__u07gTrackResultValidation = (...args) => {
+  resultValidations++; const promise = validateConnectedReportResult(...args); activeResultValidations.add(promise)
+  promise.then(() => activeResultValidations.delete(promise), () => activeResultValidations.delete(promise)); return promise
+}
+source = source.replace(/\bvalidateConnectedReportResult\(/g, 'globalThis.__u07gTrackResultValidation(')
 const component = (await import(`data:text/javascript;base64,${Buffer.from(source + '\nexport default __component').toString('base64')}`)).default
 const uid = n => `00000000-0000-0000-0000-${String(n).padStart(12, '0')}`, hash = 'a'.repeat(64), clone = v => JSON.parse(JSON.stringify(v))
 function ascii(v) { if (Array.isArray(v)) return '[' + v.map(ascii).join(',') + ']'; if (v && typeof v === 'object') return '{' + Object.keys(v).sort().map(k => ascii(k) + ':' + ascii(v[k])).join(',') + '}'; return JSON.stringify(v).replace(/[\u007f-\uffff]/g, c => '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0')) }
@@ -36,9 +42,10 @@ function selection() {
   launch.launch_sha256 = digest(pick(launch, 'schema_version display_graph_id scope preparation request limits ceiling_microusd model_label')); launch.receipt = { run_id: uid(10), attempt_id: uid(12), instance_id: uid(13), request_fingerprint: digest(launch.request), outcome: 'completed', evidence_sha256: hash }
   return { launch, preparation }
 }
-function report(payload = { report_id: uid(20), requirement: hostile, output_language: 'en', native_windows: null }) {
-  const s = selection(), l = s.launch, w = payload.native_windows?.[0], windows = w ? [{ offset: w.offset, count: w.count }] : [{ offset: 0, count: 2 }]
+function report(payload = { report_id: uid(20), requirement: hostile, output_language: 'en', native_windows: null }, s = selection()) {
+  const l = s.launch, w = payload.native_windows?.[0], windows = w ? [{ offset: w.offset, count: w.count }] : [{ offset: 0, count: 2 }]
   const v = { schema_version: 1, report_id: payload.report_id, plan_sha256: null, binding: { display_graph_id: 'graph_1', principal: 'local-research', scope: s.preparation.scope, project_revision: 1, source: s.preparation.source, preparation: l.preparation, native: { run_id: uid(10), launch_sha256: l.launch_sha256, request_fingerprint: l.receipt.request_fingerprint, evidence_sha256: hash, platforms: ['twitter'] }, coverage: [{ platform: 'twitter', total_records: 2, selected_records: windows[0].count, complete: windows[0].count === 2, windows }], reference_keys: ['source:' + uid(30), ...Array.from({ length: windows[0].count }, (_, i) => `native:twitter:${windows[0].offset + i}:${hash}`)] }, options: pick(payload, 'requirement output_language native_windows'), context_sha256: hash, source_projection_sha256: hash, model_label: 'scripted 中😀', limits: { max_calls: 64, max_input_bytes: 262144, max_output_tokens: 4096, max_run_seconds: 600 }, ceiling_microusd: 12345, authorization: { model_calls_enabled: true, budget_configured: true }, state: 'planned', progress: { stage: 'planned', percent: 0, completed_sections: 0, total_sections: 0 }, workflow: null, receipt: null, receipt_sha256: null, manifest: null, cleanup: { known: false, pending: null, owner_thread_alive: null }, cancel_requested: false, error_code: null }
+  if (payload.schema_version === 2) v.binding.source_set = { schema_version: 1, source_revisions: [...payload.source_revisions] }
   v.plan_sha256 = digest(pick(v, 'schema_version report_id binding options context_sha256 source_projection_sha256 model_label limits ceiling_microusd')); return v
 }
 const prose = '# Narrative 中😀\n\n[[source:' + uid(30) + ']] [[native:twitter:0:' + hash + ']]\n\n' + hostile + '\n\n[unsafe](javascript:alert(1))'
@@ -57,6 +64,121 @@ async function waitFor(predicate) { const end = Date.now() + 2000; do { await ne
 function input(m, selector, value) { const e = m.root.querySelector(selector); e.value = value; e.dispatchEvent(new dom.window.Event(e.tagName === 'SELECT' ? 'change' : 'input', { bubbles: true })) }
 async function recover(m, value = done()) { input(m, '#report-recovery-id', value.report_id); input(m, '#report-recovery-hash', value.plan_sha256); m.root.querySelector('.recovery').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true })); await waitFor(() => m.root.querySelector('.report-record')) }
 async function reviewed(m) { await waitFor(() => !m.root.querySelector('fieldset').disabled); input(m, '#report-requirement', hostile); m.root.querySelector('form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true })); await waitFor(() => m.root.querySelector('.report-start')) }
+
+const catalog = () => [5, 31, 32].map(n => ({ project_id: uid(2), source_revision: uid(n), source_name: `Document ${n} <literal> 雨`, text_sha256: hash, byte_length: 8, codepoint_length: 4, recorded_at: '2026-10-19T00:00:00Z' }))
+function checkSource(m, revision) {
+  const field = [...m.root.querySelectorAll('.report-source-checkbox')].find(e => e.value === revision)
+  assert.ok(field); field.checked = !field.checked; field.dispatchEvent(new dom.window.Event('change', { bubbles: true }))
+}
+
+test('a multi-source preparation pins reports to its frozen documents without a live catalog', async () => {
+  const s = selection(), calls = []
+  s.preparation.schema_version = 2
+  s.preparation.sources = [clone(s.preparation.source), { source_revision: uid(31), source_name: 'Prepared <literal> DOCX 雨', source_sha256: hash }]
+  s.preparation.plan_sha256 = digest(pick(s.preparation, 'schema_version display_graph_id scope project_revision operation_id source sources options actors projection_sha256'))
+  s.launch.preparation.plan_sha256 = s.preparation.plan_sha256
+  s.launch.launch_sha256 = digest(pick(s.launch, 'schema_version display_graph_id scope preparation request limits ceiling_microusd model_label'))
+  const m = mount({ selection: s, sourceCatalog: null, methods: { plan: async p => { calls.push(clone(p)); return report(p, s) }, clear: () => {} } })
+  try {
+    await waitFor(() => m.root.querySelector('.report-prepared-sources'))
+    assert.equal(m.root.querySelector('.report-source-checkbox,.report-sources'), null)
+    assert.ok(m.root.querySelector('.report-prepared-sources').textContent.includes(uid(31)))
+    assert.equal(calls.length, 0); await reviewed(m)
+    assert.equal(calls[0].schema_version, 2); assert.deepEqual(calls[0].source_revisions, [uid(5), uid(31)])
+    m.props.sourceCatalog = catalog().map(source => ({ ...source, source_name: 'unrelated current catalog' })); await nextTick()
+    assert.ok(m.root.querySelector('.report-start')); assert.equal(calls.length, 1)
+    await reviewed(m)
+    assert.deepEqual(calls[1].source_revisions, [uid(5), uid(31)])
+    assert.ok(m.root.querySelector('.report-prepared-sources').textContent.includes('Prepared <literal> DOCX 雨'))
+    assert.equal(m.root.querySelector('img,script'), null)
+  } finally { m.cleanup() }
+})
+
+test('catalog retains fixed anchor, filters project, defaults V1 and sends explicit extras in displayed order', async () => {
+  const calls = [], sourceCatalog = [...catalog(), { ...catalog()[1], project_id: uid(99), source_revision: uid(98) }]
+  const m = mount({ selection: selection(), sourceCatalog, methods: { plan: async p => { calls.push(clone(p)); return report(p) }, clear: () => {} } })
+  try {
+    await waitFor(() => !m.root.querySelector('fieldset').disabled)
+    assert.ok(m.root.querySelector('.report-anchor').textContent.includes(uid(5)))
+    const fields = [...m.root.querySelectorAll('.report-source-checkbox')]
+    assert.deepEqual(fields.map(e => e.value), [uid(31), uid(32)])
+    assert.ok(fields.every(e => !e.checked && e.closest('label')))
+    assert.ok(m.root.querySelector('.report-sources legend').textContent)
+    assert.equal(calls.length, 0)
+    await reviewed(m); assert.equal(calls[0].schema_version, 1); assert.equal(Object.hasOwn(calls[0], 'source_revisions'), false)
+    // Separate user events let Vue refresh each checkbox's array-model binding.
+    checkSource(m, uid(32)); await nextTick()
+    assert.deepEqual(fields.filter(e => e.checked).map(e => e.value), [uid(32)])
+    checkSource(m, uid(31)); await nextTick()
+    assert.deepEqual(fields.filter(e => e.checked).map(e => e.value), [uid(31), uid(32)])
+    assert.equal(m.root.querySelector('.report-start'), null); assert.equal(calls.length, 1)
+    await reviewed(m)
+    assert.equal(calls[1].schema_version, 2)
+    assert.deepEqual(calls[1].source_revisions, [uid(5), uid(31), uid(32)])
+    assert.deepEqual([...m.root.querySelectorAll('.report-source-set li')].map(e => e.textContent), calls[1].source_revisions)
+    assert.equal(m.root.querySelector('img,script'), null)
+  } finally { m.cleanup() }
+})
+
+for (const change of ['catalog', 'selection']) {
+  test(`${change} change drops selected extras and fences a pending plan without dropping native selection on catalog load`, async () => {
+    let finish, requested
+    const m = mount({ selection: selection(), sourceCatalog: catalog(), methods: {
+      plan: p => { requested = clone(p); return new Promise(resolve => { finish = () => resolve(report(p)) }) }, clear: () => {}
+    } })
+    try {
+      await waitFor(() => !m.root.querySelector('fieldset').disabled)
+      checkSource(m, uid(31)); input(m, '#report-requirement', 'Compare')
+      m.root.querySelector('form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }))
+      await waitFor(() => finish)
+      assert.deepEqual(requested.source_revisions, [uid(5), uid(31)])
+      if (change === 'catalog') m.props.sourceCatalog = catalog().map(s => ({ ...s, source_name: s.source_name + ' updated' }))
+      else m.props.selection = selection()
+      await waitFor(() => !m.root.querySelector('fieldset').disabled)
+      assert.ok([...m.root.querySelectorAll('.report-source-checkbox')].every(e => !e.checked))
+      const before = resultValidations; finish()
+      await waitFor(() => resultValidations > before && activeResultValidations.size === 0)
+      assert.equal(m.root.querySelector('.report-record,.report-start'), null)
+      assert.ok(m.root.querySelector('.report-anchor'))
+    } finally { m.cleanup() }
+  })
+}
+
+test('catalog invalidation keeps attempted immutable V2 history and rejects a late Start reply', async () => {
+  let finish, known, starts = 0
+  const m = mount({ selection: selection(), sourceCatalog: catalog(), methods: {
+    plan: async p => known = report(p), start: () => { starts++; return new Promise(resolve => { finish = () => resolve({ ...clone(known), state: 'queued', progress: { stage: 'queued', percent: 0, completed_sections: 0, total_sections: 0 } }) }) }, clear: () => {}
+  } })
+  try {
+    await waitFor(() => !m.root.querySelector('fieldset').disabled); checkSource(m, uid(31)); await reviewed(m)
+    const original = clone(known)
+    m.root.querySelector('.report-start').click(); await waitFor(() => finish)
+    m.props.sourceCatalog = catalog().slice(0, 1); await nextTick()
+    const before = resultValidations; finish()
+    await waitFor(() => resultValidations > before && activeResultValidations.size === 0)
+    const record = m.root.querySelector(`[data-report-id="${original.report_id}"]`)
+    assert.ok(record); assert.ok(record.textContent.includes(original.plan_sha256))
+    assert.deepEqual([...record.querySelectorAll('.report-source-set li')].map(e => e.textContent), [uid(5), uid(31)])
+    assert.equal(record.querySelector('.report-start'), null)
+    assert.equal(record.querySelector('h3').textContent, connectedReportsCopy.en.states.planned)
+    assert.equal(m.root.querySelector('#report-recovery-hash').value, original.plan_sha256)
+    assert.equal(starts, 1)
+    m.props.resetVersion++; await nextTick()
+    assert.equal(m.root.querySelector('.report-record'), null)
+    assert.equal(m.root.querySelector('#report-recovery-hash').value, '')
+  } finally { m.cleanup() }
+})
+
+test('recovery displays the immutable full source set without a live source catalog', async () => {
+  const known = report({ report_id: uid(20), requirement: 'Compare', output_language: 'en', native_windows: null,
+    schema_version: 2, source_revisions: [uid(5), uid(31), uid(32)] })
+  const m = mount({ methods: { status: async () => known, clear: () => {} } })
+  try {
+    await recover(m, known)
+    assert.deepEqual([...m.root.querySelectorAll('.report-source-set li')].map(e => e.textContent), [uid(5), uid(31), uid(32)])
+    assert.equal(m.root.querySelector('.report-start'), null)
+  } finally { m.cleanup() }
+})
 
 test('mounted selection, options and locale switching never fetch or generate implicitly', async () => {
   let calls = 0; const m = mount({ selection: selection(), methods: { plan: async p => { calls++; return report(p) }, clear: () => {} } })

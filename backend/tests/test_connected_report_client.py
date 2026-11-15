@@ -183,3 +183,66 @@ def test_read_and_download_verify_actual_content_not_only_metadata():
     download['artifact']['content_base64'] += '\n'
     with pytest.raises(ReportError):
         validate_download(download, payload, result)
+
+
+def test_v2_report_plan_preserves_order_detaches_selection_and_keeps_v1_shape():
+    from app.services.connected_report_client import validate_payload, ReportError
+    original = declaration()
+    assert validate_payload('plan', original) == original
+    selected = [fixture_context()['binding']['source']['source_revision'], str(UUID(int=31))]
+    payload = dict(original, schema_version=2, source_revisions=selected)
+    admitted = validate_payload('plan', payload)
+    assert admitted == payload
+    selected.reverse()
+    assert admitted['source_revisions'] == list(reversed(selected))
+    reversed_plan = validate_payload('plan', payload)
+    assert reversed_plan['source_revisions'] != admitted['source_revisions']
+    with pytest.raises(ReportError):
+        validate_payload('plan', dict(original, source_revisions=selected))
+
+
+@pytest.mark.parametrize('selected', [None, [], 'not-a-list', [True], ['not-a-uuid'],
+    [str(UUID(int=31)), str(UUID(int=31))], [str(UUID(int=i)) for i in range(101)]])
+def test_v2_report_plan_rejects_invalid_or_oversized_source_selection(selected):
+    from app.services.connected_report_client import validate_payload, ReportError
+    with pytest.raises(ReportError) as error:
+        validate_payload('plan', dict(declaration(), schema_version=2, source_revisions=selected))
+    assert error.value.code == 'invalid_request'
+
+
+def test_v2_report_plan_requires_selection_and_does_not_upgrade_recovery_protocol():
+    from app.services.connected_report_client import validate_payload, ReportError
+    with pytest.raises(ReportError):
+        validate_payload('plan', dict(declaration(), schema_version=2))
+    for method in ('start', 'status', 'cancel', 'read', 'download'):
+        payload = dict(schema_version=2, report_id=str(UUID(int=12)), plan_sha256='a' * 64)
+        if method == 'download':
+            payload.update(kind='report', section_index=None)
+        with pytest.raises(ReportError):
+            validate_payload(method, payload)
+
+
+def test_v2_report_plan_response_must_preserve_complete_ordered_source_set():
+    from app.services.connected_report_client import validate_result, ReportError, IDENTITY, digest
+    result, _ = public_result()
+    anchor = result['binding']['source']['source_revision']
+    selected = [anchor, str(UUID(int=31)), str(UUID(int=32))]
+    payload = dict(declaration(), schema_version=2, source_revisions=selected)
+    # An otherwise valid V1 response cannot satisfy the explicit multi-source plan.
+    with pytest.raises(ReportError):
+        validate_result(result, 'display-1', result['binding']['scope'], payload, 'plan')
+    result['binding']['source_set'] = dict(schema_version=1, source_revisions=selected[:])
+    result['plan_sha256'] = digest({key: result[key] for key in IDENTITY})
+    assert validate_result(result, 'display-1', result['binding']['scope'], payload, 'plan') == result
+    # Recovery keeps its V1 request protocol while retaining the complete binding.
+    assert validate_result(result, 'display-1', result['binding']['scope'], reference(result), 'status') == result
+    for revisions in ([anchor], [anchor, selected[2], selected[1]],
+                      [anchor, selected[1], str(UUID(int=33))], [selected[1], anchor, selected[2]]):
+        changed = deepcopy(result)
+        changed['binding']['source_set']['source_revisions'] = revisions
+        changed['plan_sha256'] = digest({key: changed[key] for key in IDENTITY})
+        with pytest.raises(ReportError):
+            validate_result(changed, 'display-1', changed['binding']['scope'], payload, 'plan')
+    # V1 planning must not silently acquire a source-set extension.
+    with pytest.raises(ReportError):
+        validate_result(result, 'display-1', result['binding']['scope'], declaration(), 'plan')

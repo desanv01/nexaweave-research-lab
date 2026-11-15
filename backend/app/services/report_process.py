@@ -178,6 +178,11 @@ def _child(connection, cancelled, frozen, factory, operation, deadline):
             native=identity['binding']['native'], coverage=identity['binding']['coverage'],
             reference_keys=identity['binding']['reference_keys'], records=context['native_records'],
             manifest=context['native_manifest'], search_ranking='lexical_only', semantic_support_status='not_reviewed')
+        if context['schema_version'] == 2:
+            native_evidence.update(schema_version=2, source_set=identity['binding']['source_set'],
+                sources=[{key: source[key] for key in
+                    ('source_revision', 'source_name', 'source_sha256', 'passages')}
+                    for source in context['sources']])
         (root / 'native_evidence.json').write_bytes(encoded(native_evidence))
         manifest = output_manifest(root, len(report.outline.sections))
         with report_files(root, manifest) as content:

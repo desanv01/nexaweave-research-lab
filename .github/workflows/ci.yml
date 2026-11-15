@@ -65,11 +65,21 @@ jobs:
       - name: Qualify connected report transport and actual workbench components
         run: node --test tests/connectedReports.test.js tests/connectedReports.component.test.js tests/workbenchConnectedReports.component.test.js
         working-directory: frontend
+      - name: Qualify grounded follow-up transport and actual shared workbench
+        run: node --test tests/connectedFollowups.test.js tests/connectedFollowups.component.test.js tests/workbenchConnectedFollowups.component.test.js
+        working-directory: frontend
+      - name: Qualify verified original PDF component and owned downloads
+        run: node --test tests/source-original.component.test.js
+        working-directory: frontend
+      - name: Qualify shared persisted UI languages and keyboard selection
+        run: node --test tests/sharedLocale.component.test.js tests/workbenchSources.component.test.js
+        working-directory: frontend
       - run: npm run build
 
   knowledge-compatibility:
     name: knowledge-compatibility
-    runs-on: ubuntu-latest
+    # Supported browser base; migrate before runner retirement on 2027-04-17.
+    runs-on: ubuntu-22.04
     timeout-minutes: 15
     env:
       KNOWLEDGE_TEST_PASSWORD: nexaweave-ci-disposable-fixture-only
@@ -113,8 +123,95 @@ jobs:
         run: services/knowledge/.venv/bin/python tools/run_pdf_source_tests.py
       - name: Qualify protected retained-source HTTP and installed PG-only child
         run: services/knowledge/.venv/bin/python tools/run_source_library_tests.py
+      - name: Qualify atomic original PDFs, migration, restart and protected byte reads
+        run: services/knowledge/.venv/bin/python tools/run_source_binary_tests.py --postgres
       - name: Qualify connected source ingestion with real stores and local synthetic SDK
         run: services/knowledge/.venv/bin/python tools/run_source_ingestion_tests.py
+      - name: Select pinned Node for the real research browser
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24.14.1'
+      - name: Install exact Playwright bundled headless Chromium
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v unzip >/dev/null
+          command -v ldd >/dev/null
+          command -v fuser >/dev/null
+          browser_provider_dir="$RUNNER_TEMP/nexaweave-playwright-1.64.1"
+          test "$(realpath "$RUNNER_TEMP")" = "$RUNNER_TEMP"
+          test ! -e "$browser_provider_dir"
+          mkdir -m 700 "$browser_provider_dir"
+          curl --proto '=https' --proto-redir '=https' --fail --location --max-redirs 3 --max-time 120 --max-filesize 125797539 --output "$browser_provider_dir/provider.zip" https://cdn.playwright.dev/builds/cft/156.0.8078.4/linux64/chrome-headless-shell-linux64.zip
+          test "$(stat -c %s "$browser_provider_dir/provider.zip")" = '125797539'
+          printf '%s  %s\n' 'c3e50596aef52c58f8fda3c6b3411c33d34c88b177b3ed1c2243359fd3b8ba20' "$browser_provider_dir/provider.zip" | sha256sum --check --strict
+          timeout --kill-after=5s 115s bash -euo pipefail -s -- "$browser_provider_dir" <<'BUNDLE'
+          provider="$1"
+          # The pinned SHA binds all287 ordinary files/285084594 unpacked bytes.
+          test "$(unzip -Z -1 "$provider/provider.zip" | wc -l)" = '287'
+          unzip -q "$provider/provider.zip" -d "$provider"
+          browser_root="$provider/chrome-headless-shell-linux64"
+          test "$(find "$browser_root" -type f | wc -l)" = '287'
+          test "$(find "$browser_root" -type f -printf '%s\n' | awk '{sum+=$1} END {printf "%.0f",sum}')" = '285084594'
+          test -z "$(find "$provider" -type l -print -quit)"
+          for native in chrome-headless-shell libEGL.so libGLESv2.so libvk_swiftshader.so libvulkan.so.1; do
+            dependencies="$(ldd "$browser_root/$native")"
+            if grep -Fq 'not found' <<<"$dependencies"; then
+              printf '%s\n' 'bundled_browser_native_dependency_missing' >&2
+              exit 1
+            fi
+          done
+          browser_version="$("$browser_root/chrome-headless-shell" --version)"
+          [[ "$browser_version" =~ (^|[[:space:]])156\.0\.8078\.4[[:space:]]*$ ]]
+          printf '%s\n' 'playwright bundled headless Chromium156.0.8078.4'
+          rm -- "$provider/provider.zip"
+          BUNDLE
+      - name: Install locked workbench browser dependencies without scripts
+        working-directory: frontend
+        run: |
+          npm ci --ignore-scripts
+          node --input-type=commonjs -e "const p=require('./node_modules/playwright-core/package.json'); if(p.version !== '1.64.1') throw new Error('browser_package_version_refused'); const b=require('./node_modules/playwright-core/browsers.json').browsers.find(x=>x.name==='chromium-headless-shell'); if(!b || b.revision!=='1248' || b.browserVersion!=='156.0.8078.4') throw new Error('browser_revision_refused'); console.log('playwright-core ' + p.version)"
+      - name: Connect four retained formats through actual graph and native report
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv sync --project backend --locked --extra dev --extra native-store --extra native-temporal --python 3.12.13
+          backend/.venv/bin/python tools/apply_native_import_patch.py --apply
+          backend/.venv/bin/python tools/apply_native_import_patch.py --check
+          uv pip install --python backend/.venv/bin/python --no-deps --reinstall services/knowledge
+          export KNOWLEDGE_PYTHON="$GITHUB_WORKSPACE/services/knowledge/.venv/bin/python"
+          export KNOWLEDGE_BOOTSTRAP_SCRIPT="$("$KNOWLEDGE_PYTHON" -I -c "import importlib.util; print(importlib.util.find_spec('nexaweave_knowledge.read_bootstrap').origin)")"
+          export TEMPORAL_TEST_ADDRESS='127.0.0.1:17233'
+          export NEXAWEAVE_RESEARCH_BROWSER_NODE="$(command -v node)"
+          export NEXAWEAVE_RESEARCH_BROWSER_CHROME="$RUNNER_TEMP/nexaweave-playwright-1.64.1/chrome-headless-shell-linux64/chrome-headless-shell"
+          test -x "$NEXAWEAVE_RESEARCH_BROWSER_CHROME"
+          "$NEXAWEAVE_RESEARCH_BROWSER_NODE" --version
+          "$NEXAWEAVE_RESEARCH_BROWSER_CHROME" --version
+          mkdir -p "$RUNNER_TEMP/nexaweave-group1-temporal"
+          curl --fail --location --retry 3 --max-time 120 --output "$RUNNER_TEMP/nexaweave-group1-temporal/temporal.tar.gz" https://github.com/temporalio/cli/releases/download/v1.9.1/temporal_cli_1.9.1_linux_amd64.tar.gz
+          printf '%s\n' "09a0326a51db84d02735e53542b9ebd8c4758daf47482a9ab0abce15844e60d5  $RUNNER_TEMP/nexaweave-group1-temporal/temporal.tar.gz" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/nexaweave-group1-temporal/temporal.tar.gz" -C "$RUNNER_TEMP/nexaweave-group1-temporal" temporal
+          temporal_bin="$RUNNER_TEMP/nexaweave-group1-temporal/temporal"
+          "$temporal_bin" server start-dev --headless --ip 127.0.0.1 --port 17233 --http-port 17234 --metrics-port 17235 --db-filename "$RUNNER_TEMP/nexaweave-group1-temporal/test.db" > "$RUNNER_TEMP/nexaweave-group1-temporal/server.log" 2>&1 &
+          temporal_pid=$!
+          trap 'kill "$temporal_pid" 2>/dev/null || true; wait "$temporal_pid" 2>/dev/null || true' EXIT
+          ready=false
+          for attempt in {1..30}; do
+            if "$temporal_bin" operator cluster health --address 127.0.0.1:17233 --command-timeout 2s >/dev/null 2>&1; then
+              ready=true
+              break
+            fi
+            kill -0 "$temporal_pid"
+            sleep 1
+          done
+          if [ "$ready" != true ]; then
+            tail -100 "$RUNNER_TEMP/nexaweave-group1-temporal/server.log"
+            exit 1
+          fi
+          backend/.venv/bin/python tools/run_connected_report_tests.py --integration --journey --actual-graph --browser
+          backend/.venv/bin/python tools/run_connected_followup_tests.py --integration --browser-journey
+          backend/.venv/bin/python tools/run_connected_report_tests.py --integration --store-only
+          backend/.venv/bin/python tools/run_connected_followup_tests.py --integration --store-only
       - name: Test database diagnostics on failure
         if: failure()
         run: docker compose -f infra/compose.knowledge-test.yml logs --tail 100 neo4j
@@ -124,6 +221,30 @@ jobs:
       - name: Remove only this job's research PostgreSQL
         if: always()
         run: docker compose -f infra/compose.operations-test.yml down -v
+
+      - name: Remove only this job's pinned browser bundle
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(realpath "$RUNNER_TEMP")" = "$RUNNER_TEMP"
+          browser_provider_dir="$RUNNER_TEMP/nexaweave-playwright-1.64.1"
+          if [ -e "$browser_provider_dir" ]; then
+            test -d "$browser_provider_dir"
+            test ! -L "$browser_provider_dir"
+            test "$(realpath "$browser_provider_dir")" = "$browser_provider_dir"
+            browser_binary="$browser_provider_dir/chrome-headless-shell-linux64/chrome-headless-shell"
+            if [ -f "$browser_binary" ]; then
+              command -v fuser >/dev/null
+              if fuser -s -- "$browser_binary"; then
+                printf '%s\n' 'bundled_browser_still_owned_open' >&2
+                exit 1
+              else
+                test "$?" = '1'
+              fi
+            fi
+            timeout --kill-after=5s 10s rm -r -- "$browser_provider_dir"
+          fi
 
   knowledge-operations:
     name: knowledge-operations
@@ -227,6 +348,12 @@ jobs:
           version: '0.11.25'
       - name: Install inherited locked backend runtime
         run: uv sync --project backend --locked --extra dev --extra native-store --extra native-temporal --python 3.12.13
+      - name: Apply fingerprint-checked native optional import correction
+        run: |
+          backend/.venv/Scripts/python.exe tools/apply_native_import_patch.py --apply
+          if ($LASTEXITCODE -ne 0) { throw 'Native optional import correction failed' }
+          backend/.venv/Scripts/python.exe tools/apply_native_import_patch.py --check
+          if ($LASTEXITCODE -ne 0) { throw 'Native optional import fingerprint verification failed' }
       - name: Install fixed experiment child package and select explicit test runtimes
         shell: pwsh
         run: |
@@ -238,73 +365,14 @@ jobs:
           "NEXAWEAVE_EXPERIMENT_TEST_PYTHON=$experimentPython" >> $env:GITHUB_ENV
           "NEXAWEAVE_EXPERIMENT_TEST_HTTP_PYTHON=$experimentPython" >> $env:GITHUB_ENV
           "NEXAWEAVE_EXPERIMENT_TEST_BOOTSTRAP=$experimentBootstrap" >> $env:GITHUB_ENV
-      - name: Qualify durable preparation and directly affected offline generators
-        run: |
-          backend/.venv/Scripts/python.exe tools/run_preparation_tests.py --unit
-          if ($LASTEXITCODE -ne 0) { throw 'Preparation offline qualification failed' }
-      - name: Qualify connected native launch contracts and capped model boundaries
-        run: |
-          backend/.venv/Scripts/python.exe tools/run_native_launch_tests.py --unit
-          if ($LASTEXITCODE -ne 0) { throw 'Native launch offline qualification failed' }
-      - name: Qualify receipt-bound native observation contracts and safe reads
-        run: |
-          backend/.venv/Scripts/python.exe tools/run_native_observations_tests.py --unit
-          if ($LASTEXITCODE -ne 0) { throw 'Native observations offline qualification failed' }
-      - name: Qualify native seed batch and cold pre-model factory gate
-        run: |
-          backend/.venv/Scripts/python.exe tools/run_native_seed_tests.py --unit
-          if ($LASTEXITCODE -ne 0) { throw 'Native seed offline qualification failed' }
-      - name: Qualify actual native seed response, post and trace fidelity
-        run: |
-          backend/.venv/Scripts/python.exe tools/run_native_seed_tests.py --engine
-          if ($LASTEXITCODE -ne 0) { throw 'Native seed engine qualification failed' }
-      - name: Qualify connected report cold contracts and protected boundaries
-        run: |
-          backend/.venv/Scripts/python.exe tools/run_connected_report_tests.py --unit
-          if ($LASTEXITCODE -ne 0) { throw 'Connected report offline qualification failed' }
-      - name: Qualify actual inherited report child and isolated artifacts
-        run: |
-          backend/.venv/Scripts/python.exe tools/run_connected_report_tests.py --engine
-          if ($LASTEXITCODE -ne 0) { throw 'Connected report child qualification failed' }
       - name: Qualify actual owned Windows parser and knowledge process trees
         run: |
           backend/.venv/Scripts/python.exe tools/run_owned_process_tests.py
           if ($LASTEXITCODE -ne 0) { throw 'Owned Windows process qualification failed' }
-      - name: Verify native imports without credentials or downloads
-        run: backend/.venv/Scripts/python.exe tools/check_engine_imports.py
-      - name: Exercise actual native action primitives with temporary SQLite
-        run: backend/.venv/Scripts/python.exe tools/run_engine_tests.py
-      - name: Start job-local PostgreSQL with hosted binaries
-        run: ./tools/native_store_ci_postgres.ps1 -Action start
-      - name: Qualify actual prepared native engine with PostgreSQL ownership
-        run: backend/.venv/Scripts/python.exe tools/run_native_store_tests.py --postgres
-      - name: Qualify prepared native engine through Temporal and PostgreSQL
-        shell: pwsh
+      - name: Qualify all offline modes alongside one serial PostgreSQL and Temporal lane
         run: |
-          # Keep the Windows child server in this shell's lifetime; Actions can
-          # terminate child processes when the step that launched them exits.
-          try {
-            ./tools/native_temporal_ci_server.ps1 -Action start
-            if ($LASTEXITCODE -ne 0) { throw 'Temporal fixture start failed' }
-            backend/.venv/Scripts/python.exe tools/run_native_temporal_tests.py --integration
-            if ($LASTEXITCODE -ne 0) { throw 'Prepared native Temporal qualification failed' }
-            backend/.venv/Scripts/python.exe tools/run_preparation_tests.py --integration
-            if ($LASTEXITCODE -ne 0) { throw 'Durable preparation PG/Temporal qualification failed' }
-            backend/.venv/Scripts/python.exe tools/run_native_launch_tests.py --integration
-            if ($LASTEXITCODE -ne 0) { throw 'Connected native launch PG/Temporal qualification failed' }
-            backend/.venv/Scripts/python.exe tools/run_native_launch_tests.py --engine
-            if ($LASTEXITCODE -ne 0) { throw 'Generated preparation to owned native engine qualification failed' }
-            backend/.venv/Scripts/python.exe tools/run_native_observations_tests.py --integration
-            if ($LASTEXITCODE -ne 0) { throw 'Native observations PG authority qualification failed' }
-            backend/.venv/Scripts/python.exe tools/run_native_observations_tests.py --engine
-            if ($LASTEXITCODE -ne 0) { throw 'Generated native receipt-bound observations qualification failed' }
-            backend/.venv/Scripts/python.exe tools/run_native_seed_tests.py --integration
-            if ($LASTEXITCODE -ne 0) { throw 'Generated PGTemporal native seed fidelity qualification failed' }
-            backend/.venv/Scripts/python.exe tools/run_connected_report_tests.py --integration
-            if ($LASTEXITCODE -ne 0) { throw 'Connected native-receipt-to-report PGTemporal qualification failed' }
-          } finally {
-            ./tools/native_temporal_ci_server.ps1 -Action stop
-          }
+          backend/.venv/Scripts/python.exe tools/run_native_ci_qualification.py
+          if ($LASTEXITCODE -ne 0) { throw 'Owned native CI lanes failed or evidence incomplete' }
       - name: Stop only this job's Temporal fixture
         if: always()
         run: ./tools/native_temporal_ci_server.ps1 -Action stop
@@ -332,6 +400,10 @@ jobs:
         run: uv pip install --python services/knowledge/.venv/bin/python --no-deps --reinstall services/knowledge
       - name: Start disposable PostgreSQL
         run: docker compose -f infra/compose.operations-test.yml up -d --wait --wait-timeout 120
+      - name: Qualify unchanged local transaction settings and guarded batching
+        run: |
+          services/knowledge/.venv/bin/python tools/run_transaction_settings_tests.py --unit
+          services/knowledge/.venv/bin/python tools/run_transaction_settings_tests.py --postgres
       - name: Verify project revision store
         run: services/knowledge/.venv/bin/python tools/run_project_store_tests.py --postgres
       - name: Qualify DOCX source passages and fresh owned CLI

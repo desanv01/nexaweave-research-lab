@@ -11,8 +11,10 @@ import SimulationPreparation from '../components/workbench/SimulationPreparation
 import NativeLaunch from '../components/workbench/NativeLaunch.vue'
 import NativeObservations from '../components/workbench/NativeObservations.vue'
 import ConnectedReports from '../components/workbench/ConnectedReports.vue'
+import ConnectedFollowup from '../components/workbench/ConnectedFollowup.vue'
 import { populationCopyFor } from '../i18n/populationWorkbench.js'
-const locale = ref('en'), copy = computed(() => copyFor(locale.value))
+import { uiLocale as locale } from '../i18n/index.js'
+const copy = computed(() => copyFor(locale.value))
 const origin = ref('http://127.0.0.1:5001'), graph = ref(''), token = ref(''), reveal = ref(false)
 const connected = ref(false), busy = ref(false), status = ref('disconnected'), errorCode = ref('')
 const ingestionRequest = ref('')
@@ -31,11 +33,14 @@ const populationFeedback = ref('')
 const populationStatus = computed(() => populationCopyFor(locale.value)[populationFeedback.value] || '')
 const populationTypes = computed(() => graphData.value?.nodes.flatMap(node => node.labels) || [])
 const inspectedSource = ref(null)
+const sourceCatalog = ref(null)
 const preparationReset = ref(0)
 const nativeReady = ref(null), nativeReset = ref(0)
 const observationSelection = ref(null), observationReset = ref(0)
 const reportSelection = ref(null), reportReset = ref(0)
-function clearReports() { reportSelection.value = null; reportReset.value++; client.clearConnectedReports() }
+const followupSelection = ref(null), followupReset = ref(0)
+function clearFollowups() { followupSelection.value = null; followupReset.value++; client.clearConnectedFollowups() }
+function clearReports() { clearFollowups(); reportSelection.value = null; reportReset.value++; client.clearConnectedReports() }
 function clearNativeViews() { clearObservations(); clearReports() }
 const reportMethods = Object.freeze(Object.fromEntries([
   ['plan', 'connectedReportPlan'], ['start', 'connectedReportStart'], ['status', 'connectedReportStatus'],
@@ -44,6 +49,14 @@ const reportMethods = Object.freeze(Object.fromEntries([
   try { return await client[name](...args) }
   catch (e) { if (['unauthorized', 'origin_denied', 'disconnected'].includes(e?.code)) disconnect(); throw e }
 }]).concat([['clear', () => client.clearConnectedReports()]])))
+const followupMethods = Object.freeze(Object.fromEntries([
+  ['plan', 'connectedFollowupPlan'], ['start', 'connectedFollowupStart'], ['status', 'connectedFollowupStatus'],
+  ['cancel', 'connectedFollowupCancel'], ['read', 'connectedFollowupRead'], ['download', 'connectedFollowupDownload'],
+  ['history', 'connectedFollowupHistory']
+].map(([method, name]) => [method, async (...args) => {
+  try { return await client[name](...args) }
+  catch (e) { if (['unauthorized', 'origin_denied', 'disconnected'].includes(e?.code)) disconnect(); throw e }
+}]).concat([['clear', () => client.clearConnectedFollowups()]])))
 function clearObservations() { observationSelection.value = null; observationReset.value++; client.clearNativeObservations() }
 const observationMethods = Object.freeze({
   page: async (payload, selection, knownPage) => {
@@ -74,7 +87,10 @@ const ingestionMethods = Object.freeze({
 const sourceMethods = Object.freeze({
   list: () => operation(() => client.sourceList(), false, true),
   get: payload => operation(() => client.sourceGet(payload), false, true),
-  retain: payload => operation(() => client.sourceRetain(payload), false, true)
+  retain: payload => operation(() => client.sourceRetain(payload), false, true),
+  retainOriginal: (payload, options) => operation(() => client.sourceRetainOriginal(payload, options), false, true),
+  originalMetadata: (payload, options) => operation(() => client.sourceOriginalMetadata(payload, options), false, true, '', false, true),
+  originalRead: (payload, options) => operation(() => client.sourceOriginalRead(payload, options), false, true, '', false, true)
 })
 const experimentMethods = Object.freeze({
   catalog: () => operation(() => client.experimentCatalog(), false, true),
@@ -87,32 +103,38 @@ const populationMethods = Object.freeze({
 })
 let generation = 0
 const graphEntries = computed(() => graphData.value?.[graphKind.value] || [])
-function clearProtected() { clearNativeViews(); sourceReset.value++; populationReset.value++; preparationReset.value++; nativeReset.value++; nativeReady.value = null; inspectedSource.value = null; graphData.value = null; result.value = null; graphPage.value = 0 }
+function clearProtected() { clearNativeViews(); sourceCatalog.value = null; sourceReset.value++; populationReset.value++; preparationReset.value++; nativeReset.value++; nativeReady.value = null; inspectedSource.value = null; graphData.value = null; result.value = null; graphPage.value = 0 }
 function disconnect() { generation++; client.disconnect(); token.value = ''; reveal.value = false; connected.value = false; busy.value = false; clearProtected(); errorCode.value = ''; ingestionRequest.value = ''; status.value = 'disconnected' }
 function cancel() { generation++; populationReset.value++; client.cancel(); busy.value = false; status.value = 'cancelled'; errorCode.value = ''; if (!connected.value) { client.disconnect(); token.value = ''; clearProtected() } }
-async function operation(action, connecting = false, source = false, ingestion = '', population = false) {
+async function operation(action, connecting = false, source = false, ingestion = '', population = false, preserveProtected = false, graphRefresh = false) {
   const epoch = ++generation
   if (!population) populationReset.value++
-  client.cancel(population)
+  if (preserveProtected) client.cancelShared(population)
+  else client.cancel(population)
   busy.value = true; errorCode.value = ''; ingestionRequest.value = ingestion; status.value = connecting ? 'connecting' : 'loading'
   if (connecting) { connected.value = false; clearProtected() } else if (!source) result.value = null
   try {
     const data = await action()
-    if (epoch !== generation) { if (source) throw new WorkbenchError('cancelled'); return }
-    if (connecting) { graphData.value = data; connected.value = true; status.value = 'connected' } else if (!source) { result.value = data; status.value = 'success' } else status.value = 'connected'
+    if (epoch !== generation) { if (source && !graphRefresh) throw new WorkbenchError('cancelled'); return }
+    if (graphRefresh) { graphData.value = data; graphPage.value = 0; result.value = null; status.value = 'connected' }
+    else if (connecting) { graphData.value = data; connected.value = true; status.value = 'connected' } else if (!source) { result.value = data; status.value = 'success' } else status.value = 'connected'
     return data
   } catch (e) {
-    if (epoch !== generation) { if (source) throw e; return }
+    if (epoch !== generation) { if (source && !graphRefresh) throw e; return }
     errorCode.value = e instanceof WorkbenchError ? e.code : 'invalid_request'
     status.value = errorCode.value === 'cancelled' ? 'cancelled' : ['unauthorized', 'origin_denied'].includes(errorCode.value) ? 'denied' : 'error'
-    if (connecting || ['unauthorized', 'origin_denied'].includes(errorCode.value)) { client.disconnect(); connected.value = false; token.value = ''; reveal.value = false; clearProtected() }
-    if (source) throw e
+    if (connecting || ['unauthorized', 'origin_denied'].includes(errorCode.value) || graphRefresh && errorCode.value === 'disconnected') { client.disconnect(); connected.value = false; token.value = ''; reveal.value = false; clearProtected() }
+    if (source && !graphRefresh) throw e
   } finally { if (epoch === generation) busy.value = false }
 }
 function connect() {
   const credentials = { origin: origin.value, graph: graph.value, token: token.value }
   token.value = ''; reveal.value = false
   return operation(() => client.connect(credentials), true)
+}
+function refreshGraph() {
+  if (!connected.value || busy.value) return
+  return operation(() => client.refreshGraph(), false, true, '', false, true, true)
 }
 function submit() {
   return operation(() => {
@@ -144,16 +166,18 @@ onBeforeUnmount(disconnect)
         <p class="status" role="status" aria-live="polite" aria-atomic="true">{{ copy.status[status] }}<span v-if="bannerError"> · {{ bannerError }}</span><span v-if="populationStatus"> · {{ populationStatus }}</span></p><button v-if="busy" type="button" @click="cancel">{{ copy.cancel }}</button>
       </section>
       <section v-if="graphData" class="graph-overview"><h2>{{ copy.graphOverview }} <span class="mono">{{ graphData.graph_id }}</span></h2><p>{{ copy.nodes }}: {{ graphData.node_count }} · {{ copy.edges }}: {{ graphData.edge_count }}</p>
+        <button class="graph-refresh" type="button" :disabled="!connected || busy" aria-describedby="graph-refresh-help" @click="refreshGraph">{{ copy.refreshGraph }}</button><p id="graph-refresh-help" class="help">{{ copy.refreshGraphHint }}</p>
         <details><summary>{{ copy.overview }}</summary><div class="choices"><label><input v-model="graphKind" value="nodes" type="radio" @change="graphPage = 0">{{ copy.nodes }}</label><label><input v-model="graphKind" value="edges" type="radio" @change="graphPage = 0">{{ copy.edges }}</label></div><ul><li v-for="entry in graphEntries.slice(graphPage * 10, (graphPage + 1) * 10)" :key="entry.uuid"><details><summary>{{ entry.name || entry.uuid }}</summary><p class="mono">{{ entry.uuid }}</p><p>{{ entry.summary }}</p><p>{{ entry.fact }}</p><p v-if="graphKind === 'edges'">{{ entry.source_node_name }} → {{ entry.target_node_name }}</p></details></li></ul><nav v-if="graphEntries.length > 10" class="actions" :aria-label="copy.graphOverview"><button type="button" :disabled="!graphPage" @click="graphPage--">{{ copy.previous }}</button><span>{{ copy.range }} {{ graphPage + 1 }} / {{ Math.ceil(graphEntries.length / 10) }}</span><button type="button" :disabled="(graphPage + 1) * 10 >= graphEntries.length" @click="graphPage++">{{ copy.next }}</button></nav></details>
       </section>
-      <SourceLibrary :methods="sourceMethods" :connected="connected" :busy="busy" :reset-version="sourceReset" :locale="locale" @inspected="inspectedSource = $event" />
+      <SourceLibrary :methods="sourceMethods" :connected="connected" :busy="busy" :reset-version="sourceReset" :locale="locale" @inspected="inspectedSource = $event" @catalog="sourceCatalog = $event" />
       <SourceIngestion :methods="ingestionMethods" :inspected="inspectedSource" :connected="connected" :busy="busy" :reset-version="sourceReset" :locale="locale" />
       <ExperimentComparison :methods="experimentMethods" :connected="connected" :busy="busy" :reset-version="sourceReset" :locale="locale" />
       <PopulationWorkbench :methods="populationMethods" :connected="connected" :busy="busy" :reset-version="populationReset" :locale="locale" :type-labels="populationTypes" />
-      <SimulationPreparation :methods="preparationMethods" :connected="connected" :busy="busy" :reset-version="preparationReset" :locale="locale" :source="inspectedSource?.source || null" :display-graph-id="graphData?.graph_id || ''" :type-labels="populationTypes" @ready="nativeReady = $event" @cleared="nativeReset++" />
+      <SimulationPreparation :methods="preparationMethods" :connected="connected" :busy="busy" :reset-version="preparationReset" :locale="locale" :source="inspectedSource?.source || null" :source-catalog="sourceCatalog" :display-graph-id="graphData?.graph_id || ''" :type-labels="populationTypes" @ready="nativeReady = $event" @cleared="nativeReset++" />
       <NativeLaunch :methods="nativeMethods" :ready="nativeReady" :connected="connected" :busy="busy" :reset-version="nativeReset" :locale="locale" :display-graph-id="graphData?.graph_id || ''" @inspect="observationSelection = $event" @report="reportSelection = $event" @cleared="clearNativeViews" />
       <NativeObservations :methods="observationMethods" :selection="observationSelection" :connected="connected" :busy="busy" :reset-version="observationReset" :locale="locale" :display-graph-id="graphData?.graph_id || ''" />
-      <ConnectedReports :methods="reportMethods" :selection="reportSelection" :connected="connected" :busy="busy" :reset-version="reportReset" :locale="locale" :display-graph-id="graphData?.graph_id || ''" />
+      <ConnectedReports :methods="reportMethods" :selection="reportSelection" :source-catalog="sourceCatalog" :connected="connected" :busy="busy" :reset-version="reportReset" :locale="locale" :display-graph-id="graphData?.graph_id || ''" @followup="followupSelection = $event" />
+      <ConnectedFollowup :methods="followupMethods" :selection="followupSelection" :connected="connected" :busy="busy" :reset-version="followupReset" :locale="locale" :display-graph-id="graphData?.graph_id || ''" />
       <section class="query-section" aria-labelledby="query-title"><h2 id="query-title">{{ copy.research }}</h2>
         <form @submit.prevent="submit"><fieldset :disabled="!connected || busy"><legend>{{ copy.scope }}</legend><div class="choices"><label><input v-model="mode" type="radio" value="research">{{ copy.research }}</label><label><input v-model="mode" type="radio" value="dossier">{{ copy.dossier }}</label></div>
           <label v-if="mode === 'research'" for="question">{{ copy.query }}<textarea id="question" v-model="query" required rows="3" maxlength="4000"></textarea></label>

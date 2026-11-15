@@ -2039,6 +2039,11 @@ class ReportAgent:
             tools_description=self._get_tools_description(),
         )
         system_prompt = f"{system_prompt}\n\n{get_language_instruction()}"
+        if self.connected_context is not None:
+            # The same bound source/native marker rule used during generation
+            # also governs a connected chat answer. Prior answers and report
+            # prose are context, not independent citation authority.
+            system_prompt += self.connected_instruction
         if self.neutral_mode:
             system_prompt += ("\nThe bound source graph is evidence, not observed simulation behavior. "
                               "Do not invent interviews or simulated opinions.")
@@ -2058,6 +2063,7 @@ class ReportAgent:
         
         # ReACT循环（简化版）
         tool_calls_made = []
+        executed_trace = []
         max_iterations = 2  # 减少迭代轮数
         
         for iteration in range(max_iterations):
@@ -2075,11 +2081,14 @@ class ReportAgent:
                 clean_response = re.sub(r'\[TOOL_CALL\].*?\)', '', clean_response)
                 clean_response = ReportAgent._strip_fake_tool_results(clean_response)
                 
-                return {
+                answer = {
                     "response": clean_response.strip(),
                     "tool_calls": tool_calls_made,
                     "sources": [tc.get("parameters", {}).get("query", "") for tc in tool_calls_made]
                 }
+                if self.connected_context is not None:
+                    answer['executed_trace'] = executed_trace
+                return answer
             
             # 执行工具调用（限制数量）
             tool_results = []
@@ -2092,6 +2101,9 @@ class ReportAgent:
                     "result": result[:1500]  # 限制结果长度
                 })
                 tool_calls_made.append(call)
+                if self.connected_context is not None:
+                    executed_trace.append({"tool": call["name"], "parameters": call.get("parameters", {}),
+                                           "observation": result[:1500]})
             
             # 将结果添加到消息
             cleaned_response = ReportAgent._strip_fake_tool_results(response)
@@ -2113,11 +2125,14 @@ class ReportAgent:
         clean_response = re.sub(r'\[TOOL_CALL\].*?\)', '', clean_response)
         clean_response = ReportAgent._strip_fake_tool_results(clean_response)
         
-        return {
+        answer = {
             "response": clean_response.strip(),
             "tool_calls": tool_calls_made,
             "sources": [tc.get("parameters", {}).get("query", "") for tc in tool_calls_made]
         }
+        if self.connected_context is not None:
+            answer['executed_trace'] = executed_trace
+        return answer
 
 
 class ReportManager:
