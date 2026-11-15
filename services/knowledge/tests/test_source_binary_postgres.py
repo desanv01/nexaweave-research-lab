@@ -4,7 +4,7 @@ from uuid import uuid4
 
 import pytest
 
-from nexaweave_storage import Conflict, NotFound, SourceStore, StorageError
+from nexaweave_storage import Conflict, NotFound, SourceStore, StorageError, migrate
 from test_source_store_postgres import factory, project
 
 pytestmark = pytest.mark.postgres
@@ -18,6 +18,9 @@ def test_original_replay_restart_owner_and_v1_absence(factory):
     first = store.ingest_pdf("owner", project_id, revision, "original.pdf", text, passages, raw)
     assert first.content == raw and first.sha256 == hashlib.sha256(raw).hexdigest()
     assert store.ingest_pdf("owner", project_id, revision, "original.pdf", text, passages, raw) == first
+    with factory() as conn:
+        migrate(conn)
+        migrate(conn)
     assert SourceStore(factory).get_original("owner", project_id, revision) == first
     assert SourceStore(factory).get_source("owner", project_id, revision) == first.source
     with pytest.raises(NotFound):
