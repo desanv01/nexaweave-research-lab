@@ -15,6 +15,7 @@ import sqlite3
 import time
 
 from .native_recording_contracts import (
+    IDENTIFIER,
     MAX_EVENT_BYTES,
     MAX_EVENTS,
     MAX_JSON,
@@ -36,6 +37,7 @@ _READ_BYTES = 64 * 1024
 _SETUP_ACTIONS = {"sign_up", "follow", "create_post"}
 _ROUND_ACTIONS = {"refresh", "listen_from_group", "create_post"}
 _SIDECARS = ("-wal", "-shm", "-journal")
+_MEMORY_FILE = "native-memory.bin"
 
 
 def _valid_id(value):
@@ -55,6 +57,23 @@ class _Request:
 class _Barrier:
     acknowledged: asyncio.Future
     release: asyncio.Event
+
+
+@dataclass(frozen=True)
+class _AgentMemoryOwner:
+    platform_id: int
+    camel_id: str
+    agent: object
+    action: object
+    memory: object
+    block: object
+    storage: object
+
+    def same_binding(self, other):
+        return (self.platform_id == other.platform_id and self.camel_id == other.camel_id
+                and self.agent is other.agent and self.action is other.action
+                and self.memory is other.memory and self.block is other.block
+                and self.storage is other.storage)
 
 
 class _OwnedChannel:
@@ -116,7 +135,21 @@ class _OwnedChannel:
 class NativeRoundCapture:
     """Capture-only component for a single trusted native session."""
 
-    def __init__(self, *, simulation_dir, destination, anchors):
+    def __init__(self, *, simulation_dir, destination, anchors,
+                 include_memory=False, prepared_agent_ids=None):
+        if type(include_memory) is not bool:
+            raise RecordingError()
+        if include_memory:
+            if type(prepared_agent_ids) is not tuple or not prepared_agent_ids:
+                raise RecordingError()
+            if len(prepared_agent_ids) > _MAX_AGENTS:
+                raise RecordingError("limit_exceeded")
+            if (not all(_valid_id(item) for item in prepared_agent_ids)
+                    or len(set(prepared_agent_ids)) != len(prepared_agent_ids)):
+                raise RecordingError()
+        elif prepared_agent_ids is not None:
+            raise RecordingError()
+
         try:
             self._root = Path(simulation_dir).resolve(strict=True)
             target = Path(destination)
@@ -132,6 +165,10 @@ class NativeRoundCapture:
         except (OSError, TypeError, ValueError):
             raise RecordingError() from None
 
+        self._include_memory = include_memory
+        self._prepared_agent_ids = tuple(sorted(prepared_agent_ids)) if include_memory else None
+        self._memory_graph = None
+        self._memory_owners = ()
         self._platform = None
         self._channel = None
         self._env = None
@@ -340,6 +377,9 @@ class NativeRoundCapture:
             agent_ids.add(agent_id)
             expected[id(agent)] = entry
         source = env.platform.db
+        if self._include_memory:
+            self._memory_graph = env.agent_graph
+            self._memory_owners = self._resolve_memory_cohort(env, deadline)
         with self._source_queries(source, deadline):
             self._require_source_path(source)
             if self._trace_watermark(source) != prior_cursor:
@@ -347,6 +387,8 @@ class NativeRoundCapture:
             prior_post_id = source.execute("SELECT COALESCE(MAX(post_id), 0) FROM post").fetchone()[0]
             if not _valid_id(prior_post_id):
                 raise RecordingError()
+            if self._include_memory:
+                self._verify_memory_users(source, deadline)
 
         self._expected = expected
         self._prior_cursor = prior_cursor
@@ -393,6 +435,8 @@ class NativeRoundCapture:
             self._env._perform_llm_action = self._original_llm
         self._env = self._platform = self._channel = self._original_llm = self._source_db = None
         self._expected.clear()
+        self._memory_graph = None
+        self._memory_owners = ()
         self._pending.clear()
         self._round_witnesses.clear()
 
@@ -454,6 +498,8 @@ class NativeRoundCapture:
 
     def _check_destination_budget(self):
         paths = ["native.sqlite3", "actions.jsonl", "manifest.json"]
+        if self._include_memory:
+            paths.append(_MEMORY_FILE)
         paths.extend("native.sqlite3" + suffix for suffix in _SIDECARS)
         total = 0
         for name in paths:
@@ -628,6 +674,129 @@ class NativeRoundCapture:
                 digest.update(block)
         return size, digest.hexdigest()
 
+    def _resolve_memory_cohort(self, env, deadline):
+        from camel.memories import ChatHistoryMemory
+        from camel.memories.blocks.chat_history_block import ChatHistoryBlock
+        from camel.storages.key_value_storages.in_memory import InMemoryKeyValueStorage
+
+        self._remaining(deadline)
+        graph = env.agent_graph
+        mappings = getattr(graph, "agent_mappings", None)
+        if (graph is not self._memory_graph or getattr(graph, "backend", None) != "igraph"
+                or type(mappings) is not dict or len(mappings) != len(self._prepared_agent_ids)
+                or graph.get_num_nodes() != len(self._prepared_agent_ids)
+                or not all(_valid_id(key) for key in mappings)
+                or set(mappings) != set(self._prepared_agent_ids)):
+            raise RecordingError()
+
+        owners = []
+        camel_ids = set()
+        object_ids = set()
+        for platform_id in self._prepared_agent_ids:
+            self._remaining(deadline)
+            agent = mappings[platform_id]
+            if (graph.get_agent(platform_id) is not agent
+                    or not _valid_id(getattr(agent, "social_agent_id", None))
+                    or agent.social_agent_id != platform_id):
+                raise RecordingError()
+            action = getattr(getattr(agent, "env", None), "action", None)
+            if (getattr(action, "channel", None) is not self._channel
+                    or not _valid_id(getattr(action, "agent_id", None))
+                    or action.agent_id != platform_id):
+                raise RecordingError()
+
+            camel_id = getattr(agent, "agent_id", None)
+            memory = getattr(agent, "memory", None)
+            if (type(camel_id) is not str or not IDENTIFIER.fullmatch(camel_id)
+                    or camel_id in camel_ids or type(memory) is not ChatHistoryMemory
+                    or type(memory.agent_id) is not str or memory.agent_id != camel_id):
+                raise RecordingError()
+            block = memory._chat_history_block
+            if type(block) is not ChatHistoryBlock or type(block.storage) is not InMemoryKeyValueStorage:
+                raise RecordingError()
+            storage = block.storage
+            for value in (agent, action, memory, block, storage):
+                identity = id(value)
+                if identity in object_ids:
+                    raise RecordingError()
+                object_ids.add(identity)
+            camel_ids.add(camel_id)
+            owners.append(_AgentMemoryOwner(platform_id, camel_id, agent, action, memory, block, storage))
+        return tuple(owners)
+
+    def _verify_memory_users(self, connection, deadline):
+        self._remaining(deadline)
+        candidates = self._prepared_agent_ids
+        rows = connection.execute(
+            "SELECT agent_id, user_id FROM user ORDER BY agent_id LIMIT ?",
+            (len(candidates) + 1,),
+        ).fetchall()
+        if len(rows) != len(candidates):
+            raise RecordingError()
+        for (agent_id, user_id), platform_id in zip(rows, candidates, strict=True):
+            if (not _valid_id(agent_id) or not _valid_id(user_id)
+                    or agent_id != platform_id or user_id != platform_id):
+                raise RecordingError()
+        self._remaining(deadline)
+
+    def _copy_memory_at_cut(self, deadline):
+        from .native_checkpoint_memory import NativeMemoryCaptureBudget, capture_native_memory
+
+        barrier = self._barrier
+        if (not self._sealed or barrier is None or not barrier.acknowledged.done()
+                or not barrier.acknowledged.result() or barrier.release.is_set()):
+            raise RecordingError()
+        owners = self._resolve_memory_cohort(self._env, deadline)
+        if (len(owners) != len(self._memory_owners)
+                or not all(before.same_binding(current)
+                           for before, current in zip(self._memory_owners, owners, strict=True))):
+            raise RecordingError()
+
+        if self._text_remaining == 0:
+            raise RecordingError("limit_exceeded")
+        budget = NativeMemoryCaptureBudget(max_bytes=self._text_remaining, deadline_monotonic=deadline)
+        prefix = f"NWM1\n{len(owners)}\n".encode("ascii")
+        # Reserve the maximum count width for each frame before any payload
+        # allocation. Charge the exact completed file size to the outer pool.
+        max_count_width = len(str(MAX_JSON))
+        header_allowance = len(prefix) + sum(
+            len(str(owner.platform_id)) + max_count_width + 2 for owner in owners
+        )
+        budget.charge_bytes(header_allowance)
+
+        path = self._destination / _MEMORY_FILE
+        digest = hashlib.sha256()
+        size = len(prefix)
+        budget.check()
+        with path.open("xb") as stream:
+            stream.write(prefix)
+            digest.update(prefix)
+            for owner in owners:
+                budget.check()
+                raw = capture_native_memory(owner.memory, expected_agent_id=owner.camel_id, budget=budget)
+                frame = f"{owner.platform_id} {len(raw)}\n".encode("ascii")
+                stream.write(frame)
+                stream.write(raw)
+                digest.update(frame)
+                digest.update(raw)
+                size += len(frame) + len(raw)
+                del raw
+            budget.check()
+        self._charge_text(size)
+        checksum = digest.hexdigest()
+        if self._file_digest(path, size, deadline) != (size, checksum):
+            raise RecordingError()
+        self._check_destination_budget()
+        self._remaining(deadline)
+        return {
+            "version": 1,
+            "filename": _MEMORY_FILE,
+            "coverage": "all_registered_agents",
+            "agent_count": len(owners),
+            "bytes": size,
+            "sha256": checksum,
+        }
+
     def _copy_at_cut(self, source, cursor, log_path, agent_names, deadline):
         expected_log = self._root / "twitter" / "actions.jsonl"
         if (expected_log.resolve(strict=True) != expected_log
@@ -644,6 +813,8 @@ class NativeRoundCapture:
                 raise RecordingError("limit_exceeded")
             rows = self._trace_snapshot(source, cursor, deadline)
             posts = self._verified_posts(source, rows, deadline)
+            if self._include_memory:
+                self._verify_memory_users(source, deadline)
 
             self._remaining(deadline)
             self._destination.mkdir(mode=0o700)
@@ -657,6 +828,8 @@ class NativeRoundCapture:
                     backup_rows = self._trace_snapshot(backup, cursor, deadline)
                     if backup_rows != rows or self._verified_posts(backup, backup_rows, deadline) != posts:
                         raise RecordingError()
+                    if self._include_memory:
+                        self._verify_memory_users(backup, deadline)
                 finally:
                     backup.set_progress_handler(None, 0)
             self._check_sidecars(database_path)
@@ -685,6 +858,8 @@ class NativeRoundCapture:
                 "full_checkpoint": False,
                 "continuation_supported": False,
             }
+            if self._include_memory:
+                receipt["memory"] = self._copy_memory_at_cut(deadline)
             manifest = canonical({
                 **receipt, "version": 1, "platform": "twitter", "source_journal_mode": journal,
             })
