@@ -86,21 +86,26 @@ class FixturePhases:
 @dataclass(frozen=True)
 class ScriptedReportTransportFactory:
     log_path: str
+    record_entry: bool = False
 
     def __call__(self, *, max_retries, timeout):
         assert type(max_retries) is int and max_retries == 0 and 0 < timeout <= 15
-        return ScriptedReportTransport(self.log_path)
+        return ScriptedReportTransport(self.log_path, record_entry=self.record_entry)
 
 
 class ScriptedReportTransport:
     """Actual inherited ReportAgent consumes these raw cooperative SDK replies."""
     max_retries = 0
 
-    def __init__(self, log_path):
+    def __init__(self, log_path, *, record_entry=False):
         self.path, self.count, self.prose_count = Path(log_path), 0, 0
+        self.record_entry = record_entry
         self.chat = SimpleNamespace(completions=self)
 
     def create(self, **kwargs):
+        if self.record_entry:
+            with self.path.open('a', encoding='utf-8', newline='\n') as output:
+                output.write('{"entry":true}\n')
         assert kwargs['stream'] is False and 0 < kwargs['timeout'] <= 15
         tokens = kwargs.get('max_tokens', kwargs.get('max_completion_tokens'))
         assert type(tokens) is int and 1 <= tokens <= 4096
@@ -362,8 +367,11 @@ def factory():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('slow_authorization', [False, True], ids=['ordinary', 'cooperative-heartbeat'])
-async def test_actual_native_receipt_to_inherited_report_preserves_inputs_and_disabled_reads(factory, tmp_path, monkeypatch, slow_authorization):
+@pytest.mark.parametrize('profile', [
+    'ordinary', 'cooperative-heartbeat',
+    pytest.param('caller-cancel', marks=pytest.mark.connected_report_caller_cancel),
+])
+async def test_actual_native_receipt_to_inherited_report_preserves_inputs_and_disabled_reads(factory, tmp_path, monkeypatch, profile):
     from test_connected_preparation_native_launch import RichConnectedChat
     from test_preparation_store import real_host, request, reference as prep_reference
     from test_native_launch_store import migrate_all, launch_host, declaration
@@ -377,6 +385,9 @@ async def test_actual_native_receipt_to_inherited_report_preserves_inputs_and_di
     from app.services.report_models import BoundedReportModelFactory
     from app.services.connected_report_client import digest, validate_read, validate_download, ReportError
 
+    slow_authorization = profile == 'cooperative-heartbeat'
+    caller_cancel = profile == 'caller-cancel'
+    assert not caller_cancel or not (_actual_graph_journey or _research_browser_journey)
     assert not (_actual_graph_journey and slow_authorization)
     assert not _research_browser_journey or (_actual_graph_journey and not slow_authorization)
     seed_types = ['Person', 'Organization']
@@ -393,7 +404,7 @@ async def test_actual_native_receipt_to_inherited_report_preserves_inputs_and_di
                         dict(poster_type=seed_types[0], content='Final same actor E')]), ensure_ascii=False)
             return response
 
-    phases = FixturePhases('report-cooperative-heartbeat' if slow_authorization else 'report-ordinary')
+    phases = FixturePhases('report-' + profile)
     phases.start('setup')
     monkeypatch.chdir(tmp_path)
     migrate_all(factory)
@@ -456,7 +467,8 @@ async def test_actual_native_receipt_to_inherited_report_preserves_inputs_and_di
         reports = DurableReportHost(settings=prep.settings, connection_factory=factory, read_facade=report_reader,
             native_launch_host=native_host, artifact_root=tmp_path/'reports', account_id=prep.account_id,
             ceiling_microusd=4, authorize=lambda: report_enabled[0], model_label='scripted offline inherited report',
-            limits=limits, model_factory=BoundedReportModelFactory(ScriptedReportTransportFactory(str(report_log)),
+            limits=limits, model_factory=BoundedReportModelFactory(
+                ScriptedReportTransportFactory(str(report_log), record_entry=caller_cancel),
                 'scripted-report', limits), scheduler=lambda _: None)
         report_temporal = TemporalReportHost(client=temporal, task_queue='mf-report-body-'+uuid4().hex,
             trusted_host=reports, allow_dispatch=lambda: report_enabled[0])
@@ -584,6 +596,14 @@ async def test_actual_native_receipt_to_inherited_report_preserves_inputs_and_di
                     reviewed = await asyncio.to_thread(reports.plan, declared)
                     assert reviewed['state']=='planned' and not report_log.exists()
                 reference = dict(schema_version=1, report_id=reviewed['report_id'], plan_sha256=reviewed['plan_sha256'])
+                if caller_cancel:
+                    from test_report_store import _assert_report_caller_cancel
+
+                    phases.end('report-plan-start')
+                    await _assert_report_caller_cancel(reports, reference, temporal, factory,
+                                                       prep.budget, report_log, monkeypatch)
+                    assert all((input_root/name).read_bytes()==raw for name,raw in {**original_inputs,**original_outputs}.items())
+                    return
                 if not browser:
                     await asyncio.to_thread(reports.start, reference)
                 row = reports.store.get('owner', reference['report_id'], reference['plan_sha256'])
