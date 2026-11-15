@@ -12,7 +12,7 @@ import { ingestionFingerprint, ingestionIdentities } from '../src/api/sourceInge
 import { copyFor, safeError, workbenchCopy } from '../src/i18n/workbench.js'
 const dom = new JSDOM('<!doctype html><html><body></body></html>', { url: 'http://127.0.0.1:5173/research' })
 Object.defineProperty(globalThis, 'crypto', { value: webcrypto, configurable: true })
-for (const name of ['window', 'document', 'Element', 'HTMLElement', 'SVGElement', 'Node']) globalThis[name] = name === 'window' ? dom.window : dom.window[name]
+for (const name of ['window', 'document', 'Element', 'HTMLElement', 'SVGElement', 'Node', 'Document', 'ShadowRoot']) globalThis[name] = name === 'window' ? dom.window : dom.window[name]
 globalThis.localStorage = dom.window.localStorage
 const { createApp, nextTick, h } = await import('vue')
 const localeFiles = Object.fromEntries(['en', 'zh', 'ms'].map(key => [`../../../locales/${key}.json`, { default: JSON.parse(readFileSync(new URL(`../../locales/${key}.json`, import.meta.url), 'utf8')) }]))

@@ -8,7 +8,7 @@ import { nativeObservationsCopy, nativeObservationsCopyFor } from '../src/i18n/n
 import { validateNativeObservationsResult } from '../src/api/nativeObservations.js'
 globalThis.crypto ||= webcrypto
 const dom = new JSDOM('<!doctype html><html><body></body></html>', { url: 'http://127.0.0.1:5173/research' })
-for (const name of ['window', 'document', 'Element', 'HTMLElement', 'SVGElement', 'Node']) globalThis[name] = name === 'window' ? dom.window : dom.window[name]
+for (const name of ['window', 'document', 'Element', 'HTMLElement', 'SVGElement', 'Node', 'Document', 'ShadowRoot']) globalThis[name] = name === 'window' ? dom.window : dom.window[name]
 const { createApp, h, nextTick, reactive } = await import('vue')
 const file = new URL('../src/components/workbench/NativeObservations.vue', import.meta.url)
 const { descriptor } = parse(readFileSync(file, 'utf8'), { filename: file.pathname })

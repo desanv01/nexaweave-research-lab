@@ -6,7 +6,7 @@ import { JSDOM } from 'jsdom'
 import { parse, compileScript } from '@vue/compiler-sfc'
 import { copyFor } from '../src/i18n/workbench.js'
 const dom = new JSDOM('<!doctype html><html><body></body></html>', { url: 'http://127.0.0.1:5173/research' })
-for (const name of ['window', 'document', 'Element', 'HTMLElement', 'SVGElement', 'Node']) globalThis[name] = name === 'window' ? dom.window : dom.window[name]
+for (const name of ['window', 'document', 'Element', 'HTMLElement', 'SVGElement', 'Node', 'Document', 'ShadowRoot']) globalThis[name] = name === 'window' ? dom.window : dom.window[name]
 const { createApp, nextTick, h, reactive } = await import('vue')
 const file = new URL('../src/components/workbench/DossierExport.vue', import.meta.url)
 const { descriptor } = parse(readFileSync(file, 'utf8'), { filename: file.pathname })
