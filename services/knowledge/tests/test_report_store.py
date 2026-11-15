@@ -425,3 +425,73 @@ def test_actual_quiescent_rollback_up_roundtrip_removes_only_report_and_restores
             assert rebuilt['report']['migrations'] == quiescent['report']['migrations']
             assert rebuilt['report']['rows'] == []
         assert rollback_snapshot(conn) == before
+
+
+async def _assert_report_caller_cancel(reports, reference, temporal, factory, budget, report_log, monkeypatch):
+    import asyncio
+    from dataclasses import replace
+    import json
+    from nexaweave_execution.budget import ReservationState
+
+    store, account = reports.store, reports.account_id
+    scheduled, latched = [], []
+    schedule, first_request = reports.scheduler, store.first_request
+
+    def reservation(report_id):
+        with factory() as conn:
+            return budget._row(conn, account, report_id)
+
+    def schedule_once(wire):
+        assert not scheduled
+        scheduled.append(dict(wire))
+        return schedule(wire)
+
+    def cancel_after_latch(principal, wire):
+        assert not latched and scheduled == [wire]
+        first_request(principal, wire)
+        row = store.get(principal, wire['report_id'], wire['plan_sha256'])
+        hold = reservation(row.report_id)
+        baseline = budget.status(principal, account)
+        assert str(row.attempt_id) == wire['attempt_id'] and row.first_possible_request
+        assert hold.attempt_id == row.attempt_id and hold.state == ReservationState.started
+        assert hold.ceiling_microusd == 4 and hold.receipt is None
+        intent = reports.cancel(reference)
+        assert intent['state'] == 'generating' and intent['cancel_requested']
+        assert budget.status(principal, account) == baseline
+        assert reservation(row.report_id) == hold
+        latched.append((hold, baseline))
+
+    monkeypatch.setattr(reports, 'scheduler', schedule_once)
+    monkeypatch.setattr(store, 'first_request', cancel_after_latch)
+    await asyncio.to_thread(reports.start, reference)
+    row = store.get('owner', reference['report_id'], reference['plan_sha256'])
+    result = await asyncio.wait_for(temporal.get_workflow_handle(row.workflow['workflow_id']).result(), 180)
+    assert result == {**reference, 'state': 'cancelled'}
+    terminal = store.get('owner', row.report_id, row.plan_sha256)
+    assert terminal.state == 'cancelled' and terminal.error_code == 'report_cancelled'
+    assert terminal.first_possible_request and terminal.cancel_requested
+    assert terminal.cleanup == dict(known=True, pending=False, owner_thread_alive=False)
+    assert terminal.receipt is None and terminal.manifest is None
+    assert terminal.attempt_id == row.attempt_id and terminal.workflow == row.workflow
+    hold, baseline = latched[0]
+    saved = reservation(row.report_id)
+    assert saved.state == ReservationState.uncertain and saved.receipt is None
+    assert saved.attempt_id == hold.attempt_id == terminal.attempt_id
+    assert (saved.fingerprint, saved.ceiling_microusd) == (hold.fingerprint, hold.ceiling_microusd)
+    final = budget.status('owner', account)
+    assert (baseline.cap_microusd, baseline.accounted_ceiling_microusd,
+            baseline.reserved_microusd, baseline.remaining_microusd) == (12, 8, 4, 0)
+    assert baseline.actual_usage_microusd is None
+    assert final == replace(baseline, uncertain_microusd=baseline.uncertain_microusd + 4)
+    log = report_log.read_bytes() if report_log.exists() else None
+    for line in (log or b'').splitlines():
+        record = json.loads(line)
+        assert 'entry' not in record and 'call' not in record
+        if record.get('closed') is True:
+            assert record['calls'] == 0
+    recovered = await asyncio.to_thread(reports.start, reference)
+    assert recovered['state'] == 'cancelled' and recovered['workflow'] == terminal.workflow
+    assert store.get('owner', row.report_id, row.plan_sha256) == terminal
+    assert reservation(row.report_id) == saved and budget.status('owner', account) == final
+    assert len(scheduled) == len(latched) == 1
+    assert (report_log.read_bytes() if report_log.exists() else None) == log

@@ -25,6 +25,7 @@ ENGINE_TARGET = ROOT / 'backend/engine_tests/test_connected_report_process.py'
 PG_TARGET = ROOT / 'services/knowledge/tests/test_connected_native_report.py'
 PG_STORE_TARGET = ROOT / 'services/knowledge/tests/test_report_store.py'
 MARKERS = ('postgres: approved disposable PostgreSQL authority\n'
+           'connected_report_caller_cancel: opt-in real caller cancellation and PostgreSQL hold\n'
            'connected_report_engine: actual locked connected report\n'
            'connected_report_temporal: freshly inherited-generated real PGTemporal connected report\n'
            'native_launch_temporal: inherited actual connected Temporal native launch\n'
@@ -109,7 +110,7 @@ def require_installed_freshness(package_specs, *, root=None, prefix=None):
 
 
 def child(mode: str, journey: bool = False, actual_graph: bool = False, store_only: bool = False,
-          browser: bool = False) -> int:
+          browser: bool = False, caller_cancel: bool = False) -> int:
     guard = LoopbackOnlySockets()
     guard.install()
     try:
@@ -147,7 +148,7 @@ def child(mode: str, journey: bool = False, actual_graph: bool = False, store_on
                     expected = ({'schema_version', 'suite', 'phase', 'event', 'monotonic_seconds', 'elapsed_seconds'}
                                 if fixture else {'schema_version', 'suite', 'nodeid', 'event', 'when', 'outcome',
                                                  'duration_seconds', 'monotonic_seconds', 'elapsed_seconds'})
-                    allowed_suites = ('report-ordinary', 'report-cooperative-heartbeat') if fixture else ('report',)
+                    allowed_suites = ('report-ordinary', 'report-cooperative-heartbeat', 'report-caller-cancel') if fixture else ('report',)
                     if set(record) != expected or type(record['schema_version']) is not int or record['schema_version'] != 1 or record['suite'] not in allowed_suites:
                         return
                     for key in ('monotonic_seconds', 'elapsed_seconds', *(() if fixture else ('duration_seconds',))):
@@ -212,8 +213,9 @@ def child(mode: str, journey: bool = False, actual_graph: bool = False, store_on
             required = (ENGINE_TARGET.name,)
         elif mode == 'integration':
             targets = ((PG_STORE_TARGET,) if store_only else
-                       (PG_TARGET,) if journey else (PG_STORE_TARGET, PG_TARGET))
-            selection = 'postgres'
+                       (PG_TARGET,) if journey or caller_cancel else (PG_STORE_TARGET, PG_TARGET))
+            selection = ('postgres and connected_report_caller_cancel' if caller_cancel else
+                         'postgres and not connected_report_caller_cancel')
             required = tuple(path.name for path in targets)
         else:
             targets = UNIT_TARGETS
@@ -225,6 +227,9 @@ def child(mode: str, journey: bool = False, actual_graph: bool = False, store_on
         selected_targets = [
             str(PG_TARGET) + '::test_actual_native_receipt_to_inherited_report_preserves_inputs_and_disabled_reads[ordinary]'
         ] if actual_graph else list(map(str, targets))
+        cancel_node = 'test_actual_native_receipt_to_inherited_report_preserves_inputs_and_disabled_reads[caller-cancel]'
+        if caller_cancel:
+            selected_targets = [str(PG_TARGET) + '::' + cancel_node]
         result = int(pytest.main([
             '-q', '--durations=0', '--rootdir', str(ROOT), '-p', 'pytest_asyncio.plugin',
             '-o', 'asyncio_default_fixture_loop_scope=function', '-o', 'markers=' + MARKERS,
@@ -236,6 +241,11 @@ def child(mode: str, journey: bool = False, actual_graph: bool = False, store_on
         if actual_graph:
             complete = (complete and accounting.collected == accounting.passed == 1
                         and accounting.targets[PG_TARGET.name] == 1)
+        if caller_cancel:
+            complete = (complete and accounting.collected == accounting.passed == 1
+                        and accounting.targets[PG_TARGET.name] == 1
+                        and len(accounting.paths) == 1
+                        and next(iter(accounting.paths)).endswith('/' + PG_TARGET.name + '::' + cancel_node))
         if store_only:
             expected = {PG_STORE_TARGET.name: 21}
             collected_targets = {name: sum(path == name for path in accounting.paths.values())
@@ -253,11 +263,14 @@ def child(mode: str, journey: bool = False, actual_graph: bool = False, store_on
                                       or 'site-packages' not in Path(origin).parts):
                 print('connected_report_loaded_source_package_refused', file=sys.stderr)
                 complete = False
-        print(json.dumps(dict(connected_report_mode=mode, actual_graph_journey=actual_graph,
+        result_record = dict(connected_report_mode=mode, actual_graph_journey=actual_graph,
             research_browser_journey=browser, store_only=store_only,
             collected=accounting.collected,
             passed=accounting.passed, skipped=accounting.skipped, targets=accounting.targets,
-            complete=complete), sort_keys=True))
+            complete=complete)
+        if caller_cancel:
+            result_record['caller_cancel'] = True
+        print(json.dumps(result_record, sort_keys=True))
         if not complete:
             print('connected_report_qualification_incomplete', file=sys.stderr)
             result = 1
@@ -277,6 +290,7 @@ def main() -> int:
     subset = parser.add_mutually_exclusive_group()
     subset.add_argument('--journey', action='store_true', help='Select only the actual combined journey for concrete fixture corrections')
     subset.add_argument('--store-only', action='store_true', help='Require exact database store/budget case counts without the native journey')
+    subset.add_argument('--caller-cancel', action='store_true', help='Select one real report caller cancellation and PostgreSQL hold case')
     parser.add_argument('--actual-graph', action='store_true',
                         help='Require the ordinary four-format journey with real co-located Graphiti stores')
     parser.add_argument('--browser', action='store_true',
@@ -285,6 +299,8 @@ def main() -> int:
     mode = 'engine' if args.engine else 'integration' if args.integration else 'unit'
     if args.journey and mode != 'integration':
         parser.error('--journey requires --integration')
+    if args.caller_cancel and (mode != 'integration' or args.actual_graph or args.browser):
+        parser.error('--caller-cancel requires --integration without graph or browser modes')
     if args.actual_graph and (mode != 'integration' or not args.journey):
         parser.error('--actual-graph requires --integration --journey')
     if args.store_only and mode != 'integration':
@@ -294,7 +310,7 @@ def main() -> int:
     if args.browser and (mode != 'integration' or not args.journey or not args.actual_graph):
         parser.error('--browser requires --integration --journey --actual-graph')
     if args.child:
-        return child(mode, args.journey, args.actual_graph, args.store_only, args.browser)
+        return child(mode, args.journey, args.actual_graph, args.store_only, args.browser, args.caller_cancel)
     password = os.environ.get('PROJECT_STORE_TEST_PASSWORD')
     if mode == 'integration' and not password:
         parser.error('explicit approved disposable PostgreSQL fixture required')
@@ -379,7 +395,8 @@ def main() -> int:
         process = owner.start(subprocess.Popen,
             [sys.executable, str(Path(__file__).resolve()), '--child', '--' + mode,
              *(['--journey'] if args.journey else []), *(['--actual-graph'] if args.actual_graph else []),
-             *(['--store-only'] if args.store_only else []), *(['--browser'] if args.browser else [])],
+             *(['--store-only'] if args.store_only else []), *(['--browser'] if args.browser else []),
+             *(['--caller-cancel'] if args.caller_cancel else [])],
             cwd=directory.name, env=env, stdin=subprocess.DEVNULL, shell=False, close_fds=True,
             creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
         try:
