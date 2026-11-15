@@ -10,7 +10,7 @@ import { connectedReportsCopyFor } from '../src/i18n/connectedReports.js'
 import { connectedFollowupsCopyFor } from '../src/i18n/connectedFollowups.js'
 globalThis.crypto ||= webcrypto
 const dom = new JSDOM('<!doctype html><html><body></body></html>', { url: 'http://127.0.0.1:5173/research' })
-for (const name of ['window', 'document', 'Element', 'HTMLElement', 'SVGElement', 'Node']) globalThis[name] = name === 'window' ? dom.window : dom.window[name]
+for (const name of ['window', 'document', 'Element', 'HTMLElement', 'SVGElement', 'Node', 'Document', 'ShadowRoot']) globalThis[name] = name === 'window' ? dom.window : dom.window[name]
 globalThis.localStorage = dom.window.localStorage
 const { createApp, h, nextTick } = await import('vue')
 const dataModule = code => `data:text/javascript;base64,${Buffer.from(code).toString('base64')}`
