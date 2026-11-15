@@ -164,6 +164,56 @@ def test_actual_closed_no_call_failure_releases_only_active_claim(factory,tmp_pa
     other=plan(); next_row,dispatched=store.queue('owner',other.turn_id,other.plan_sha256,scope,prep.account_id)
     assert dispatched and next_row.state=='queued'
 
+    cancel_path = tmp_path / 'closed-cancellation'
+    cancel_path.mkdir()
+    store, prep, scope, parent, plan = seed(factory, cancel_path)
+    account = prep.account_id
+    initial = prep.budget.status('owner', account)
+    row = plan()
+    history = store.history('owner', parent.report_id, parent.plan_sha256)
+    queued, dispatched = store.queue('owner', row.turn_id, row.plan_sha256, scope, account)
+    assert dispatched
+    claimed = store.claim('owner', wire(queued))
+    store.first_request('owner', wire(claimed))
+    held_status = prep.budget.status('owner', account)
+    with factory() as conn:
+        started = BudgetLedger._row(conn, account, row.turn_id)
+    assert started.state == ReservationState.started and started.attempt_id == claimed.attempt_id
+    assert started.ceiling_microusd == 4 and started.receipt is None
+    assert held_status.reserved_microusd == initial.reserved_microusd + 4
+    assert held_status.remaining_microusd == initial.remaining_microusd - 4
+
+    intent = store.cancel('owner', row.turn_id, row.plan_sha256)
+    assert intent.state == 'generating' and intent.cancel_requested and intent.first_possible_request
+    assert prep.budget.status('owner', account) == held_status
+    with factory() as conn:
+        assert BudgetLedger._row(conn, account, row.turn_id) == started
+
+    cleanup = dict(known=True, pending=False, owner_thread_alive=False)
+    cancelled = store.finish('owner', wire(claimed), state='cancelled',
+                             cleanup=cleanup, error_code='followup_cancelled')
+    assert cancelled.state == 'cancelled' and cancelled.cleanup == cleanup
+    assert cancelled.attempt_id == claimed.attempt_id and cancelled.receipt is None
+    assert store.history('owner', parent.report_id, parent.plan_sha256) == history
+    with factory() as conn:
+        retained = BudgetLedger._row(conn, account, row.turn_id)
+        active = conn.execute('SELECT active_turn_id FROM mf_followup.histories WHERE principal=%s AND report_id=%s',
+                              ('owner', parent.report_id)).fetchone()
+    assert active == (None,)
+    assert retained.state == ReservationState.uncertain and retained.attempt_id == started.attempt_id
+    assert retained.ceiling_microusd == started.ceiling_microusd and retained.receipt is None
+    final = prep.budget.status('owner', account)
+    assert final.accounted_ceiling_microusd == held_status.accounted_ceiling_microusd
+    assert final.reserved_microusd == held_status.reserved_microusd
+    assert final.remaining_microusd == held_status.remaining_microusd and final.actual_usage_microusd is None
+    assert final.uncertain_microusd == held_status.uncertain_microusd + 4
+
+    replayed, dispatched = store.queue('owner', row.turn_id, row.plan_sha256, scope, account)
+    assert not dispatched and replayed == cancelled
+    assert prep.budget.status('owner', account) == final
+    with factory() as conn:
+        assert BudgetLedger._row(conn, account, row.turn_id) == retained
+
 
 def test_actual_completed_chain_budget_and_older_turn_stays_readable(factory,tmp_path):
     from nexaweave_execution.followup_contracts import FILE_NAMES,digest
