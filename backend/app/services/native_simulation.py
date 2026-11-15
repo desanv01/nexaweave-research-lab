@@ -12,6 +12,7 @@ import json
 import os
 import random
 import sqlite3
+import time
 import uuid
 from pathlib import Path
 
@@ -35,7 +36,8 @@ class NativeSimulationSession:
     _claim_name = ".native_prepared_start_claim"
 
     def __init__(self, simulation_dir, *, graph_id, simulation_id, models,
-                 seed: int, max_rounds: int, timeout_seconds: float = 120.0):
+                 seed: int, max_rounds: int, timeout_seconds: float = 120.0,
+                 round_capture=None):
         if (type(graph_id) is not str or not graph_id or type(simulation_id) is not str
                 or not simulation_id or type(seed) is not int
                 or type(max_rounds) is not int or not 1 <= max_rounds <= 24
@@ -62,12 +64,27 @@ class NativeSimulationSession:
         self._models = dict(models)
         self._controls = None
         self._control_network = {}
+        self._round_capture = None
         self._config, self._agents, self._profiles, self._platforms = self._preflight()
         if set(self._models) != set(self._platforms) or any(
                 model is None or not callable(getattr(model, "run", None))
                 for model in self._models.values()):
             # CAMEL BaseModelBackend.run is the native agent's synchronous seam.
             raise NeutralCapabilityError("invalid_request")
+        if round_capture is not None:
+            from .native_recording_contracts import RecordingAnchors
+            from .native_round_capture import NativeRoundCapture
+            if (type(round_capture) is not dict
+                    or set(round_capture) != {"destination", "anchors"}
+                    or type(round_capture["anchors"]) is not RecordingAnchors
+                    or round_capture["anchors"].graph_id != self.graph_id
+                    or round_capture["anchors"].simulation_id != self.simulation_id
+                    or self._platforms != ("twitter",) or self.max_rounds != 1):
+                raise NeutralCapabilityError("invalid_request")
+            self._round_capture = NativeRoundCapture(
+                simulation_dir=self.simulation_dir,
+                destination=round_capture["destination"],
+                anchors=round_capture["anchors"])
 
     def _preflight(self):
         try:
@@ -182,16 +199,20 @@ class NativeSimulationSession:
                   if self._controls is not None else None)
         if kwargs is not None:
             from oasis.social_platform.platform import Platform
-            return Platform(db_path=db_path, **kwargs)
+            owned_platform = Platform(db_path=db_path, **kwargs)
+            return (self._round_capture.wrap_platform(owned_platform)
+                    if self._round_capture is not None else owned_platform)
         if platform == "reddit":
             return oasis.DefaultPlatformType.REDDIT
         # OASIS's default Twitter platform selects TWHIN weights. Its native
         # random recommender uses local Python random and keeps the real DB,
         # environment, action and interview implementations.
         from oasis.social_platform.platform import Platform
-        return Platform(db_path=db_path, recsys_type="random",
-                        refresh_rec_post_count=2, max_rec_post_len=2,
-                        following_post_count=3, use_openai_embedding=False)
+        owned_platform = Platform(db_path=db_path, recsys_type="random",
+                                  refresh_rec_post_count=2, max_rec_post_len=2,
+                                  following_post_count=3, use_openai_embedding=False)
+        return (self._round_capture.wrap_platform(owned_platform)
+                if self._round_capture is not None else owned_platform)
 
     def schedule_for(self, agent_config, simulated_minutes, current_hour):
         if self._controls is None:
@@ -256,6 +277,41 @@ class NativeSimulationSession:
 
     def adopt(self, platform, result):
         self._results[platform] = result
+        if self._round_capture is not None:
+            if platform != "twitter":
+                raise NeutralCapabilityError("invalid_request")
+            self._round_capture.adopt(result.env)
+
+    def begin_capture_round(self, result, round_num, active_agents, prior_cursor):
+        if self._round_capture is not None:
+            if self._results.get("twitter") is not result:
+                raise NeutralCapabilityError("invalid_request")
+            self._round_capture.begin_round(result.env, round_num,
+                                            active_agents, prior_cursor,
+                                            deadline_monotonic=self._start_deadline)
+
+    def check_capture_projection(self, result, round_num):
+        if self._round_capture is not None:
+            if self._results.get("twitter") is not result:
+                raise NeutralCapabilityError("invalid_request")
+            return self._round_capture.check_projection(
+                result.env, round_num, deadline_monotonic=self._start_deadline)
+
+    async def capture_completed_round(self, result, round_num, cursor,
+                                      log_path, agent_names):
+        if self._round_capture is not None:
+            if self._results.get("twitter") is not result:
+                raise NeutralCapabilityError("invalid_request")
+            await self._round_capture.capture(result.env, round_num, cursor,
+                                               log_path, agent_names,
+                                               deadline_monotonic=self._start_deadline)
+
+    @property
+    def round_capture_receipt(self):
+        if not self._started or self._round_capture is None:
+            return None
+        receipt = self._round_capture.receipt
+        return None if receipt is None else json.loads(json.dumps(receipt))
 
     async def _start_async(self):
         from scripts import run_parallel_simulation as native
@@ -293,6 +349,7 @@ class NativeSimulationSession:
         self._claim_fresh_start()
         self._runner = asyncio.Runner()
         try:
+            self._start_deadline = time.monotonic() + self.timeout_seconds
             self._runner.run(asyncio.wait_for(self._start_async(), self.timeout_seconds))
             self._started = True
             return self
@@ -478,6 +535,8 @@ class NativeSimulationSession:
 
     async def _close_async(self):
         failed = False
+        if self._round_capture is not None:
+            self._round_capture.prepare_close()
         for platform in reversed(self._platforms):
             result = self._results.get(platform)
             if result is not None and result.env is not None:

@@ -32,10 +32,12 @@ import argparse
 import asyncio
 import json
 import logging
+import math
 import multiprocessing
 import random
 import signal
 import sqlite3
+import time
 import warnings
 from datetime import datetime
 from typing import Dict, Any, List, Optional, Tuple
@@ -578,7 +580,8 @@ def get_agent_names_from_config(config: Dict[str, Any]) -> Dict[int, str]:
 def fetch_new_actions_from_db(
     db_path: str,
     last_rowid: int,
-    agent_names: Dict[int, str]
+    agent_names: Dict[int, str],
+    *, capture_deadline=None
 ) -> Tuple[List[Dict[str, Any]], int]:
     """
     从数据库中获取新的动作记录，并补充完整的上下文信息
@@ -595,12 +598,21 @@ def fetch_new_actions_from_db(
     """
     actions = []
     new_last_rowid = last_rowid
+    conn = None
+    if capture_deadline is not None:
+        if type(capture_deadline) not in (int, float) or not math.isfinite(capture_deadline):
+            raise ValueError("invalid capture deadline")
+        if time.monotonic() >= capture_deadline:
+            raise TimeoutError("native capture deadline")
     
     if not os.path.exists(db_path):
         return actions, new_last_rowid
     
     try:
-        conn = sqlite3.connect(db_path)
+        conn = (sqlite3.connect(db_path, timeout=0) if capture_deadline is not None
+                else sqlite3.connect(db_path))
+        if capture_deadline is not None:
+            conn.set_progress_handler(lambda: int(time.monotonic() >= capture_deadline), 1000)
         cursor = conn.cursor()
         
         # 使用 rowid 来追踪已处理的记录（rowid 是 SQLite 的内置自增字段）
@@ -613,6 +625,8 @@ def fetch_new_actions_from_db(
         """, (last_rowid,))
         
         for rowid, user_id, action, info_json in cursor.fetchall():
+            if capture_deadline is not None and time.monotonic() >= capture_deadline:
+                raise TimeoutError("native capture deadline")
             # 更新最大 rowid
             new_last_rowid = rowid
             
@@ -660,9 +674,17 @@ def fetch_new_actions_from_db(
                 'action_args': simplified_args,
             })
         
-        conn.close()
+        if capture_deadline is None:
+            conn.close()
     except Exception as e:
+        if capture_deadline is not None:
+            raise
         print(f"读取数据库动作失败: {e}")
+    finally:
+        if capture_deadline is not None and conn is not None:
+            conn.close()
+    if capture_deadline is not None and time.monotonic() >= capture_deadline:
+        raise TimeoutError("native capture deadline")
     
     return actions, new_last_rowid
 
@@ -1165,6 +1187,10 @@ async def run_twitter_simulation(
         # 无论是否有活跃agent，都记录round开始
         if action_logger:
             action_logger.log_round_start(round_num + 1, simulated_hour)
+
+        if native_dependencies is not None and hasattr(native_dependencies, "begin_capture_round"):
+            native_dependencies.begin_capture_round(
+                result, round_num + 1, active_agents, last_rowid)
         
         if not active_agents:
             # 没有活跃agent时也记录round结束（actions_count=0）
@@ -1174,10 +1200,14 @@ async def run_twitter_simulation(
         
         actions = {agent: LLMAction() for _, agent in active_agents}
         await result.env.step(actions)
+
+        capture_deadline = None
+        if native_dependencies is not None and hasattr(native_dependencies, "check_capture_projection"):
+            capture_deadline = native_dependencies.check_capture_projection(result, round_num + 1)
         
         # 从数据库获取实际执行的动作并记录
         actual_actions, last_rowid = fetch_new_actions_from_db(
-            db_path, last_rowid, agent_names
+            db_path, last_rowid, agent_names, capture_deadline=capture_deadline
         )
         
         round_action_count = 0
@@ -1195,6 +1225,11 @@ async def run_twitter_simulation(
         
         if action_logger:
             action_logger.log_round_end(round_num + 1, round_action_count)
+
+        if native_dependencies is not None and hasattr(native_dependencies, "capture_completed_round"):
+            await native_dependencies.capture_completed_round(
+                result, round_num + 1, last_rowid,
+                getattr(action_logger, "log_path", None), agent_names)
         
         if (round_num + 1) % 20 == 0:
             progress = (round_num + 1) / total_rounds * 100
