@@ -17,7 +17,8 @@ from camel.types import OpenAIBackendRole
 
 from app.services.knowledge_report_tools import NeutralCapabilityError
 from app.services.native_checkpoint_memory import restore_native_memory
-from app.services.native_recording_contracts import RecordingAnchors
+from app.services.native_recording_contracts import RecordingAnchors, RecordingError
+from app.services.native_recordings import verify_twitter_round_recording
 from app.services.native_simulation import (
     NativeSimulationSession,
     open_prestart_twitter_child,
@@ -630,10 +631,27 @@ def test_actual_twitter_round_capture_preserves_native_cut(tmp_path, monkeypatch
             + receipt["database_bytes"]) <= 160 * 1024 * 1024
     writer_dir = tmp_path / "writer-child"
     writer_deadline = monotonic() + 10
-    child_db = _stage_writer_child(writer_dir, database, receipt, writer_deadline)
+    manifest_sha256 = copied_before[manifest][1]
+    verified = verify_twitter_round_recording(
+        destination, expected_manifest_sha256=manifest_sha256,
+        expected_anchors=anchors, deadline_monotonic=writer_deadline,
+    )
+    assert verified == materialized
+    different_anchors = RecordingAnchors(
+        anchors.graph_id, anchors.simulation_id, "different-capture-run",
+        anchors.branch_id, anchors.project_id, anchors.project_revision,
+    )
+    assert not writer_dir.exists() and monotonic() < writer_deadline
+    with pytest.raises(RecordingError):
+        verify_twitter_round_recording(
+            destination, expected_manifest_sha256=manifest_sha256,
+            expected_anchors=different_anchors, deadline_monotonic=writer_deadline,
+        )
+    assert not writer_dir.exists() and monotonic() < writer_deadline
+    child_db = _stage_writer_child(writer_dir, database, verified, writer_deadline)
     assert not child_db.samefile(native)
     child_before = _artifact(child_db, _DATABASE_LIMIT)
-    asyncio.run(_assert_existing_child_writer(writer_dir, child_db, receipt,
+    asyncio.run(_assert_existing_child_writer(writer_dir, child_db, verified,
                                               observed_clock[-1][0], trace[-1], writer_deadline))
     assert sorted(islice(writer_dir.iterdir(), 2)) == [child_db]
     assert _artifact(child_db, _DATABASE_LIMIT) == child_before

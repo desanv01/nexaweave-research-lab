@@ -10,11 +10,13 @@ from collections import Counter
 import csv
 import hashlib
 import io
+import math
 import os
 from pathlib import Path
 import platform as python_platform
 import sqlite3
 import stat
+import time
 
 try:  # Direct sibling import supports the CLI without importing backend app.
     from .native_recording_contracts import (RecordingAnchors, RecordingError,
@@ -113,6 +115,193 @@ def _read(root, name, limit=FILE_LIMIT):
         return data
     finally:
         os.close(descriptor)
+
+
+_ROUND_MANIFEST_LIMIT = 7200
+_ROUND_FILES = {"manifest.json", "native.sqlite3", "actions.jsonl",
+                "native-memory.bin", "native-runner.bin"}
+_ROUND_FIELDS = {
+    "anchors", "round", "prior_cursor", "prior_post_id", "cursor",
+    "database_sha256", "database_bytes", "log_sha256", "log_bytes", "post_count",
+    "manifest", "full_checkpoint", "continuation_supported", "memory", "topology",
+    "runner_state", "engine_clock", "recommendation_state", "version", "platform",
+    "source_journal_mode",
+}
+
+
+def _round_deadline(deadline):
+    if time.monotonic() >= deadline:
+        raise RecordingError()
+
+
+def _round_file_stat(path):
+    info = path.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        raise RecordingError()
+    return info
+
+
+def _round_inventory(root, deadline):
+    _round_deadline(deadline)
+    result = {}
+    with os.scandir(root) as entries:
+        for entry in entries:
+            _round_deadline(deadline)
+            if entry.name not in _ROUND_FILES:
+                raise RecordingError()
+            result[entry.name] = _identity(_round_file_stat(_safe(root / entry.name)))
+    if result.keys() != _ROUND_FILES or len({info[:2] for info in result.values()}) != len(result):
+        raise RecordingError()
+    return result
+
+
+def _round_read(root, name, expected_identity, length, checksum, deadline, *, retain=False):
+    _round_deadline(deadline)
+    path = _safe(root / name)
+    before = _round_file_stat(path)
+    if _identity(before) != expected_identity or before.st_size != length:
+        raise RecordingError()
+    digest_state = hashlib.sha256()
+    data = bytearray() if retain else None
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0)
+                         | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    try:
+        opened = os.fstat(descriptor)
+        if (_cross_identity(before) != _cross_identity(opened)
+                or not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1):
+            raise RecordingError()
+        remaining = length
+        with os.fdopen(descriptor, "rb", closefd=False) as stream:
+            while remaining:
+                _round_deadline(deadline)
+                chunk = stream.read(min(65536, remaining))
+                if not chunk:
+                    raise RecordingError()
+                digest_state.update(chunk)
+                if data is not None:
+                    data.extend(chunk)
+                remaining -= len(chunk)
+            _round_deadline(deadline)
+            if stream.read(1):
+                raise RecordingError()
+        descriptor_after = os.fstat(descriptor)
+        path_after = _round_file_stat(_safe(path))
+        if (_identity(opened) != _identity(descriptor_after)
+                or _identity(path_after) != expected_identity
+                or _cross_identity(descriptor_after) != _cross_identity(path_after)
+                or not stat.S_ISREG(descriptor_after.st_mode) or descriptor_after.st_nlink != 1
+                or digest_state.hexdigest() != checksum):
+            raise RecordingError()
+        _round_deadline(deadline)
+        return bytes(data) if data is not None else None
+    finally:
+        os.close(descriptor)
+
+
+def _round_int(value, low=0, high=2**63 - 1):
+    return type(value) is int and low <= value <= high
+
+
+def _round_hash(value):
+    return type(value) is str and HEX.fullmatch(value) is not None
+
+
+def _round_fields(value, fields):
+    if (type(value) is not dict or value.keys() != fields
+            or not _round_int(value["version"], 1, 1)):
+        raise RecordingError()
+
+
+def _round_components(manifest):
+    memory = manifest["memory"]
+    _round_fields(memory, {"version", "filename", "coverage", "agent_count", "bytes", "sha256"})
+    if (memory["filename"] != "native-memory.bin" or memory["coverage"] != "all_registered_agents"
+            or not _round_int(memory["agent_count"], 1, 128)):
+        raise RecordingError()
+    agents = memory["agent_count"]
+    runner = manifest["runner_state"]
+    _round_fields(runner, {"version", "file", "bytes", "sha256"})
+    if runner["file"] != "native-runner.bin" or not _round_int(runner["bytes"], 2564, 2564):
+        raise RecordingError()
+
+    topology = manifest["topology"]
+    _round_fields(topology, {"version", "directed", "vertex_count", "edge_count", "sha256"})
+    if (topology["directed"] is not True or not _round_int(topology["vertex_count"], agents, agents)
+            or not _round_int(topology["edge_count"], 0, 0) or not _round_hash(topology["sha256"])):
+        raise RecordingError()
+    clock = manifest["engine_clock"]
+    _round_fields(clock, {"version", "before_step", "after_step"})
+    if (not _round_int(clock["before_step"]) or not _round_int(clock["after_step"])
+            or clock["after_step"] != clock["before_step"] + 1):
+        raise RecordingError()
+
+    rec = manifest["recommendation_state"]
+    _round_fields(rec, {"version", "mode", "use_openai_embedding", "max_rec_post_len",
+                        "refresh_rec_post_count", "following_post_count", "users", "rows", "sha256"})
+    if (rec["mode"] != "random" or rec["use_openai_embedding"] is not False
+            or not _round_int(rec["max_rec_post_len"], 2, 2)
+            or not _round_int(rec["refresh_rec_post_count"], 2, 2)
+            or not _round_int(rec["following_post_count"], 3, 3)
+            or not _round_int(rec["users"], agents, agents)
+            or not _round_int(rec["rows"], 0, 2 * agents) or not _round_hash(rec["sha256"])):
+        raise RecordingError()
+    return (
+        ("native.sqlite3", manifest["database_bytes"], manifest["database_sha256"], FILE_LIMIT),
+        ("actions.jsonl", manifest["log_bytes"], manifest["log_sha256"], MAX_JSON),
+        ("native-memory.bin", memory["bytes"], memory["sha256"], MAX_JSON),
+        ("native-runner.bin", runner["bytes"], runner["sha256"], 2564),
+    )
+
+
+def verify_twitter_round_recording(directory, *, expected_manifest_sha256, expected_anchors,
+                                   deadline_monotonic):
+    """Check an inert five-file capture against independently held host identity."""
+    if (not _round_hash(expected_manifest_sha256) or type(expected_anchors) is not RecordingAnchors
+            or type(deadline_monotonic) not in (int, float)):
+        raise RecordingError("invalid_request")
+    try:
+        if not math.isfinite(deadline_monotonic):
+            raise RecordingError("invalid_request")
+        _round_deadline(deadline_monotonic)
+        root = _root(directory)
+        inventory = _round_inventory(root, deadline_monotonic)
+        manifest_bytes = inventory["manifest.json"][2]
+        if not 1 <= manifest_bytes <= _ROUND_MANIFEST_LIMIT:
+            raise RecordingError("limit_exceeded")
+        raw = _round_read(root, "manifest.json", inventory["manifest.json"], manifest_bytes,
+                          expected_manifest_sha256, deadline_monotonic, retain=True)
+        manifest = strict_json(raw, _ROUND_MANIFEST_LIMIT)
+        _round_fields(manifest, _ROUND_FIELDS)
+        if (canonical(manifest) != raw
+                or canonical(manifest["anchors"]) != canonical(expected_anchors.wire())
+                or not _round_int(manifest["round"], 1, 1)
+                or manifest["platform"] != "twitter" or manifest["manifest"] != "manifest.json"
+                or manifest["full_checkpoint"] is not False
+                or manifest["continuation_supported"] is not False
+                or manifest["source_journal_mode"] not in ("delete", "truncate", "persist", "wal", "off")
+                or not all(_round_int(manifest[key]) for key in ("prior_cursor", "cursor", "prior_post_id"))
+                or manifest["cursor"] <= manifest["prior_cursor"]
+                or not _round_int(manifest["post_count"], 1, 128)):
+            raise RecordingError()
+        artifacts = _round_components(manifest)
+        for name, length, checksum, limit in artifacts:
+            if not _round_int(length, 1, limit) or not _round_hash(checksum):
+                raise RecordingError()
+            if inventory[name][2] != length:
+                raise RecordingError()
+        if (sum(length for _, length, _, _ in artifacts[1:]) > MAX_JSON
+                or manifest_bytes + sum(length for _, length, _, _ in artifacts) > TOTAL_LIMIT):
+            raise RecordingError("limit_exceeded")
+        for name, length, checksum, _ in artifacts:
+            _round_read(root, name, inventory[name], length, checksum, deadline_monotonic)
+        if _round_inventory(root, deadline_monotonic) != inventory:
+            raise RecordingError()
+        _round_deadline(deadline_monotonic)
+        return manifest
+    except RecordingError:
+        raise
+    except (OSError, RuntimeError, TypeError, ValueError, OverflowError):
+        raise RecordingError() from None
 
 
 def _names(platforms):
