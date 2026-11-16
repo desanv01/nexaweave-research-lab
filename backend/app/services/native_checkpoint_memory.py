@@ -18,6 +18,7 @@ from .native_recording_contracts import (
     IDENTIFIER,
     MAX_JSON,
     RecordingError,
+    _strict_json_text,
     strict_json,
 )
 
@@ -33,6 +34,225 @@ _MAX_DEPTH = 16
 _MAX_NODES = 100000
 _ROLE_NAME_PATH = ("records", None, "message", "role_name")
 _SYSTEM_ROLE_NAME_TAG = {"$camel_role_name": "system"}
+_JSON_LITERALS = {"t": "true", "f": "false", "n": "null"}
+_JSON_SPACE = (" ", "\t", "\n", "\r")
+_JSON_SHORT_ESCAPES = ('"', "\\", "/", "b", "f", "n", "r", "t")
+_JSON_HEX = frozenset("0123456789abcdefABCDEF")
+_JSON_CHECK_INTERVAL = 1024
+
+
+class _MemoryAdmissionBudget:
+    """One value-node allowance shared by the cohort and rendered arguments."""
+
+    __slots__ = ("_deadline_monotonic", "_remaining_nodes")
+
+    def __init__(self, deadline_monotonic, *, max_nodes=100000):
+        if (type(max_nodes) is not int or not 1 <= max_nodes <= _MAX_NODES
+                or type(deadline_monotonic) not in (int, float)):
+            raise RecordingError("invalid_request")
+        try:
+            if not math.isfinite(deadline_monotonic):
+                raise RecordingError("invalid_request")
+        except OverflowError:
+            raise RecordingError("invalid_request") from None
+        self._deadline_monotonic = deadline_monotonic
+        self._remaining_nodes = max_nodes
+        self.check()
+
+    def check(self):
+        _check_cut_deadline(self._deadline_monotonic)
+
+    def charge_node(self):
+        self.check()
+        if not self._remaining_nodes:
+            raise RecordingError("limit_exceeded")
+        self._remaining_nodes -= 1
+
+
+class _MemoryJSONPreflight:
+    """Walk the JSON grammar without allocating values, keys or tokens."""
+
+    def __init__(self, text, budget, byte_limit):
+        self._text = text
+        self._budget = budget
+        self._length = len(text)
+        self._offset = 0
+        self._next_check = _JSON_CHECK_INTERVAL
+        # Each code point costs at least one byte. Charge the UTF-8 surcharge
+        # in strings, the only grammar position that permits non-ASCII.
+        self._remaining_bytes = byte_limit - self._length
+        if self._remaining_bytes < 0:
+            raise RecordingError("limit_exceeded")
+
+    def check(self):
+        self._value(0)
+        self._skip_space()
+        if self._offset != self._length:
+            raise RecordingError()
+
+    def _peek(self):
+        if self._offset < self._length:
+            return self._text[self._offset]
+        return ""
+
+    def _advance(self, count=1):
+        self._offset += count
+        if self._offset >= self._next_check:
+            self._budget.check()
+            self._next_check = self._offset + _JSON_CHECK_INTERVAL
+
+    def _take(self, char):
+        if self._peek() != char:
+            return False
+        self._advance()
+        return True
+
+    def _expect(self, char):
+        if not self._take(char):
+            raise RecordingError()
+
+    def _skip_space(self):
+        while self._peek() in _JSON_SPACE:
+            self._advance()
+
+    def _value(self, depth):
+        if depth > _MAX_DEPTH:
+            raise RecordingError("limit_exceeded")
+        self._budget.charge_node()
+        self._skip_space()
+        char = self._peek()
+        if char == "{":
+            self._advance()
+            self._object(depth)
+        elif char == "[":
+            self._advance()
+            self._array(depth)
+        elif char == '"':
+            self._string()
+        elif char in _JSON_LITERALS:
+            literal = _JSON_LITERALS[char]
+            if not self._text.startswith(literal, self._offset):
+                raise RecordingError()
+            self._advance(len(literal))
+        else:
+            self._number()
+
+    def _object(self, depth):
+        self._skip_space()
+        if self._take("}"):
+            return
+        while True:
+            # A name has no value-node charge. Each admitted name requires
+            # the member value charged immediately below.
+            self._string()
+            self._skip_space()
+            self._expect(":")
+            self._value(depth + 1)
+            self._skip_space()
+            if self._take("}"):
+                return
+            self._expect(",")
+            self._skip_space()
+
+    def _array(self, depth):
+        self._skip_space()
+        if self._take("]"):
+            return
+        while True:
+            self._value(depth + 1)
+            self._skip_space()
+            if self._take("]"):
+                return
+            self._expect(",")
+
+    def _string(self):
+        self._expect('"')
+        while True:
+            char = self._peek()
+            if not char or ord(char) < 32:
+                raise RecordingError()
+            self._advance()
+            if char == '"':
+                return
+            if char == "\\":
+                self._escape()
+            elif not char.isascii():
+                self._charge_utf8(ord(char))
+
+    def _escape(self):
+        char = self._peek()
+        if char in _JSON_SHORT_ESCAPES:
+            self._advance()
+            return
+        self._expect("u")
+        for _ in range(4):
+            if self._peek() not in _JSON_HEX:
+                raise RecordingError()
+            self._advance()
+
+    def _charge_utf8(self, codepoint):
+        if 0xD800 <= codepoint <= 0xDFFF:
+            raise RecordingError()
+        if codepoint < 0x800:
+            self._remaining_bytes -= 1
+        elif codepoint < 0x10000:
+            self._remaining_bytes -= 2
+        else:
+            self._remaining_bytes -= 3
+        if self._remaining_bytes < 0:
+            raise RecordingError("limit_exceeded")
+
+    def _digits(self):
+        start = self._offset
+        while "0" <= self._peek() <= "9":
+            self._advance()
+        if self._offset == start:
+            raise RecordingError()
+
+    def _number(self):
+        negative = self._take("-")
+        start = self._offset
+        if not self._take("0"):
+            self._digits()
+        integer_end = self._offset
+        fraction = self._take(".")
+        if fraction:
+            self._digits()
+        if self._peek() in ("e", "E"):
+            self._advance()
+            if self._peek() in ("+", "-"):
+                self._advance()
+            self._digits()
+        elif not fraction:
+            self._check_integer(start, integer_end, negative)
+
+    def _check_integer(self, start, end, negative):
+        limit = "9223372036854775808" if negative else "9223372036854775807"
+        width = end - start
+        if width > len(limit):
+            raise RecordingError()
+        if width == len(limit):
+            for offset, limit_digit in enumerate(limit, start):
+                digit = self._text[offset]
+                if digit > limit_digit:
+                    raise RecordingError()
+                if digit < limit_digit:
+                    break
+
+
+def _parse_memory_json(text, budget, byte_limit):
+    if type(text) is not str or type(budget) is not _MemoryAdmissionBudget:
+        raise RecordingError("invalid_request")
+    budget.check()
+    _MemoryJSONPreflight(text, budget, byte_limit).check()
+    budget.check()
+    value = _strict_json_text(text)
+    budget.check()
+    return value
+
+
+def _parse_bounded_memory_json(text, budget):
+    return _parse_memory_json(text, budget, MAX_JSON)
 
 
 class NativeMemoryCaptureBudget:
@@ -194,7 +414,7 @@ def _nonempty_string(value):
     return type(value) is str and bool(value)
 
 
-def _check_tool_calls(tool_calls, budget):
+def _check_tool_calls(tool_calls, budget, argument_limit=None):
     if type(tool_calls) is not list:
         raise RecordingError()
     for call in tool_calls:
@@ -208,12 +428,16 @@ def _check_tool_calls(tool_calls, budget):
                 or not _nonempty_string(function["name"])
                 or type(function["arguments"]) is not str):
             raise RecordingError()
-        limit = MAX_JSON if budget is None else budget.remaining_bytes
-        arguments = strict_json(function["arguments"], limit)
+        if argument_limit is None:
+            limit = MAX_JSON if budget is None else budget.remaining_bytes
+            arguments = strict_json(function["arguments"], limit)
+        else:
+            arguments = _parse_memory_json(function["arguments"], budget, argument_limit)
         if budget is not None:
             budget.check()
         if type(arguments) is not dict:
             raise RecordingError()
+        del arguments
 
 
 def _check_function_message(message, backend_role):
@@ -236,7 +460,7 @@ def _check_function_message(message, backend_role):
         raise RecordingError()
 
 
-def _decode_message(message, backend_role, budget):
+def _decode_message(message, backend_role, budget, argument_limit=None):
     if (type(message) is not dict or not _MESSAGE_FIELDS <= message.keys()
             or type(message["role_type"]) is not str or type(message["content"]) is not str
             or any(message.get(key) is not None for key in ("image_list", "video_bytes", "parsed"))
@@ -266,10 +490,10 @@ def _decode_message(message, backend_role, budget):
     if "tool_calls" in message:
         if backend_role != "assistant":
             raise RecordingError()
-        _check_tool_calls(message["tool_calls"], budget)
+        _check_tool_calls(message["tool_calls"], budget, argument_limit)
 
 
-def _check_record(record, agent_id, budget):
+def _check_record(record, agent_id, budget, argument_limit=None):
     if budget is not None:
         budget.check()
     if type(record) is not dict or record.keys() != _RECORD_FIELDS:
@@ -283,7 +507,7 @@ def _check_record(record, agent_id, budget):
             or any(type(value) is not str for value in record["extra_info"].values())):
         raise RecordingError()
 
-    _decode_message(record["message"], record["role_at_backend"], budget)
+    _decode_message(record["message"], record["role_at_backend"], budget, argument_limit)
     if budget is not None:
         budget.check()
     # Run the real codec as a second guard on a copy of the validated subset.
@@ -303,6 +527,10 @@ def _validated_payload(raw, agent_id, token_limit, byte_limit=MAX_JSON, budget=N
     payload = strict_json(raw, byte_limit)
     if budget is not None:
         budget.check()
+    return _validate_memory_payload(payload, agent_id, token_limit, budget)
+
+
+def _validate_memory_payload(payload, agent_id, token_limit, budget, *, argument_limit=None):
     if (type(payload) is not dict or payload.keys() != _FIELDS
             or payload["kind"] != _KIND
             or type(payload["version"]) is not int or payload["version"] != 1
@@ -317,8 +545,37 @@ def _validated_payload(raw, agent_id, token_limit, byte_limit=MAX_JSON, budget=N
             or type(keep_rate) not in (int, float) or not 0 <= keep_rate <= 1):
         raise RecordingError()
     for record in payload["records"]:
-        _check_record(record, agent_id, budget)
+        _check_record(record, agent_id, budget, argument_limit)
     return payload
+
+
+def _admit_detached_memory_frame(frame, *, expected_agent_id, token_limit, budget):
+    """Validate one authenticated owner frame and return only its record count."""
+    try:
+        _check_owner(expected_agent_id)
+        if (type(frame) is not memoryview or not frame.readonly or not frame.c_contiguous
+                or frame.ndim != 1 or frame.itemsize != 1
+                or type(token_limit) is not int or not 0 < token_limit < 2**63
+                or type(budget) is not _MemoryAdmissionBudget):
+            raise RecordingError("invalid_request")
+        frame_size = frame.nbytes
+        if not 0 < frame_size <= MAX_JSON:
+            raise RecordingError("limit_exceeded")
+        budget.check()
+        payload = _parse_bounded_memory_json(str(frame, "utf-8"), budget)
+        _validate_memory_payload(payload, expected_agent_id, token_limit, budget,
+                                 argument_limit=frame_size)
+        budget.check()
+        return len(payload["records"])
+    except RecordingError as error:
+        refusal_code = error.code
+    except (RuntimeError, TypeError, ValueError, OverflowError):
+        refusal_code = "invalid_recording"
+    finally:
+        payload = None
+        frame = None
+    # UnicodeDecodeError can retain a copy of the frame in its context.
+    raise RecordingError(refusal_code)
 
 
 def capture_native_memory(memory, *, expected_agent_id, budget=None):

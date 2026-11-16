@@ -52,7 +52,8 @@ def bounded_tree(value, depth=0, budget=None):
     raise RecordingError()
 
 
-def strict_json(raw, limit=MAX_JSON):
+def _strict_json_text(text):
+    """Parse decoded JSON with the recording contract's strict checks."""
     def pairs(items):
         result = {}
         for key, value in items:
@@ -65,11 +66,7 @@ def strict_json(raw, limit=MAX_JSON):
         raise RecordingError()
 
     try:
-        if type(raw) is str:
-            raw = raw.encode("utf-8")
-        if type(raw) is not bytes or len(raw) > limit:
-            raise RecordingError("limit_exceeded")
-        value = json.loads(raw.decode("utf-8"), object_pairs_hook=pairs,
+        value = json.loads(text, object_pairs_hook=pairs,
                            parse_constant=nonfinite)
         bounded_tree(value)
         return value
@@ -77,6 +74,20 @@ def strict_json(raw, limit=MAX_JSON):
         raise
     except (ValueError, TypeError, UnicodeError, RecursionError, OverflowError):
         raise RecordingError() from None
+
+
+def strict_json(raw, limit=MAX_JSON):
+    try:
+        if type(raw) is str:
+            raw = raw.encode("utf-8")
+        if type(raw) is not bytes or len(raw) > limit:
+            raise RecordingError("limit_exceeded")
+        text = raw.decode("utf-8")
+    except RecordingError:
+        raise
+    except (ValueError, TypeError, UnicodeError, RecursionError, OverflowError):
+        raise RecordingError() from None
+    return _strict_json_text(text)
 
 
 def canonical(value):

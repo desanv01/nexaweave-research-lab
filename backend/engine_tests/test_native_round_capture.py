@@ -15,8 +15,8 @@ from uuid import UUID
 import pytest
 from camel.types import OpenAIBackendRole
 
+from app.services import native_checkpoint_memory
 from app.services.knowledge_report_tools import NeutralCapabilityError
-from app.services.native_checkpoint_memory import restore_native_memory
 from app.services.native_recording_contracts import RecordingAnchors, RecordingError
 from app.services.native_recordings import (
     _RoundMemoryLayout,
@@ -93,10 +93,11 @@ def _memory_wire(value, remaining):
 
 
 def _same_parent_memories(observed):
-    for agent, memory, agent_id, creator, records, context, has_tool in observed.values():
+    for agent, memory, agent_id, creator, records, context, record_count, _ in observed.values():
         assert agent.agent_id == memory.agent_id == agent_id
         assert agent.memory is memory and memory.get_context_creator() is creator
         live = memory._chat_history_block.storage.memory_list
+        assert len(live) == record_count
         assert _memory_wire(live, len(records)) == records
         assert _memory_wire(memory.get_context(), len(context)) == context
 
@@ -126,7 +127,7 @@ def _assert_memory_artifact(path, descriptor, observed, active_id):
     assert type(size) is int and 0 < size <= _MEMORY_LIMIT
     assert _artifact(path, _MEMORY_LIMIT)[:2] == (size, descriptor["sha256"])
     assert {agent_id for agent_id, snapshot in observed.items() if snapshot[-1]} == {active_id}
-    frames = []
+    witnesses = []
     with path.open("rb") as stream:
         magic = stream.read(5)
         assert magic == b"NWM1\n"
@@ -142,13 +143,15 @@ def _assert_memory_artifact(path, descriptor, observed, active_id):
             count = _decimal(raw_count)
             payload_offset = stream.tell()
             assert 0 < count <= size - payload_offset
-            if not frames:
+            if not witnesses:
                 prefix += header
-            frames.append((expected_id, payload_offset, count))
             raw = stream.read(count)
             assert len(raw) == count
             payload = _json_without_duplicate_keys(raw)
-            _, parent_memory, actual_uuid, creator, records, context, has_tool = observed[expected_id]
+            (_, parent_memory, actual_uuid, creator, records, context,
+             record_count, has_tool) = observed[expected_id]
+            witnesses.append((expected_id, payload_offset, count, sha256(raw).hexdigest(),
+                              actual_uuid, creator.token_limit, record_count))
             assert set(payload) == {"kind", "version", "agent_id", "window_size",
                                     "keep_rate", "token_limit", "records"}
             assert payload["kind"] == "native_camel_memory"
@@ -160,13 +163,15 @@ def _assert_memory_artifact(path, descriptor, observed, active_id):
             assert _memory_wire(payload["records"], len(records)) == records
             assert any(record["message"]["__class__"] == "FunctionCallingMessage"
                        for record in payload["records"]) is has_tool
-            restored = restore_native_memory(raw, expected_agent_id=actual_uuid, context_creator=creator)
+            restored = native_checkpoint_memory.restore_native_memory(
+                raw, expected_agent_id=actual_uuid, context_creator=creator,
+            )
             assert restored is not parent_memory and restored.agent_id == actual_uuid
             assert _memory_wire(restored._chat_history_block.storage.memory_list, len(records)) == records
             assert _memory_wire(restored.get_context(), len(context)) == context
             del restored, payload, raw
         assert stream.tell() == size and stream.read(1) == b""
-    return tuple(frames), prefix
+    return tuple(witnesses), prefix
 
 
 def _read_bounded(path, limit):
@@ -474,7 +479,8 @@ def test_actual_twitter_round_capture_preserves_native_cut(tmp_path, monkeypatch
             remaining -= len(context)
             has_tool = any(record["message"]["__class__"] == "FunctionCallingMessage"
                            for record in live)
-            observed[platform_id] = (agent, memory, actual_uuid, creator, records, context, has_tool)
+            observed[platform_id] = (agent, memory, actual_uuid, creator, records, context,
+                                     len(live), has_tool)
         result = copy_at_cut(*args, **kwargs)
         assert owner._barrier is barrier and owner._sealed and not env.platform_task.done()
         assert not barrier.release.is_set()
@@ -575,7 +581,7 @@ def test_actual_twitter_round_capture_preserves_native_cut(tmp_path, monkeypatch
         assert observed_selections == [active_id]
         inactive_id, = set(observed) - set(observed_selections)
         assert not observed[inactive_id][-1]
-        expected_memory_frames, memory_prefix = _assert_memory_artifact(
+        expected_memory_witnesses, memory_prefix = _assert_memory_artifact(
             memory_file, receipt["memory"], observed, active_id,
         )
         assert all(type(post_id) is int and post_id > prior_post_id for post_id, _, _ in mutations)
@@ -647,23 +653,52 @@ def test_actual_twitter_round_capture_preserves_native_cut(tmp_path, monkeypatch
     writer_deadline = monotonic() + 10
     manifest_sha256 = copied_before[manifest][1]
     total_actions = suffix[0]["total_actions"]
-    verified, (position, decoded_config_sha256, decoded_rng), memory_frames = (
+    memory_bindings = tuple(
+        (platform_id, camel_id, creator.token_limit)
+        for platform_id, (_, _, camel_id, creator, _, _, _, _) in sorted(observed.items())
+    )
+    verified, (position, decoded_config_sha256, decoded_rng), memory_witnesses = (
         _verify_twitter_round_recording_with_runner(
             destination, expected_manifest_sha256=manifest_sha256,
             expected_anchors=anchors, deadline_monotonic=writer_deadline,
             expected_runner=(2, 60, total_actions, config_sha256),
-            expected_memory_ids=tuple(sorted(observed)),
+            expected_memory_bindings=memory_bindings,
         )
     )
     assert verified == materialized
     assert position == (1, 2, 60, 0, total_actions)
     assert decoded_config_sha256 == config_sha256
     assert decoded_rng == cut_rng
-    assert memory_frames == expected_memory_frames
+    assert memory_witnesses == expected_memory_witnesses
     assert random.getstate() == ambient_rng
     wrong_order = _RoundMemoryLayout((1, 2), verified["memory"]["bytes"], writer_deadline)
     with pytest.raises(RecordingError):
         wrong_order.feed(memory_prefix)
+
+    budget = native_checkpoint_memory._MemoryAdmissionBudget(writer_deadline, max_nodes=3)
+    # Each document has two value nodes and the first leaves one node for the second.
+    assert native_checkpoint_memory._parse_bounded_memory_json(
+        r'{"label":"[\"x\"]"}', budget,
+    ) == {"label": '["x"]'}
+
+    def unexpected_memory_parse(*_args, **_kwargs):
+        pytest.fail("shared memory budget must refuse the second document before strict parsing")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(native_checkpoint_memory, "_strict_json_text", unexpected_memory_parse)
+        with pytest.raises(RecordingError):
+            native_checkpoint_memory._parse_bounded_memory_json("[0]", budget)
+    _, owner_id, owner_token_limit = memory_bindings[0]
+    with memoryview(b"\xff") as invalid_frame:
+        with pytest.raises(RecordingError) as invalid_utf8:
+            native_checkpoint_memory._admit_detached_memory_frame(
+                invalid_frame, expected_agent_id=owner_id, token_limit=owner_token_limit,
+                budget=native_checkpoint_memory._MemoryAdmissionBudget(writer_deadline),
+            )
+    assert invalid_utf8.value.code == "invalid_recording"
+    assert invalid_utf8.value.__context__ is None
+    assert monotonic() < writer_deadline
+
     different_anchors = RecordingAnchors(
         anchors.graph_id, anchors.simulation_id, "different-capture-run",
         anchors.branch_id, anchors.project_id, anchors.project_revision,
