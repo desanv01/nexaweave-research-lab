@@ -37,29 +37,32 @@ def prepared_binding(tmp_path):
     return root, factory, request, originals
 
 
-def terminal(driver, request, attempt, child):
+def terminal(driver, request, attempt, child, deadline):
     # A fresh Windows interpreter imports the locked torch/CAMEL/OASIS stack.
     # Include cold import time as well as the session's bounded native round.
-    deadline = time.monotonic() + 120
     while time.monotonic() < deadline:
         observed = driver.observe(request, attempt, child)
         if observed.status != "running":
+            assert time.monotonic() < deadline
             return observed
-        time.sleep(0.05)
+        time.sleep(max(0, min(0.05, deadline - time.monotonic())))
     pytest.fail("bounded native process deadline exceeded")
 
 
 def test_owned_child_runs_real_both_platforms_and_preserves_prepared_inputs(tmp_path,
                                                                              monkeypatch):
+    from native_twitter_fresh_fixture import assert_fresh_twitter_continuation
+
     monkeypatch.chdir(tmp_path)
     root, factory, request, originals = prepared_binding(tmp_path)
     driver = NativeProcessDriver(factory, handshake_seconds=10,
                                  go_timeout_seconds=30, join_seconds=3)
     attempt = uuid4()
+    deadline = time.monotonic() + 120
     try:
         child = driver.launch(request, attempt)
         assert not (root / ".native_prepared_start_claim").exists()
-        observed = terminal(driver, request, attempt, child)
+        observed = terminal(driver, request, attempt, child, deadline)
         assert observed.status == "completed" and observed.receipt is not None
         for platform in ("twitter", "reddit"):
             with sqlite3.connect(root / f"{platform}_simulation.db") as connection:
@@ -71,6 +74,7 @@ def test_owned_child_runs_real_both_platforms_and_preserves_prepared_inputs(tmp_
         assert all((root / name).read_bytes() == data for name, data in originals.items())
     finally:
         driver.close()
+    assert_fresh_twitter_continuation(tmp_path, request, child.process_id, terminal, deadline)
 
 
 @pytest.mark.parametrize("change", ["artifact", "runtime", "changed-input"])

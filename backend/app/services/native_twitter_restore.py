@@ -3,10 +3,13 @@
 import asyncio
 from datetime import datetime
 import hashlib
+import json
 import math
 import os
+from pathlib import Path
 import random
 import sqlite3
+import stat
 import time
 
 from .native_recording_contracts import HEX, MAX_JSON, MAX_WIRE, RecordingError, canonical, strict_json
@@ -430,6 +433,576 @@ async def _advance_restored_twitter_round(
                 connect_platform_channel(channel=original_channel, agent_graph=graph)
         _remaining(deadline)
         return {"agent_id": agent_id, "post_id": post_id, "after_step": clock.time_step}
+    except RecordingError as error:
+        refusal_code = error.code
+    except Exception:
+        refusal_code = "invalid_recording"
+    finally:
+        random.setstate(ambient_rng)
+    raise RecordingError(refusal_code)
+
+
+_LINEAGE_LIMIT = 7200
+_STAGE_DATABASE_LIMIT = 64 * 1024 * 1024
+_STAGE_TOTAL_LIMIT = 160 * 1024 * 1024
+_STAGE_ACTIVE_SECONDS = 10
+_PREPARED_FILES = (
+    "state.json", "simulation_config.json", "source_grounding.json", "twitter_profiles.csv",
+)
+_PREPARED_KEYS = {"artifact_sha256", "config_sha256", "profile_sha256", "source_grounding_sha256"}
+_RUNNER_KEYS = ("completed_round", "horizon", "minutes_per_round", "simulated_minutes", "total_actions")
+
+
+def _is_digest(value):
+    return type(value) is str and HEX.fullmatch(value) is not None
+
+
+def _read_lineage_input(path, limit, deadline):
+    """Read one fixed input through the same custody rules as round artifacts."""
+    from .native_recordings import _cross_identity, _identity, _round_file_stat, _safe
+
+    _remaining(deadline)
+    before = _round_file_stat(_safe(path))
+    if not _integer(before.st_size, 1, limit):
+        raise RecordingError("limit_exceeded")
+    data = bytearray()
+    digest_state = hashlib.sha256()
+    flags = (os.O_RDONLY | getattr(os, "O_BINARY", 0)
+             | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    with os.fdopen(os.open(path, flags), "rb") as stream:
+        opened = os.fstat(stream.fileno())
+        if (_cross_identity(opened) != _cross_identity(before)
+                or not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1):
+            raise RecordingError()
+        left = opened.st_size
+        while left:
+            _remaining(deadline)
+            chunk = stream.read(min(left, 65536))
+            if not chunk:
+                raise RecordingError()
+            data.extend(chunk)
+            digest_state.update(chunk)
+            left -= len(chunk)
+        if stream.read(1):
+            raise RecordingError()
+        after = os.fstat(stream.fileno())
+        path_after = _round_file_stat(_safe(path))
+        if (_identity(after) != _identity(opened) or _identity(path_after) != _identity(before)
+                or _cross_identity(after) != _cross_identity(path_after)
+                or not stat.S_ISREG(after.st_mode) or after.st_nlink != 1):
+            raise RecordingError()
+    _remaining(deadline)
+    return bytes(data), digest_state.hexdigest(), _identity(before)
+
+
+def _prepared_twitter_lineage(root, anchors, deadline):
+    from .native_recordings import _identity, _round_file_stat, _safe
+
+    descriptors = []
+    identities = {}
+    for name in _PREPARED_FILES:
+        raw, checksum, identities[name] = _read_lineage_input(root / name, MAX_JSON, deadline)
+        descriptors.append({"name": name, "sha256": checksum, "size": len(raw)})
+        if name == "state.json":
+            state = strict_json(raw)
+        elif name == "simulation_config.json":
+            config = strict_json(raw)
+            config_bytes = raw
+        elif name == "source_grounding.json":
+            grounding = strict_json(raw)
+        else:
+            profile_bytes = raw
+        _remaining(deadline)
+    if len({identity[:2] for identity in identities.values()}) != len(_PREPARED_FILES):
+        raise RecordingError()
+    for name, expected_identity in identities.items():
+        _remaining(deadline)
+        if _identity(_round_file_stat(_safe(root / name))) != expected_identity:
+            raise RecordingError()
+
+    if (type(state) is not dict or type(config) is not dict or type(grounding) is not dict
+            or state.get("status") != "ready"
+            or state.get("profiles_generated") is not True or state.get("config_generated") is not True
+            or state.get("enable_twitter") is not True or state.get("enable_reddit") is not False
+            or type(config.get("twitter_config")) is not dict
+            or type(config.get("reddit_config")) is dict):
+        raise RecordingError()
+    for value in (state, config):
+        if value.get("graph_id") != anchors.graph_id or value.get("simulation_id") != anchors.simulation_id:
+            raise RecordingError()
+    agents = config.get("agent_configs")
+    if type(agents) is not list or len(agents) != 2 or len(grounding) != 2:
+        raise RecordingError()
+    names = []
+    source_ids = set()
+    for index, agent in enumerate(agents):
+        if type(agent) is not dict or not _integer(agent.get("agent_id"), index, index):
+            raise RecordingError()
+        name = agent.get("entity_name")
+        source_id = agent.get("entity_uuid")
+        if (type(name) is not str or not 0 < len(name) <= _LINEAGE_LIMIT or not name.strip()
+                or type(source_id) is not str or not source_id or source_id in source_ids
+                or type(grounding.get(source_id)) is not dict
+                or grounding[source_id].get("source_entity_uuid") != source_id):
+            raise RecordingError()
+        names.append(name)
+        source_ids.add(source_id)
+    if names[0] == names[1]:
+        raise RecordingError()
+    prepared = {
+        "artifact_sha256": hashlib.sha256(
+            canonical({"schema_version": 1, "files": descriptors}),
+        ).hexdigest(),
+        "config_sha256": descriptors[1]["sha256"],
+        "source_grounding_sha256": descriptors[2]["sha256"],
+        "profile_sha256": descriptors[3]["sha256"],
+    }
+    _remaining(deadline)
+    return prepared, tuple(names), config, config_bytes, profile_bytes, sum(
+        item["size"] for item in descriptors
+    )
+
+
+def _disjoint_native_paths(*paths):
+    for index, path in enumerate(paths):
+        for other in paths[:index]:
+            if path == other or path in other.parents or other in path.parents:
+                raise RecordingError("invalid_request")
+
+
+def _new_native_directory(path):
+    from .native_recordings import _root
+
+    path = Path(path)
+    if not path.is_absolute() or path != _root(path.parent) / path.name or not path.name:
+        raise RecordingError("invalid_request")
+    return path
+
+
+def _capture_twitter_lineage(session, checkpoint_dir, lineage_dir, expected_anchors):
+    """Seal the live producer's typed owner and first-cut runner bindings."""
+    try:
+        _capture_twitter_lineage_once(session, checkpoint_dir, lineage_dir, expected_anchors)
+        return
+    except RecordingError as error:
+        refusal_code = error.code
+    except Exception:
+        refusal_code = "invalid_recording"
+    session = None
+    raise RecordingError(refusal_code)
+
+
+def _capture_twitter_lineage_once(session, checkpoint_dir, lineage_dir, anchors):
+    from .native_checkpoint_memory import resolve_native_memory_cohort
+    from .native_recording_contracts import RecordingAnchors
+    from .native_recordings import _root, _verify_twitter_round_recording_with_runner
+    from .native_simulation import NativeSimulationSession
+
+    if (type(session) is not NativeSimulationSession or not session._started or session._closed
+            or session.max_rounds != 1 or session._platforms != ("twitter",)
+            or session._controls is not None or type(anchors) is not RecordingAnchors
+            or session.graph_id != anchors.graph_id or session.simulation_id != anchors.simulation_id):
+        raise RecordingError("invalid_request")
+    deadline = session._start_deadline
+    _remaining(deadline)
+    prepared_root = _root(session.simulation_dir)
+    checkpoint = _root(checkpoint_dir)
+    output = _new_native_directory(lineage_dir)
+    _disjoint_native_paths(prepared_root, checkpoint, output)
+    receipt = session.round_capture_receipt
+    if (type(receipt) is not dict or receipt.get("anchors") != anchors.wire()
+            or not _integer(receipt.get("round"), 1, 1)
+            or session._round_capture._destination != checkpoint):
+        raise RecordingError()
+    prepared, names, config, config_bytes, _, _ = _prepared_twitter_lineage(
+        prepared_root, anchors, deadline,
+    )
+    if config != session._config or prepared["config_sha256"] != session._runner_config_sha256:
+        raise RecordingError()
+
+    result = session._results["twitter"]
+    graph = result.agent_graph
+    channel = graph.get_agent(0).env.action.channel
+    owners = resolve_native_memory_cohort(graph, result.env.agent_graph, channel, (0, 1), deadline)
+    # The live model supplies the trusted limit. The framed semantic verifier
+    # checks it against each actual captured CAMEL context.
+    token_limit = session._models["twitter"].token_limit
+    if not _integer(token_limit, 1, 2**63 - 1):
+        raise RecordingError()
+    bindings = tuple((owner.platform_id, owner.camel_id, token_limit) for owner in owners)
+
+    timing = config["time_config"]
+    interval = timing["minutes_per_round"]
+    hours = timing["total_simulation_hours"]
+    if not _integer(interval, 1, 1440) or not _integer(hours, 1, 168):
+        raise RecordingError()
+    actions = result.total_actions
+    expected_runner = (hours * 60 // interval, interval, actions,
+                       bytes.fromhex(prepared["config_sha256"]))
+    manifest_bytes, manifest_sha256, _ = _read_lineage_input(
+        checkpoint / "manifest.json", _LINEAGE_LIMIT, deadline,
+    )
+    manifest, runner_state, _ = _verify_twitter_round_recording_with_runner(
+        checkpoint, expected_manifest_sha256=manifest_sha256, expected_anchors=anchors,
+        deadline_monotonic=deadline, expected_runner=expected_runner,
+        expected_memory_bindings=bindings,
+    )
+    if (canonical(manifest) != manifest_bytes
+            or {key: value for key, value in manifest.items()
+                if key not in {"version", "platform", "source_journal_mode"}} != receipt):
+        raise RecordingError()
+    _restore_schedule(manifest, runner_state, config_bytes, deadline)
+    lineage = {
+        "version": 1,
+        "anchors": anchors.wire(),
+        "producer_pid": os.getpid(),
+        "manifest_sha256": manifest_sha256,
+        "prepared": prepared,
+        "owners": [
+            {"platform_id": index, "name": names[index], "camel_id": camel_id,
+             "token_limit": limit}
+            for index, camel_id, limit in bindings
+        ],
+        "runner": dict(zip(_RUNNER_KEYS, runner_state[0], strict=True)),
+    }
+    raw = canonical(lineage)
+    if len(raw) > _LINEAGE_LIMIT:
+        raise RecordingError("limit_exceeded")
+    _remaining(deadline)
+    if os.path.lexists(output):
+        _root(output)
+        with os.scandir(output) as entries:
+            if next(entries, None) is not None:
+                raise RecordingError()
+    else:
+        output.mkdir(mode=0o700)
+    with (output / "lineage.json").open("xb") as stream:
+        if stream.write(raw) != len(raw):
+            raise RecordingError()
+        stream.flush()
+        os.fsync(stream.fileno())
+    _remaining(deadline)
+
+
+def _checked_twitter_lineage(lineage):
+    from .native_recording_contracts import IDENTIFIER, RecordingAnchors
+
+    if (type(lineage) is not dict
+            or lineage.keys() != {"version", "anchors", "producer_pid", "manifest_sha256",
+                                  "prepared", "owners", "runner"}
+            or not _integer(lineage["version"], 1, 1)
+            or not _integer(lineage["producer_pid"], 1, 2**63 - 1)
+            or lineage["producer_pid"] == os.getpid()
+            or not _is_digest(lineage["manifest_sha256"])
+            or type(lineage["anchors"]) is not dict
+            or lineage["anchors"].keys() != {"graph_id", "simulation_id", "run_id", "branch_id",
+                                             "project_id", "project_revision"}):
+        raise RecordingError("invalid_request")
+    anchors = RecordingAnchors(**lineage["anchors"])
+    prepared, owners, runner = lineage["prepared"], lineage["owners"], lineage["runner"]
+    if (type(prepared) is not dict or prepared.keys() != _PREPARED_KEYS
+            or not all(_is_digest(value) for value in prepared.values())
+            or type(owners) is not list or len(owners) != 2
+            or type(runner) is not dict or runner.keys() != set(_RUNNER_KEYS)):
+        raise RecordingError()
+    names = []
+    bindings = []
+    for index, owner in enumerate(owners):
+        if (type(owner) is not dict or owner.keys() != {"platform_id", "name", "camel_id", "token_limit"}
+                or not _integer(owner["platform_id"], index, index)
+                or type(owner["name"]) is not str or not 0 < len(owner["name"]) <= _LINEAGE_LIMIT
+                or not owner["name"].strip() or type(owner["camel_id"]) is not str
+                or not IDENTIFIER.fullmatch(owner["camel_id"])
+                or not _integer(owner["token_limit"], 1, 2**63 - 1)):
+            raise RecordingError()
+        names.append(owner["name"])
+        bindings.append((index, owner["camel_id"], owner["token_limit"]))
+    position = tuple(runner[key] for key in _RUNNER_KEYS)
+    completed, horizon, interval, offset, actions = position
+    if (names[0] == names[1] or bindings[0][1] == bindings[1][1]
+            or not _integer(completed, 1, 1) or not _integer(horizon, 2, 10080)
+            or not _integer(interval, 1, 1440) or horizon * interval > 10080
+            or not _integer(offset, 0, 0) or not _integer(actions, 1, 2**32 - 1)
+            or len(canonical(lineage)) > _LINEAGE_LIMIT):
+        raise RecordingError()
+    return anchors, tuple(names), tuple(bindings), position
+
+
+def _fresh_twitter_models(factory, bindings, deadline):
+    from .native_checkpoint_memory import ScoreBasedContextCreator, _token_limit
+
+    models = []
+    counters = []
+    for _ in range(3):
+        _remaining(deadline)
+        mapping = factory()
+        if type(mapping) is not dict or mapping.keys() != {"twitter"}:
+            raise RecordingError()
+        model = mapping["twitter"]
+        if model is None or not callable(getattr(model, "run", None)):
+            raise RecordingError()
+        counter = model.token_counter
+        if (counter is None or any(model is previous for previous in models)
+                or any(counter is previous for previous in counters)):
+            raise RecordingError()
+        models.append(model)
+        counters.append(counter)
+    expected_limits = tuple(limit for _, _, limit in bindings)
+    contexts = tuple(
+        ScoreBasedContextCreator(token_counter=counter, token_limit=model.token_limit)
+        for model, counter in zip(models[:2], counters[:2], strict=True)
+    )
+    if (tuple(_token_limit(creator) for creator in contexts) != expected_limits
+            or any(not _integer(models[2].token_limit, limit, limit) for limit in expected_limits)):
+        raise RecordingError()
+    _remaining(deadline)
+    return contexts, models[2]
+
+
+def _retained_twitter_inventory(prepared_root, deadline):
+    from .native_recordings import _identity, _round_file_stat, _safe
+
+    inventory = {}
+    for name, limit in (("twitter_simulation.db", _STAGE_DATABASE_LIMIT),
+                        ("twitter/actions.jsonl", MAX_JSON)):
+        _remaining(deadline)
+        info = _round_file_stat(_safe(prepared_root / name))
+        if not _integer(info.st_size, 1, limit):
+            raise RecordingError("limit_exceeded")
+        inventory[name] = _identity(info)
+    _remaining(deadline)
+    return inventory
+
+
+def _stage_twitter_artifacts(prepared_root, checkpoint, child, manifest, inventory,
+                             prepared_size, deadline):
+    from .native_recordings import _round_inventory, _round_read
+
+    files = (
+        ("native.sqlite3", manifest["database_bytes"], manifest["database_sha256"]),
+        ("actions.jsonl", manifest["log_bytes"], manifest["log_sha256"]),
+    )
+    producer_inventory = _retained_twitter_inventory(prepared_root, deadline)
+    source_identities = (*inventory.values(), *producer_inventory.values())
+    if len({identity[:2] for identity in source_identities}) != len(source_identities):
+        raise RecordingError()
+    source_size = sum(identity[2] for identity in source_identities)
+    if (prepared_size + source_size + sum(size for _, size, _ in files) > _STAGE_TOTAL_LIMIT
+            or not _integer(files[0][1], 1, _STAGE_DATABASE_LIMIT)
+            or not _integer(files[1][1], 1, MAX_JSON)):
+        raise RecordingError("limit_exceeded")
+    _remaining(deadline)
+    child.mkdir(mode=0o700)
+    for name, size, checksum in files:
+        with (child / name).open("xb") as stream:
+            def write_chunk(chunk):
+                if stream.write(chunk) != len(chunk):
+                    raise RecordingError()
+
+            _round_read(checkpoint, name, inventory[name], size, checksum, deadline,
+                        observer=write_chunk)
+            stream.flush()
+            os.fsync(stream.fileno())
+    if (_round_inventory(checkpoint, deadline) != inventory
+            or _retained_twitter_inventory(prepared_root, deadline) != producer_inventory):
+        raise RecordingError()
+    return producer_inventory
+
+
+def _read_acknowledged_twitter_action(native, database, manifest, result, names, content, deadline):
+    from .native_recordings import _identity, _round_file_stat, _safe
+
+    _remaining(deadline)
+    identity = _identity(_round_file_stat(_safe(database)))
+    if not _integer(identity[2], 1, _STAGE_DATABASE_LIMIT):
+        raise RecordingError("limit_exceeded")
+    observed, cursor = native.fetch_new_actions_from_db(
+        str(database), manifest["cursor"], dict(enumerate(names)), capture_deadline=deadline,
+    )
+    if (_identity(_round_file_stat(_safe(database))) != identity
+            or not _integer(cursor, manifest["cursor"] + 1, 2**63 - 1)
+            or type(observed) is not list or len(observed) != 1):
+        raise RecordingError()
+    action = observed[0]
+    agent_id = result["agent_id"]
+    if (type(action) is not dict
+            or action.keys() != {"agent_id", "agent_name", "action_type", "action_args"}
+            or not _integer(action["agent_id"], agent_id, agent_id)
+            or action["agent_name"] != names[agent_id] or action["action_type"] != "CREATE_POST"
+            or type(action["action_args"]) is not dict
+            or action["action_args"].keys() != {"content", "post_id"}
+            or action["action_args"]["content"] != content
+            or not _integer(action["action_args"]["post_id"], result["post_id"], result["post_id"])):
+        raise RecordingError()
+    _remaining(deadline)
+    return action
+
+
+def _append_restored_twitter_log(log_path, manifest, position, action, deadline):
+    from .native_recording_contracts import MAX_EVENT_BYTES, MAX_EVENTS
+    from .native_recordings import _cross_identity, _identity, _round_file_stat, _safe
+
+    completed, _, interval, offset, _ = position
+    round_num = completed + 1
+    hour = ((offset + interval) // 60) % 24
+    # Match the native PlatformActionLogger schema on the fixed staged path.
+    events = (
+        {"round": round_num, "timestamp": datetime.now().isoformat(), "event_type": "round_start",
+         "simulated_hour": hour},
+        {"round": round_num, "timestamp": datetime.now().isoformat(), **action,
+         "result": None, "success": True},
+        {"round": round_num, "timestamp": datetime.now().isoformat(), "event_type": "round_end",
+         "actions_count": 1},
+    )
+    lines = tuple(
+        (json.dumps(event, ensure_ascii=False) + os.linesep).encode("utf-8") for event in events
+    )
+    tail = b"".join(lines)
+    prefix_size = manifest["log_bytes"]
+    if (any(len(line) > MAX_EVENT_BYTES for line in lines) or prefix_size + len(tail) > MAX_JSON
+            or any(strict_json(line, MAX_EVENT_BYTES) != event for line, event in zip(lines, events))):
+        raise RecordingError("limit_exceeded")
+    _remaining(deadline)
+    before = _round_file_stat(_safe(log_path))
+    if before.st_size != prefix_size:
+        raise RecordingError()
+    flags = (os.O_RDWR | getattr(os, "O_BINARY", 0)
+             | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    with os.fdopen(os.open(log_path, flags), "r+b") as stream:
+        opened = os.fstat(stream.fileno())
+        if (_cross_identity(opened) != _cross_identity(before)
+                or not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1):
+            raise RecordingError()
+        digest_state = hashlib.sha256()
+        left = prefix_size
+        count = 0
+        last = None
+        while left:
+            _remaining(deadline)
+            chunk = stream.read(min(left, 65536))
+            if not chunk:
+                raise RecordingError()
+            digest_state.update(chunk)
+            left -= len(chunk)
+            count += chunk.count(b"\n")
+            last = chunk[-1]
+        if (last != 10 or count + len(events) > MAX_EVENTS or stream.read(1)
+                or digest_state.hexdigest() != manifest["log_sha256"]
+                or _identity(os.fstat(stream.fileno())) != _identity(opened)
+                or _identity(_round_file_stat(_safe(log_path))) != _identity(before)):
+            raise RecordingError()
+        if stream.write(tail) != len(tail):
+            raise RecordingError()
+        stream.flush()
+        os.fsync(stream.fileno())
+        stream.seek(0)
+        readback = hashlib.sha256()
+        left = prefix_size
+        while left:
+            _remaining(deadline)
+            chunk = stream.read(min(left, 65536))
+            if not chunk:
+                raise RecordingError()
+            readback.update(chunk)
+            left -= len(chunk)
+        after = os.fstat(stream.fileno())
+        if (readback.hexdigest() != manifest["log_sha256"]
+                or stream.read(len(tail) + 1) != tail
+                or after.st_size != prefix_size + len(tail) or after.st_nlink != 1
+                or _identity(os.fstat(stream.fileno())) != _identity(after)
+                or _cross_identity(_round_file_stat(_safe(log_path))) != _cross_identity(after)):
+            raise RecordingError()
+    _remaining(deadline)
+
+
+async def _run_fresh_restored_twitter(
+    prepared_dir, checkpoint_dir, child_dir, lineage, model_factory, content, deadline,
+):
+    from .native_recordings import _root, _round_inventory, _restore_twitter_round_recording_memory_with_runner
+    from .native_twitter_child_graph import _rebuild_twitter_round_child_graph
+
+    anchors, names, bindings, position = _checked_twitter_lineage(lineage)
+    prepared_root, checkpoint = _root(prepared_dir), _root(checkpoint_dir)
+    child = _new_native_directory(child_dir)
+    _disjoint_native_paths(prepared_root, checkpoint, child)
+    if os.path.lexists(child):
+        raise RecordingError("invalid_request")
+    prepared, prepared_names, _, config_bytes, profile_bytes, prepared_size = _prepared_twitter_lineage(
+        prepared_root, anchors, deadline,
+    )
+    if prepared != lineage["prepared"] or prepared_names != names:
+        raise RecordingError()
+    _, saved_digest, saved_identity = _read_lineage_input(
+        checkpoint / "manifest.json", _LINEAGE_LIMIT, deadline,
+    )
+    inventory = _round_inventory(checkpoint, deadline)
+    if saved_digest != lineage["manifest_sha256"] or saved_identity != inventory["manifest.json"]:
+        raise RecordingError()
+    contexts, model = _fresh_twitter_models(model_factory, bindings, deadline)
+    expected_runner = (position[1], position[2], position[4], bytes.fromhex(prepared["config_sha256"]))
+    manifest, runner_state, _, restored = _restore_twitter_round_recording_memory_with_runner(
+        checkpoint, expected_manifest_sha256=saved_digest, expected_anchors=anchors,
+        deadline_monotonic=deadline, expected_runner=expected_runner,
+        expected_memory_bindings=bindings, expected_memory_contexts=contexts,
+    )
+    if runner_state[0] != position or _round_inventory(checkpoint, deadline) != inventory:
+        raise RecordingError()
+    _restore_schedule(manifest, runner_state, config_bytes, deadline)
+
+    # This is the same lazy import used by NativeSimulationSession.
+    from scripts import run_parallel_simulation as native
+
+    native._load_native_engine()
+    _remaining(deadline)
+    graph = await _rebuild_twitter_round_child_graph(
+        profile_bytes, expected_profile_sha256=prepared["profile_sha256"],
+        expected_owner_names=names, memory_bindings=bindings, restored_memories=restored,
+        expected_topology=manifest["topology"], model=model,
+        available_actions=tuple(native.TWITTER_ACTIONS), deadline_monotonic=deadline,
+    )
+    producer_inventory = _stage_twitter_artifacts(
+        prepared_root, checkpoint, child, manifest, inventory, prepared_size, deadline,
+    )
+    database = child / "native.sqlite3"
+    previous_path = os.environ.get("OASIS_DB_PATH")
+    os.environ["OASIS_DB_PATH"] = str(database)
+    try:
+        active_deadline = min(deadline, time.monotonic() + _STAGE_ACTIVE_SECONDS)
+        result = await _advance_restored_twitter_round(
+            child, manifest=manifest, runner_state=runner_state, config_bytes=config_bytes,
+            graph=graph, expected_post_content=content, deadline_monotonic=active_deadline,
+        )
+    finally:
+        if previous_path is None:
+            os.environ.pop("OASIS_DB_PATH", None)
+        else:
+            os.environ["OASIS_DB_PATH"] = previous_path
+    action = _read_acknowledged_twitter_action(native, database, manifest, result, names, content, deadline)
+    _append_restored_twitter_log(child / "actions.jsonl", manifest, position, action, deadline)
+    if (_round_inventory(checkpoint, deadline) != inventory
+            or _retained_twitter_inventory(prepared_root, deadline) != producer_inventory):
+        raise RecordingError()
+    _remaining(deadline)
+    return result
+
+
+def _start_fresh_restored_twitter(
+    prepared_dir, checkpoint_dir, child_dir, lineage, model_factory, expected_post_content,
+    timeout_seconds,
+):
+    """Run one dedicated child's synchronous restore boundary to ordinary closure."""
+    ambient_rng = random.getstate()
+    try:
+        if (type(timeout_seconds) not in (int, float) or not 1 <= timeout_seconds <= 600
+                or not callable(model_factory)
+                or type(expected_post_content) is not str or not expected_post_content):
+            raise RecordingError("invalid_request")
+        deadline = time.monotonic() + timeout_seconds
+        _wire_size(expected_post_content, MAX_WIRE)
+        return asyncio.run(_run_fresh_restored_twitter(
+            prepared_dir, checkpoint_dir, child_dir, lineage, model_factory,
+            expected_post_content, deadline,
+        ))
     except RecordingError as error:
         refusal_code = error.code
     except Exception:

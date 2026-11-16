@@ -143,16 +143,17 @@ class NativeOwnedSessionFactory:
         from nexaweave_execution.native_seed_contracts import validate_native_seed_plan
         validate_native_seed_plan(config)
 
-    def create_session(self, request):
+    def create_session(self, request, *, round_capture=None):
         self.validate(request)
         models = self.model_factory()
         if type(models) is not dict or set(models) != set(self.platforms):
             raise ValueError("invalid owned native models")
         from app.services.native_simulation import NativeSimulationSession
+        options = {} if round_capture is None else {"round_capture": round_capture}
         return NativeSimulationSession(
             self.simulation_dir, graph_id=self.graph_id,
             simulation_id=self.simulation_id, models=models, seed=self.seed,
-            max_rounds=self.max_rounds, timeout_seconds=self.timeout_seconds)
+            max_rounds=self.max_rounds, timeout_seconds=self.timeout_seconds, **options)
 
     def evidence(self, request) -> str:
         root = self._root()
