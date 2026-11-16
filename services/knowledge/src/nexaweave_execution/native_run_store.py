@@ -28,7 +28,12 @@ from .native_run_contracts import (InvalidNativeRun, NativeChildIdentity, Native
 _SELECT = ("run_id,principal,project_id,project_revision,simulation_id,artifact_sha256,"
            "runtime_sha256,platforms,seed,max_rounds,request_fingerprint,state,"
            "cancel_requested,attempt_id,owner_id,lease_until,child_instance_id,"
-           "process_id,process_fingerprint,receipt,created_at,updated_at")
+           "process_id,process_fingerprint,receipt,created_at,updated_at,"
+           "source_run_id,checkpoint_sha256")
+_MIGRATION_SELECT = ("SELECT version,sql_sha256,catalog_sha256 "
+                     "FROM mf_native_execution.schema_migrations ORDER BY version")
+_MIGRATION_INSERT = ("INSERT INTO mf_native_execution.schema_migrations"
+                     "(version,sql_sha256,catalog_sha256) VALUES (%s,%s,%s)")
 
 
 @dataclass(frozen=True)
@@ -77,11 +82,20 @@ def _catalog(conn: psycopg.Connection) -> str:
                                    default=str, separators=(",", ":")).encode()).hexdigest()
 
 
+def _v2_catalog_receipt(connection: psycopg.Connection, v1_receipt: tuple) -> str:
+    # Bind the verified historical receipt to the current catalog without updating v1.
+    evidence = json.dumps([v1_receipt, _catalog(connection)], separators=(",", ":"))
+    return hashlib.sha256(evidence.encode("ascii")).hexdigest()
+
+
 def migrate_native_runs(connection: psycopg.Connection) -> None:
     """Install or verify only the native execution catalog after mf_app exists."""
     try:
-        sql = files("nexaweave_execution").joinpath("migrations/native_runs_0001.sql").read_text("utf-8")
-        checksum = hashlib.sha256(sql.encode("utf-8")).hexdigest()
+        migrations = files("nexaweave_execution").joinpath("migrations")
+        sql_v1 = migrations.joinpath("native_runs_0001.sql").read_text("utf-8")
+        sql_v2 = migrations.joinpath("native_runs_0002.sql").read_text("utf-8")
+        checksum_v1 = hashlib.sha256(sql_v1.encode("utf-8")).hexdigest()
+        checksum_v2 = hashlib.sha256(sql_v2.encode("utf-8")).hexdigest()
         with connection.transaction():
             connection.execute("SET LOCAL statement_timeout = '10s'")
             connection.execute("SET LOCAL lock_timeout = '3s'")
@@ -91,17 +105,27 @@ def migrate_native_runs(connection: psycopg.Connection) -> None:
             if connection.execute("SELECT to_regclass('mf_app.project_revisions')").fetchone()[0] is None:
                 raise NativeRunMigrationMismatch()
             exists = connection.execute("SELECT to_regnamespace('mf_native_execution') IS NOT NULL").fetchone()[0]
-            if exists:
-                if connection.execute("SELECT to_regclass('mf_native_execution.schema_migrations')").fetchone()[0] is None:
+            if not exists:
+                connection.execute(sql_v1)
+                connection.execute(_MIGRATION_INSERT, (1, checksum_v1, _catalog(connection)))
+            if connection.execute("SELECT to_regclass('mf_native_execution.schema_migrations')").fetchone()[0] is None:
+                raise NativeRunMigrationMismatch()
+            rows = connection.execute(_MIGRATION_SELECT).fetchall()
+            versions = [row[0] for row in rows]
+            if versions not in ([1], [1, 2]) or rows[0][1] != checksum_v1:
+                raise NativeRunMigrationMismatch()
+            prior_v1 = rows[0]
+            if versions == [1]:
+                if prior_v1[2] != _catalog(connection):
                     raise NativeRunMigrationMismatch()
-                rows = connection.execute("SELECT version,sql_sha256,catalog_sha256 FROM mf_native_execution.schema_migrations ORDER BY version").fetchall()
-                if (len(rows) != 1 or rows[0][0] != 1 or rows[0][1].strip() != checksum
-                        or rows[0][2].strip() != _catalog(connection)):
-                    raise NativeRunMigrationMismatch()
-            else:
-                connection.execute(sql)
-                connection.execute("INSERT INTO mf_native_execution.schema_migrations(version,sql_sha256,catalog_sha256) VALUES (1,%s,%s)",
-                                   (checksum, _catalog(connection)))
+                connection.execute(sql_v2)
+                connection.execute(_MIGRATION_INSERT, (2, checksum_v2,
+                                                        _v2_catalog_receipt(connection, prior_v1)))
+                rows = connection.execute(_MIGRATION_SELECT).fetchall()
+            if (len(rows) != 2 or rows[0] != prior_v1 or rows[1][0] != 2
+                    or rows[1][1] != checksum_v2
+                    or rows[1][2] != _v2_catalog_receipt(connection, prior_v1)):
+                raise NativeRunMigrationMismatch()
     except (OSError, psycopg.Error):
         raise NativeRunMigrationMismatch() from None
 
@@ -109,13 +133,17 @@ def migrate_native_runs(connection: psycopg.Connection) -> None:
 def _row(value: tuple) -> NativeRunRecord:
     (run, principal, project, revision, simulation, artifact, runtime, platforms, seed,
      rounds, fingerprint, state, cancel, attempt, owner, lease, instance, pid, process,
-     receipt, created, updated) = value
+     receipt, created, updated, source_run_id, checkpoint) = value
     try:
-        request = NativeRunRequest.from_wire({
+        wire = {
             "schema_version": 1, "principal": principal, "project_id": project,
             "project_revision": revision, "simulation_id": simulation, "run_id": run,
             "artifact_sha256": artifact.strip(), "runtime_sha256": runtime.strip(),
-            "platforms": tuple(platforms), "seed": seed, "max_rounds": rounds})
+            "platforms": tuple(platforms), "seed": seed, "max_rounds": rounds}
+        if source_run_id is not None or checkpoint is not None:
+            wire.update(schema_version=2, source_run_id=source_run_id,
+                        checkpoint_sha256=None if checkpoint is None else checkpoint.strip())
+        request = NativeRunRequest.from_wire(wire)
         if request.fingerprint != fingerprint.strip():
             raise InvalidNativeRun()
         child = None if instance is None else NativeChildIdentity.from_wire({
@@ -151,6 +179,20 @@ class NativeRunStore:
             raise NativeRunDenied()
         return _row(row)
 
+    def _verify_continuation_source(self, conn, request: NativeRunRequest) -> None:
+        source = self._owned(request.principal, request.source_run_id, lock=True, conn=conn)
+        original = source.request
+        if (original.schema_version != 1 or source.state != RunState.completed
+                or source.receipt is None or source.receipt.evidence_sha256 != request.checkpoint_sha256
+                or original.project_id != request.project_id
+                or original.project_revision != request.project_revision
+                or original.simulation_id != request.simulation_id
+                or original.artifact_sha256 != request.artifact_sha256
+                or original.runtime_sha256 != request.runtime_sha256
+                or original.platforms != request.platforms or original.seed != request.seed
+                or original.max_rounds != request.max_rounds):
+            raise NativeRunDenied()
+
     def register(self, request: NativeRunRequest) -> NativeRunRecord:
         request = NativeRunRequest.from_wire(request)
         try:
@@ -164,21 +206,31 @@ class NativeRunStore:
                 or project.revision != request.project_revision):
             raise NativeRunDenied()
         with _transaction(self._connect) as conn:
+            if request.source_run_id is not None:
+                self._verify_continuation_source(conn, request)
             conn.execute("INSERT INTO mf_native_execution.runs (run_id,principal,project_id,"
                          "project_revision,simulation_id,artifact_sha256,runtime_sha256,"
-                         "platforms,seed,max_rounds,request_fingerprint) VALUES "
-                         "(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
+                         "platforms,seed,max_rounds,request_fingerprint,source_run_id,checkpoint_sha256) VALUES "
+                         "(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
                          (request.run_id, request.principal, request.project_id,
                           request.project_revision, request.simulation_id,
                           request.artifact_sha256, request.runtime_sha256,
                           list(request.platforms), request.seed, request.max_rounds,
-                          request.fingerprint))
+                          request.fingerprint, request.source_run_id, request.checkpoint_sha256))
             row = conn.execute(f"SELECT {_SELECT} FROM mf_native_execution.runs WHERE run_id=%s AND principal=%s",
                                (request.run_id, request.principal)).fetchone()
             if row is None:
-                other = conn.execute("SELECT 1 FROM mf_native_execution.runs WHERE project_id=%s "
-                                     "AND simulation_id=%s AND principal=%s",
-                                     (request.project_id, request.simulation_id, request.principal)).fetchone()
+                if request.source_run_id is None:
+                    other = conn.execute(
+                        "SELECT 1 FROM mf_native_execution.runs WHERE project_id=%s "
+                        "AND simulation_id=%s AND principal=%s AND source_run_id IS NULL",
+                        (request.project_id, request.simulation_id, request.principal),
+                    ).fetchone()
+                else:
+                    other = conn.execute(
+                        "SELECT 1 FROM mf_native_execution.runs WHERE source_run_id=%s AND principal=%s",
+                        (request.source_run_id, request.principal),
+                    ).fetchone()
                 if other is not None:
                     raise NativeRunConflict()
                 raise NativeRunDenied()

@@ -112,7 +112,7 @@ class NativeOwnedSessionFactory:
     def validate(self, request) -> None:
         from nexaweave_execution.native_run_contracts import NativeRunRequest
         request = NativeRunRequest.from_wire(request)
-        if (request.principal != self.principal
+        if (request.schema_version != 1 or request.principal != self.principal
                 or str(request.project_id) != self.project_id
                 or request.project_revision != self.project_revision
                 or request.simulation_id != self.simulation_id

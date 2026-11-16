@@ -14,6 +14,7 @@ _SIMULATION = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
 _HEX = re.compile(r"[0-9a-f]{64}\Z")
 _REQUEST_KEYS = frozenset({"schema_version", "principal", "project_id", "project_revision",
     "simulation_id", "run_id", "artifact_sha256", "runtime_sha256", "platforms", "seed", "max_rounds"})
+_CONTINUATION_KEYS = frozenset({"source_run_id", "checkpoint_sha256"})
 _CHILD_KEYS = frozenset({"instance_id", "process_id", "process_fingerprint"})
 _RECEIPT_KEYS = frozenset({"run_id", "attempt_id", "instance_id", "request_fingerprint",
                            "outcome", "evidence_sha256"})
@@ -103,29 +104,47 @@ class NativeRunRequest:
     platforms: tuple[str, ...]
     seed: int
     max_rounds: int
+    source_run_id: UUID | None = None
+    checkpoint_sha256: str | None = None
 
     @classmethod
     def from_wire(cls, value: object) -> NativeRunRequest:
         if isinstance(value, cls):
             value = asdict(value)
-        if not isinstance(value, Mapping) or set(value) != _REQUEST_KEYS:
+            if value["schema_version"] == 1 and all(value[key] is None for key in _CONTINUATION_KEYS):
+                for key in _CONTINUATION_KEYS:
+                    del value[key]
+        if not isinstance(value, Mapping):
             raise InvalidNativeRun()
         try:
+            version = value.get("schema_version")
+            if type(version) is not int or version not in (1, 2):
+                raise InvalidNativeRun()
+            expected_keys = _REQUEST_KEYS if version == 1 else _REQUEST_KEYS | _CONTINUATION_KEYS
+            if set(value) != expected_keys:
+                raise InvalidNativeRun()
             platforms = value["platforms"]
-            if (type(value["schema_version"]) is not int or value["schema_version"] != 1
-                    or type(value["project_revision"]) is not int
+            rounds = value["max_rounds"]
+            if (type(value["project_revision"]) is not int
                     or not 1 <= value["project_revision"] <= 2_147_483_647
                     or type(value["simulation_id"]) is not str
                     or not _SIMULATION.fullmatch(value["simulation_id"])
                     or type(platforms) not in (tuple, list)
                     or tuple(platforms) not in (("twitter",), ("reddit",), ("twitter", "reddit"))
                     or type(value["seed"]) is not int or not -(2**63) <= value["seed"] < 2**63
-                    or type(value["max_rounds"]) is not int or not 1 <= value["max_rounds"] <= 24):
+                    or type(rounds) is not int or not 1 <= rounds <= 24):
                 raise InvalidNativeRun()
-            return cls(1, principal_id(value["principal"]), canonical_uuid(value["project_id"]),
-                       value["project_revision"], value["simulation_id"], canonical_uuid(value["run_id"]),
+            run_id = canonical_uuid(value["run_id"])
+            source_run_id = checkpoint_sha256 = None
+            if version == 2:
+                source_run_id = canonical_uuid(value["source_run_id"])
+                checkpoint_sha256 = sha256(value["checkpoint_sha256"])
+                if source_run_id == run_id or tuple(platforms) != ("twitter",) or rounds != 1:
+                    raise InvalidNativeRun()
+            return cls(version, principal_id(value["principal"]), canonical_uuid(value["project_id"]),
+                       value["project_revision"], value["simulation_id"], run_id,
                        sha256(value["artifact_sha256"]), sha256(value["runtime_sha256"]),
-                       tuple(platforms), value["seed"], value["max_rounds"])
+                       tuple(platforms), value["seed"], rounds, source_run_id, checkpoint_sha256)
         except (KeyError, TypeError, ValueError, OverflowError):
             raise InvalidNativeRun() from None
 
@@ -134,6 +153,11 @@ class NativeRunRequest:
         value["project_id"] = str(self.project_id)
         value["run_id"] = str(self.run_id)
         value["platforms"] = list(self.platforms)
+        if value["schema_version"] == 1:
+            for key in _CONTINUATION_KEYS:
+                del value[key]
+        else:
+            value["source_run_id"] = str(value["source_run_id"])
         return value
 
     @property

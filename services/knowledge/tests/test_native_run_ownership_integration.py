@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from dataclasses import replace
+from importlib.resources import files
 from threading import Barrier
 from uuid import uuid4
 
@@ -13,7 +16,7 @@ import psycopg
 import pytest
 from psycopg.types.json import Jsonb
 
-from nexaweave_execution.native_run_contracts import (NativeChildIdentity, NativeRunBusy,
+from nexaweave_execution.native_run_contracts import (InvalidNativeRun, NativeChildIdentity, NativeRunBusy,
     NativeRunConflict, NativeRunDenied, NativeRunReceipt, NativeRunRequest,
     NativeRunMigrationMismatch, NativeRunUnavailable, NativeRunUncertain, RunState)
 from nexaweave_execution.native_run_coordinator import NativeObservation, NativeRunCoordinator
@@ -80,6 +83,165 @@ def coordinator(factory, driver, **kwargs):
                                 dispatch_allowed=lambda _request: True, **kwargs)
 
 
+def _legacy_request_wire(source):
+    return {
+        "schema_version": 1, "principal": "owner", "project_id": str(source.project_id),
+        "project_revision": 1, "simulation_id": "checkpoint_source", "run_id": str(source.run_id),
+        "artifact_sha256": "a" * 64, "runtime_sha256": "b" * 64,
+        "platforms": ["twitter"], "seed": 7, "max_rounds": 1,
+    }
+
+
+def _request_bytes(wire):
+    return json.dumps(wire, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+
+
+def _assert_v1_catalog_upgrade(factory, source, legacy_wire, legacy_fingerprint):
+    sql = files("nexaweave_execution").joinpath("migrations/native_runs_0001.sql").read_text("utf-8")
+    checksum = hashlib.sha256(sql.encode("utf-8")).hexdigest()
+    assert checksum == "85edf91461d79d0a577739bb68abcb36420068623a51661cb9f3b1e586f5ceb6"
+    attempt_id, owner_id = uuid4(), uuid4()
+    child = NativeChildIdentity(uuid4(), 12345, "c" * 64)
+    original_receipt = receipt(source, attempt_id, child)
+    migrations = ("SELECT version,sql_sha256,catalog_sha256 FROM "
+                  "mf_native_execution.schema_migrations ORDER BY version")
+    persisted = "SELECT * FROM mf_native_execution.runs WHERE run_id=%s"
+    with factory() as conn:
+        current_catalog = conn.execute(migrations).fetchall()
+        conn.rollback()
+        assert [row[0] for row in current_catalog] == [1, 2]
+        original_catalog_receipt = current_catalog[0]
+        assert original_catalog_receipt[1] == checksum
+        with conn.transaction(force_rollback=True):
+            conn.execute("SET LOCAL statement_timeout = '10s'")
+            conn.execute("SET LOCAL lock_timeout = '3s'")
+            conn.execute("SET LOCAL search_path = pg_catalog")
+            conn.execute("ALTER SCHEMA mf_native_execution RENAME TO mf_native_execution_v2_fixture")
+            conn.execute(sql)
+            conn.execute("INSERT INTO mf_native_execution.schema_migrations VALUES (%s,%s,%s)",
+                         original_catalog_receipt)
+            conn.execute(
+                "INSERT INTO mf_native_execution.runs (run_id,principal,project_id,project_revision,"
+                "simulation_id,artifact_sha256,runtime_sha256,platforms,seed,max_rounds,"
+                "request_fingerprint,state,attempt_id,owner_id,child_instance_id,process_id,"
+                "process_fingerprint,receipt) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,"
+                "'completed',%s,%s,%s,%s,%s,%s)",
+                (source.run_id, source.principal, source.project_id, source.project_revision,
+                 source.simulation_id, source.artifact_sha256, source.runtime_sha256,
+                 legacy_wire["platforms"], source.seed, source.max_rounds, legacy_fingerprint,
+                 attempt_id, owner_id, child.instance_id, child.process_id, child.process_fingerprint,
+                 Jsonb(original_receipt.to_wire())),
+            )
+            original_row = conn.execute(persisted, (source.run_id,)).fetchone()
+            assert original_row is not None
+            assert conn.execute(migrations).fetchall() == [original_catalog_receipt]
+            with conn.transaction(force_rollback=True):
+                conn.execute("CREATE TABLE mf_native_execution.unexpected_v1_columnset(id integer)")
+                with pytest.raises(NativeRunMigrationMismatch):
+                    migrate_native_runs(conn)
+
+            migrate_native_runs(conn)
+            migrate_native_runs(conn)
+            assert conn.execute(migrations).fetchall() == current_catalog
+            with conn.transaction(force_rollback=True):
+                replacement_digest = "0" * 64 if original_catalog_receipt[2] != "0" * 64 else "1" * 64
+                conn.execute("UPDATE mf_native_execution.schema_migrations "
+                             "SET catalog_sha256=%s WHERE version=1", (replacement_digest,))
+                with pytest.raises(NativeRunMigrationMismatch):
+                    migrate_native_runs(conn)
+            assert conn.execute(migrations).fetchall() == current_catalog
+            assert conn.execute(persisted, (source.run_id,)).fetchone() == (*original_row, None, None)
+            migrated = NativeRunStore(lambda: nullcontext(conn)).get("owner", source.run_id)
+            assert migrated.request.to_wire() == legacy_wire
+            assert migrated.fingerprint == migrated.request.fingerprint == legacy_fingerprint
+            assert migrated.state == RunState.completed and migrated.receipt == original_receipt
+            assert (migrated.attempt_id, migrated.owner_id, migrated.child) == (attempt_id, owner_id, child)
+        assert conn.execute(migrations).fetchall() == current_catalog
+        assert conn.execute(persisted, (source.run_id,)).fetchone() is None
+
+
+def _assert_checkpoint_continuation(factory, source, legacy_wire):
+    store = NativeRunStore(factory)
+    producer_driver = FakeDriver(store)
+    producer = coordinator(factory, producer_driver)
+    producer_running = producer.start(source)
+    assert producer_running.state == RunState.running and producer_driver.launches == 1
+    wire = {**legacy_wire, "schema_version": 2, "run_id": str(uuid4()),
+            "source_run_id": str(source.run_id), "checkpoint_sha256": "e" * 64}
+    request = NativeRunRequest.from_wire(wire)
+    assert request.to_wire() == wire
+    assert request.fingerprint == hashlib.sha256(_request_bytes(wire)).hexdigest()
+    with pytest.raises(InvalidNativeRun):
+        NativeRunRequest.from_wire({**wire, "schema_version": 1})
+    with pytest.raises(InvalidNativeRun):
+        NativeRunRequest.from_wire({**wire, "source_run_id": wire["run_id"]})
+    with pytest.raises(InvalidNativeRun):
+        NativeRunRequest.from_wire({key: value for key, value in wire.items()
+                                    if key != "checkpoint_sha256"})
+
+    with pytest.raises(NativeRunDenied):
+        store.register(request)
+    with pytest.raises(NativeRunDenied):
+        store.get("owner", request.run_id)
+    completed = producer.observe(source.run_id)
+    assert completed.state == RunState.completed and completed.receipt is not None
+    assert completed.receipt.evidence_sha256 == request.checkpoint_sha256
+
+    foreign_project = owned(factory, simulation_id=source.simulation_id).project_id
+    wrong_bindings = (
+        {"checkpoint_sha256": "d" * 64},
+        {"source_run_id": uuid4()},
+        {"project_id": foreign_project},
+        {"simulation_id": "different_simulation"},
+        {"runtime_sha256": "d" * 64},
+    )
+    for change in wrong_bindings:
+        mismatched = replace(request, run_id=uuid4(), **change)
+        with pytest.raises(NativeRunDenied):
+            store.register(mismatched)
+        with pytest.raises(NativeRunDenied):
+            store.get("owner", mismatched.run_id)
+
+    declared = store.register(request)
+    assert declared.state == RunState.declared and declared.attempt_id is None
+    assert declared.request == request and NativeRunStore(factory).register(request) == declared
+    competing = replace(request, run_id=uuid4())
+    with pytest.raises(NativeRunConflict):
+        store.register(competing)
+    with pytest.raises(NativeRunConflict):
+        store.register(replace(source, run_id=uuid4()))
+
+    driver = FakeDriver(store)
+    active = coordinator(factory, driver)
+    other = coordinator(factory, driver)
+    running = active.start(request)
+    assert running.state == RunState.running and running.attempt_id is not None
+    assert running.child is not None and running.owner_id == active.owner_id
+    assert NativeRunStore(factory).register(request) == running
+    with pytest.raises(NativeRunBusy):
+        other.start(request)
+    pending = other.request_cancel(request.run_id)
+    assert pending.state == RunState.running and pending.cancel_requested and driver.cancels == 0
+    cancelled = active.observe(request.run_id)
+    assert cancelled.state == RunState.cancelled and cancelled.attempt_id == running.attempt_id
+    assert cancelled.child == running.child and cancelled.lease_until is None
+    assert cancelled.receipt == receipt(request, running.attempt_id, running.child, "cancelled")
+    assert other.start(request) == cancelled and NativeRunStore(factory).register(request) == cancelled
+    with pytest.raises(NativeRunConflict):
+        other.start(competing)
+    assert (driver.launches, driver.cancels) == (1, 1)
+    assert store.get("owner", source.run_id) == completed
+    with factory() as conn:
+        stored = conn.execute(
+            "SELECT run_id,source_run_id,checkpoint_sha256,attempt_id FROM mf_native_execution.runs "
+            "WHERE project_id=%s AND simulation_id=%s", (source.project_id, source.simulation_id),
+        ).fetchall()
+    assert set(stored) == {
+        (source.run_id, None, None, completed.attempt_id),
+        (request.run_id, source.run_id, request.checkpoint_sha256, running.attempt_id),
+    }
+
+
 def test_registration_pinned_revision_idempotence_and_isolation(factory):
     request = owned(factory)
     store = NativeRunStore(factory)
@@ -105,6 +267,15 @@ def test_pinned_old_revision_remains_eligible_after_project_update(factory):
     ProjectStore(factory).update("owner", request.project_id, 1, changed)
     assert ProjectStore(factory).get("owner", request.project_id).revision == 2
     assert NativeRunStore(factory).register(request).request.project_revision == 1
+
+    source = replace(owned(factory, simulation_id="checkpoint_source"), max_rounds=1)
+    legacy_wire = _legacy_request_wire(source)
+    legacy_bytes = _request_bytes(legacy_wire)
+    legacy_fingerprint = hashlib.sha256(legacy_bytes).hexdigest()
+    assert _request_bytes(source.to_wire()) == legacy_bytes
+    assert NativeRunRequest.from_wire(legacy_wire) == source and source.fingerprint == legacy_fingerprint
+    _assert_v1_catalog_upgrade(factory, source, legacy_wire, legacy_fingerprint)
+    _assert_checkpoint_continuation(factory, source, legacy_wire)
 
 
 def test_dispatch_defaults_closed_and_catalog_drift_is_rejected(factory):
