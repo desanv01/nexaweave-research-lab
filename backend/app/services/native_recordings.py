@@ -156,7 +156,8 @@ def _round_inventory(root, deadline):
     return result
 
 
-def _round_read(root, name, expected_identity, length, checksum, deadline, *, retain=False):
+def _round_read(root, name, expected_identity, length, checksum, deadline, *,
+                retain=False, observer=None):
     _round_deadline(deadline)
     path = _safe(root / name)
     before = _round_file_stat(path)
@@ -179,6 +180,8 @@ def _round_read(root, name, expected_identity, length, checksum, deadline, *, re
                 if not chunk:
                     raise RecordingError()
                 digest_state.update(chunk)
+                if observer is not None:
+                    observer(chunk)
                 if data is not None:
                     data.extend(chunk)
                 remaining -= len(chunk)
@@ -201,6 +204,79 @@ def _round_read(root, name, expected_identity, length, checksum, deadline, *, re
 
 def _round_int(value, low=0, high=2**63 - 1):
     return type(value) is int and low <= value <= high
+
+
+class _RoundMemoryLayout:
+    """Observe NWM1 framing without retaining any owner payload bytes."""
+
+    def __init__(self, expected_ids, length, deadline):
+        if (type(expected_ids) is not tuple or not 1 <= len(expected_ids) <= 128
+                or not all(_round_int(owner_id) for owner_id in expected_ids)
+                or any(expected_ids[i - 1] >= expected_ids[i]
+                       for i in range(1, len(expected_ids)))):
+            raise RecordingError("invalid_request")
+        if not _round_int(length, 1, MAX_JSON):
+            raise RecordingError()
+        self._expected_ids = expected_ids
+        self._length = length
+        self._deadline = deadline
+        self._prefix = f"NWM1\n{len(expected_ids)}\n".encode("ascii")
+        self._position = 0
+        self._header = bytearray()
+        self._payload_remaining = 0
+        self._frames = []
+
+    def feed(self, chunk):
+        _round_deadline(self._deadline)
+        chunk_size = len(chunk)
+        if chunk_size > self._length - self._position:
+            raise RecordingError()
+        index = 0
+        if self._position < len(self._prefix):
+            index = min(chunk_size, len(self._prefix) - self._position)
+            if chunk[:index] != self._prefix[self._position:self._position + index]:
+                raise RecordingError()
+        while index < chunk_size:
+            _round_deadline(self._deadline)
+            if self._payload_remaining:
+                skipped = min(chunk_size - index, self._payload_remaining)
+                index += skipped
+                self._payload_remaining -= skipped
+                if not self._payload_remaining:
+                    _round_deadline(self._deadline)
+                continue
+            if len(self._frames) == len(self._expected_ids):
+                raise RecordingError()
+            # Search only the remainder of the 28-byte header budget, including LF.
+            header_end = index + 28 - len(self._header)
+            newline = chunk.find(b"\n", index, header_end)
+            if newline == -1:
+                if chunk_size >= header_end:
+                    raise RecordingError()
+                self._header.extend(chunk[index:])
+                break
+            self._header.extend(chunk[index:newline])
+            owner, _, length_field = self._header.partition(b" ")
+            self._header.clear()
+            expected_id = self._expected_ids[len(self._frames)]
+            if (owner != str(expected_id).encode("ascii") or not length_field.isdigit()
+                    or length_field.startswith(b"0")):
+                raise RecordingError()
+            length = int(length_field)
+            index = newline + 1
+            payload_offset = self._position + index
+            if length > self._length - payload_offset:
+                raise RecordingError()
+            self._frames.append((expected_id, payload_offset, length))
+            self._payload_remaining = length
+        self._position += chunk_size
+
+    def finish(self):
+        _round_deadline(self._deadline)
+        if (self._position != self._length or self._header or self._payload_remaining
+                or len(self._frames) != len(self._expected_ids)):
+            raise RecordingError()
+        return tuple(self._frames)
 
 
 def _round_hash(value):
@@ -301,18 +377,18 @@ def verify_twitter_round_recording(directory, *, expected_manifest_sha256, expec
 
 def _verify_twitter_round_recording_with_runner(directory, *, expected_manifest_sha256,
                                                 expected_anchors, deadline_monotonic,
-                                                expected_runner):
+                                                expected_runner, expected_memory_ids=None):
     """Verify and decode the authenticated runner artifact for trusted restore."""
     _check_expected_round_runner(expected_runner)
     return _verify_round_recording(
         directory, expected_manifest_sha256=expected_manifest_sha256,
         expected_anchors=expected_anchors, deadline_monotonic=deadline_monotonic,
-        expected_runner=expected_runner,
+        expected_runner=expected_runner, expected_memory_ids=expected_memory_ids,
     )
 
 
 def _verify_round_recording(directory, *, expected_manifest_sha256, expected_anchors,
-                            deadline_monotonic, expected_runner):
+                            deadline_monotonic, expected_runner, expected_memory_ids=None):
     if (not _round_hash(expected_manifest_sha256) or type(expected_anchors) is not RecordingAnchors
             or type(deadline_monotonic) not in (int, float)):
         raise RecordingError("invalid_request")
@@ -349,17 +425,28 @@ def _verify_round_recording(directory, *, expected_manifest_sha256, expected_anc
         if (sum(length for _, length, _, _ in artifacts[1:]) > MAX_JSON
                 or manifest_bytes + sum(length for _, length, _, _ in artifacts) > TOTAL_LIMIT):
             raise RecordingError("limit_exceeded")
+        memory_layout = None
+        if expected_memory_ids is not None:
+            memory = manifest["memory"]
+            memory_layout = _RoundMemoryLayout(expected_memory_ids, memory["bytes"],
+                                               deadline_monotonic)
+            if len(expected_memory_ids) != memory["agent_count"]:
+                raise RecordingError()
         runner_state = None
         for name, length, checksum, _ in artifacts:
             retain = expected_runner is not None and name == "native-runner.bin"
+            observer = (memory_layout.feed if memory_layout is not None
+                        and name == "native-memory.bin" else None)
             artifact = _round_read(root, name, inventory[name], length, checksum,
-                                   deadline_monotonic, retain=retain)
+                                   deadline_monotonic, retain=retain, observer=observer)
             if retain:
                 runner_state = _decode_round_runner(artifact, manifest["round"], expected_runner)
                 _round_deadline(deadline_monotonic)
         if _round_inventory(root, deadline_monotonic) != inventory:
             raise RecordingError()
         _round_deadline(deadline_monotonic)
+        if memory_layout is not None:
+            return manifest, runner_state, memory_layout.finish()
         return manifest, runner_state
     except RecordingError:
         raise
