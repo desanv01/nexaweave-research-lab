@@ -19,6 +19,7 @@ from app.services.knowledge_report_tools import NeutralCapabilityError
 from app.services.native_checkpoint_memory import restore_native_memory
 from app.services.native_recording_contracts import RecordingAnchors, RecordingError
 from app.services.native_recordings import (
+    _RoundMemoryLayout,
     _verify_twitter_round_recording_with_runner,
     verify_twitter_round_recording,
 )
@@ -125,18 +126,25 @@ def _assert_memory_artifact(path, descriptor, observed, active_id):
     assert type(size) is int and 0 < size <= _MEMORY_LIMIT
     assert _artifact(path, _MEMORY_LIMIT)[:2] == (size, descriptor["sha256"])
     assert {agent_id for agent_id, snapshot in observed.items() if snapshot[-1]} == {active_id}
+    frames = []
     with path.open("rb") as stream:
-        assert stream.read(5) == b"NWM1\n"
+        magic = stream.read(5)
+        assert magic == b"NWM1\n"
         count_line = stream.readline(_MEMORY_HEADER_LIMIT + 1)
         assert len(count_line) <= _MEMORY_HEADER_LIMIT and count_line.endswith(b"\n")
         assert _decimal(count_line[:-1]) == len(observed)
+        prefix = magic + count_line
         for expected_id in sorted(observed):
             header = stream.readline(_MEMORY_HEADER_LIMIT + 1)
             assert len(header) <= _MEMORY_HEADER_LIMIT and header.endswith(b"\n")
             raw_id, raw_count = header[:-1].split(b" ")
             assert _decimal(raw_id) == expected_id
             count = _decimal(raw_count)
-            assert 0 < count <= size - stream.tell()
+            payload_offset = stream.tell()
+            assert 0 < count <= size - payload_offset
+            if not frames:
+                prefix += header
+            frames.append((expected_id, payload_offset, count))
             raw = stream.read(count)
             assert len(raw) == count
             payload = _json_without_duplicate_keys(raw)
@@ -158,6 +166,7 @@ def _assert_memory_artifact(path, descriptor, observed, active_id):
             assert _memory_wire(restored.get_context(), len(context)) == context
             del restored, payload, raw
         assert stream.tell() == size and stream.read(1) == b""
+    return tuple(frames), prefix
 
 
 def _read_bounded(path, limit):
@@ -566,7 +575,9 @@ def test_actual_twitter_round_capture_preserves_native_cut(tmp_path, monkeypatch
         assert observed_selections == [active_id]
         inactive_id, = set(observed) - set(observed_selections)
         assert not observed[inactive_id][-1]
-        _assert_memory_artifact(memory_file, receipt["memory"], observed, active_id)
+        expected_memory_frames, memory_prefix = _assert_memory_artifact(
+            memory_file, receipt["memory"], observed, active_id,
+        )
         assert all(type(post_id) is int and post_id > prior_post_id for post_id, _, _ in mutations)
         assert len({post_id for post_id, _, _ in mutations}) == len(mutations)
         for rowid, _, action, _, created_at in backup_rows[1]:
@@ -636,18 +647,23 @@ def test_actual_twitter_round_capture_preserves_native_cut(tmp_path, monkeypatch
     writer_deadline = monotonic() + 10
     manifest_sha256 = copied_before[manifest][1]
     total_actions = suffix[0]["total_actions"]
-    verified, (position, decoded_config_sha256, decoded_rng) = (
+    verified, (position, decoded_config_sha256, decoded_rng), memory_frames = (
         _verify_twitter_round_recording_with_runner(
             destination, expected_manifest_sha256=manifest_sha256,
             expected_anchors=anchors, deadline_monotonic=writer_deadline,
             expected_runner=(2, 60, total_actions, config_sha256),
+            expected_memory_ids=tuple(sorted(observed)),
         )
     )
     assert verified == materialized
     assert position == (1, 2, 60, 0, total_actions)
     assert decoded_config_sha256 == config_sha256
     assert decoded_rng == cut_rng
+    assert memory_frames == expected_memory_frames
     assert random.getstate() == ambient_rng
+    wrong_order = _RoundMemoryLayout((1, 2), verified["memory"]["bytes"], writer_deadline)
+    with pytest.raises(RecordingError):
+        wrong_order.feed(memory_prefix)
     different_anchors = RecordingAnchors(
         anchors.graph_id, anchors.simulation_id, "different-capture-run",
         anchors.branch_id, anchors.project_id, anchors.project_revision,
