@@ -236,7 +236,8 @@ def test_actual_twitter_round_capture_preserves_native_cut(tmp_path, monkeypatch
         models={"twitter": model}, seed=7, max_rounds=1,
         round_capture={"destination": destination, "anchors": anchors,
                        "include_memory": True, "include_runner_state": True,
-                       "include_engine_clock": True, "include_recommendation_state": True},
+                       "include_engine_clock": True, "include_recommendation_state": True,
+                       "include_topology": True},
     )
     assert session.round_capture_receipt is None and not destination.exists()
     native = root / "twitter_simulation.db"
@@ -277,6 +278,7 @@ def test_actual_twitter_round_capture_preserves_native_cut(tmp_path, monkeypatch
     copy_at_cut = owner._copy_at_cut
     observed = {}
     observed_rng = []
+    observed_topology = []
 
     def observe_at_cut(*args, **kwargs):
         assert not observed
@@ -296,6 +298,25 @@ def test_actual_twitter_round_capture_preserves_native_cut(tmp_path, monkeypatch
         assert len(env.agent_graph.agent_mappings) == 2
         agents = dict(env.agent_graph.get_agents())
         assert set(agents) == {0, 1}
+        native_graph = env.agent_graph.graph
+        assert native_graph.is_directed() is True
+        vertex_count = native_graph.vcount()
+        assert type(vertex_count) is int and vertex_count == len(agents) == 2
+        edge_count = native_graph.ecount()
+        assert type(edge_count) is int and edge_count == 0
+        ordered_ids = []
+        for index in range(vertex_count):
+            vertex = native_graph.vs[index]
+            agent_id = vertex["name"]
+            assert vertex.index == index
+            assert type(agent_id) is int and agent_id == index
+            assert env.agent_graph.agent_mappings[agent_id] is agents[agent_id]
+            assert agents[agent_id].social_agent_id == agent_id
+            ordered_ids.append(agent_id)
+        observed_topology.append({
+            "version": 1, "directed": True, "vertex_count": vertex_count,
+            "edge_count": edge_count, "sha256": sha256(b"NTZ1" + bytes(ordered_ids)).hexdigest(),
+        })
         remaining = _MEMORY_LIMIT
         for platform_id, agent in agents.items():
             memory = agent.memory
@@ -357,6 +378,10 @@ def test_actual_twitter_round_capture_preserves_native_cut(tmp_path, monkeypatch
         assert copied_before[database][:2] == (receipt["database_bytes"], receipt["database_sha256"])
         assert copied_before[log][:2] == (receipt["log_bytes"], receipt["log_sha256"])
         materialized = json.loads(_read_bounded(manifest, _MANIFEST_LIMIT))
+        topology, = observed_topology
+        for record in (receipt["topology"], materialized["topology"]):
+            assert record == topology
+            assert all(type(record[key]) is type(value) for key, value in topology.items())
         (_, before_step), (_, after_step) = observed_clock
         clock_record = {"version": 1, "before_step": before_step, "after_step": after_step}
         for clock_evidence in (receipt["engine_clock"], materialized["engine_clock"]):
