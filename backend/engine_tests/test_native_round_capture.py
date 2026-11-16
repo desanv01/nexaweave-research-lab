@@ -179,16 +179,23 @@ def _native_rows(path):
         db.execute("BEGIN")
         max_rowid, = db.execute("SELECT MAX(rowid) FROM trace").fetchone()
         trace = db.execute(
-            "SELECT rowid, user_id, action, info FROM trace ORDER BY rowid LIMIT ?",
+            "SELECT rowid, user_id, action, info, created_at FROM trace ORDER BY rowid LIMIT ?",
             (_ROW_LIMIT + 1,),
         ).fetchall()
         posts = db.execute(
-            "SELECT post_id, user_id, content FROM post ORDER BY post_id LIMIT ?",
+            "SELECT post_id, user_id, content, created_at FROM post ORDER BY post_id LIMIT ?",
             (_ROW_LIMIT + 1,),
         ).fetchall()
     assert 0 < len(trace) <= _ROW_LIMIT and 0 < len(posts) <= _ROW_LIMIT
     assert max_rowid == trace[-1][0]
     return max_rowid, trace, posts
+
+
+def _observed_tick(clock):
+    tick = clock.time_step
+    assert type(tick) is int and 0 <= tick < 2**63
+    assert clock.get_time_step() == str(tick)
+    return tick
 
 
 def test_actual_twitter_round_capture_preserves_native_cut(tmp_path, monkeypatch):
@@ -218,12 +225,14 @@ def test_actual_twitter_round_capture_preserves_native_cut(tmp_path, monkeypatch
         root, graph_id=anchors.graph_id, simulation_id=anchors.simulation_id,
         models={"twitter": model}, seed=7, max_rounds=1,
         round_capture={"destination": destination, "anchors": anchors,
-                       "include_memory": True, "include_runner_state": True},
+                       "include_memory": True, "include_runner_state": True,
+                       "include_engine_clock": True},
     )
     assert session.round_capture_receipt is None and not destination.exists()
     native = root / "twitter_simulation.db"
     observed_watermarks = []
     observed_selections = []
+    observed_clock = []
     begin_capture_round = session.begin_capture_round
 
     def observe_before_round(result, round_num, active_agents, prior_cursor):
@@ -237,6 +246,8 @@ def test_actual_twitter_round_capture_preserves_native_cut(tmp_path, monkeypatch
             post_id, = db.execute("SELECT MAX(post_id) FROM post").fetchone()
         assert type(post_id) is int and post_id > 0  # The prepared fixture seeds an initial post.
         observed_watermarks.append(post_id)
+        clock = result.env.platform.sandbox_clock
+        observed_clock.append((clock, _observed_tick(clock)))
         return begin_capture_round(result, round_num, active_agents, prior_cursor)
 
     monkeypatch.setattr(session, "begin_capture_round", observe_before_round)
@@ -251,6 +262,12 @@ def test_actual_twitter_round_capture_preserves_native_cut(tmp_path, monkeypatch
         assert owner._sealed and barrier is not None
         assert barrier.acknowledged.done() and barrier.acknowledged.result() is True
         assert not barrier.release.is_set()
+        (before_clock, before_step), = observed_clock
+        clock = env.platform.sandbox_clock
+        assert clock is before_clock
+        after_step = _observed_tick(clock)
+        assert after_step == before_step + 1
+        observed_clock.append((clock, after_step))
         assert not observed_rng
         observed_rng.append(random.getstate())
         assert not env.platform_task.done()
@@ -277,6 +294,7 @@ def test_actual_twitter_round_capture_preserves_native_cut(tmp_path, monkeypatch
         result = copy_at_cut(*args, **kwargs)
         assert owner._barrier is barrier and owner._sealed and not env.platform_task.done()
         assert not barrier.release.is_set()
+        assert env.platform.sandbox_clock is clock and _observed_tick(clock) == after_step
         assert observed_rng == [random.getstate()]
         _same_parent_memories(observed)
         return result
@@ -317,6 +335,11 @@ def test_actual_twitter_round_capture_preserves_native_cut(tmp_path, monkeypatch
         assert copied_before[database][:2] == (receipt["database_bytes"], receipt["database_sha256"])
         assert copied_before[log][:2] == (receipt["log_bytes"], receipt["log_sha256"])
         materialized = json.loads(_read_bounded(manifest, _MANIFEST_LIMIT))
+        (_, before_step), (_, after_step) = observed_clock
+        clock_record = {"version": 1, "before_step": before_step, "after_step": after_step}
+        for clock_evidence in (receipt["engine_clock"], materialized["engine_clock"]):
+            assert clock_evidence == clock_record
+            assert all(type(value) is int for value in clock_evidence.values())
         assert materialized["memory"] == receipt["memory"]
         assert materialized["runner_state"] == receipt["runner_state"]
         assert type(materialized["prior_post_id"]) is int
@@ -325,17 +348,19 @@ def test_actual_twitter_round_capture_preserves_native_cut(tmp_path, monkeypatch
             assert materialized[key] == receipt[key]
 
         source_rows = _native_rows(native)
-        assert _native_rows(database) == source_rows
+        backup_rows = _native_rows(database)
+        assert backup_rows == source_rows
         cursor, trace, posts = source_rows
         before_cursor = receipt["prior_cursor"]
         assert type(before_cursor) is int and 0 < before_cursor < cursor == receipt["cursor"]
         assert before_cursor in {rowid for rowid, *_ in trace}
-        selected = [(action, user, info) for rowid, user, action, info in trace
+        selected = [(action, user, info, created_at) for rowid, user, action, info, created_at in trace
                     if before_cursor < rowid <= cursor]
-        assert selected and {action for action, _, _ in selected} <= {"refresh", "create_post"}
+        assert selected and {action for action, _, _, _ in selected} <= {"refresh", "create_post"}
         mutations = []
-        for action, user, info in selected:
+        for action, user, info, created_at in selected:
             if action == "create_post":
+                assert type(created_at) is int and created_at == before_step
                 payload = json.loads(info)
                 mutations.append((payload["post_id"], user, payload["content"]))
         assert len(mutations) == receipt["post_count"] > 0
@@ -347,8 +372,16 @@ def test_actual_twitter_round_capture_preserves_native_cut(tmp_path, monkeypatch
         _assert_memory_artifact(memory_file, receipt["memory"], observed, active_id)
         assert all(type(post_id) is int and post_id > prior_post_id for post_id, _, _ in mutations)
         assert len({post_id for post_id, _, _ in mutations}) == len(mutations)
-        assert all(post in posts and post[2].startswith("Synthetic native post ") for post in mutations)
-        assert any(content == "Synthetic initial event" for _, _, content in posts)
+        for rowid, _, action, _, created_at in backup_rows[1]:
+            if before_cursor < rowid <= cursor and action == "create_post":
+                assert type(created_at) is int and created_at == before_step
+        for post in mutations:
+            for post_rows in (posts, backup_rows[2]):
+                post_created_at, = [created_at for *identity, created_at in post_rows
+                                    if tuple(identity) == post]
+                assert type(post_created_at) is int and post_created_at == before_step
+            assert post[2].startswith("Synthetic native post ")
+        assert any(content == "Synthetic initial event" for _, _, content, _ in posts)
 
         parent_log = root / "twitter" / "actions.jsonl"
         prefix = _read_bounded(log, _LOG_LIMIT)
