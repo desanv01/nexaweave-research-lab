@@ -7,12 +7,17 @@ CAMEL-compatible model objects under a separate, approved budget policy.
 from __future__ import annotations
 
 import asyncio
+from contextlib import ExitStack, contextmanager
 import csv
+from datetime import datetime
 import hashlib
+from importlib.metadata import version
 import json
+import math
 import os
 import random
 import sqlite3
+import stat
 import time
 import uuid
 from pathlib import Path
@@ -45,6 +50,195 @@ def _read_runner_config(path: Path):
             raise NeutralCapabilityError("invalid_request")
     digest = hashlib.sha256(raw).hexdigest()
     return json.loads(raw.decode("utf-8")), digest
+
+
+_CHILD_DATABASE_LIMIT = 64 * 1024 * 1024
+_CHILD_DATABASE_CHUNK = 64 * 1024
+
+
+def _child_deadline(deadline):
+    if time.monotonic() >= deadline:
+        raise NeutralCapabilityError("invalid_request")
+
+
+def _child_stat(path):
+    info = path.lstat()
+    if (stat.S_ISLNK(info.st_mode)
+            or getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT):
+        raise NeutralCapabilityError("invalid_request")
+    return info
+
+
+def _child_no_sidecars(path):
+    for suffix in ("-journal", "-wal", "-shm"):
+        try:
+            path.with_name(path.name + suffix).lstat()
+        except FileNotFoundError:
+            continue
+        raise NeutralCapabilityError("invalid_request")
+
+
+def _child_file_identity(info):
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        raise NeutralCapabilityError("invalid_request")
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def _verify_child_database(child_dir, database_bytes, database_sha256, deadline):
+    from .native_recording_contracts import HEX
+
+    if (type(database_bytes) is not int or not 1 <= database_bytes <= _CHILD_DATABASE_LIMIT
+            or type(database_sha256) is not str or not HEX.fullmatch(database_sha256)
+            or type(deadline) not in (int, float)):
+        raise NeutralCapabilityError("invalid_request")
+    try:
+        if not math.isfinite(deadline):
+            raise NeutralCapabilityError("invalid_request")
+        _child_deadline(deadline)
+        directory = Path(child_dir)
+        if not directory.is_absolute() or directory.resolve(strict=True) != directory:
+            raise NeutralCapabilityError("invalid_request")
+        for ancestor in (*directory.parents, directory):
+            _child_deadline(deadline)
+            if not stat.S_ISDIR(_child_stat(ancestor).st_mode):
+                raise NeutralCapabilityError("invalid_request")
+        path = directory / "native.sqlite3"
+        _child_no_sidecars(path)
+        identity = _child_file_identity(_child_stat(path))
+        if identity[2] != database_bytes:
+            raise NeutralCapabilityError("invalid_request")
+
+        digest = hashlib.sha256()
+        remaining = database_bytes
+        with path.open("rb") as stream:
+            if _child_file_identity(os.fstat(stream.fileno())) != identity:
+                raise NeutralCapabilityError("invalid_request")
+            while remaining:
+                _child_deadline(deadline)
+                chunk = stream.read(min(remaining, _CHILD_DATABASE_CHUNK))
+                if not chunk:
+                    raise NeutralCapabilityError("invalid_request")
+                # A closed WAL database can have no sidecars before SQLite opens it.
+                if remaining == database_bytes and (
+                        len(chunk) < 100 or not chunk.startswith(b"SQLite format 3\x00")
+                        or chunk[18:20] != b"\x01\x01"):
+                    raise NeutralCapabilityError("invalid_request")
+                remaining -= len(chunk)
+                digest.update(chunk)
+            _child_deadline(deadline)
+            if (stream.read(1) or _child_file_identity(os.fstat(stream.fileno())) != identity
+                    or _child_file_identity(_child_stat(path)) != identity
+                    or digest.hexdigest() != database_sha256):
+                raise NeutralCapabilityError("invalid_request")
+        _child_no_sidecars(path)
+        _child_deadline(deadline)
+    except (OSError, RuntimeError, TypeError, ValueError, OverflowError):
+        raise NeutralCapabilityError("invalid_request") from None
+    return path, identity
+
+
+def _bind_prestart_twitter_child(path, identity, clock, start_time, deadline, handles):
+    from oasis.clock.clock import Clock
+    from oasis.social_platform.channel import Channel
+    from oasis.social_platform.platform import Platform
+    from oasis.social_platform.platform_utils import PlatformUtils
+    from oasis.social_platform.typing import RecsysType
+
+    if type(clock) is not Clock or type(start_time) is not datetime:
+        raise NeutralCapabilityError("invalid_request")
+
+    _child_deadline(deadline)
+    _child_no_sidecars(path)
+    if _child_file_identity(_child_stat(path)) != identity:
+        raise NeutralCapabilityError("invalid_request")
+    connection = sqlite3.connect(path.as_uri() + "?mode=rw", uri=True, timeout=0)
+    handles.callback(connection.close)
+    cursor = connection.cursor()
+    handles.callback(cursor.close)
+    main = cursor.execute("PRAGMA database_list").fetchall()
+    if (len(main) != 1 or main[0][1] != "main" or not main[0][2]
+            or Path(main[0][2]).resolve(strict=True) != path
+            or cursor.connection is not connection or connection.in_transaction):
+        raise NeutralCapabilityError("internal_error")
+    cursor.execute("PRAGMA synchronous = OFF")
+    cursor.execute("PRAGMA query_only = ON")
+    if (cursor.execute("PRAGMA synchronous").fetchone() != (0,)
+            or cursor.execute("PRAGMA query_only").fetchone() != (1,)):
+        raise NeutralCapabilityError("internal_error")
+
+    class PrestartTwitterPlatform(Platform):
+        """Pinned native behavior bound to handles owned by this context."""
+
+        def __init__(self):
+            self.db_path = str(path)
+            self.db = connection
+            self.db_cursor = cursor
+            self.sandbox_clock = clock
+            self.start_time = start_time
+            self.channel = Channel()
+            self.show_score = False
+            self.allow_self_rating = True
+            self.recsys_type = RecsysType.RANDOM
+            self.refresh_rec_post_count = 2
+            self.max_rec_post_len = 2
+            self.following_post_count = 3
+            self.rec_prob = 0.7
+            self.use_openai_embedding = False
+            self.trend_num_days = 7
+            self.trend_top_k = 1
+            self.report_threshold = 2
+            self.pl_utils = PlatformUtils(
+                connection, cursor, start_time, clock, self.show_score,
+                self.recsys_type, self.report_threshold,
+            )
+
+    platform = PrestartTwitterPlatform()
+    utils = platform.pl_utils
+    if (platform.db is not connection or platform.db_cursor is not cursor
+            or utils.db is not connection or utils.db_cursor is not cursor
+            or utils.sandbox_clock is not clock or utils.start_time is not start_time
+            or utils.recsys_type is not platform.recsys_type
+            or utils.show_score is not platform.show_score
+            or utils.report_threshold != platform.report_threshold or connection.in_transaction):
+        raise NeutralCapabilityError("internal_error")
+    if _child_file_identity(_child_stat(path)) != identity:
+        raise NeutralCapabilityError("invalid_request")
+    _child_no_sidecars(path)
+    _child_deadline(deadline)
+    return platform
+
+
+@contextmanager
+def open_prestart_twitter_child(child_dir, *, database_bytes, database_sha256,
+                                clock, start_time, deadline_monotonic):
+    """Bind a private existing checkpoint copy for pre-start, SELECT-only use."""
+    path, identity = _verify_child_database(
+        child_dir, database_bytes, database_sha256, deadline_monotonic,
+    )
+    handles = ExitStack()
+    try:
+        try:
+            if version("camel-oasis") != "0.2.5":
+                raise NeutralCapabilityError("internal_error")
+            platform = _bind_prestart_twitter_child(
+                path, identity, clock, start_time, deadline_monotonic, handles,
+            )
+        except NeutralCapabilityError:
+            raise
+        except Exception:
+            raise NeutralCapabilityError("internal_error") from None
+        yield platform
+    except BaseException:
+        try:
+            handles.close()
+        except Exception:
+            pass
+        raise
+    else:
+        try:
+            handles.close()
+        except Exception:
+            raise NeutralCapabilityError("internal_error") from None
 
 
 class NativeSimulationSession:
