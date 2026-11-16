@@ -38,7 +38,8 @@ class NativePreparedHost:
         bound_request = NativeRunRequest.from_wire(request)
         if bound_request.principal != bound_principal:
             raise NativeRunDenied()
-        if (type(session_factory) is not NativeOwnedSessionFactory
+        if (bound_request.schema_version != 1
+                or type(session_factory) is not NativeOwnedSessionFactory
                 or not callable(connection_factory)
                 or (dispatch_allowed is not None and not callable(dispatch_allowed))):
             raise InvalidNativeRun()

@@ -65,7 +65,8 @@ def validate_identity(value):
             raise ValueError
         operation = identifier(prep['operation_id']); sha(prep['plan_sha256']); sha(prep['artifact_sha256'])
         req = NativeRunRequest.from_wire(value['request'])
-        if (value['request'] != req.to_wire() or req.project_id != scope.project_id
+        if (req.schema_version != 1 or value['request'] != req.to_wire()
+                or req.project_id != scope.project_id
                 or req.simulation_id != 'sim_' + operation.hex or prep['simulation_id'] != req.simulation_id
                 or prep['artifact_sha256'] != req.artifact_sha256 or not 0 <= req.seed <= 4294967295):
             raise ValueError
