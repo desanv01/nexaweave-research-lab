@@ -142,7 +142,10 @@ class NativeRoundCapture:
     """Capture-only component for a single trusted native session."""
 
     def __init__(self, *, simulation_dir, destination, anchors,
-                 include_memory=False, prepared_agent_ids=None, runner_config_sha256=None):
+                 include_memory=False, prepared_agent_ids=None, runner_config_sha256=None,
+                 include_engine_clock=False):
+        if type(include_engine_clock) is not bool:
+            raise RecordingError()
         if (runner_config_sha256 is not None
                 and (type(runner_config_sha256) is not str
                      or not HEX.fullmatch(runner_config_sha256))):
@@ -179,6 +182,10 @@ class NativeRoundCapture:
             bytes.fromhex(runner_config_sha256) if runner_config_sha256 is not None else None
         )
         self._runner_position = None
+        self._include_engine_clock = include_engine_clock
+        self._engine_clock = None
+        self._clock_before_step = None
+        self._clock_after_step = None
         self._include_memory = include_memory
         self._prepared_agent_ids = tuple(sorted(prepared_agent_ids)) if include_memory else None
         self._memory_graph = None
@@ -369,6 +376,22 @@ class NativeRoundCapture:
                 or not isinstance(writer, asyncio.Task) or writer.done()):
             raise RecordingError()
 
+    @staticmethod
+    def _read_engine_clock(env):
+        from oasis.clock.clock import Clock
+        from oasis.environment.env import DefaultPlatformType
+
+        clock = getattr(env.platform, "sandbox_clock", None)
+        if env.platform_type is not DefaultPlatformType.TWITTER or type(clock) is not Clock:
+            raise RecordingError()
+        tick = clock.time_step
+        if not _valid_id(tick):
+            raise RecordingError()
+        label = clock.get_time_step()
+        if type(label) is not str or label != str(tick):
+            raise RecordingError()
+        return clock, tick
+
     def begin_round(self, env, round_num, active_agents, prior_cursor, *, deadline_monotonic):
         deadline = self._checked_deadline(deadline_monotonic)
         self._check_owner(env)
@@ -404,6 +427,10 @@ class NativeRoundCapture:
             if self._include_memory:
                 self._verify_memory_users(source, deadline)
 
+        if self._include_engine_clock:
+            self._remaining(deadline)
+            self._engine_clock, self._clock_before_step = self._read_engine_clock(env)
+            self._remaining(deadline)
         self._expected = expected
         self._prior_cursor = prior_cursor
         self._prior_post_id = prior_post_id
@@ -451,6 +478,7 @@ class NativeRoundCapture:
         self._expected.clear()
         self._memory_graph = None
         self._memory_owners = ()
+        self._engine_clock = None
         self._pending.clear()
         self._round_witnesses.clear()
 
@@ -501,6 +529,12 @@ class NativeRoundCapture:
             if (self._barrier is not barrier or self._pending
                     or not barrier.acknowledged.done() or not barrier.acknowledged.result()):
                 raise RecordingError()
+            if self._include_engine_clock:
+                clock, tick = self._read_engine_clock(env)
+                if clock is not self._engine_clock or tick != self._clock_before_step + 1:
+                    raise RecordingError()
+                self._clock_after_step = tick
+                self._remaining(deadline)
             result = self._copy_at_cut(self._source_db, cursor, log_path, agent_names, deadline)
             self._remaining(deadline)
             self._receipt = result
@@ -636,7 +670,7 @@ class NativeRoundCapture:
         previous = self._prior_cursor
         for row, witness in zip(rows, self._round_witnesses, strict=True):
             self._remaining(deadline)
-            row_id, user_id, _, action, info = row
+            row_id, user_id, trace_created_at, action, info = row
             expected_action, expected_user, content, post_id = witness
             if (not _valid_id(row_id) or row_id <= previous or not _valid_id(user_id)
                     or user_id != expected_user or action != expected_action or type(info) is not str):
@@ -650,10 +684,14 @@ class NativeRoundCapture:
                     or type(payload["post_id"]) is not int or payload["post_id"] != post_id
                     or post_id <= self._prior_post_id or post_id in post_ids):
                 raise RecordingError()
-            row_found = connection.execute(
-                "SELECT 1 FROM post WHERE post_id = ? AND user_id = ? AND content = ?",
-                (post_id, user_id, content),
-            ).fetchone()
+            query = "SELECT 1 FROM post WHERE post_id = ? AND user_id = ? AND content = ?"
+            params = (post_id, user_id, content)
+            if self._include_engine_clock:
+                if type(trace_created_at) is not int or trace_created_at != self._clock_before_step:
+                    raise RecordingError()
+                query += " AND typeof(created_at) = 'integer' AND created_at = ?"
+                params += (self._clock_before_step,)
+            row_found = connection.execute(query, params).fetchone()
             if row_found != (1,):
                 raise RecordingError()
             post_ids.add(post_id)
@@ -929,6 +967,12 @@ class NativeRoundCapture:
                 receipt["memory"] = self._copy_memory_at_cut(deadline)
             if self._runner_config_digest is not None:
                 receipt["runner_state"] = self._copy_runner_at_cut(deadline)
+            if self._include_engine_clock:
+                receipt["engine_clock"] = {
+                    "version": 1,
+                    "before_step": self._clock_before_step,
+                    "after_step": self._clock_after_step,
+                }
             manifest = canonical({
                 **receipt, "version": 1, "platform": "twitter", "source_journal_mode": journal,
             })
