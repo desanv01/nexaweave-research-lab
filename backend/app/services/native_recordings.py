@@ -301,28 +301,46 @@ def _round_memory_binding_ids(bindings):
     return tuple(platform_ids)
 
 
-def _admit_round_memory(buffer, frames, bindings, deadline):
+def _admit_round_memory(buffer, frames, bindings, deadline, *, contexts=None):
     _round_deadline(deadline)
     try:
         from .native_checkpoint_memory import _MemoryAdmissionBudget, _admit_detached_memory_frame
+        if contexts is not None:
+            from .native_checkpoint_memory import _restore_detached_memory_frame
     except ImportError:
         raise RecordingError() from None
     _round_deadline(deadline)
     budget = _MemoryAdmissionBudget(deadline)
     witnesses = []
-    with memoryview(buffer).toreadonly() as view:
-        for (platform_id, offset, length), (_, camel_id, token_limit) in zip(frames, bindings):
-            _round_deadline(deadline)
-            with view[offset:offset + length] as frame:
-                record_count = _admit_detached_memory_frame(
-                    frame, expected_agent_id=camel_id, token_limit=token_limit, budget=budget,
-                )
+    restored = []
+    try:
+        with memoryview(buffer).toreadonly() as view:
+            for index, (platform_id, offset, length) in enumerate(frames):
+                _, camel_id, token_limit = bindings[index]
                 _round_deadline(deadline)
-                payload_sha256 = digest(frame)
-            _round_deadline(deadline)
-            witnesses.append((platform_id, offset, length, payload_sha256,
-                              camel_id, token_limit, record_count))
-    return tuple(witnesses)
+                with view[offset:offset + length] as frame:
+                    if contexts is None:
+                        record_count = _admit_detached_memory_frame(
+                            frame, expected_agent_id=camel_id, token_limit=token_limit, budget=budget,
+                        )
+                    else:
+                        record_count, memory = _restore_detached_memory_frame(
+                            frame, expected_agent_id=camel_id, token_limit=token_limit,
+                            budget=budget, context_creator=contexts[index],
+                        )
+                        restored.append(memory)
+                        memory = None
+                    _round_deadline(deadline)
+                    payload_sha256 = digest(frame)
+                _round_deadline(deadline)
+                witnesses.append((platform_id, offset, length, payload_sha256,
+                                  camel_id, token_limit, record_count))
+        if contexts is not None:
+            return tuple(witnesses), tuple(restored)
+        return tuple(witnesses)
+    finally:
+        memory = None
+        restored.clear()
 
 
 def _round_hash(value):
@@ -435,9 +453,27 @@ def _verify_twitter_round_recording_with_runner(directory, *, expected_manifest_
     )
 
 
+def _restore_twitter_round_recording_memory_with_runner(
+    directory, *, expected_manifest_sha256, expected_anchors, deadline_monotonic,
+    expected_runner, expected_memory_bindings, expected_memory_contexts,
+):
+    """Restore the authenticated two-owner cohort into detached memory."""
+    _check_expected_round_runner(expected_runner)
+    if (type(expected_memory_bindings) is not tuple or len(expected_memory_bindings) != 2
+            or type(expected_memory_contexts) is not tuple or len(expected_memory_contexts) != 2
+            or expected_memory_contexts[0] is expected_memory_contexts[1]):
+        raise RecordingError("invalid_request")
+    return _verify_round_recording(
+        directory, expected_manifest_sha256=expected_manifest_sha256,
+        expected_anchors=expected_anchors, deadline_monotonic=deadline_monotonic,
+        expected_runner=expected_runner, expected_memory_bindings=expected_memory_bindings,
+        expected_memory_contexts=expected_memory_contexts,
+    )
+
+
 def _verify_round_recording(directory, *, expected_manifest_sha256, expected_anchors,
                             deadline_monotonic, expected_runner, expected_memory_ids=None,
-                            expected_memory_bindings=None):
+                            expected_memory_bindings=None, expected_memory_contexts=None):
     if (not _round_hash(expected_manifest_sha256) or type(expected_anchors) is not RecordingAnchors
             or type(deadline_monotonic) not in (int, float)):
         raise RecordingError("invalid_request")
@@ -487,6 +523,7 @@ def _verify_round_recording(directory, *, expected_manifest_sha256, expected_anc
                 raise RecordingError()
         runner_state = None
         memory_witnesses = None
+        restored_memories = None
         for name, length, checksum, _ in artifacts:
             retain = expected_runner is not None and name == "native-runner.bin"
             observer = (memory_layout.feed if memory_layout is not None
@@ -497,9 +534,16 @@ def _verify_round_recording(directory, *, expected_manifest_sha256, expected_anc
                                    retain_buffer=semantic_memory)
             if semantic_memory:
                 try:
-                    memory_witnesses = _admit_round_memory(
-                        artifact, memory_layout.finish(), expected_memory_bindings, deadline_monotonic,
-                    )
+                    frames = memory_layout.finish()
+                    if expected_memory_contexts is None:
+                        memory_witnesses = _admit_round_memory(
+                            artifact, frames, expected_memory_bindings, deadline_monotonic,
+                        )
+                    else:
+                        memory_witnesses, restored_memories = _admit_round_memory(
+                            artifact, frames, expected_memory_bindings, deadline_monotonic,
+                            contexts=expected_memory_contexts,
+                        )
                 finally:
                     artifact = None
             elif retain:
@@ -508,6 +552,8 @@ def _verify_round_recording(directory, *, expected_manifest_sha256, expected_anc
         if _round_inventory(root, deadline_monotonic) != inventory:
             raise RecordingError()
         _round_deadline(deadline_monotonic)
+        if restored_memories is not None:
+            return manifest, runner_state, memory_witnesses, restored_memories
         if memory_witnesses is not None:
             return manifest, runner_state, memory_witnesses
         if memory_layout is not None:
@@ -521,6 +567,8 @@ def _verify_round_recording(directory, *, expected_manifest_sha256, expected_anc
         if expected_memory_bindings is None:
             raise RecordingError() from None
         refusal_code = "invalid_recording"
+    finally:
+        restored_memories = None
     # The inner traceback can own a read buffer or a decoded frame.
     artifact = None
     raise RecordingError(refusal_code)

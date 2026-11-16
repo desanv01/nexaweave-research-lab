@@ -549,23 +549,28 @@ def _validate_memory_payload(payload, agent_id, token_limit, budget, *, argument
     return payload
 
 
+def _validated_detached_memory_frame(frame, expected_agent_id, token_limit, budget):
+    _check_owner(expected_agent_id)
+    if (type(frame) is not memoryview or not frame.readonly or not frame.c_contiguous
+            or frame.ndim != 1 or frame.itemsize != 1
+            or type(token_limit) is not int or not 0 < token_limit < 2**63
+            or type(budget) is not _MemoryAdmissionBudget):
+        raise RecordingError("invalid_request")
+    frame_size = frame.nbytes
+    if not 0 < frame_size <= MAX_JSON:
+        raise RecordingError("limit_exceeded")
+    budget.check()
+    payload = _parse_bounded_memory_json(str(frame, "utf-8"), budget)
+    _validate_memory_payload(payload, expected_agent_id, token_limit, budget,
+                             argument_limit=frame_size)
+    budget.check()
+    return payload
+
+
 def _admit_detached_memory_frame(frame, *, expected_agent_id, token_limit, budget):
     """Validate one authenticated owner frame and return only its record count."""
     try:
-        _check_owner(expected_agent_id)
-        if (type(frame) is not memoryview or not frame.readonly or not frame.c_contiguous
-                or frame.ndim != 1 or frame.itemsize != 1
-                or type(token_limit) is not int or not 0 < token_limit < 2**63
-                or type(budget) is not _MemoryAdmissionBudget):
-            raise RecordingError("invalid_request")
-        frame_size = frame.nbytes
-        if not 0 < frame_size <= MAX_JSON:
-            raise RecordingError("limit_exceeded")
-        budget.check()
-        payload = _parse_bounded_memory_json(str(frame, "utf-8"), budget)
-        _validate_memory_payload(payload, expected_agent_id, token_limit, budget,
-                                 argument_limit=frame_size)
-        budget.check()
+        payload = _validated_detached_memory_frame(frame, expected_agent_id, token_limit, budget)
         return len(payload["records"])
     except RecordingError as error:
         refusal_code = error.code
@@ -575,6 +580,28 @@ def _admit_detached_memory_frame(frame, *, expected_agent_id, token_limit, budge
         payload = None
         frame = None
     # UnicodeDecodeError can retain a copy of the frame in its context.
+    raise RecordingError(refusal_code)
+
+
+def _restore_detached_memory_frame(frame, *, expected_agent_id, token_limit, budget,
+                                   context_creator):
+    """Build fresh CAMEL memory from one shared-budget authenticated frame."""
+    try:
+        if type(token_limit) is not int or _token_limit(context_creator) != token_limit:
+            raise RecordingError()
+        payload = _validated_detached_memory_frame(frame, expected_agent_id, token_limit, budget)
+        record_count = len(payload["records"])
+        budget.check()
+        memory = _build_detached_memory(payload, expected_agent_id, context_creator)
+        budget.check()
+        return record_count, memory
+    except RecordingError as error:
+        refusal_code = error.code
+    except Exception:
+        # A constructor or storage failure can retain a partially built memory.
+        refusal_code = "invalid_recording"
+    finally:
+        frame = payload = memory = context_creator = None
     raise RecordingError(refusal_code)
 
 
@@ -609,10 +636,7 @@ def capture_native_memory(memory, *, expected_agent_id, budget=None):
     return raw
 
 
-def restore_native_memory(raw, *, expected_agent_id, context_creator):
-    """Build detached native memory using the caller's trusted context creator."""
-    _check_owner(expected_agent_id)
-    payload = _validated_payload(raw, expected_agent_id, _token_limit(context_creator))
+def _build_detached_memory(payload, expected_agent_id, context_creator):
     memory = ChatHistoryMemory(
         context_creator=context_creator,
         window_size=payload["window_size"],
@@ -622,6 +646,13 @@ def restore_native_memory(raw, *, expected_agent_id, context_creator):
     block.keep_rate = payload["keep_rate"]
     block.storage.save(payload["records"])
     return memory
+
+
+def restore_native_memory(raw, *, expected_agent_id, context_creator):
+    """Build detached native memory using the caller's trusted context creator."""
+    _check_owner(expected_agent_id)
+    payload = _validated_payload(raw, expected_agent_id, _token_limit(context_creator))
+    return _build_detached_memory(payload, expected_agent_id, context_creator)
 
 
 @dataclass(frozen=True)
