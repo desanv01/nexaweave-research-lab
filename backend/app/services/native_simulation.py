@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import hashlib
 import json
 import os
 import random
@@ -28,6 +29,22 @@ def _bounded_json(path: Path):
         raise NeutralCapabilityError("invalid_request")
     with path.open(encoding="utf-8") as stream:
         return json.load(stream)
+
+
+def _read_runner_config(path: Path):
+    if not path.is_file():
+        raise NeutralCapabilityError("invalid_request")
+    with path.open("rb") as stream:
+        before = os.fstat(stream.fileno())
+        if not 1 <= before.st_size <= 2 * 1024 * 1024:
+            raise NeutralCapabilityError("invalid_request")
+        raw = stream.read(before.st_size)
+        after = os.fstat(stream.fileno())
+        if (len(raw) != before.st_size or after.st_size != before.st_size
+                or after.st_mtime_ns != before.st_mtime_ns):
+            raise NeutralCapabilityError("invalid_request")
+    digest = hashlib.sha256(raw).hexdigest()
+    return json.loads(raw.decode("utf-8")), digest
 
 
 class NativeSimulationSession:
@@ -65,7 +82,11 @@ class NativeSimulationSession:
         self._controls = None
         self._control_network = {}
         self._round_capture = None
-        self._config, self._agents, self._profiles, self._platforms = self._preflight()
+        self._runner_config_sha256 = None
+        include_runner_state = (type(round_capture) is dict
+                                and round_capture.get("include_runner_state") is True)
+        self._config, self._agents, self._profiles, self._platforms = self._preflight(
+            include_runner_state=include_runner_state)
         if set(self._models) != set(self._platforms) or any(
                 model is None or not callable(getattr(model, "run", None))
                 for model in self._models.values()):
@@ -75,10 +96,12 @@ class NativeSimulationSession:
             from .native_recording_contracts import RecordingAnchors
             from .native_round_capture import NativeRoundCapture
             if (type(round_capture) is not dict
-                    or not 2 <= len(round_capture) <= 3
+                    or not 2 <= len(round_capture) <= 4
                     or not {"destination", "anchors"} <= round_capture.keys()
-                    or set(round_capture) - {"destination", "anchors", "include_memory"}
+                    or set(round_capture) - {"destination", "anchors", "include_memory",
+                                             "include_runner_state"}
                     or type(round_capture.get("include_memory", False)) is not bool
+                    or type(round_capture.get("include_runner_state", False)) is not bool
                     or type(round_capture["anchors"]) is not RecordingAnchors
                     or round_capture["anchors"].graph_id != self.graph_id
                     or round_capture["anchors"].simulation_id != self.simulation_id
@@ -92,15 +115,20 @@ class NativeSimulationSession:
                 destination=round_capture["destination"],
                 anchors=round_capture["anchors"],
                 include_memory=include_memory,
-                prepared_agent_ids=tuple(self._agents) if include_memory else None)
+                prepared_agent_ids=tuple(self._agents) if include_memory else None,
+                runner_config_sha256=self._runner_config_sha256)
 
-    def _preflight(self):
+    def _preflight(self, *, include_runner_state=False):
         try:
             root = self.simulation_dir
             if self._native_output_exists():
                 raise ValueError
             state = _bounded_json(root / "state.json")
-            config = _bounded_json(root / "simulation_config.json")
+            config_path = root / "simulation_config.json"
+            if include_runner_state:
+                config, self._runner_config_sha256 = _read_runner_config(config_path)
+            else:
+                config = _bounded_json(config_path)
             grounding = _bounded_json(root / "source_grounding.json")
             if (type(state) is not dict or type(config) is not dict
                     or type(grounding) is not dict
@@ -305,14 +333,18 @@ class NativeSimulationSession:
             return self._round_capture.check_projection(
                 result.env, round_num, deadline_monotonic=self._start_deadline)
 
+    @property
+    def runner_state_enabled(self):
+        return self._round_capture is not None and self._runner_config_sha256 is not None
+
     async def capture_completed_round(self, result, round_num, cursor,
-                                      log_path, agent_names):
+                                      log_path, agent_names, *, runner_position=None):
         if self._round_capture is not None:
             if self._results.get("twitter") is not result:
                 raise NeutralCapabilityError("invalid_request")
-            await self._round_capture.capture(result.env, round_num, cursor,
-                                               log_path, agent_names,
-                                               deadline_monotonic=self._start_deadline)
+            await self._round_capture.capture(
+                result.env, round_num, cursor, log_path, agent_names,
+                deadline_monotonic=self._start_deadline, runner_position=runner_position)
 
     @property
     def round_capture_receipt(self):

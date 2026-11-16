@@ -11,10 +11,13 @@ import hashlib
 import math
 import os
 from pathlib import Path
+import random
 import sqlite3
+import struct
 import time
 
 from .native_recording_contracts import (
+    HEX,
     IDENTIFIER,
     MAX_EVENT_BYTES,
     MAX_EVENTS,
@@ -38,6 +41,9 @@ _SETUP_ACTIONS = {"sign_up", "follow", "create_post"}
 _ROUND_ACTIONS = {"refresh", "listen_from_group", "create_post"}
 _SIDECARS = ("-wal", "-shm", "-journal")
 _MEMORY_FILE = "native-memory.bin"
+_RUNNER_FILE = "native-runner.bin"
+_RUNNER_STATE = struct.Struct(">4sB5I32s624IHBd")
+_MAX_SIMULATED_MINUTES = 168 * 60
 
 
 def _valid_id(value):
@@ -136,7 +142,11 @@ class NativeRoundCapture:
     """Capture-only component for a single trusted native session."""
 
     def __init__(self, *, simulation_dir, destination, anchors,
-                 include_memory=False, prepared_agent_ids=None):
+                 include_memory=False, prepared_agent_ids=None, runner_config_sha256=None):
+        if (runner_config_sha256 is not None
+                and (type(runner_config_sha256) is not str
+                     or not HEX.fullmatch(runner_config_sha256))):
+            raise RecordingError()
         if type(include_memory) is not bool:
             raise RecordingError()
         if include_memory:
@@ -165,6 +175,10 @@ class NativeRoundCapture:
         except (OSError, TypeError, ValueError):
             raise RecordingError() from None
 
+        self._runner_config_digest = (
+            bytes.fromhex(runner_config_sha256) if runner_config_sha256 is not None else None
+        )
+        self._runner_position = None
         self._include_memory = include_memory
         self._prepared_agent_ids = tuple(sorted(prepared_agent_ids)) if include_memory else None
         self._memory_graph = None
@@ -458,17 +472,20 @@ class NativeRoundCapture:
             raise RecordingError() from None
         return deadline
 
-    async def capture(self, env, round_num, cursor, log_path, agent_names, *, deadline_monotonic):
+    async def capture(self, env, round_num, cursor, log_path, agent_names, *,
+                      deadline_monotonic, runner_position=None):
         if self._attempted:
             raise RecordingError()
         self._attempted = True
         self._check_completed_round(env, round_num)
+        self._validate_runner_position(runner_position, round_num)
         if (self._capture_deadline is None or not _valid_id(cursor)
                 or self._projection_cursor != cursor):
             raise RecordingError()
         deadline = min(self._capture_deadline, self._checked_deadline(deadline_monotonic))
 
         self._remaining(deadline)
+        self._runner_position = runner_position
         self._sealed = True
         barrier = _Barrier(asyncio.get_running_loop().create_future(), asyncio.Event())
         self._barrier = barrier
@@ -494,12 +511,15 @@ class NativeRoundCapture:
             self._remaining(deadline)
             raise RecordingError() from None
         finally:
+            self._runner_position = None
             self._release_barrier()
 
     def _check_destination_budget(self):
         paths = ["native.sqlite3", "actions.jsonl", "manifest.json"]
         if self._include_memory:
             paths.append(_MEMORY_FILE)
+        if self._runner_config_digest is not None:
+            paths.append(_RUNNER_FILE)
         paths.extend("native.sqlite3" + suffix for suffix in _SIDECARS)
         total = 0
         for name in paths:
@@ -797,6 +817,53 @@ class NativeRoundCapture:
             "sha256": checksum,
         }
 
+    def _validate_runner_position(self, position, round_num):
+        if self._runner_config_digest is None:
+            if position is not None:
+                raise RecordingError()
+            return
+        if (type(position) is not tuple or len(position) != 5
+                or any(type(value) is not int or not 0 <= value < 2**32 for value in position)):
+            raise RecordingError()
+        completed, horizon, interval, simulated_minutes, _ = position
+        if (completed != round_num or not 1 <= completed <= horizon
+                or not 1 <= interval <= 1440 or horizon * interval > _MAX_SIMULATED_MINUTES
+                or simulated_minutes != (completed - 1) * interval):
+            raise RecordingError()
+
+    def _copy_runner_at_cut(self, deadline):
+        self._remaining(deadline)
+        barrier = self._barrier
+        if (not self._sealed or barrier is None or not barrier.acknowledged.done()
+                or not barrier.acknowledged.result() or barrier.release.is_set()):
+            raise RecordingError()
+        self._charge_text(_RUNNER_STATE.size)
+        state = random.getstate()
+        if (type(state) is not tuple or len(state) != 3
+                or type(state[0]) is not int or state[0] != 3
+                or type(state[1]) is not tuple or len(state[1]) != 625):
+            raise RecordingError()
+        version, vector, cache = state
+        words, index = vector[:-1], vector[-1]
+        if (any(type(word) is not int or not 0 <= word < 2**32 for word in words)
+                or type(index) is not int or not 0 <= index <= 624
+                or (cache is not None and (type(cache) is not float or not math.isfinite(cache)))):
+            raise RecordingError()
+        self._remaining(deadline)
+        raw = _RUNNER_STATE.pack(
+            b"NWR1", version, *self._runner_position, self._runner_config_digest,
+            *words, index, int(cache is not None), 0.0 if cache is None else cache,
+        )
+        path = self._destination / _RUNNER_FILE
+        checksum = hashlib.sha256(raw).hexdigest()
+        with path.open("xb") as stream:
+            stream.write(raw)
+        if self._file_digest(path, _RUNNER_STATE.size, deadline) != (len(raw), checksum):
+            raise RecordingError()
+        self._check_destination_budget()
+        self._remaining(deadline)
+        return {"version": 1, "file": _RUNNER_FILE, "bytes": len(raw), "sha256": checksum}
+
     def _copy_at_cut(self, source, cursor, log_path, agent_names, deadline):
         expected_log = self._root / "twitter" / "actions.jsonl"
         if (expected_log.resolve(strict=True) != expected_log
@@ -860,6 +927,8 @@ class NativeRoundCapture:
             }
             if self._include_memory:
                 receipt["memory"] = self._copy_memory_at_cut(deadline)
+            if self._runner_config_digest is not None:
+                receipt["runner_state"] = self._copy_runner_at_cut(deadline)
             manifest = canonical({
                 **receipt, "version": 1, "platform": "twitter", "source_journal_mode": journal,
             })
