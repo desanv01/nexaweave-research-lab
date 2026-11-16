@@ -143,8 +143,8 @@ class NativeRoundCapture:
 
     def __init__(self, *, simulation_dir, destination, anchors,
                  include_memory=False, prepared_agent_ids=None, runner_config_sha256=None,
-                 include_engine_clock=False):
-        if type(include_engine_clock) is not bool:
+                 include_engine_clock=False, include_recommendation_state=False):
+        if type(include_engine_clock) is not bool or type(include_recommendation_state) is not bool:
             raise RecordingError()
         if (runner_config_sha256 is not None
                 and (type(runner_config_sha256) is not str
@@ -182,6 +182,7 @@ class NativeRoundCapture:
             bytes.fromhex(runner_config_sha256) if runner_config_sha256 is not None else None
         )
         self._runner_position = None
+        self._include_recommendation_state = include_recommendation_state
         self._include_engine_clock = include_engine_clock
         self._engine_clock = None
         self._clock_before_step = None
@@ -902,6 +903,56 @@ class NativeRoundCapture:
         self._remaining(deadline)
         return {"version": 1, "file": _RUNNER_FILE, "bytes": len(raw), "sha256": checksum}
 
+    def _recommendation_settings(self):
+        from oasis.environment.env import DefaultPlatformType
+        from oasis.social_platform.platform import Platform, RecsysType
+
+        platform = self._platform
+        if (self._env.platform_type is not DefaultPlatformType.TWITTER
+                or type(platform) is not Platform or platform.recsys_type is not RecsysType.RANDOM
+                or platform.use_openai_embedding is not False):
+            raise RecordingError()
+        settings = {"max_rec_post_len": 2, "refresh_rec_post_count": 2, "following_post_count": 3}
+        for name, expected in settings.items():
+            actual = getattr(platform, name, None)
+            if type(actual) is not int or actual != expected:
+                raise RecordingError()
+        return settings
+
+    def _recommendation_digest(self, connection, deadline):
+        self._remaining(deadline)
+        users = connection.execute("SELECT COUNT(*) FROM (SELECT 1 FROM user LIMIT 129)").fetchone()[0]
+        if users > 128:
+            raise RecordingError("limit_exceeded")
+        if not users:
+            raise RecordingError()
+
+        digest = hashlib.sha256(b"NRC1")
+        previous = (-1, -1)
+        posts_for_user = count = 0
+        with closing(connection.execute(
+            "SELECT CASE WHEN typeof(user_id) = 'integer' THEN user_id END,"
+            " CASE WHEN typeof(post_id) = 'integer' THEN post_id END"
+            " FROM rec INDEXED BY sqlite_autoindex_rec_1 ORDER BY user_id, post_id LIMIT 257"
+        )) as rows:
+            for user_id, post_id in rows:
+                self._remaining(deadline)
+                count += 1
+                if count > 256:
+                    raise RecordingError("limit_exceeded")
+                pair = (user_id, post_id)
+                if (not _valid_id(user_id) or user_id >= users or not _valid_id(post_id)
+                        or pair <= previous):
+                    raise RecordingError()
+                posts_for_user = posts_for_user + 1 if user_id == previous[0] else 1
+                if posts_for_user > 2:
+                    raise RecordingError()
+                self._charge_text(16)
+                digest.update(struct.pack(">QQ", *pair))
+                previous = pair
+        self._remaining(deadline)
+        return {"users": users, "rows": count, "sha256": digest.hexdigest()}
+
     def _copy_at_cut(self, source, cursor, log_path, agent_names, deadline):
         expected_log = self._root / "twitter" / "actions.jsonl"
         if (expected_log.resolve(strict=True) != expected_log
@@ -918,6 +969,9 @@ class NativeRoundCapture:
                 raise RecordingError("limit_exceeded")
             rows = self._trace_snapshot(source, cursor, deadline)
             posts = self._verified_posts(source, rows, deadline)
+            if self._include_recommendation_state:
+                settings = self._recommendation_settings()
+                recommendation = self._recommendation_digest(source, deadline)
             if self._include_memory:
                 self._verify_memory_users(source, deadline)
 
@@ -935,6 +989,9 @@ class NativeRoundCapture:
                         raise RecordingError()
                     if self._include_memory:
                         self._verify_memory_users(backup, deadline)
+                    if (self._include_recommendation_state
+                            and self._recommendation_digest(backup, deadline) != recommendation):
+                        raise RecordingError()
                 finally:
                     backup.set_progress_handler(None, 0)
             self._check_sidecars(database_path)
@@ -972,6 +1029,11 @@ class NativeRoundCapture:
                     "version": 1,
                     "before_step": self._clock_before_step,
                     "after_step": self._clock_after_step,
+                }
+            if self._include_recommendation_state:
+                receipt["recommendation_state"] = {
+                    "version": 1, "mode": "random", "use_openai_embedding": False,
+                    **settings, **recommendation,
                 }
             manifest = canonical({
                 **receipt, "version": 1, "platform": "twitter", "source_journal_mode": journal,
