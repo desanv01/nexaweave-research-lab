@@ -13,6 +13,7 @@ from time import monotonic
 from uuid import UUID
 
 import pytest
+from camel.memories import ScoreBasedContextCreator
 from camel.types import OpenAIBackendRole
 
 from app.services import native_checkpoint_memory
@@ -20,7 +21,7 @@ from app.services.knowledge_report_tools import NeutralCapabilityError
 from app.services.native_recording_contracts import RecordingAnchors, RecordingError
 from app.services.native_recordings import (
     _RoundMemoryLayout,
-    _verify_twitter_round_recording_with_runner,
+    _restore_twitter_round_recording_memory_with_runner,
     verify_twitter_round_recording,
 )
 from app.services.native_simulation import (
@@ -93,9 +94,12 @@ def _memory_wire(value, remaining):
 
 
 def _same_parent_memories(observed):
-    for agent, memory, agent_id, creator, records, context, record_count, _ in observed.values():
+    for snapshot in observed.values():
+        agent, memory, agent_id, creator, records, context, record_count, settings, _ = snapshot
         assert agent.agent_id == memory.agent_id == agent_id
         assert agent.memory is memory and memory.get_context_creator() is creator
+        assert (memory._window_size, memory._chat_history_block.keep_rate,
+                creator.token_limit) == settings
         live = memory._chat_history_block.storage.memory_list
         assert len(live) == record_count
         assert _memory_wire(live, len(records)) == records
@@ -149,17 +153,18 @@ def _assert_memory_artifact(path, descriptor, observed, active_id):
             assert len(raw) == count
             payload = _json_without_duplicate_keys(raw)
             (_, parent_memory, actual_uuid, creator, records, context,
-             record_count, has_tool) = observed[expected_id]
+             record_count, settings, has_tool) = observed[expected_id]
+            window_size, keep_rate, token_limit = settings
             witnesses.append((expected_id, payload_offset, count, sha256(raw).hexdigest(),
-                              actual_uuid, creator.token_limit, record_count))
+                              actual_uuid, token_limit, record_count))
             assert set(payload) == {"kind", "version", "agent_id", "window_size",
                                     "keep_rate", "token_limit", "records"}
             assert payload["kind"] == "native_camel_memory"
             assert type(payload["version"]) is int and payload["version"] == 1
             assert payload["agent_id"] == actual_uuid
-            assert payload["window_size"] == parent_memory._window_size
-            assert payload["keep_rate"] == parent_memory._chat_history_block.keep_rate
-            assert payload["token_limit"] == creator.token_limit
+            assert payload["window_size"] == window_size
+            assert payload["keep_rate"] == keep_rate
+            assert payload["token_limit"] == token_limit
             assert _memory_wire(payload["records"], len(records)) == records
             assert any(record["message"]["__class__"] == "FunctionCallingMessage"
                        for record in payload["records"]) is has_tool
@@ -172,6 +177,33 @@ def _assert_memory_artifact(path, descriptor, observed, active_id):
             del restored, payload, raw
         assert stream.tell() == size and stream.read(1) == b""
     return tuple(witnesses), prefix
+
+
+def _assert_detached_memories(owners, contexts, restored_memories, active_id):
+    first, second = restored_memories
+    assert first is not second
+    assert first._chat_history_block.storage is not second._chat_history_block.storage
+    for (platform_id, snapshot), creator, restored in zip(
+        owners, contexts, restored_memories, strict=True,
+    ):
+        (_, parent_memory, camel_id, parent_creator, records, context,
+         record_count, settings, has_tool) = snapshot
+        window_size, keep_rate, token_limit = settings
+        assert restored is not parent_memory and restored.agent_id == camel_id
+        assert creator is not parent_creator and restored.get_context_creator() is creator
+        assert creator.token_limit == token_limit
+        assert restored._window_size == window_size
+        child_block = restored._chat_history_block
+        parent_block = parent_memory._chat_history_block
+        assert child_block is not parent_block and child_block.keep_rate == keep_rate
+        assert child_block.storage is not parent_block.storage
+        child_records = child_block.storage.memory_list
+        assert len(child_records) == record_count
+        assert _memory_wire(child_records, len(records)) == records
+        assert _memory_wire(restored.get_context(), len(context)) == context
+        assert has_tool is (platform_id == active_id)
+        assert any(record["message"]["__class__"] == "FunctionCallingMessage"
+                   for record in child_records) is has_tool
 
 
 def _read_bounded(path, limit):
@@ -479,8 +511,9 @@ def test_actual_twitter_round_capture_preserves_native_cut(tmp_path, monkeypatch
             remaining -= len(context)
             has_tool = any(record["message"]["__class__"] == "FunctionCallingMessage"
                            for record in live)
+            settings = (memory._window_size, memory._chat_history_block.keep_rate, creator.token_limit)
             observed[platform_id] = (agent, memory, actual_uuid, creator, records, context,
-                                     len(live), has_tool)
+                                     len(live), settings, has_tool)
         result = copy_at_cut(*args, **kwargs)
         assert owner._barrier is barrier and owner._sealed and not env.platform_task.done()
         assert not barrier.release.is_set()
@@ -653,23 +686,41 @@ def test_actual_twitter_round_capture_preserves_native_cut(tmp_path, monkeypatch
     writer_deadline = monotonic() + 10
     manifest_sha256 = copied_before[manifest][1]
     total_actions = suffix[0]["total_actions"]
+    owners = sorted(observed.items())
     memory_bindings = tuple(
-        (platform_id, camel_id, creator.token_limit)
-        for platform_id, (_, _, camel_id, creator, _, _, _, _) in sorted(observed.items())
+        (platform_id, camel_id, token_limit)
+        for platform_id, (_, _, camel_id, _, _, _, _, (_, _, token_limit), _) in owners
     )
-    verified, (position, decoded_config_sha256, decoded_rng), memory_witnesses = (
-        _verify_twitter_round_recording_with_runner(
+    context_models = (_offline_model(), _offline_model())
+    first_counter, second_counter = (fresh_model.token_counter for fresh_model in context_models)
+    assert first_counter is not second_counter
+    parent_counter = model.token_counter
+    assert first_counter is not parent_counter and second_counter is not parent_counter
+    context_token_limits = tuple(fresh_model.token_limit for fresh_model in context_models)
+    assert context_token_limits == tuple(token_limit for _, _, token_limit in memory_bindings)
+    memory_contexts = tuple(
+        ScoreBasedContextCreator(token_counter=counter, token_limit=token_limit)
+        for counter, token_limit in zip((first_counter, second_counter), context_token_limits, strict=True)
+    )
+    assert memory_contexts[0] is not memory_contexts[1]
+    verified, runner_state, memory_witnesses, restored_memories = (
+        _restore_twitter_round_recording_memory_with_runner(
             destination, expected_manifest_sha256=manifest_sha256,
             expected_anchors=anchors, deadline_monotonic=writer_deadline,
             expected_runner=(2, 60, total_actions, config_sha256),
             expected_memory_bindings=memory_bindings,
+            expected_memory_contexts=memory_contexts,
         )
     )
+    position, decoded_config_sha256, decoded_rng = runner_state
     assert verified == materialized
     assert position == (1, 2, 60, 0, total_actions)
     assert decoded_config_sha256 == config_sha256
     assert decoded_rng == cut_rng
     assert memory_witnesses == expected_memory_witnesses
+    _assert_detached_memories(owners, memory_contexts, restored_memories, active_id)
+    _same_parent_memories(observed)
+    assert model.calls == model_calls and all(fresh_model.calls == 0 for fresh_model in context_models)
     assert random.getstate() == ambient_rng
     wrong_order = _RoundMemoryLayout((1, 2), verified["memory"]["bytes"], writer_deadline)
     with pytest.raises(RecordingError):
