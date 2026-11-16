@@ -96,13 +96,15 @@ class NativeSimulationSession:
             from .native_recording_contracts import RecordingAnchors
             from .native_round_capture import NativeRoundCapture
             if (type(round_capture) is not dict
-                    or not 2 <= len(round_capture) <= 5
+                    or not 2 <= len(round_capture) <= 6
                     or not {"destination", "anchors"} <= round_capture.keys()
                     or set(round_capture) - {"destination", "anchors", "include_memory",
-                                             "include_runner_state", "include_engine_clock"}
+                                             "include_runner_state", "include_engine_clock",
+                                             "include_recommendation_state"}
                     or type(round_capture.get("include_memory", False)) is not bool
                     or type(round_capture.get("include_runner_state", False)) is not bool
                     or type(round_capture.get("include_engine_clock", False)) is not bool
+                    or type(round_capture.get("include_recommendation_state", False)) is not bool
                     or type(round_capture["anchors"]) is not RecordingAnchors
                     or round_capture["anchors"].graph_id != self.graph_id
                     or round_capture["anchors"].simulation_id != self.simulation_id
@@ -118,7 +120,8 @@ class NativeSimulationSession:
                 include_memory=include_memory,
                 prepared_agent_ids=tuple(self._agents) if include_memory else None,
                 runner_config_sha256=self._runner_config_sha256,
-                include_engine_clock=round_capture.get("include_engine_clock", False))
+                include_engine_clock=round_capture.get("include_engine_clock", False),
+                include_recommendation_state=round_capture.get("include_recommendation_state", False))
 
     def _preflight(self, *, include_runner_state=False):
         try:

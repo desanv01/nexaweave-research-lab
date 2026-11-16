@@ -24,6 +24,7 @@ _LOG_LIMIT = 1024 * 1024
 _DATABASE_LIMIT = 64 * 1024 * 1024
 _MANIFEST_LIMIT = 7200
 _ROW_LIMIT = 128
+_RECOMMENDATION_ROW_LIMIT = 256
 _MEMORY_LIMIT = 2 * 1024 * 1024
 _MEMORY_HEADER_LIMIT = 32
 _RUNNER_BYTES = 2564
@@ -186,9 +187,18 @@ def _native_rows(path):
             "SELECT post_id, user_id, content, created_at FROM post ORDER BY post_id LIMIT ?",
             (_ROW_LIMIT + 1,),
         ).fetchall()
+        recommendations = db.execute(
+            "SELECT CASE WHEN typeof(user_id) = 'integer' THEN user_id END, "
+            "CASE WHEN typeof(post_id) = 'integer' THEN post_id END "
+            "FROM rec INDEXED BY sqlite_autoindex_rec_1 ORDER BY rec.user_id, rec.post_id LIMIT ?",
+            (_RECOMMENDATION_ROW_LIMIT + 1,),
+        ).fetchall()
     assert 0 < len(trace) <= _ROW_LIMIT and 0 < len(posts) <= _ROW_LIMIT
+    assert len(recommendations) <= _RECOMMENDATION_ROW_LIMIT
+    assert all(type(value) is int and 0 <= value < 2**63
+               for pair in recommendations for value in pair)
     assert max_rowid == trace[-1][0]
-    return max_rowid, trace, posts
+    return max_rowid, trace, posts, recommendations
 
 
 def _observed_tick(clock):
@@ -226,13 +236,14 @@ def test_actual_twitter_round_capture_preserves_native_cut(tmp_path, monkeypatch
         models={"twitter": model}, seed=7, max_rounds=1,
         round_capture={"destination": destination, "anchors": anchors,
                        "include_memory": True, "include_runner_state": True,
-                       "include_engine_clock": True},
+                       "include_engine_clock": True, "include_recommendation_state": True},
     )
     assert session.round_capture_receipt is None and not destination.exists()
     native = root / "twitter_simulation.db"
     observed_watermarks = []
     observed_selections = []
     observed_clock = []
+    observed_setup = []
     begin_capture_round = session.begin_capture_round
 
     def observe_before_round(result, round_num, active_agents, prior_cursor):
@@ -243,9 +254,20 @@ def test_actual_twitter_round_capture_preserves_native_cut(tmp_path, monkeypatch
         observed_selections.append(selected_id)
         assert native.is_file() and not native.is_symlink()
         with closing(sqlite3.connect(native.as_uri() + "?mode=ro", uri=True, timeout=0)) as db:
+            db.execute("BEGIN")
             post_id, = db.execute("SELECT MAX(post_id) FROM post").fetchone()
+            setup_posts = tuple(row[0] for row in db.execute(
+                "SELECT post_id FROM post ORDER BY post_id LIMIT 3"
+            ))
+            users, = db.execute(
+                'SELECT COUNT(*) FROM (SELECT 1 FROM "user" LIMIT ?)', (_ROW_LIMIT + 1,)
+            ).fetchone()
         assert type(post_id) is int and post_id > 0  # The prepared fixture seeds an initial post.
         observed_watermarks.append(post_id)
+        assert type(users) is int and users == 2
+        assert 0 < len(setup_posts) <= 2 and setup_posts[-1] == post_id
+        assert all(type(value) is int and 0 <= value < 2**63 for value in setup_posts)
+        observed_setup.append((users, setup_posts))
         clock = result.env.platform.sandbox_clock
         observed_clock.append((clock, _observed_tick(clock)))
         return begin_capture_round(result, round_num, active_agents, prior_cursor)
@@ -350,7 +372,22 @@ def test_actual_twitter_round_capture_preserves_native_cut(tmp_path, monkeypatch
         source_rows = _native_rows(native)
         backup_rows = _native_rows(database)
         assert backup_rows == source_rows
-        cursor, trace, posts = source_rows
+        cursor, trace, posts, recommendations = source_rows
+        (users, setup_posts), = observed_setup
+        expected_pairs = [(ordinal, setup_id)
+                          for ordinal in range(users) for setup_id in setup_posts]
+        assert recommendations == backup_rows[3] == expected_pairs
+        encoded = b"NRC1" + b"".join(struct.pack(">QQ", *pair) for pair in expected_pairs)
+        recommendation_record = {
+            "version": 1, "mode": "random", "max_rec_post_len": 2,
+            "refresh_rec_post_count": 2, "following_post_count": 3,
+            "use_openai_embedding": False, "users": users,
+            "rows": len(expected_pairs), "sha256": sha256(encoded).hexdigest(),
+        }
+        for record in (receipt["recommendation_state"], materialized["recommendation_state"]):
+            assert record == recommendation_record
+            assert all(type(record[key]) is type(value)
+                       for key, value in recommendation_record.items())
         before_cursor = receipt["prior_cursor"]
         assert type(before_cursor) is int and 0 < before_cursor < cursor == receipt["cursor"]
         assert before_cursor in {rowid for rowid, *_ in trace}
@@ -364,6 +401,9 @@ def test_actual_twitter_round_capture_preserves_native_cut(tmp_path, monkeypatch
                 payload = json.loads(info)
                 mutations.append((payload["post_id"], user, payload["content"]))
         assert len(mutations) == receipt["post_count"] > 0
+        assert {post for _, post in recommendations}.isdisjoint(
+            post_id for post_id, _, _ in mutations
+        )
         active_id, = {user for _, user, _ in mutations}
         assert active_id in observed
         assert observed_selections == [active_id]
