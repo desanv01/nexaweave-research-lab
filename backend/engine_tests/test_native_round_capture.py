@@ -1,7 +1,9 @@
 """One real offline native Twitter round and its materialized recording cut."""
 
 import json
+import random
 import sqlite3
+import struct
 from contextlib import closing
 from hashlib import sha256
 from itertools import islice
@@ -24,6 +26,38 @@ _MANIFEST_LIMIT = 7200
 _ROW_LIMIT = 128
 _MEMORY_LIMIT = 2 * 1024 * 1024
 _MEMORY_HEADER_LIMIT = 32
+_RUNNER_BYTES = 2564
+
+
+def _assert_runner_artifact(path, descriptor, cut_state, config_sha256, total_actions):
+    assert set(descriptor) == {"version", "file", "bytes", "sha256"}
+    assert type(descriptor["version"]) is int and descriptor["version"] == 1
+    assert descriptor["file"] == path.name == "native-runner.bin"
+    raw = _read_bounded(path, _RUNNER_BYTES)
+    assert type(descriptor["bytes"]) is int and len(raw) == descriptor["bytes"] == _RUNNER_BYTES
+    assert sha256(raw).hexdigest() == descriptor["sha256"]
+
+    magic, version, completed, horizon, minutes, offset, actions, digest = struct.unpack_from(
+        ">4sB5I32s", raw,
+    )
+    assert magic == b"NWR1" and version == 3
+    assert (completed, horizon, minutes, offset, actions) == (1, 2, 60, 0, total_actions)
+    assert completed + 1 == horizon and offset + minutes == 60
+    assert digest == config_sha256
+
+    words = struct.unpack_from(">624I", raw, 57)
+    index, cache_tag, cache = struct.unpack_from(">HBd", raw, 2553)
+    assert index <= 624 and cache_tag in (0, 1)
+    # For an absent cache, require the canonical positive-zero bytes.
+    assert cache_tag or raw[-8:] == bytes(8)
+    recorded = (version, (*words, index), cache if cache_tag else None)
+    assert recorded == cut_state
+    expected, restored = random.Random(0), random.Random(0)
+    expected.setstate(cut_state)
+    restored.setstate(recorded)
+    assert restored.sample((0, 1), 1) == expected.sample((0, 1), 1)
+    assert restored.random() == expected.random()
+    assert restored.getstate() == expected.getstate()
 
 
 def _role_tag(value):
@@ -169,16 +203,22 @@ def test_actual_twitter_round_capture_preserves_native_cut(tmp_path, monkeypatch
     del config["reddit_config"]
     config["time_config"]["agents_per_hour_min"] = 1
     config["time_config"]["agents_per_hour_max"] = 1
-    config_path.write_text(json.dumps(config), encoding="utf-8")
+    config["time_config"]["total_simulation_hours"] = 2
+    config["time_config"]["minutes_per_round"] = 60
+    config_bytes = json.dumps(config).encode("utf-8")
+    config_path.write_bytes(config_bytes)
+    config_sha256 = sha256(config_bytes).digest()
 
     destination = tmp_path / "round-one"
     anchors = RecordingAnchors("graph-fixture", "sim-fixture", "capture-run",
                                "parent-branch", "capture-project", 1)
     model = _offline_model()
+    ambient_rng = random.getstate()
     session = NativeSimulationSession(
         root, graph_id=anchors.graph_id, simulation_id=anchors.simulation_id,
         models={"twitter": model}, seed=7, max_rounds=1,
-        round_capture={"destination": destination, "anchors": anchors, "include_memory": True},
+        round_capture={"destination": destination, "anchors": anchors,
+                       "include_memory": True, "include_runner_state": True},
     )
     assert session.round_capture_receipt is None and not destination.exists()
     native = root / "twitter_simulation.db"
@@ -203,6 +243,7 @@ def test_actual_twitter_round_capture_preserves_native_cut(tmp_path, monkeypatch
     owner = session._round_capture
     copy_at_cut = owner._copy_at_cut
     observed = {}
+    observed_rng = []
 
     def observe_at_cut(*args, **kwargs):
         assert not observed
@@ -210,6 +251,8 @@ def test_actual_twitter_round_capture_preserves_native_cut(tmp_path, monkeypatch
         assert owner._sealed and barrier is not None
         assert barrier.acknowledged.done() and barrier.acknowledged.result() is True
         assert not barrier.release.is_set()
+        assert not observed_rng
+        observed_rng.append(random.getstate())
         assert not env.platform_task.done()
         assert len(env.agent_graph.agent_mappings) == 2
         agents = dict(env.agent_graph.get_agents())
@@ -234,11 +277,13 @@ def test_actual_twitter_round_capture_preserves_native_cut(tmp_path, monkeypatch
         result = copy_at_cut(*args, **kwargs)
         assert owner._barrier is barrier and owner._sealed and not env.platform_task.done()
         assert not barrier.release.is_set()
+        assert observed_rng == [random.getstate()]
         _same_parent_memories(observed)
         return result
 
     monkeypatch.setattr(owner, "_copy_at_cut", observe_at_cut)
     with session:
+        assert random.getstate() == ambient_rng
         assert set(session._results) == {"twitter"}
         assert set(observed) == {0, 1}
         _same_parent_memories(observed)
@@ -261,16 +306,19 @@ def test_actual_twitter_round_capture_preserves_native_cut(tmp_path, monkeypatch
         manifest = destination / manifest_name
         assert manifest.parent == destination and manifest.name == manifest_name
         memory_file = destination / "native-memory.bin"
-        entries = sorted(islice(destination.iterdir(), 5))
-        assert len(entries) == 4 and {database, manifest, memory_file} <= set(entries)
-        log, = set(entries) - {database, manifest, memory_file}
+        runner_file = destination / "native-runner.bin"
+        known_files = {database, manifest, memory_file, runner_file}
+        entries = sorted(islice(destination.iterdir(), 6))
+        assert len(entries) == 5 and known_files <= set(entries)
+        log, = set(entries) - known_files
         limits = {database: _DATABASE_LIMIT, manifest: _MANIFEST_LIMIT,
-                  log: _LOG_LIMIT, memory_file: _MEMORY_LIMIT}
+                  log: _LOG_LIMIT, memory_file: _MEMORY_LIMIT, runner_file: _RUNNER_BYTES}
         copied_before = {file: _artifact(file, limit) for file, limit in limits.items()}
         assert copied_before[database][:2] == (receipt["database_bytes"], receipt["database_sha256"])
         assert copied_before[log][:2] == (receipt["log_bytes"], receipt["log_sha256"])
         materialized = json.loads(_read_bounded(manifest, _MANIFEST_LIMIT))
         assert materialized["memory"] == receipt["memory"]
+        assert materialized["runner_state"] == receipt["runner_state"]
         assert type(materialized["prior_post_id"]) is int
         for key in ("anchors", "round", "prior_post_id", "prior_cursor", "cursor", "database_bytes",
                     "database_sha256", "log_bytes", "log_sha256", "post_count"):
@@ -314,6 +362,10 @@ def test_actual_twitter_round_capture_preserves_native_cut(tmp_path, monkeypatch
         suffix = [json.loads(line) for line in parent[len(prefix):].splitlines()]
         assert len(suffix) == 1 and suffix[0]["event_type"] == "simulation_end"
         assert suffix[0]["platform"] == "twitter" and suffix[0]["total_rounds"] == 1
+        cut_rng, = observed_rng
+        _assert_runner_artifact(runner_file, receipt["runner_state"], cut_rng,
+                                config_sha256, suffix[0]["total_actions"])
+        assert random.getstate() == ambient_rng
 
         round_actions = [event for event in events
                          if event.get("round") == 1 and "action_type" in event]
@@ -335,11 +387,12 @@ def test_actual_twitter_round_capture_preserves_native_cut(tmp_path, monkeypatch
         assert observed_watermarks == [prior_post_id]
         assert model.calls == model_calls
         assert session.round_capture_receipt == receipt
-        assert sorted(islice(destination.iterdir(), 5)) == entries
+        assert sorted(islice(destination.iterdir(), 6)) == entries
         assert {file: _artifact(file, limit) for file, limit in limits.items()} == copied_before
         assert _native_rows(native) == source_rows
         assert _read_bounded(parent_log, _LOG_LIMIT) == parent
         _same_parent_memories(observed)
 
     assert session._closed and session._results == {}
+    assert random.getstate() == ambient_rng
     assert not (root / "reddit_simulation.db").exists()

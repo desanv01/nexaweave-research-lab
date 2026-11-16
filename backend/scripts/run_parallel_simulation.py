@@ -1157,7 +1157,8 @@ async def run_twitter_simulation(
     time_config = config.get("time_config", {})
     total_hours = time_config.get("total_simulation_hours", 72)
     minutes_per_round = time_config.get("minutes_per_round", 30)
-    total_rounds = (total_hours * 60) // minutes_per_round
+    logical_rounds = (total_hours * 60) // minutes_per_round
+    total_rounds = logical_rounds
     
     # 如果指定了最大轮数，则截断
     if max_rounds is not None and max_rounds > 0:
@@ -1227,9 +1228,15 @@ async def run_twitter_simulation(
             action_logger.log_round_end(round_num + 1, round_action_count)
 
         if native_dependencies is not None and hasattr(native_dependencies, "capture_completed_round"):
+            capture_options = {}
+            if getattr(native_dependencies, "runner_state_enabled", False) is True:
+                capture_options["runner_position"] = (
+                    round_num + 1, logical_rounds, minutes_per_round,
+                    simulated_minutes, total_actions,
+                )
             await native_dependencies.capture_completed_round(
                 result, round_num + 1, last_rowid,
-                getattr(action_logger, "log_path", None), agent_names)
+                getattr(action_logger, "log_path", None), agent_names, **capture_options)
         
         if (round_num + 1) % 20 == 0:
             progress = (round_num + 1) / total_rounds * 100
