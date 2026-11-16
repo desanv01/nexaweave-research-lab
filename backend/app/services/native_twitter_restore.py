@@ -1,6 +1,7 @@
 """Private, single-step continuation of an authenticated native Twitter cut."""
 
 import asyncio
+from contextlib import closing
 from datetime import datetime
 import hashlib
 import json
@@ -16,6 +17,7 @@ from .native_recording_contracts import HEX, MAX_JSON, MAX_WIRE, RecordingError,
 
 
 _CLEANUP_RESERVE_SECONDS = 1.0
+_MODEL_POST_WIRE_LIMIT = 7200
 
 
 def _integer(value, low, high):
@@ -62,6 +64,18 @@ def _wire_size(value, limit, depth=0):
     return size
 
 
+def _model_post_digest(message_id, data):
+    content = data[1]
+    if type(content) is not str or not content:
+        raise RecordingError()
+    _wire_size((message_id, data), min(MAX_WIRE, _MODEL_POST_WIRE_LIMIT))
+    try:
+        content.encode("utf-8")
+    except UnicodeEncodeError:
+        raise RecordingError() from None
+    return hashlib.sha256(canonical(content)).hexdigest()
+
+
 class _RestoredTwitterChannel:
     """One native writer, one outstanding exchange, and a terminal EXIT."""
 
@@ -79,6 +93,7 @@ class _RestoredTwitterChannel:
         self._pending = None
         self._received = False
         self._post_id = None
+        self.post_content_sha256 = None
         self._failed = False
         self._closing_task = None
         self._exit_queued = False
@@ -110,11 +125,19 @@ class _RestoredTwitterChannel:
                 or type(agent_id) is not int or agent_id != self._agent_id):
             self._refuse()
         expected_payload, expected_action = self._actions[self._completed]
-        if (type(action) is not str or action != expected_action
-                or type(payload) is not type(expected_payload) or payload != expected_payload):
+        if type(action) is not str or action != expected_action:
             self._refuse()
         message_id = str(self._completed)
-        _wire_size((message_id, data), MAX_WIRE)
+        if expected_payload is None and self._completed == len(self._actions) - 1:
+            try:
+                self.post_content_sha256 = _model_post_digest(message_id, data)
+            except RecordingError:
+                self._failed = True
+                raise
+        else:
+            if type(payload) is not type(expected_payload) or payload != expected_payload:
+                self._refuse()
+            _wire_size((message_id, data), MAX_WIRE)
         self._pending = (
             message_id, asyncio.current_task(), asyncio.get_running_loop().create_future(),
         )
@@ -366,11 +389,13 @@ async def _advance_restored_twitter_round(
     try:
         deadline = deadline_monotonic
         if (type(deadline) not in (int, float) or not math.isfinite(deadline)
-                or type(expected_post_content) is not str or not expected_post_content):
+                or (expected_post_content is not None
+                    and (type(expected_post_content) is not str or not expected_post_content))):
             raise RecordingError("invalid_request")
         work_deadline = deadline - _CLEANUP_RESERVE_SECONDS
         _remaining(work_deadline)
-        _wire_size(expected_post_content, MAX_WIRE)
+        if expected_post_content is not None:
+            _wire_size(expected_post_content, MAX_WIRE)
         config, rng_state, tick, round_index, minutes = _restore_schedule(
             manifest, runner_state, config_bytes, work_deadline,
         )
@@ -413,7 +438,8 @@ async def _advance_restored_twitter_round(
             agent_id, agent = active[0]
             if not _integer(agent_id, 0, 1) or graph.get_agent(agent_id) is not agent:
                 raise RecordingError()
-            _wire_size(("2", (agent_id, expected_post_content, ActionType.CREATE_POST.value)), MAX_WIRE)
+            if expected_post_content is not None:
+                _wire_size(("2", (agent_id, expected_post_content, ActionType.CREATE_POST.value)), MAX_WIRE)
             channel = _RestoredTwitterChannel(ActionType, agent_id, expected_post_content, deadline)
             platform.channel = env.channel = channel
             try:
@@ -432,7 +458,12 @@ async def _advance_restored_twitter_round(
             else:
                 connect_platform_channel(channel=original_channel, agent_graph=graph)
         _remaining(deadline)
-        return {"agent_id": agent_id, "post_id": post_id, "after_step": clock.time_step}
+        result = {"agent_id": agent_id, "post_id": post_id, "after_step": clock.time_step}
+        if expected_post_content is None:
+            if not _is_digest(channel.post_content_sha256):
+                raise RecordingError()
+            result["post_content_sha256"] = channel.post_content_sha256
+        return result
     except RecordingError as error:
         refusal_code = error.code
     except Exception:
@@ -831,8 +862,25 @@ def _read_acknowledged_twitter_action(native, database, manifest, result, names,
             or action["agent_name"] != names[agent_id] or action["action_type"] != "CREATE_POST"
             or type(action["action_args"]) is not dict
             or action["action_args"].keys() != {"content", "post_id"}
-            or action["action_args"]["content"] != content
             or not _integer(action["action_args"]["post_id"], result["post_id"], result["post_id"])):
+        raise RecordingError()
+    logged_content = action["action_args"]["content"]
+    if content is None:
+        _remaining(deadline)
+        with closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True, timeout=0)) as connection:
+            connection.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, MAX_JSON)
+            connection.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+            rows = connection.execute(
+                "SELECT user_id, content FROM post WHERE post_id = ? LIMIT 2", (result["post_id"],),
+            ).fetchmany(2)
+        if (_identity(_round_file_stat(_safe(database))) != identity
+                or len(rows) != 1 or not _integer(rows[0][0], agent_id, agent_id)
+                or rows[0][1] != logged_content):
+            raise RecordingError()
+        digest = _model_post_digest("2", (agent_id, rows[0][1], "create_post"))
+        if digest != result.get("post_content_sha256"):
+            raise RecordingError()
+    elif logged_content != content:
         raise RecordingError()
     _remaining(deadline)
     return action
@@ -995,10 +1043,12 @@ def _start_fresh_restored_twitter(
     try:
         if (type(timeout_seconds) not in (int, float) or not 1 <= timeout_seconds <= 600
                 or not callable(model_factory)
-                or type(expected_post_content) is not str or not expected_post_content):
+                or (expected_post_content is not None
+                    and (type(expected_post_content) is not str or not expected_post_content))):
             raise RecordingError("invalid_request")
         deadline = time.monotonic() + timeout_seconds
-        _wire_size(expected_post_content, MAX_WIRE)
+        if expected_post_content is not None:
+            _wire_size(expected_post_content, MAX_WIRE)
         return asyncio.run(_run_fresh_restored_twitter(
             prepared_dir, checkpoint_dir, child_dir, lineage, model_factory,
             expected_post_content, deadline,

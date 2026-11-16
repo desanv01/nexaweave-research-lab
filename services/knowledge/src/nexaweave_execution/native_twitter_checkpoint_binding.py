@@ -315,16 +315,18 @@ class NativeRestoredTwitterFactory:
     expected_lineage_sha256: str
     expected_producer_pid: int
     expected_producer_run: str
-    expected_post_content: str
+    expected_post_content: str | None
 
     def _checked_restore(self, request):
         request = _native_request(self.prepared, request)
         producer_run = canonical_uuid(self.expected_producer_run)
         producer_pid = self.expected_producer_pid
         expected_digest = sha256(self.expected_lineage_sha256)
+        expected_post_content = self.expected_post_content
         if (producer_run == request.run_id or type(producer_pid) is not int
                 or not 1 <= producer_pid <= 2_147_483_647 or producer_pid == os.getpid()
-                or type(self.expected_post_content) is not str or not self.expected_post_content):
+                or (expected_post_content is not None
+                    and (type(expected_post_content) is not str or not expected_post_content))):
             raise ValueError("invalid owned Twitter restore authorization")
         prepared_dir = self.prepared._root()
         checkpoint_dir = _directory(self.checkpoint_dir)
