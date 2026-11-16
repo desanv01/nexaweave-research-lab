@@ -7,7 +7,7 @@ CAMEL-compatible model objects under a separate, approved budget policy.
 from __future__ import annotations
 
 import asyncio
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, asynccontextmanager, contextmanager
 import csv
 from datetime import datetime
 import hashlib
@@ -215,9 +215,8 @@ def _bind_prestart_twitter_child(path, identity, clock, start_time, deadline, ha
 
 
 @contextmanager
-def open_prestart_twitter_child(child_dir, *, database_bytes, database_sha256,
-                                clock, start_time, deadline_monotonic):
-    """Bind a private existing checkpoint copy for pre-start, SELECT-only use."""
+def _open_bound_twitter_child(child_dir, *, database_bytes, database_sha256,
+                              clock, start_time, deadline_monotonic):
     path, identity = _verify_child_database(
         child_dir, database_bytes, database_sha256, deadline_monotonic,
     )
@@ -233,7 +232,7 @@ def open_prestart_twitter_child(child_dir, *, database_bytes, database_sha256,
             raise
         except Exception:
             raise NeutralCapabilityError("internal_error") from None
-        yield platform
+        yield platform, handles
     except BaseException:
         try:
             handles.close()
@@ -245,6 +244,169 @@ def open_prestart_twitter_child(child_dir, *, database_bytes, database_sha256,
             handles.close()
         except Exception:
             raise NeutralCapabilityError("internal_error") from None
+
+
+@contextmanager
+def open_prestart_twitter_child(child_dir, *, database_bytes, database_sha256,
+                                clock, start_time, deadline_monotonic):
+    """Bind a private existing checkpoint copy for pre-start, SELECT-only use."""
+    with _open_bound_twitter_child(
+        child_dir, database_bytes=database_bytes, database_sha256=database_sha256,
+        clock=clock, start_time=start_time, deadline_monotonic=deadline_monotonic,
+    ) as (platform, _):
+        yield platform
+
+
+def _exit_only_child_channel():
+    from oasis import ActionType
+    from oasis.social_platform.channel import Channel
+
+    class ExitOnlyChildChannel(Channel):
+        """Allow the pinned native writer to receive only its owned EXIT."""
+
+        def __init__(self):
+            super().__init__()
+            self._exit_request = None
+            self.exit_received = False
+
+        async def write_to_receive_queue(self, action_info):
+            if (self._exit_request is not None or type(action_info) is not tuple
+                    or len(action_info) != 3 or action_info[0] is not None
+                    or action_info[1] is not None or action_info[2] is not ActionType.EXIT):
+                raise NeutralCapabilityError("internal_error")
+            self._exit_request = action_info
+            return await super().write_to_receive_queue(action_info)
+
+        async def receive_from(self):
+            message_id, action_info = await super().receive_from()
+            if (self._exit_request is None or action_info is not self._exit_request
+                    or self.exit_received):
+                raise NeutralCapabilityError("internal_error")
+            self.exit_received = True
+            return message_id, action_info
+
+    return ExitOnlyChildChannel()
+
+
+def _child_writer_closed_normally(writer_task, channel):
+    if writer_task.cancelled():
+        return False
+    return writer_task.exception() is None and channel.exit_received
+
+
+def _release_terminal_child_writer(writer_task, channel, handles):
+    if _child_writer_closed_normally(writer_task, channel):
+        handles.pop_all()
+    else:
+        handles.close()
+
+
+async def _cancel_child_writer(writer_task, channel, handles, deadline):
+    writer_task.cancel()
+    try:
+        if not writer_task.done():
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                await asyncio.wait((writer_task,), timeout=remaining)
+    finally:
+        if writer_task.done():
+            if _child_writer_closed_normally(writer_task, channel):
+                handles.pop_all()
+        else:
+            retained = handles.pop_all()
+
+            def release_when_terminal(task):
+                try:
+                    _release_terminal_child_writer(task, channel, retained)
+                except Exception:
+                    task.get_loop().call_exception_handler({
+                        "message": "Native child handle cleanup failed",
+                        "exception": NeutralCapabilityError("internal_error"),
+                    })
+
+            writer_task.add_done_callback(release_when_terminal)
+
+
+async def _stop_staged_twitter_writer(channel, writer_task, handles, deadline):
+    try:
+        from oasis import ActionType
+
+        remaining = deadline - time.monotonic()
+        if writer_task.done() or remaining <= 0:
+            raise NeutralCapabilityError("internal_error")
+        async with asyncio.timeout(remaining):
+            await channel.write_to_receive_queue((None, None, ActionType.EXIT))
+            await asyncio.shield(writer_task)
+        if not _child_writer_closed_normally(writer_task, channel):
+            raise NeutralCapabilityError("internal_error")
+        # The pinned EXIT branch closed both handles before returning.
+        handles.pop_all()
+        if time.monotonic() >= deadline:
+            raise NeutralCapabilityError("internal_error")
+    except BaseException as error:
+        try:
+            await _cancel_child_writer(writer_task, channel, handles, deadline)
+        except asyncio.CancelledError:
+            pass  # The completion callback still owns the retained handles.
+        if not isinstance(error, Exception):
+            raise
+        raise NeutralCapabilityError("internal_error") from None
+
+
+@asynccontextmanager
+async def open_staged_twitter_child_writer(child_dir, *, database_bytes, database_sha256,
+                                           clock, start_time, deadline_monotonic):
+    """Give a verified, independently staged child to one native writer."""
+    with _open_bound_twitter_child(
+        child_dir, database_bytes=database_bytes, database_sha256=database_sha256,
+        clock=clock, start_time=start_time, deadline_monotonic=deadline_monotonic,
+    ) as (platform, handles):
+        connection, cursor = platform.db, platform.db_cursor
+        utils = platform.pl_utils
+        try:
+            _child_deadline(deadline_monotonic)
+            if (connection.in_transaction or cursor.connection is not connection
+                    or utils.db is not connection or utils.db_cursor is not cursor
+                    or utils.sandbox_clock is not clock or platform.sandbox_clock is not clock
+                    or cursor.execute("PRAGMA query_only").fetchone() != (1,)):
+                raise NeutralCapabilityError("internal_error")
+            cursor.execute("PRAGMA query_only = OFF")
+            if (cursor.execute("PRAGMA query_only").fetchone() != (0,)
+                    or connection.in_transaction):
+                raise NeutralCapabilityError("internal_error")
+            _child_deadline(deadline_monotonic)
+        except sqlite3.Error:
+            raise NeutralCapabilityError("internal_error") from None
+
+        channel = _exit_only_child_channel()
+        platform.channel = channel
+        writer_task = asyncio.create_task(platform.running())
+        try:
+            await asyncio.sleep(0)
+            if writer_task.done():
+                writer_task.result()
+                raise NeutralCapabilityError("internal_error")
+            _child_deadline(deadline_monotonic)
+        except BaseException:
+            try:
+                await _cancel_child_writer(writer_task, channel, handles, deadline_monotonic)
+            except asyncio.CancelledError:
+                pass  # Preserve the startup failure after ownership transfer.
+            raise
+
+        try:
+            yield platform, writer_task
+        except BaseException:
+            try:
+                await _stop_staged_twitter_writer(
+                    channel, writer_task, handles, deadline_monotonic,
+                )
+            except BaseException:
+                # A failed shutdown must not replace the caller's exception.
+                pass
+            raise
+        else:
+            await _stop_staged_twitter_writer(channel, writer_task, handles, deadline_monotonic)
 
 
 class NativeSimulationSession:

@@ -1,5 +1,6 @@
 """One real offline native Twitter round and its materialized recording cut."""
 
+import asyncio
 import json
 import random
 import sqlite3
@@ -17,7 +18,11 @@ from camel.types import OpenAIBackendRole
 from app.services.knowledge_report_tools import NeutralCapabilityError
 from app.services.native_checkpoint_memory import restore_native_memory
 from app.services.native_recording_contracts import RecordingAnchors
-from app.services.native_simulation import NativeSimulationSession, open_prestart_twitter_child
+from app.services.native_simulation import (
+    NativeSimulationSession,
+    open_prestart_twitter_child,
+    open_staged_twitter_child_writer,
+)
 from test_native_prepared_workflow import _offline_model, _prepared
 from test_native_recordings import _offline_boundary  # noqa: F401 (autouse fixture)
 
@@ -269,6 +274,65 @@ def _assert_existing_child_prestart(destination, database, receipt, clock, trace
         assert refused.value.code == "internal_error"
     (failure_db, failure_cursor), = failed_handles
     _assert_prestart_handles_closed(failure_db, failure_cursor)
+    assert _observed_tick(clock) == clock_tick
+
+
+def _stage_writer_child(child_dir, checkpoint_db, receipt, deadline):
+    size = receipt["database_bytes"]
+    assert type(size) is int and 0 < size <= _DATABASE_LIMIT
+    assert checkpoint_db.is_file() and not checkpoint_db.is_symlink()
+    assert checkpoint_db.stat().st_size == size
+    child_dir.mkdir(mode=0o700)
+    child_db = child_dir / "native.sqlite3"
+    digest = sha256()
+    left = size
+    with checkpoint_db.open("rb") as source, child_db.open("xb") as target:
+        while left:
+            assert monotonic() < deadline
+            chunk = source.read(min(left, 64 * 1024))
+            assert chunk
+            assert target.write(chunk) == len(chunk)
+            digest.update(chunk)
+            left -= len(chunk)
+        assert source.read(1) == b""
+    assert monotonic() < deadline
+    assert digest.hexdigest() == receipt["database_sha256"]
+    assert child_db.stat().st_size == size and child_db.stat().st_nlink == 1
+    assert not child_db.samefile(checkpoint_db)
+    return child_db
+
+
+async def _assert_existing_child_writer(child_dir, child_db, receipt, clock, trace_row, deadline):
+    from oasis.social_platform.platform import Platform
+
+    clock_tick = _observed_tick(clock)
+    start_time = datetime(2026, 1, 1)
+    existing_tasks = asyncio.all_tasks()
+    async with open_staged_twitter_child_writer(
+        child_dir, database_bytes=receipt["database_bytes"],
+        database_sha256=receipt["database_sha256"], clock=clock,
+        start_time=start_time, deadline_monotonic=deadline,
+    ) as (platform, writer):
+        assert isinstance(platform, Platform) and platform.running.__func__ is Platform.running
+        assert isinstance(writer, asyncio.Task) and not writer.done()
+        assert asyncio.all_tasks() - existing_tasks == {writer}
+        assert writer.get_coro().__qualname__ == Platform.running.__qualname__
+        db, cursor = platform.db, platform.db_cursor
+        assert cursor.connection is db
+        assert platform.pl_utils.db is db and platform.pl_utils.db_cursor is cursor
+        assert platform.sandbox_clock is clock and platform.start_time is start_time
+        assert cursor.execute("PRAGMA query_only").fetchone() == (0,)
+        databases = cursor.execute("PRAGMA database_list").fetchmany(2)
+        assert len(databases) == 1 and databases[0][1:] == ("main", str(child_db))
+        assert cursor.execute(
+            "SELECT rowid, user_id, action, info, created_at FROM trace WHERE rowid = ?",
+            (trace_row[0],),
+        ).fetchone() == trace_row
+        assert not db.in_transaction and _observed_tick(clock) == clock_tick
+        assert not writer.done()
+    assert writer.done() and not writer.cancelled() and writer.exception() is None
+    assert asyncio.all_tasks() == existing_tasks
+    _assert_prestart_handles_closed(db, cursor)
     assert _observed_tick(clock) == clock_tick
 
 
@@ -562,6 +626,18 @@ def test_actual_twitter_round_capture_preserves_native_cut(tmp_path, monkeypatch
     parent_rows = _native_rows(native)
     _assert_existing_child_prestart(destination, database, receipt, observed_clock[-1][0],
                                     trace[-1], monkeypatch)
+    assert (parent_database[0] + sum(evidence[0] for evidence in copied_before.values())
+            + receipt["database_bytes"]) <= 160 * 1024 * 1024
+    writer_dir = tmp_path / "writer-child"
+    writer_deadline = monotonic() + 10
+    child_db = _stage_writer_child(writer_dir, database, receipt, writer_deadline)
+    assert not child_db.samefile(native)
+    child_before = _artifact(child_db, _DATABASE_LIMIT)
+    asyncio.run(_assert_existing_child_writer(writer_dir, child_db, receipt,
+                                              observed_clock[-1][0], trace[-1], writer_deadline))
+    assert sorted(islice(writer_dir.iterdir(), 2)) == [child_db]
+    assert _artifact(child_db, _DATABASE_LIMIT) == child_before
+    assert _native_rows(child_db) == backup_rows
     assert sorted(islice(destination.iterdir(), 6)) == entries
     assert {file: _artifact(file, limit) for file, limit in limits.items()} == copied_before
     assert _native_rows(database) == backup_rows
