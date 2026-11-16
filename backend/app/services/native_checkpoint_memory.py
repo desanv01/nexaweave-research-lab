@@ -5,6 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 import json
 import math
+import time
 
 from camel.memories import ChatHistoryMemory, MemoryRecord, ScoreBasedContextCreator
 from camel.memories.blocks.chat_history_block import ChatHistoryBlock
@@ -32,6 +33,56 @@ _ROLE_NAME_PATH = ("records", None, "message", "role_name")
 _SYSTEM_ROLE_NAME_TAG = {"$camel_role_name": "system"}
 
 
+class NativeMemoryCaptureBudget:
+    """One nonrefillable allowance for the memory artifact at a held cut."""
+
+    __slots__ = ("_remaining_bytes", "_remaining_nodes", "_deadline_monotonic")
+
+    def __init__(self, *, max_bytes, deadline_monotonic):
+        if (type(max_bytes) is not int or not 0 < max_bytes <= MAX_JSON
+                or type(deadline_monotonic) not in (int, float)):
+            raise RecordingError("invalid_request")
+        try:
+            if not math.isfinite(deadline_monotonic):
+                raise RecordingError("invalid_request")
+        except OverflowError:
+            raise RecordingError("invalid_request") from None
+        self._remaining_bytes = max_bytes
+        self._remaining_nodes = _MAX_NODES
+        self._deadline_monotonic = deadline_monotonic
+        self.check()
+
+    @property
+    def remaining_bytes(self):
+        return self._remaining_bytes
+
+    @property
+    def remaining_nodes(self):
+        return self._remaining_nodes
+
+    @property
+    def deadline_monotonic(self):
+        return self._deadline_monotonic
+
+    def check(self):
+        if time.monotonic() >= self._deadline_monotonic:
+            raise RecordingError("limit_exceeded")
+
+    def charge_bytes(self, amount):
+        self.check()
+        if type(amount) is not int or amount < 0:
+            raise RecordingError("invalid_request")
+        if amount > self._remaining_bytes:
+            raise RecordingError("limit_exceeded")
+        self._remaining_bytes -= amount
+
+    def charge_node(self):
+        self.check()
+        if self._remaining_nodes == 0:
+            raise RecordingError("limit_exceeded")
+        self._remaining_nodes -= 1
+
+
 def _check_owner(agent_id):
     if type(agent_id) is not str or not IDENTIFIER.fullmatch(agent_id):
         raise RecordingError("invalid_request")
@@ -52,11 +103,16 @@ def _charge_bytes(budget, minimum):
         raise RecordingError("limit_exceeded")
 
 
-def _preflight_tree(value, budget, path=()):
+def _preflight_tree(value, bounds, capture_budget, path=()):
     """Reject impossible live payloads before UTF-8 work or copying."""
-    budget[1] -= 1
-    if budget[1] < 0 or len(path) > _MAX_DEPTH:
+    if len(path) > _MAX_DEPTH:
         raise RecordingError("limit_exceeded")
+    if capture_budget is None:
+        bounds[1] -= 1
+        if bounds[1] < 0:
+            raise RecordingError("limit_exceeded")
+    else:
+        capture_budget.charge_node()
 
     if path == _ROLE_NAME_PATH:
         # OASIS stores a real enum in this slot for data-driven system history.
@@ -68,30 +124,30 @@ def _preflight_tree(value, budget, path=()):
     kind = type(value)
     if kind is str:
         # Each character needs at least one JSON byte, plus the quotes.
-        _charge_bytes(budget, len(value) + 2)
+        _charge_bytes(bounds, len(value) + 2)
     elif value is None:
-        _charge_bytes(budget, 4)
+        _charge_bytes(bounds, 4)
     elif kind is bool:
-        _charge_bytes(budget, 4 if value else 5)
+        _charge_bytes(bounds, 4 if value else 5)
     elif kind is int:
         if not -(2**63) <= value < 2**63:
             raise RecordingError()
-        _charge_bytes(budget, len(str(value)))
+        _charge_bytes(bounds, len(str(value)))
     elif kind is float:
         if not math.isfinite(value):
             raise RecordingError()
-        _charge_bytes(budget, 1)
+        _charge_bytes(bounds, 1)
     elif kind is list:
-        _charge_bytes(budget, 2 + max(0, len(value) - 1))
+        _charge_bytes(bounds, 2 + max(0, len(value) - 1))
         for item in value:
-            _preflight_tree(item, budget, path + (None,))
+            _preflight_tree(item, bounds, capture_budget, path + (None,))
     elif kind is dict:
-        _charge_bytes(budget, 2 + len(value) + max(0, len(value) - 1))
+        _charge_bytes(bounds, 2 + len(value) + max(0, len(value) - 1))
         for key, item in value.items():
             if type(key) is not str or len(key) > 256:
                 raise RecordingError()
-            _charge_bytes(budget, len(key) + 2)
-            _preflight_tree(item, budget, path + (key,))
+            _charge_bytes(bounds, len(key) + 2)
+            _preflight_tree(item, bounds, capture_budget, path + (key,))
     else:
         raise RecordingError()
 
@@ -103,22 +159,28 @@ def _encode_system_role_name(value):
     raise TypeError
 
 
-def _encode_payload(payload):
+def _encode_payload(payload, byte_limit, budget):
     try:
-        _preflight_tree(payload, [MAX_JSON, _MAX_NODES])
+        _preflight_tree(payload, [byte_limit, _MAX_NODES], budget)
+        if budget is not None:
+            budget.check()
         encoded = bytearray()
         encoder = json.JSONEncoder(
             ensure_ascii=False, allow_nan=False, separators=(",", ":"),
             default=_encode_system_role_name,
         )
         for chunk in encoder.iterencode(payload):
-            remaining = MAX_JSON - len(encoded)
+            if budget is not None:
+                budget.check()
+            remaining = byte_limit - len(encoded)
             if len(chunk) > remaining:
                 raise RecordingError("limit_exceeded")
             data = chunk.encode("utf-8")
             if len(data) > remaining:
                 raise RecordingError("limit_exceeded")
             encoded.extend(data)
+        if budget is not None:
+            budget.check()
         return bytes(encoded)
     except RecordingError:
         raise
@@ -130,18 +192,25 @@ def _nonempty_string(value):
     return type(value) is str and bool(value)
 
 
-def _check_tool_calls(tool_calls):
+def _check_tool_calls(tool_calls, budget):
     if type(tool_calls) is not list:
         raise RecordingError()
     for call in tool_calls:
+        if budget is not None:
+            budget.check()
         if (type(call) is not dict or call.keys() != {"id", "type", "function"}
                 or not _nonempty_string(call["id"]) or call["type"] != "function"):
             raise RecordingError()
         function = call["function"]
         if (type(function) is not dict or function.keys() != {"name", "arguments"}
                 or not _nonempty_string(function["name"])
-                or type(function["arguments"]) is not str
-                or type(strict_json(function["arguments"])) is not dict):
+                or type(function["arguments"]) is not str):
+            raise RecordingError()
+        limit = MAX_JSON if budget is None else budget.remaining_bytes
+        arguments = strict_json(function["arguments"], limit)
+        if budget is not None:
+            budget.check()
+        if type(arguments) is not dict:
             raise RecordingError()
 
 
@@ -165,7 +234,7 @@ def _check_function_message(message, backend_role):
         raise RecordingError()
 
 
-def _decode_message(message, backend_role):
+def _decode_message(message, backend_role, budget):
     if (type(message) is not dict or not _MESSAGE_FIELDS <= message.keys()
             or type(message["role_type"]) is not str or type(message["content"]) is not str
             or any(message.get(key) is not None for key in ("image_list", "video_bytes", "parsed"))
@@ -195,10 +264,12 @@ def _decode_message(message, backend_role):
     if "tool_calls" in message:
         if backend_role != "assistant":
             raise RecordingError()
-        _check_tool_calls(message["tool_calls"])
+        _check_tool_calls(message["tool_calls"], budget)
 
 
-def _check_record(record, agent_id):
+def _check_record(record, agent_id, budget):
+    if budget is not None:
+        budget.check()
     if type(record) is not dict or record.keys() != _RECORD_FIELDS:
         raise RecordingError()
     if (type(record["uuid"]) is not str
@@ -210,18 +281,26 @@ def _check_record(record, agent_id):
             or any(type(value) is not str for value in record["extra_info"].values())):
         raise RecordingError()
 
-    _decode_message(record["message"], record["role_at_backend"])
+    _decode_message(record["message"], record["role_at_backend"], budget)
+    if budget is not None:
+        budget.check()
     # Run the real codec as a second guard on a copy of the validated subset.
     try:
         MemoryRecord.from_dict(deepcopy(record)).to_openai_message()
     except (TypeError, ValueError, KeyError, AttributeError, OverflowError):
         raise RecordingError() from None
+    if budget is not None:
+        budget.check()
 
 
-def _validated_payload(raw, agent_id, token_limit):
+def _validated_payload(raw, agent_id, token_limit, byte_limit=MAX_JSON, budget=None):
     if type(raw) is not bytes:
         raise RecordingError("invalid_request")
-    payload = strict_json(raw)
+    if budget is not None:
+        budget.check()
+    payload = strict_json(raw, byte_limit)
+    if budget is not None:
+        budget.check()
     if (type(payload) is not dict or payload.keys() != _FIELDS
             or payload["kind"] != _KIND
             or type(payload["version"]) is not int or payload["version"] != 1
@@ -236,12 +315,17 @@ def _validated_payload(raw, agent_id, token_limit):
             or type(keep_rate) not in (int, float) or not 0 <= keep_rate <= 1):
         raise RecordingError()
     for record in payload["records"]:
-        _check_record(record, agent_id)
+        _check_record(record, agent_id, budget)
     return payload
 
 
-def capture_native_memory(memory, *, expected_agent_id):
+def capture_native_memory(memory, *, expected_agent_id, budget=None):
     """Materialize all history while the caller holds the native round fence."""
+    if budget is not None and type(budget) is not NativeMemoryCaptureBudget:
+        raise RecordingError("invalid_request")
+    byte_limit = MAX_JSON if budget is None else budget.remaining_bytes
+    if budget is not None:
+        budget.check()
     _check_owner(expected_agent_id)
     if type(memory) is not ChatHistoryMemory or memory.agent_id != expected_agent_id:
         raise RecordingError()
@@ -259,8 +343,10 @@ def capture_native_memory(memory, *, expected_agent_id):
         "keep_rate": block.keep_rate,
         "token_limit": limit,
         "records": block.storage.memory_list,
-    })
-    _validated_payload(raw, expected_agent_id, limit)
+    }, byte_limit, budget)
+    _validated_payload(raw, expected_agent_id, limit, byte_limit, budget)
+    if budget is not None:
+        budget.charge_bytes(len(raw))
     return raw
 
 

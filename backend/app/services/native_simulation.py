@@ -75,16 +75,24 @@ class NativeSimulationSession:
             from .native_recording_contracts import RecordingAnchors
             from .native_round_capture import NativeRoundCapture
             if (type(round_capture) is not dict
-                    or set(round_capture) != {"destination", "anchors"}
+                    or not 2 <= len(round_capture) <= 3
+                    or not {"destination", "anchors"} <= round_capture.keys()
+                    or set(round_capture) - {"destination", "anchors", "include_memory"}
+                    or type(round_capture.get("include_memory", False)) is not bool
                     or type(round_capture["anchors"]) is not RecordingAnchors
                     or round_capture["anchors"].graph_id != self.graph_id
                     or round_capture["anchors"].simulation_id != self.simulation_id
                     or self._platforms != ("twitter",) or self.max_rounds != 1):
                 raise NeutralCapabilityError("invalid_request")
+            include_memory = round_capture.get("include_memory", False)
+            if include_memory and not 1 <= len(self._agents) <= 128:
+                raise NeutralCapabilityError("invalid_request")
             self._round_capture = NativeRoundCapture(
                 simulation_dir=self.simulation_dir,
                 destination=round_capture["destination"],
-                anchors=round_capture["anchors"])
+                anchors=round_capture["anchors"],
+                include_memory=include_memory,
+                prepared_agent_ids=tuple(self._agents) if include_memory else None)
 
     def _preflight(self):
         try:
