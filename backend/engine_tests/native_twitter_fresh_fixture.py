@@ -463,7 +463,7 @@ def assert_fresh_twitter_continuation(tmp_path, request, original_pid, terminal,
     producer, originals, prepared, capture_request = _prepared_twitter(
         tmp_path / "fresh-producer", request, 1, _producer_models,
     )
-    checkpoint = tmp_path / "fresh-checkpoint"
+    checkpoint = producer.parent / "fresh-checkpoint"
     lineage_dir = tmp_path / "fresh-lineage"
     lineage_path = lineage_dir / "lineage.json"
     restore_dir = tmp_path / "fresh-restored"
