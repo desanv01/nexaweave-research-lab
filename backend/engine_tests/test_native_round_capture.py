@@ -5,8 +5,10 @@ import random
 import sqlite3
 import struct
 from contextlib import closing
+from datetime import datetime
 from hashlib import sha256
 from itertools import islice
+from time import monotonic
 from uuid import UUID
 
 import pytest
@@ -15,7 +17,7 @@ from camel.types import OpenAIBackendRole
 from app.services.knowledge_report_tools import NeutralCapabilityError
 from app.services.native_checkpoint_memory import restore_native_memory
 from app.services.native_recording_contracts import RecordingAnchors
-from app.services.native_simulation import NativeSimulationSession
+from app.services.native_simulation import NativeSimulationSession, open_prestart_twitter_child
 from test_native_prepared_workflow import _offline_model, _prepared
 from test_native_recordings import _offline_boundary  # noqa: F401 (autouse fixture)
 
@@ -206,6 +208,68 @@ def _observed_tick(clock):
     assert type(tick) is int and 0 <= tick < 2**63
     assert clock.get_time_step() == str(tick)
     return tick
+
+
+def _assert_prestart_handles_closed(db, cursor):
+    with pytest.raises(sqlite3.ProgrammingError, match=r"^Cannot operate on a closed cursor\.$"):
+        cursor.execute("SELECT 1")
+    with pytest.raises(sqlite3.ProgrammingError, match=r"^Cannot operate on a closed database\.$"):
+        db.execute("SELECT 1")
+
+
+def _assert_existing_child_prestart(destination, database, receipt, clock, trace_row, monkeypatch):
+    from oasis.social_platform.platform import Platform, PlatformUtils
+
+    start_time = datetime(2026, 1, 1)
+    clock_tick = _observed_tick(clock)
+    deadline = monotonic() + 10
+    options = {
+        "database_bytes": receipt["database_bytes"],
+        "database_sha256": receipt["database_sha256"],
+        "clock": clock,
+        "start_time": start_time,
+        "deadline_monotonic": deadline,
+    }
+    with open_prestart_twitter_child(destination, **options) as platform:
+        assert isinstance(platform, Platform) and type(platform) is not Platform
+        assert platform.running.__func__ is Platform.running
+        assert type(platform.pl_utils) is PlatformUtils
+        db, cursor = platform.db, platform.db_cursor
+        assert type(db) is sqlite3.Connection and type(cursor) is sqlite3.Cursor
+        assert cursor.connection is db
+        assert platform.pl_utils.db is db and platform.pl_utils.db_cursor is cursor
+        assert platform.sandbox_clock is clock and platform.pl_utils.sandbox_clock is clock
+        assert platform.start_time is start_time and platform.pl_utils.start_time is start_time
+        assert not db.in_transaction
+        databases = cursor.execute("PRAGMA database_list").fetchmany(2)
+        assert len(databases) == 1 and databases[0][1:] == ("main", str(database))
+        assert cursor.execute(
+            "SELECT rowid, user_id, action, info, created_at FROM trace WHERE rowid = ?",
+            (trace_row[0],),
+        ).fetchone() == trace_row
+        assert not db.in_transaction and _observed_tick(clock) == clock_tick
+    _assert_prestart_handles_closed(db, cursor)
+
+    failed_handles = []
+
+    def refuse_utils(_self, *args, **kwargs):
+        values = (*args, *kwargs.values())
+        failure_db, = (value for value in values if type(value) is sqlite3.Connection)
+        failure_cursor, = (value for value in values if type(value) is sqlite3.Cursor)
+        assert failure_cursor.connection is failure_db
+        assert failure_db is not db and failure_cursor is not cursor
+        failed_handles.append((failure_db, failure_cursor))
+        raise RuntimeError("intentional test-only PlatformUtils initialization failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(PlatformUtils, "__init__", refuse_utils)
+        with pytest.raises(NeutralCapabilityError) as refused:
+            with open_prestart_twitter_child(destination, **options):
+                pytest.fail("native binding failure must not yield a platform")
+        assert refused.value.code == "internal_error"
+    (failure_db, failure_cursor), = failed_handles
+    _assert_prestart_handles_closed(failure_db, failure_cursor)
+    assert _observed_tick(clock) == clock_tick
 
 
 def test_actual_twitter_round_capture_preserves_native_cut(tmp_path, monkeypatch):
@@ -494,3 +558,14 @@ def test_actual_twitter_round_capture_preserves_native_cut(tmp_path, monkeypatch
     assert session._closed and session._results == {}
     assert random.getstate() == ambient_rng
     assert not (root / "reddit_simulation.db").exists()
+    parent_database = _artifact(native, _DATABASE_LIMIT)
+    parent_rows = _native_rows(native)
+    _assert_existing_child_prestart(destination, database, receipt, observed_clock[-1][0],
+                                    trace[-1], monkeypatch)
+    assert sorted(islice(destination.iterdir(), 6)) == entries
+    assert {file: _artifact(file, limit) for file, limit in limits.items()} == copied_before
+    assert _native_rows(database) == backup_rows
+    assert _artifact(native, _DATABASE_LIMIT) == parent_database
+    assert _native_rows(native) == parent_rows
+    assert _read_bounded(parent_log, _LOG_LIMIT) == parent
+    assert model.calls == model_calls and random.getstate() == ambient_rng
