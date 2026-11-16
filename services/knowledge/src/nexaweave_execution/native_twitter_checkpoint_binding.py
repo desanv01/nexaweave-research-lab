@@ -235,7 +235,7 @@ class NativeTwitterCaptureFactory:
 
     def _checked_capture(self, request):
         request = _native_request(self.prepared, request)
-        if request.max_rounds != 1:
+        if request.schema_version != 1 or request.max_rounds != 1:
             raise ValueError("invalid owned Twitter capture request")
         prepared_dir = self.prepared._root()
         identities = _prepared_identities(prepared_dir)
@@ -285,7 +285,8 @@ class _RestoredTwitterSession:
         self._started = True
         factory = self._factory
         deadline = time.monotonic() + factory.prepared.timeout_seconds
-        prepared_dir, checkpoint_dir, child_dir, lineage = factory._checked_restore(self._request)
+        request = _native_request(factory.prepared, self._request)
+        prepared_dir, checkpoint_dir, child_dir, lineage = factory._checked_restore(request)
         from app.services.native_twitter_restore import _start_fresh_restored_twitter
 
         remaining = deadline - time.monotonic()
@@ -318,10 +319,14 @@ class NativeRestoredTwitterFactory:
     expected_post_content: str | None
 
     def _checked_restore(self, request):
-        request = _native_request(self.prepared, request)
         producer_run = canonical_uuid(self.expected_producer_run)
         producer_pid = self.expected_producer_pid
         expected_digest = sha256(self.expected_lineage_sha256)
+        if (request.schema_version == 2
+                and (request.source_run_id != producer_run
+                     or request.checkpoint_sha256 != expected_digest)):
+            raise ValueError("owned Twitter continuation binding mismatch")
+        self.prepared._check_prepared_request(request)
         expected_post_content = self.expected_post_content
         if (producer_run == request.run_id or type(producer_pid) is not int
                 or not 1 <= producer_pid <= 2_147_483_647 or producer_pid == os.getpid()
@@ -349,8 +354,9 @@ class NativeRestoredTwitterFactory:
         return prepared_dir, checkpoint_dir, child_dir, lineage
 
     def validate(self, request):
+        request = _native_request(self.prepared, request)
         self._checked_restore(request)
-        self.prepared.validate(request)
+        self.prepared._validate_prepared_files(request)
 
     def create_session(self, request):
         self.validate(request)

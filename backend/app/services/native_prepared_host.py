@@ -29,29 +29,47 @@ class NativePreparedHost:
         from nexaweave_execution.native_owned_binding import NativeOwnedSessionFactory
         from nexaweave_execution.native_process_driver import NativeProcessDriver
         from nexaweave_execution.native_run_contracts import (
-            InvalidNativeRun, NativeRunDenied, NativeRunRequest, principal_id)
+            InvalidNativeRun, NativeRunDenied, NativeRunRequest, canonical_uuid, principal_id, sha256)
         from nexaweave_execution.native_run_coordinator import NativeRunCoordinator
         from nexaweave_execution.native_run_store import NativeRunStore
         from nexaweave_execution.native_run_supervisor import NativeRunSupervisor
+        from nexaweave_execution.native_twitter_checkpoint_binding import (
+            NativeRestoredTwitterFactory, NativeTwitterCaptureFactory)
 
         bound_principal = principal_id(principal)
         bound_request = NativeRunRequest.from_wire(request)
         if bound_request.principal != bound_principal:
             raise NativeRunDenied()
-        if (bound_request.schema_version != 1
-                or type(session_factory) is not NativeOwnedSessionFactory
-                or not callable(connection_factory)
+        if (not callable(connection_factory)
                 or (dispatch_allowed is not None and not callable(dispatch_allowed))):
+            raise InvalidNativeRun()
+        factory_type = type(session_factory)
+        version = bound_request.schema_version
+        if version == 1 and factory_type is NativeOwnedSessionFactory:
+            prepared = session_factory
+        elif ((version == 1 and factory_type is NativeTwitterCaptureFactory)
+              or (version == 2 and factory_type is NativeRestoredTwitterFactory)):
+            prepared = session_factory.prepared
+            if (type(prepared) is not NativeOwnedSessionFactory
+                    or bound_request.platforms != ("twitter",) or bound_request.max_rounds != 1):
+                raise InvalidNativeRun()
+        else:
             raise InvalidNativeRun()
         # Check only scalar binding fields here. In particular, do not call
         # validate(): it reads artifacts before store authorization.
-        if (session_factory.principal != bound_principal
-                or session_factory.project_id != str(bound_request.project_id)
-                or session_factory.project_revision != bound_request.project_revision
-                or session_factory.simulation_id != bound_request.simulation_id
-                or session_factory.platforms != bound_request.platforms
-                or session_factory.seed != bound_request.seed
-                or session_factory.max_rounds != bound_request.max_rounds):
+        if (prepared.principal != bound_principal
+                or prepared.project_id != str(bound_request.project_id)
+                or prepared.project_revision != bound_request.project_revision
+                or prepared.simulation_id != bound_request.simulation_id
+                or prepared.platforms != bound_request.platforms
+                or prepared.seed != bound_request.seed
+                or prepared.max_rounds != bound_request.max_rounds
+                or (factory_type is not NativeOwnedSessionFactory
+                    and prepared.runtime_sha256 != bound_request.runtime_sha256)):
+            raise NativeRunDenied()
+        if version == 2 and (
+                canonical_uuid(session_factory.expected_producer_run) != bound_request.source_run_id
+                or sha256(session_factory.expected_lineage_sha256) != bound_request.checkpoint_sha256):
             raise NativeRunDenied()
 
         driver_bounds = (handshake_seconds, observe_seconds, grace_seconds,

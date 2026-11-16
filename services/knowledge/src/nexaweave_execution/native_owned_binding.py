@@ -112,7 +112,13 @@ class NativeOwnedSessionFactory:
     def validate(self, request) -> None:
         from nexaweave_execution.native_run_contracts import NativeRunRequest
         request = NativeRunRequest.from_wire(request)
-        if (request.schema_version != 1 or request.principal != self.principal
+        if request.schema_version != 1:
+            raise ValueError("owned native binding mismatch")
+        self._check_prepared_request(request)
+        self._validate_prepared_files(request)
+
+    def _check_prepared_request(self, request) -> None:
+        if (request.principal != self.principal
                 or str(request.project_id) != self.project_id
                 or request.project_revision != self.project_revision
                 or request.simulation_id != self.simulation_id
@@ -121,6 +127,8 @@ class NativeOwnedSessionFactory:
                 or request.runtime_sha256 != self.runtime_sha256
                 or not callable(self.model_factory)):
             raise ValueError("owned native binding mismatch")
+
+    def _validate_prepared_files(self, request) -> None:
         root = self._root()
         names = ("state.json", "simulation_config.json", "source_grounding.json")
         if "twitter" in self.platforms:
