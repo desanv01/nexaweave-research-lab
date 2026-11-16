@@ -111,7 +111,10 @@ def _verify_child_database(child_dir, database_bytes, database_sha256, deadline)
         digest = hashlib.sha256()
         remaining = database_bytes
         with path.open("rb") as stream:
-            if _child_file_identity(os.fstat(stream.fileno())) != identity:
+            opened = _child_file_identity(os.fstat(stream.fileno()))
+            # Windows path and descriptor stat expose different ctime semantics.
+            common_fields = 4 if os.name == "nt" else 5
+            if opened[:common_fields] != identity[:common_fields]:
                 raise NeutralCapabilityError("invalid_request")
             while remaining:
                 _child_deadline(deadline)
@@ -126,8 +129,11 @@ def _verify_child_database(child_dir, database_bytes, database_sha256, deadline)
                 remaining -= len(chunk)
                 digest.update(chunk)
             _child_deadline(deadline)
-            if (stream.read(1) or _child_file_identity(os.fstat(stream.fileno())) != identity
-                    or _child_file_identity(_child_stat(path)) != identity
+            extra = stream.read(1)
+            descriptor_after = _child_file_identity(os.fstat(stream.fileno()))
+            path_after = _child_file_identity(_child_stat(path))
+            if (extra or descriptor_after != opened or path_after != identity
+                    or descriptor_after[:common_fields] != path_after[:common_fields]
                     or digest.hexdigest() != database_sha256):
                 raise NeutralCapabilityError("invalid_request")
         _child_no_sidecars(path)
