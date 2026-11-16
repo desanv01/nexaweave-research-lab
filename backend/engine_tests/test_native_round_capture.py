@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import random
 import sqlite3
 import struct
@@ -30,6 +31,7 @@ from app.services.native_simulation import (
     open_staged_twitter_child_writer,
 )
 from app.services.native_twitter_child_graph import _rebuild_twitter_round_child_graph
+from app.services.native_twitter_restore import _advance_restored_twitter_round
 from test_native_prepared_workflow import _offline_model, _prepared
 from test_native_recordings import _offline_boundary  # noqa: F401 (autouse fixture)
 
@@ -425,6 +427,11 @@ def test_actual_twitter_round_capture_preserves_native_cut(tmp_path, monkeypatch
     config["time_config"]["agents_per_hour_max"] = 1
     config["time_config"]["total_simulation_hours"] = 2
     config["time_config"]["minutes_per_round"] = 60
+    for actor in config["agent_configs"]:
+        actor["active_hours"] = [0, 1]
+    config["event_config"]["initial_posts"].append({
+        "poster_agent_id": 1, "content": "Second synthetic initial event",
+    })
     config_bytes = json.dumps(config).encode("utf-8")
     config_path.write_bytes(config_bytes)
     config_sha256 = sha256(config_bytes).digest()
@@ -475,7 +482,7 @@ def test_actual_twitter_round_capture_preserves_native_cut(tmp_path, monkeypatch
         assert type(post_id) is int and post_id > 0  # The prepared fixture seeds an initial post.
         observed_watermarks.append(post_id)
         assert type(users) is int and users == 2
-        assert 0 < len(setup_posts) <= 2 and setup_posts[-1] == post_id
+        assert len(setup_posts) == 2 and setup_posts[-1] == post_id
         assert all(type(value) is int and 0 <= value < 2**63 for value in setup_posts)
         observed_setup.append((users, setup_posts))
         clock = result.env.platform.sandbox_clock
@@ -488,6 +495,7 @@ def test_actual_twitter_round_capture_preserves_native_cut(tmp_path, monkeypatch
     observed = {}
     observed_parent_storage = {}
     observed_rng = []
+    observed_model_calls = []
     observed_topology = []
     observed_graph_types = []
 
@@ -505,6 +513,7 @@ def test_actual_twitter_round_capture_preserves_native_cut(tmp_path, monkeypatch
         observed_clock.append((clock, after_step))
         assert not observed_rng
         observed_rng.append(random.getstate())
+        observed_model_calls.append(model.calls)
         assert not env.platform_task.done()
         parent_graph = env.agent_graph
         agents = dict(parent_graph.get_agents())
@@ -647,6 +656,7 @@ def test_actual_twitter_round_capture_preserves_native_cut(tmp_path, monkeypatch
                 assert type(post_created_at) is int and post_created_at == before_step
             assert post[2].startswith("Synthetic native post ")
         assert any(content == "Synthetic initial event" for _, _, content, _ in posts)
+        assert any(content == "Second synthetic initial event" for _, _, content, _ in posts)
 
         parent_log = root / "twitter" / "actions.jsonl"
         prefix = _read_bounded(log, _LOG_LIMIT)
@@ -678,7 +688,8 @@ def test_actual_twitter_round_capture_preserves_native_cut(tmp_path, monkeypatch
             assert event["action_args"]["post_id"] == post_id
 
         model_calls = model.calls
-        assert model_calls > 0
+        cut_model_calls, = observed_model_calls
+        assert model_calls == cut_model_calls > 0
         with pytest.raises(NeutralCapabilityError) as refused:
             session.start()
         assert refused.value.code == "invalid_request"
@@ -829,6 +840,106 @@ def test_actual_twitter_round_capture_preserves_native_cut(tmp_path, monkeypatch
     assert sorted(islice(writer_dir.iterdir(), 2)) == [child_db]
     assert _artifact(child_db, _DATABASE_LIMIT) == child_before
     assert _native_rows(child_db) == backup_rows
+
+    from oasis.social_agent import agent_environment
+    from oasis.social_platform import platform as native_platform
+
+    capacity = recommendation_record["max_rec_post_len"]
+    post_ids = tuple(post_id for post_id, *_ in posts)
+    assert len(post_ids) > capacity == len(setup_posts)
+    owner_ids = tuple(platform_id for platform_id, _ in owners)
+    oracle_rng = random.Random(0)
+    oracle_rng.setstate(cut_rng)
+    # Hour one has the fixture's unit off-peak multiplier and both owners have activity 1.
+    oracle_rng.uniform(1, 1)
+    for _ in owner_ids:
+        oracle_rng.random()
+    next_owner, = oracle_rng.sample(owner_ids, 1)
+    expected_draws = tuple(tuple(oracle_rng.sample(post_ids, capacity)) for _ in owner_ids)
+    expected_recommendations = sorted(
+        (platform_id, post_id)
+        for platform_id, draw in zip(owner_ids, expected_draws, strict=True)
+        for post_id in draw
+    )
+
+    genuine_recommender = native_platform.rec_sys_random
+    genuine_sample = random.sample
+    sample_draws = []
+    recommendation_calls = []
+
+    def observe_sample(population, count):
+        assert tuple(population) == post_ids and count == capacity
+        assert len(sample_draws) < len(expected_draws)
+        draw = genuine_sample(population, count)
+        sample_draws.append(tuple(draw))
+        return draw
+
+    def observe_recommendations(post_table, rec_matrix, max_rec_post_len):
+        assert not recommendation_calls and child_model.calls == cut_model_calls
+        recommendation_calls.append(max_rec_post_len)
+        assert tuple(row["post_id"] for row in post_table) == post_ids
+        assert len(rec_matrix) == len(owner_ids) and max_rec_post_len == capacity
+        with monkeypatch.context() as sample_patch:
+            sample_patch.setattr(random, "sample", observe_sample)
+            return genuine_recommender(post_table, rec_matrix, max_rec_post_len)
+
+    genuine_get_db_path = agent_environment.get_db_path
+    lookup_paths = []
+
+    def observe_db_path():
+        path = genuine_get_db_path()
+        assert str(path) == str(child_db) and len(lookup_paths) < 2
+        lookup_paths.append(str(path))
+        return path
+
+    previous_db_path = os.environ.get("OASIS_DB_PATH")
+    expected_post_content = f"Synthetic native post {cut_model_calls + 1}"
+    child_model.calls = cut_model_calls
+
+    async def advance_with_closed_writer():
+        tasks = asyncio.all_tasks()
+        try:
+            return await _advance_restored_twitter_round(
+                writer_dir, manifest=verified, runner_state=runner_state, config_bytes=config_bytes,
+                graph=child_graph, expected_post_content=expected_post_content,
+                deadline_monotonic=writer_deadline,
+            )
+        finally:
+            assert asyncio.all_tasks() == tasks
+
+    with monkeypatch.context() as patch:
+        patch.setenv("OASIS_DB_PATH", str(child_db))
+        patch.setattr(native_platform, "rec_sys_random", observe_recommendations)
+        patch.setattr(agent_environment, "get_db_path", observe_db_path)
+        advanced = asyncio.run(advance_with_closed_writer())
+    assert os.environ.get("OASIS_DB_PATH") == previous_db_path
+    assert lookup_paths == [str(child_db), str(child_db)]
+    assert recommendation_calls == [capacity] and tuple(sample_draws) == expected_draws
+    assert child_model.calls > cut_model_calls
+    assert random.getstate() == ambient_rng and monotonic() < writer_deadline
+    assert _observed_tick(observed_clock[-1][0]) == after_step
+    assert sorted(islice(writer_dir.iterdir(), 2)) == [child_db]
+    child_after = _artifact(child_db, _DATABASE_LIMIT)
+    assert child_after[2:4] == child_before[2:4] and child_after[1] != child_before[1]
+
+    new_cursor, child_trace, child_posts, child_recommendations = _native_rows(child_db)
+    assert child_trace[:len(trace)] == trace and child_posts[:len(posts)] == posts
+    added_trace = child_trace[len(trace):]
+    assert [row[2] for row in added_trace] == [action for action, *_ in selected]
+    assert all(rowid > cursor and user == next_owner for rowid, user, *_ in added_trace)
+    assert new_cursor == added_trace[-1][0]
+    (_, _, _, action_info, action_tick), = (row for row in added_trace if row[2] == "create_post")
+    (next_post_id, post_owner, post_content, post_tick), = child_posts[len(posts):]
+    assert next_post_id > post_ids[-1] and post_owner == next_owner
+    assert post_content == expected_post_content
+    assert type(post_tick) is int and type(action_tick) is int
+    assert post_tick == action_tick == after_step
+    action_payload = json.loads(action_info)
+    assert action_payload["post_id"] == next_post_id and action_payload["content"] == post_content
+    assert child_recommendations == expected_recommendations
+    assert all(type(value) is int for value in advanced.values())
+    assert advanced == {"agent_id": next_owner, "post_id": next_post_id, "after_step": after_step + 1}
+
     assert sorted(islice(destination.iterdir(), 6)) == entries
     assert {file: _artifact(file, limit) for file, limit in limits.items()} == copied_before
     assert _native_rows(database) == backup_rows
@@ -836,4 +947,6 @@ def test_actual_twitter_round_capture_preserves_native_cut(tmp_path, monkeypatch
     assert _native_rows(native_database) == parent_rows
     assert _read_bounded(profile_path, _PROFILE_LIMIT) == profile_bytes
     assert _read_bounded(parent_log, _LOG_LIMIT) == parent
+    _same_parent_memories(observed)
+    assert all(fresh_model.calls == 0 for fresh_model in context_models)
     assert model.calls == model_calls and random.getstate() == ambient_rng
