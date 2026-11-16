@@ -72,6 +72,7 @@ class _RestoredModels:
         async def observe_advance(child_dir, *, manifest, runner_state, config_bytes, graph,
                                   expected_post_content, deadline_monotonic):
             try:
+                assert expected_post_content is None
                 assert len(graph.agent_mappings) == len(self.expected_frames) == 2
                 budget = NativeMemoryCaptureBudget(
                     max_bytes=sum(length for _, _, length, _ in self.expected_frames),
@@ -95,7 +96,13 @@ class _RestoredModels:
                     deadline_monotonic=deadline_monotonic,
                 )
                 budget.check()
-                proof = _json_bytes({"pid": os.getpid(), "frames": observed_frames})
+                step_fields = ("agent_id", "post_id", "after_step")
+                assert set(result) == {*step_fields, "post_content_sha256"}
+                expected_digest = sha256(_json_bytes(_NEXT_POST)).hexdigest()
+                assert result["post_content_sha256"] == expected_digest
+                step = {field: result[field] for field in step_fields}
+                assert all(type(value) is int for value in step.values())
+                proof = _json_bytes({"pid": os.getpid(), "frames": observed_frames, "step": step})
                 assert len(proof) <= _RECEIPT_LIMIT
                 with Path(self.probe_path).open("xb") as output:
                     written = output.write(proof)
@@ -534,12 +541,14 @@ def assert_fresh_twitter_continuation(tmp_path, request, original_pid, terminal,
     restore_prepared = _owned_factory(producer, restore_request, restore_models)
     restore_factory = NativeRestoredTwitterFactory(
         restore_prepared, str(checkpoint), str(lineage_dir), str(restore_dir),
-        producer_evidence, producer_pid, str(capture_request.run_id), _NEXT_POST,
+        producer_evidence, producer_pid, str(capture_request.run_id), None,
     )
     assert not restore_dir.exists() and not memory_probe_path.exists()
     restored_pid, restore_evidence = _run_child(restore_factory, restore_request, terminal, deadline, prior_pids)
     proof_raw = _read_bounded(memory_probe_path, _RECEIPT_LIMIT)
-    assert json.loads(proof_raw) == {"pid": restored_pid, "frames": [list(frame) for frame in expected_frames]}
+    proof = json.loads(proof_raw)
+    assert set(proof) == {"pid", "frames", "step"} and proof["pid"] == restored_pid
+    assert proof["frames"] == [list(frame) for frame in expected_frames]
     assert {path.name for path in islice(restore_dir.iterdir(), 3)} == set(_RESTORE_OUTPUTS)
     assert _manifest(restore_dir, _RESTORE_OUTPUTS, _DB_LIMIT) == restore_evidence
     child_db = restore_dir / "native.sqlite3"
@@ -558,6 +567,7 @@ def assert_fresh_twitter_continuation(tmp_path, request, original_pid, terminal,
     final = observation["rounds"][1]
     assert (owner, content, tick) == (final["selection"], _NEXT_POST, final["before_step"])
     assert type(tick) is int and tick + 1 == final["after_step"]
+    assert proof["step"] == {"agent_id": owner, "post_id": post_id, "after_step": tick + 1}
     added_trace = trace[len(old_trace):]
     assert cursor == added_trace[-1][0] and all(row[1] == owner for row in added_trace)
     (_, _, _, info, trace_tick), = (row for row in added_trace if row[2] == "create_post")
