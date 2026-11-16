@@ -16,6 +16,7 @@ from pathlib import Path
 import platform as python_platform
 import sqlite3
 import stat
+import struct
 import time
 
 try:  # Direct sibling import supports the CLI without importing backend app.
@@ -253,9 +254,65 @@ def _round_components(manifest):
     )
 
 
+_ROUND_RUNNER = struct.Struct(">4sB5I32s624IHBd")
+
+
+def _check_expected_round_runner(expected):
+    if type(expected) is not tuple or len(expected) != 4:
+        raise RecordingError("invalid_request")
+    horizon, interval, actions, config_sha256 = expected
+    if (not _round_int(horizon, 1, 10080) or not _round_int(interval, 1, 1440)
+            or horizon * interval > 10080 or not _round_int(actions, 0, 2**32 - 1)
+            or type(config_sha256) is not bytes or len(config_sha256) != 32):
+        raise RecordingError("invalid_request")
+
+
+def _decode_round_runner(raw, round_num, expected):
+    if type(raw) is not bytes or len(raw) != _ROUND_RUNNER.size:
+        raise RecordingError()
+    decoded = _ROUND_RUNNER.unpack(raw)
+    magic, version, completed, horizon, interval, offset, actions, config_sha256 = decoded[:8]
+    index, cache_tag, cache = decoded[-3:]
+    if (magic != b"NWR1" or version != 3 or completed != round_num
+            or not 1 <= completed <= horizon or not 1 <= interval <= 1440
+            or horizon * interval > 10080 or offset != (completed - 1) * interval
+            or (horizon, interval, actions, config_sha256) != expected
+            or not 0 <= index <= 624 or cache_tag not in (0, 1)):
+        raise RecordingError()
+    if cache_tag == 0:
+        if not raw.endswith(b"\x00" * 8):
+            raise RecordingError()
+        cache = None
+    elif not math.isfinite(cache):
+        raise RecordingError()
+    return (decoded[2:7], config_sha256, (version, decoded[8:-2], cache))
+
+
 def verify_twitter_round_recording(directory, *, expected_manifest_sha256, expected_anchors,
                                    deadline_monotonic):
     """Check an inert five-file capture against independently held host identity."""
+    manifest, _ = _verify_round_recording(
+        directory, expected_manifest_sha256=expected_manifest_sha256,
+        expected_anchors=expected_anchors, deadline_monotonic=deadline_monotonic,
+        expected_runner=None,
+    )
+    return manifest
+
+
+def _verify_twitter_round_recording_with_runner(directory, *, expected_manifest_sha256,
+                                                expected_anchors, deadline_monotonic,
+                                                expected_runner):
+    """Verify and decode the authenticated runner artifact for trusted restore."""
+    _check_expected_round_runner(expected_runner)
+    return _verify_round_recording(
+        directory, expected_manifest_sha256=expected_manifest_sha256,
+        expected_anchors=expected_anchors, deadline_monotonic=deadline_monotonic,
+        expected_runner=expected_runner,
+    )
+
+
+def _verify_round_recording(directory, *, expected_manifest_sha256, expected_anchors,
+                            deadline_monotonic, expected_runner):
     if (not _round_hash(expected_manifest_sha256) or type(expected_anchors) is not RecordingAnchors
             or type(deadline_monotonic) not in (int, float)):
         raise RecordingError("invalid_request")
@@ -292,12 +349,18 @@ def verify_twitter_round_recording(directory, *, expected_manifest_sha256, expec
         if (sum(length for _, length, _, _ in artifacts[1:]) > MAX_JSON
                 or manifest_bytes + sum(length for _, length, _, _ in artifacts) > TOTAL_LIMIT):
             raise RecordingError("limit_exceeded")
+        runner_state = None
         for name, length, checksum, _ in artifacts:
-            _round_read(root, name, inventory[name], length, checksum, deadline_monotonic)
+            retain = expected_runner is not None and name == "native-runner.bin"
+            artifact = _round_read(root, name, inventory[name], length, checksum,
+                                   deadline_monotonic, retain=retain)
+            if retain:
+                runner_state = _decode_round_runner(artifact, manifest["round"], expected_runner)
+                _round_deadline(deadline_monotonic)
         if _round_inventory(root, deadline_monotonic) != inventory:
             raise RecordingError()
         _round_deadline(deadline_monotonic)
-        return manifest
+        return manifest, runner_state
     except RecordingError:
         raise
     except (OSError, RuntimeError, TypeError, ValueError, OverflowError):

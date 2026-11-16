@@ -18,7 +18,10 @@ from camel.types import OpenAIBackendRole
 from app.services.knowledge_report_tools import NeutralCapabilityError
 from app.services.native_checkpoint_memory import restore_native_memory
 from app.services.native_recording_contracts import RecordingAnchors, RecordingError
-from app.services.native_recordings import verify_twitter_round_recording
+from app.services.native_recordings import (
+    _verify_twitter_round_recording_with_runner,
+    verify_twitter_round_recording,
+)
 from app.services.native_simulation import (
     NativeSimulationSession,
     open_prestart_twitter_child,
@@ -632,11 +635,19 @@ def test_actual_twitter_round_capture_preserves_native_cut(tmp_path, monkeypatch
     writer_dir = tmp_path / "writer-child"
     writer_deadline = monotonic() + 10
     manifest_sha256 = copied_before[manifest][1]
-    verified = verify_twitter_round_recording(
-        destination, expected_manifest_sha256=manifest_sha256,
-        expected_anchors=anchors, deadline_monotonic=writer_deadline,
+    total_actions = suffix[0]["total_actions"]
+    verified, (position, decoded_config_sha256, decoded_rng) = (
+        _verify_twitter_round_recording_with_runner(
+            destination, expected_manifest_sha256=manifest_sha256,
+            expected_anchors=anchors, deadline_monotonic=writer_deadline,
+            expected_runner=(2, 60, total_actions, config_sha256),
+        )
     )
     assert verified == materialized
+    assert position == (1, 2, 60, 0, total_actions)
+    assert decoded_config_sha256 == config_sha256
+    assert decoded_rng == cut_rng
+    assert random.getstate() == ambient_rng
     different_anchors = RecordingAnchors(
         anchors.graph_id, anchors.simulation_id, "different-capture-run",
         anchors.branch_id, anchors.project_id, anchors.project_revision,
