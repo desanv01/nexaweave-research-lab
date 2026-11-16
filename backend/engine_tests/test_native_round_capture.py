@@ -29,6 +29,7 @@ from app.services.native_simulation import (
     open_prestart_twitter_child,
     open_staged_twitter_child_writer,
 )
+from app.services.native_twitter_child_graph import _rebuild_twitter_round_child_graph
 from test_native_prepared_workflow import _offline_model, _prepared
 from test_native_recordings import _offline_boundary  # noqa: F401 (autouse fixture)
 
@@ -40,6 +41,7 @@ _ROW_LIMIT = 128
 _RECOMMENDATION_ROW_LIMIT = 256
 _MEMORY_LIMIT = 2 * 1024 * 1024
 _MEMORY_HEADER_LIMIT = 32
+_PROFILE_LIMIT = 2 * 1024 * 1024
 _RUNNER_BYTES = 2564
 
 
@@ -204,6 +206,29 @@ def _assert_detached_memories(owners, contexts, restored_memories, active_id):
         assert has_tool is (platform_id == active_id)
         assert any(record["message"]["__class__"] == "FunctionCallingMessage"
                    for record in child_records) is has_tool
+
+
+def _twitter_graph_topology(agent_graph, agents):
+    assert set(agents) == set(agent_graph.agent_mappings) == {0, 1}
+    native_graph = agent_graph.graph
+    assert native_graph.is_directed() is True
+    vertex_count = native_graph.vcount()
+    assert type(vertex_count) is int and vertex_count == len(agents) == 2
+    edge_count = native_graph.ecount()
+    assert type(edge_count) is int and edge_count == 0
+    ordered_ids = []
+    for index in range(vertex_count):
+        vertex = native_graph.vs[index]
+        agent_id = vertex["name"]
+        assert vertex.index == index
+        assert type(agent_id) is int and agent_id == index
+        assert agent_graph.agent_mappings[agent_id] is agents[agent_id]
+        assert agents[agent_id].social_agent_id == agent_id
+        ordered_ids.append(agent_id)
+    return {
+        "version": 1, "directed": True, "vertex_count": vertex_count,
+        "edge_count": edge_count, "sha256": sha256(b"NTZ1" + bytes(ordered_ids)).hexdigest(),
+    }
 
 
 def _read_bounded(path, limit):
@@ -403,6 +428,11 @@ def test_actual_twitter_round_capture_preserves_native_cut(tmp_path, monkeypatch
     config_bytes = json.dumps(config).encode("utf-8")
     config_path.write_bytes(config_bytes)
     config_sha256 = sha256(config_bytes).digest()
+    assert tuple(actor["agent_id"] for actor in config["agent_configs"]) == (0, 1)
+    owner_names = tuple(actor["entity_name"] for actor in config["agent_configs"])
+    profile_path = root / "twitter_profiles.csv"
+    profile_bytes = _read_bounded(profile_path, _PROFILE_LIMIT)
+    profile_sha256 = sha256(profile_bytes).hexdigest()
 
     destination = tmp_path / "round-one"
     anchors = RecordingAnchors("graph-fixture", "sim-fixture", "capture-run",
@@ -418,7 +448,7 @@ def test_actual_twitter_round_capture_preserves_native_cut(tmp_path, monkeypatch
                        "include_topology": True},
     )
     assert session.round_capture_receipt is None and not destination.exists()
-    native = root / "twitter_simulation.db"
+    native_database = root / "twitter_simulation.db"
     observed_watermarks = []
     observed_selections = []
     observed_clock = []
@@ -431,8 +461,9 @@ def test_actual_twitter_round_capture_preserves_native_cut(tmp_path, monkeypatch
         selected_id, = (agent_id for agent_id, _ in active_agents)
         assert type(selected_id) is int
         observed_selections.append(selected_id)
-        assert native.is_file() and not native.is_symlink()
-        with closing(sqlite3.connect(native.as_uri() + "?mode=ro", uri=True, timeout=0)) as db:
+        assert native_database.is_file() and not native_database.is_symlink()
+        database_uri = native_database.as_uri() + "?mode=ro"
+        with closing(sqlite3.connect(database_uri, uri=True, timeout=0)) as db:
             db.execute("BEGIN")
             post_id, = db.execute("SELECT MAX(post_id) FROM post").fetchone()
             setup_posts = tuple(row[0] for row in db.execute(
@@ -455,8 +486,10 @@ def test_actual_twitter_round_capture_preserves_native_cut(tmp_path, monkeypatch
     owner = session._round_capture
     copy_at_cut = owner._copy_at_cut
     observed = {}
+    observed_parent_storage = {}
     observed_rng = []
     observed_topology = []
+    observed_graph_types = []
 
     def observe_at_cut(*args, **kwargs):
         assert not observed
@@ -473,28 +506,10 @@ def test_actual_twitter_round_capture_preserves_native_cut(tmp_path, monkeypatch
         assert not observed_rng
         observed_rng.append(random.getstate())
         assert not env.platform_task.done()
-        assert len(env.agent_graph.agent_mappings) == 2
-        agents = dict(env.agent_graph.get_agents())
-        assert set(agents) == {0, 1}
-        native_graph = env.agent_graph.graph
-        assert native_graph.is_directed() is True
-        vertex_count = native_graph.vcount()
-        assert type(vertex_count) is int and vertex_count == len(agents) == 2
-        edge_count = native_graph.ecount()
-        assert type(edge_count) is int and edge_count == 0
-        ordered_ids = []
-        for index in range(vertex_count):
-            vertex = native_graph.vs[index]
-            agent_id = vertex["name"]
-            assert vertex.index == index
-            assert type(agent_id) is int and agent_id == index
-            assert env.agent_graph.agent_mappings[agent_id] is agents[agent_id]
-            assert agents[agent_id].social_agent_id == agent_id
-            ordered_ids.append(agent_id)
-        observed_topology.append({
-            "version": 1, "directed": True, "vertex_count": vertex_count,
-            "edge_count": edge_count, "sha256": sha256(b"NTZ1" + bytes(ordered_ids)).hexdigest(),
-        })
+        parent_graph = env.agent_graph
+        agents = dict(parent_graph.get_agents())
+        observed_graph_types.append((type(parent_graph), type(parent_graph.graph)))
+        observed_topology.append(_twitter_graph_topology(parent_graph, agents))
         remaining = _MEMORY_LIMIT
         for platform_id, agent in agents.items():
             memory = agent.memory
@@ -504,7 +519,10 @@ def test_actual_twitter_round_capture_preserves_native_cut(tmp_path, monkeypatch
             assert not any(actual_uuid == item[2] for item in observed.values())
             assert UUID(actual_uuid)
             creator = memory.get_context_creator()
-            live = memory._chat_history_block.storage.memory_list
+            block = memory._chat_history_block
+            storage = block.storage
+            observed_parent_storage[platform_id] = (block, storage)
+            live = storage.memory_list
             records = _memory_wire(live, remaining)
             remaining -= len(records)
             context = _memory_wire(memory.get_context(), remaining)
@@ -574,7 +592,7 @@ def test_actual_twitter_round_capture_preserves_native_cut(tmp_path, monkeypatch
                     "database_sha256", "log_bytes", "log_sha256", "post_count"):
             assert materialized[key] == receipt[key]
 
-        source_rows = _native_rows(native)
+        source_rows = _native_rows(native_database)
         backup_rows = _native_rows(database)
         assert backup_rows == source_rows
         cursor, trace, posts, recommendations = source_rows
@@ -669,15 +687,15 @@ def test_actual_twitter_round_capture_preserves_native_cut(tmp_path, monkeypatch
         assert session.round_capture_receipt == receipt
         assert sorted(islice(destination.iterdir(), 6)) == entries
         assert {file: _artifact(file, limit) for file, limit in limits.items()} == copied_before
-        assert _native_rows(native) == source_rows
+        assert _native_rows(native_database) == source_rows
         assert _read_bounded(parent_log, _LOG_LIMIT) == parent
         _same_parent_memories(observed)
 
     assert session._closed and session._results == {}
     assert random.getstate() == ambient_rng
     assert not (root / "reddit_simulation.db").exists()
-    parent_database = _artifact(native, _DATABASE_LIMIT)
-    parent_rows = _native_rows(native)
+    parent_database = _artifact(native_database, _DATABASE_LIMIT)
+    parent_rows = _native_rows(native_database)
     _assert_existing_child_prestart(destination, database, receipt, observed_clock[-1][0],
                                     trace[-1], monkeypatch)
     assert (parent_database[0] + sum(evidence[0] for evidence in copied_before.values())
@@ -718,7 +736,6 @@ def test_actual_twitter_round_capture_preserves_native_cut(tmp_path, monkeypatch
     assert decoded_config_sha256 == config_sha256
     assert decoded_rng == cut_rng
     assert memory_witnesses == expected_memory_witnesses
-    _assert_detached_memories(owners, memory_contexts, restored_memories, active_id)
     _same_parent_memories(observed)
     assert model.calls == model_calls and all(fresh_model.calls == 0 for fresh_model in context_models)
     assert random.getstate() == ambient_rng
@@ -760,9 +777,52 @@ def test_actual_twitter_round_capture_preserves_native_cut(tmp_path, monkeypatch
             destination, expected_manifest_sha256=manifest_sha256,
             expected_anchors=different_anchors, deadline_monotonic=writer_deadline,
         )
+
+    import scripts.run_parallel_simulation as native
+
+    child_model = _offline_model()
+    graph_options = {
+        "expected_owner_names": owner_names,
+        "memory_bindings": memory_bindings,
+        "restored_memories": restored_memories,
+        "expected_topology": verified["topology"],
+        "model": child_model,
+        "available_actions": tuple(native.TWITTER_ACTIONS),
+        "deadline_monotonic": writer_deadline,
+    }
+    wrong_profile_sha256 = "0" * 64
+    assert profile_sha256 != wrong_profile_sha256
+    with pytest.raises(RecordingError) as wrong_profile:
+        asyncio.run(_rebuild_twitter_round_child_graph(
+            profile_bytes, expected_profile_sha256=wrong_profile_sha256, **graph_options,
+        ))
+    assert wrong_profile.value.code == "invalid_recording"
+    child_graph = asyncio.run(_rebuild_twitter_round_child_graph(
+        profile_bytes, expected_profile_sha256=profile_sha256, **graph_options,
+    ))
+    (agent_graph_type, native_graph_type), = observed_graph_types
+    assert type(child_graph) is agent_graph_type and type(child_graph.graph) is native_graph_type
+    child_agents = dict(child_graph.get_agents())
+    assert tuple(child_agents) == tuple(platform_id for platform_id, _ in owners)
+    assert _twitter_graph_topology(child_graph, child_agents) == topology
+    installed_memories = []
+    for (platform_id, snapshot), memory in zip(owners, restored_memories, strict=True):
+        parent_agent, parent_memory, camel_id, *_ = snapshot
+        parent_block, parent_storage = observed_parent_storage[platform_id]
+        assert parent_memory._chat_history_block is parent_block
+        assert parent_block.storage is parent_storage
+        child_agent = child_agents[platform_id]
+        assert type(child_agent) is type(parent_agent) and child_agent is not parent_agent
+        assert child_agent.agent_id == camel_id and child_agent.memory is memory
+        installed_memories.append(child_agent.memory)
+    _assert_detached_memories(owners, memory_contexts, installed_memories, active_id)
+    _same_parent_memories(observed)
+    assert child_model.calls == 0 and model.calls == model_calls
+    assert all(fresh_model.calls == 0 for fresh_model in context_models)
+    assert random.getstate() == ambient_rng
     assert not writer_dir.exists() and monotonic() < writer_deadline
     child_db = _stage_writer_child(writer_dir, database, verified, writer_deadline)
-    assert not child_db.samefile(native)
+    assert not child_db.samefile(native_database)
     child_before = _artifact(child_db, _DATABASE_LIMIT)
     asyncio.run(_assert_existing_child_writer(writer_dir, child_db, verified,
                                               observed_clock[-1][0], trace[-1], writer_deadline))
@@ -772,7 +832,8 @@ def test_actual_twitter_round_capture_preserves_native_cut(tmp_path, monkeypatch
     assert sorted(islice(destination.iterdir(), 6)) == entries
     assert {file: _artifact(file, limit) for file, limit in limits.items()} == copied_before
     assert _native_rows(database) == backup_rows
-    assert _artifact(native, _DATABASE_LIMIT) == parent_database
-    assert _native_rows(native) == parent_rows
+    assert _artifact(native_database, _DATABASE_LIMIT) == parent_database
+    assert _native_rows(native_database) == parent_rows
+    assert _read_bounded(profile_path, _PROFILE_LIMIT) == profile_bytes
     assert _read_bounded(parent_log, _LOG_LIMIT) == parent
     assert model.calls == model_calls and random.getstate() == ambient_rng

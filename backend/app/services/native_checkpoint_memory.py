@@ -729,6 +729,82 @@ def resolve_native_memory_cohort(graph, expected_graph, channel, prepared_agent_
     return tuple(owners)
 
 
+def _install_detached_twitter_round_memory(graph, channel, *, memory_bindings,
+                                           restored_memories, expected_topology,
+                                           deadline_monotonic):
+    """Install authenticated memory into the builder's private two-owner graph."""
+    _check_cut_deadline(deadline_monotonic)
+    from oasis.social_agent.agent import SocialAgent
+    from oasis.social_agent.agent_graph import AgentGraph
+
+    _check_cut_deadline(deadline_monotonic)
+    if (type(graph) is not AgentGraph or channel is None
+            or type(memory_bindings) is not tuple or len(memory_bindings) != 2
+            or type(restored_memories) is not tuple or len(restored_memories) != 2
+            or type(expected_topology) is not dict):
+        raise RecordingError()
+
+    platform_ids = (0, 1)
+    fresh_owners = resolve_native_memory_cohort(graph, graph, channel, platform_ids,
+                                              deadline_monotonic)
+    topology = capture_dense_twitter_topology(graph, fresh_owners, deadline_monotonic)
+    if (expected_topology.keys() != topology.keys()
+            or any(type(expected_topology[key]) is not type(value)
+                   or expected_topology[key] != value for key, value in topology.items())):
+        raise RecordingError()
+
+    memory_parts = []
+    expected_owners = []
+    camel_ids = set()
+    for fresh, binding, memory in zip(fresh_owners, memory_bindings, restored_memories,
+                                      strict=True):
+        _check_cut_deadline(deadline_monotonic)
+        if type(fresh.agent) is not SocialAgent or type(binding) is not tuple or len(binding) != 3:
+            raise RecordingError()
+        attributes = vars(fresh.agent)
+        fresh_id = attributes.get("agent_id")
+        if (type(fresh_id) is not str or fresh_id != fresh.camel_id
+                or attributes.get("_memory") is not fresh.memory):
+            raise RecordingError()
+
+        platform_id, camel_id, token_limit = binding
+        _check_owner(camel_id)
+        if (not _valid_id(platform_id) or platform_id != fresh.platform_id
+                or camel_id in camel_ids or type(token_limit) is not int
+                or not 0 < token_limit < 2**63
+                or type(memory) is not ChatHistoryMemory
+                or type(memory.agent_id) is not str or memory.agent_id != camel_id
+                or _token_limit(memory.get_context_creator()) != token_limit
+                or _token_limit(fresh.memory.get_context_creator()) != token_limit):
+            raise RecordingError()
+        block = memory._chat_history_block
+        if type(block) is not ChatHistoryBlock or type(block.storage) is not InMemoryKeyValueStorage:
+            raise RecordingError()
+        storage = block.storage
+        memory_parts.extend((fresh.memory, fresh.block, fresh.storage, fresh.storage.memory_list,
+                             memory, block, storage, storage.memory_list))
+        camel_ids.add(camel_id)
+        expected_owners.append(_AgentMemoryOwner(platform_id, camel_id, fresh.agent,
+                                                  fresh.action, memory, block, storage))
+
+    if len({id(part) for part in memory_parts}) != len(memory_parts):
+        raise RecordingError()
+    for owner in expected_owners:
+        _check_cut_deadline(deadline_monotonic)
+        # The public memory setter initializes messages and clears saved history.
+        attributes = vars(owner.agent)
+        attributes["agent_id"] = owner.camel_id
+        attributes["_memory"] = owner.memory
+
+    installed = resolve_native_memory_cohort(graph, graph, channel, platform_ids,
+                                             deadline_monotonic)
+    if (not all(expected.same_binding(actual)
+                for expected, actual in zip(expected_owners, installed, strict=True))
+            or capture_dense_twitter_topology(graph, installed, deadline_monotonic) != topology):
+        raise RecordingError()
+    _check_cut_deadline(deadline_monotonic)
+
+
 def capture_dense_twitter_topology(graph, owners, deadline_monotonic):
     """Describe the verified dense, directed, zero-edge graph at the held cut."""
     _check_cut_deadline(deadline_monotonic)
