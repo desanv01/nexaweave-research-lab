@@ -1,6 +1,6 @@
 """Explicit isolated PG launch schema; no accepted catalog is modified."""
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from importlib.resources import files
 import hashlib
 import json
@@ -8,7 +8,8 @@ import psycopg
 from psycopg.types.json import Jsonb
 from nexaweave_storage.transaction_settings import apply_runtime_settings
 from .native_launch_contracts import LaunchAuthorityError, validate_identity, validate_declaration, digest, identifier, sha
-from .native_run_contracts import NativeRunRequest, NativeRunReceipt, InvalidNativeRun
+from .native_run_contracts import NativeRunRequest, NativeRunReceipt, InvalidNativeRun, NativeRunUncertain
+from .native_run_store import NativeRunRecord, _SELECT as _NATIVE_COLUMNS, _row as _native_record
 from uuid import UUID
 
 
@@ -37,24 +38,44 @@ def _catalog(conn):
     return hashlib.sha256(json.dumps([conn.execute(q).fetchall() for q in queries], default=str, separators=(',', ':')).encode()).hexdigest()
 
 
+_MIGRATIONS = 'SELECT version,checksum,schema_checksum FROM mf_native_launch.schema_migrations ORDER BY version'
+_SAVE_MIGRATION = 'INSERT INTO mf_native_launch.schema_migrations VALUES(%s,%s,%s)'
+
+
+def _chained_catalog(connection, previous_receipt):
+    return digest({'catalog_sha256': _catalog(connection), 'prior_migration': list(previous_receipt)})
+
+
 def migrate(connection):
     try:
-        sql = files('nexaweave_execution').joinpath('migrations/native_launch_0001.sql').read_text('utf-8')
-        checksum = hashlib.sha256(sql.encode()).hexdigest()
+        directory = files('nexaweave_execution').joinpath('migrations')
+        sql_v1 = directory.joinpath('native_launch_0001.sql').read_text('utf-8')
+        sql_v2 = directory.joinpath('native_launch_0002.sql').read_text('utf-8')
+        checksum_v1 = hashlib.sha256(sql_v1.encode()).hexdigest()
+        checksum_v2 = hashlib.sha256(sql_v2.encode()).hexdigest()
         with connection.transaction():
             connection.execute("SET LOCAL statement_timeout='10s'")
             connection.execute("SET LOCAL lock_timeout='5s'")
             connection.execute('SET LOCAL search_path=pg_catalog')
             connection.execute('SELECT pg_advisory_xact_lock(720105,8)')
-            if connection.execute("SELECT to_regnamespace('mf_native_launch') IS NOT NULL").fetchone()[0]:
-                if not connection.execute("SELECT to_regclass('mf_native_launch.schema_migrations') IS NOT NULL").fetchone()[0]:
+            if not connection.execute("SELECT to_regnamespace('mf_native_launch') IS NOT NULL").fetchone()[0]:
+                connection.execute(sql_v1)
+                connection.execute(_SAVE_MIGRATION, (1, checksum_v1, _catalog(connection)))
+            if not connection.execute("SELECT to_regclass('mf_native_launch.schema_migrations') IS NOT NULL").fetchone()[0]:
+                raise LaunchAuthorityError('native_launch_unavailable')
+            rows = connection.execute(_MIGRATIONS).fetchall()
+            versions = [row[0] for row in rows]
+            if versions not in ([1], [1, 2]) or rows[0][1] != checksum_v1:
+                raise LaunchAuthorityError('native_launch_unavailable')
+            previous = rows[0]
+            if versions == [1]:
+                if previous[2] != _catalog(connection):
                     raise LaunchAuthorityError('native_launch_unavailable')
-                rows = connection.execute('SELECT version,checksum,schema_checksum FROM mf_native_launch.schema_migrations ORDER BY version').fetchall()
-                if rows != [(1, checksum, _catalog(connection))]:
-                    raise LaunchAuthorityError('native_launch_unavailable')
-            else:
-                connection.execute(sql)
-                connection.execute('INSERT INTO mf_native_launch.schema_migrations VALUES(1,%s,%s)', (checksum, _catalog(connection)))
+                connection.execute(sql_v2)
+                connection.execute(_SAVE_MIGRATION, (2, checksum_v2, _chained_catalog(connection, previous)))
+                rows = connection.execute(_MIGRATIONS).fetchall()
+            if rows != [previous, (2, checksum_v2, _chained_catalog(connection, previous))]:
+                raise LaunchAuthorityError('native_launch_unavailable')
     except (OSError, psycopg.Error):
         raise LaunchAuthorityError('native_launch_unavailable') from None
 
@@ -77,6 +98,7 @@ class LaunchRecord:
     cancel_requested: bool
     error_code: str | None
     dispatch_claimed: bool = False
+    source_run_id: UUID | None = None
 
     @property
     def request(self):
@@ -97,6 +119,18 @@ def _configuration(value):
     return value
 
 
+def _coherent_request(declaration, identity):
+    request = NativeRunRequest.from_wire(identity['request'])
+    if (declaration['schema_version'] != identity['schema_version']
+            or declaration.get('checkpoint') != identity.get('checkpoint')
+            or declaration['launch_id'] != str(request.run_id)
+            or declaration['preparation'] != {
+                key: identity['preparation'][key] for key in ('operation_id', 'plan_sha256')
+            }):
+        raise ValueError
+    return request
+
+
 def _record(row):
     if row is None:
         raise LaunchAuthorityError('not_found')
@@ -107,14 +141,14 @@ def _record(row):
             raise ValueError
         configuration = _configuration(result.frozen['configuration'])
         identity = validate_identity(result.frozen['identity'])
-        validate_declaration(result.frozen['declaration'])
-        req = NativeRunRequest.from_wire(identity['request'])
-        if (digest(identity) != result.launch_sha256 or digest(result.frozen['declaration']) != result.request_sha256
+        declaration = validate_declaration(result.frozen['declaration'])
+        req = _coherent_request(declaration, identity)
+        if (digest(identity) != result.launch_sha256 or digest(declaration) != result.request_sha256
                 or req.run_id != result.run_id or req.principal != result.principal or req.project_id != result.project_id
                 or req.project_revision != result.project_revision or req.simulation_id != result.simulation_id
                 or identifier(identity['preparation']['operation_id']) != result.preparation_id
-                or result.frozen['declaration']['launch_id'] != str(req.run_id)
-                or result.frozen['declaration']['preparation'] != {k: identity['preparation'][k] for k in ('operation_id','plan_sha256')}):
+                or (result.source_run_id is not None and type(result.source_run_id) is not UUID)
+                or result.source_run_id != req.source_run_id):
             raise ValueError
         if (any(type(v) is not UUID for v in (result.run_id,result.project_id,result.preparation_id))
                 or type(result.project_revision) is not int
@@ -151,6 +185,68 @@ def _record(row):
         raise LaunchAuthorityError('native_launch_uncertain') from None
 
 
+def _verify_current_preparation(conn, request, identity):
+    descriptor = identity['preparation']
+    project = conn.execute(
+        'SELECT current_revision FROM mf_app.projects WHERE principal=%s AND project_id=%s FOR UPDATE',
+        (request.principal, request.project_id),
+    ).fetchone()
+    prep = conn.execute(
+        'SELECT state,plan_sha256,receipt,project_id,project_revision,display_graph_id,'
+        "frozen #> '{public,scope}',frozen #> '{public,options}' FROM mf_preparation.plans "
+        'WHERE principal=%s AND operation_id=%s FOR UPDATE',
+        (request.principal, identifier(descriptor['operation_id'])),
+    ).fetchone()
+    if (project is None or project[0] != request.project_revision or prep is None
+            or prep[0] != 'ready' or prep[1] != descriptor['plan_sha256']
+            or type(prep[2]) is not dict or prep[2].get('artifact_sha256') != descriptor['artifact_sha256']):
+        raise LaunchAuthorityError('conflict')
+    if identity['schema_version'] == 2:
+        options = prep[7]
+        if (prep[3] != request.project_id or prep[4] != request.project_revision
+                or prep[5] != identity['display_graph_id'] or prep[6] != identity['scope']
+                or prep[2].get('simulation_id') != request.simulation_id
+                or type(options) is not dict or options.get('platforms') != list(request.platforms)
+                or type(options.get('seed')) is not int or options['seed'] != request.seed
+                or type(options.get('max_rounds')) is not int or options['max_rounds'] != request.max_rounds):
+            raise LaunchAuthorityError('conflict')
+
+
+def _verify_checkpoint_source(conn, request, identity):
+    source_row = conn.execute(
+        f"SELECT {_COLUMNS} FROM mf_native_launch.plans "
+        "WHERE principal=%s AND run_id=%s AND state='completed' FOR UPDATE",
+        (request.principal, request.source_run_id),
+    ).fetchone()
+    if source_row is None:
+        raise LaunchAuthorityError('conflict')
+    source = _record(source_row)
+    source_identity = source.frozen['identity']
+    original = replace(request, schema_version=1, run_id=request.source_run_id,
+                       source_run_id=None, checkpoint_sha256=None)
+    if (source_identity.get('checkpoint') != {'mode': 'capture'}
+            or source_identity['scope'] != identity['scope']
+            or source_identity['preparation'] != identity['preparation']
+            or source.request != original or not source.dispatch_claimed):
+        raise LaunchAuthorityError('conflict')
+    receipt = NativeRunReceipt.from_wire(source.receipt)
+    if receipt.evidence_sha256 != request.checkpoint_sha256:
+        raise LaunchAuthorityError('conflict')
+    native_row = conn.execute(
+        f"SELECT {_NATIVE_COLUMNS} FROM mf_native_execution.runs "
+        "WHERE principal=%s AND run_id=%s AND state='completed' FOR SHARE",
+        (request.principal, request.source_run_id),
+    ).fetchone()
+    if native_row is None:
+        raise LaunchAuthorityError('conflict')
+    try:
+        native = _native_record(native_row)
+    except NativeRunUncertain:
+        raise LaunchAuthorityError('native_launch_uncertain') from None
+    if native.request != original or native.receipt != receipt:
+        raise LaunchAuthorityError('conflict')
+
+
 class NativeLaunchStore:
     def __init__(self, connection_factory):
         if not callable(connection_factory):
@@ -174,35 +270,56 @@ class NativeLaunchStore:
         declaration = validate_declaration(declaration)
         try:
             _configuration(configuration)
-        except (ValueError,TypeError,KeyError):
+            req = _coherent_request(declaration, identity)
+        except (ValueError, TypeError, KeyError, InvalidNativeRun):
             raise LaunchAuthorityError('invalid_request') from None
-        req = NativeRunRequest.from_wire(identity['request'])
         if principal != req.principal:
             raise LaunchAuthorityError('unauthorized')
         frozen = json.loads(json.dumps({'declaration': declaration, 'identity': identity,
                                       'configuration': configuration}, ensure_ascii=True, allow_nan=False))
+        request_sha256, launch_sha256 = digest(declaration), digest(identity)
+        descriptor = identity['preparation']
+        preparation_id = identifier(descriptor['operation_id'])
+        version = declaration['schema_version']
         with transaction(self._connect) as conn:
-            # Serialize bounded reviews on their existing preparation row; this
-            # does not claim native dispatch or touch NativeRunStore/files.
-            prep = conn.execute('SELECT state FROM mf_preparation.plans WHERE principal=%s AND operation_id=%s FOR UPDATE',
-                                (principal,identifier(identity['preparation']['operation_id']))).fetchone()
-            if prep is None or prep[0]!='ready':
+            if version == 1:
+                # Keep the existing serialized preparation check for v1 review.
+                prep = conn.execute(
+                    'SELECT state FROM mf_preparation.plans WHERE principal=%s AND operation_id=%s FOR UPDATE',
+                    (principal, preparation_id),
+                ).fetchone()
+                if prep is None or prep[0] != 'ready':
+                    raise LaunchAuthorityError('conflict')
+            read_prior = ('SELECT request_sha256,launch_sha256,state FROM mf_native_launch.plans '
+                          'WHERE run_id=%s AND principal=%s')
+            prior = conn.execute(read_prior, (req.run_id, principal)).fetchone()
+            if version == 2 and (prior is None or prior[2] == 'planned'):
+                _verify_current_preparation(conn, req, identity)
+                # A same-ID plan can appear while waiting for preparation ownership.
+                prior = conn.execute(read_prior, (req.run_id, principal)).fetchone()
+            if prior is not None and prior[:2] != (request_sha256, launch_sha256):
                 raise LaunchAuthorityError('conflict')
-            prior = conn.execute('SELECT request_sha256,launch_sha256 FROM mf_native_launch.plans WHERE run_id=%s AND principal=%s', (req.run_id,principal)).fetchone()
-            if prior is not None and prior != (digest(declaration),digest(identity)):
-                raise LaunchAuthorityError('conflict')
+            if version == 2:
+                if (prior is None or prior[2] == 'planned') and req.source_run_id is not None:
+                    _verify_checkpoint_source(conn, req, identity)
+                if prior is not None:
+                    return self._get(conn, principal, req.run_id)
             count = conn.execute('SELECT count(*) FROM mf_native_launch.plans WHERE principal=%s AND preparation_id=%s',
-                                 (principal,identifier(identity['preparation']['operation_id']))).fetchone()[0]
+                                 (principal, preparation_id)).fetchone()[0]
             if prior is None and count>=100:
                 raise LaunchAuthorityError('busy')
-            conn.execute("INSERT INTO mf_native_launch.plans(run_id,principal,preparation_id,simulation_id,project_id,project_revision,request_sha256,launch_sha256,frozen,state) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,'planned') ON CONFLICT DO NOTHING",
-                (req.run_id, principal, identifier(identity['preparation']['operation_id']), req.simulation_id,
-                 req.project_id, req.project_revision, digest(declaration), digest(identity), Jsonb(frozen)))
+            conn.execute(
+                "INSERT INTO mf_native_launch.plans(run_id,principal,preparation_id,simulation_id,project_id,"
+                "project_revision,request_sha256,launch_sha256,frozen,state,source_run_id) "
+                "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,'planned',%s) ON CONFLICT DO NOTHING",
+                (req.run_id, principal, preparation_id, req.simulation_id, req.project_id,
+                 req.project_revision, request_sha256, launch_sha256, Jsonb(frozen), req.source_run_id),
+            )
             try:
                 row = self._get(conn, principal, req.run_id)
             except LaunchAuthorityError:
                 raise LaunchAuthorityError('conflict') from None
-            if row.request_sha256 != digest(declaration):
+            if row.request_sha256 != request_sha256 or row.launch_sha256 != launch_sha256:
                 raise LaunchAuthorityError('conflict')
             return row
 
@@ -213,15 +330,21 @@ class NativeLaunchStore:
                 raise LaunchAuthorityError('conflict')
             if row.state != 'planned' or row.cancel_requested:
                 return row, False
-            project = conn.execute('SELECT current_revision FROM mf_app.projects WHERE principal=%s AND project_id=%s FOR UPDATE', (principal,row.project_id)).fetchone()
-            prep = conn.execute('SELECT state,plan_sha256,receipt FROM mf_preparation.plans WHERE principal=%s AND operation_id=%s FOR UPDATE', (principal,row.preparation_id)).fetchone()
-            descriptor = row.frozen['identity']['preparation']
-            if (project is None or project[0] != row.project_revision or prep is None or prep[0] != 'ready'
-                    or prep[1] != descriptor['plan_sha256'] or prep[2] is None
-                    or prep[2]['artifact_sha256'] != descriptor['artifact_sha256']):
-                raise LaunchAuthorityError('conflict')
-            other = conn.execute('SELECT run_id FROM mf_native_launch.plans WHERE principal=%s AND preparation_id=%s AND dispatch_claimed',
-                                 (principal,row.preparation_id)).fetchone()
+            req = row.request
+            identity = row.frozen['identity']
+            _verify_current_preparation(conn, req, identity)
+            if row.source_run_id is None:
+                other = conn.execute(
+                    'SELECT run_id FROM mf_native_launch.plans WHERE principal=%s AND preparation_id=%s '
+                    'AND source_run_id IS NULL AND dispatch_claimed',
+                    (principal, row.preparation_id),
+                ).fetchone()
+            else:
+                _verify_checkpoint_source(conn, req, identity)
+                other = conn.execute(
+                    'SELECT run_id FROM mf_native_launch.plans WHERE source_run_id=%s AND dispatch_claimed',
+                    (row.source_run_id,),
+                ).fetchone()
             if other is not None:
                 raise LaunchAuthorityError('conflict')
             conn.execute("UPDATE mf_native_launch.plans SET state='queued',dispatch_claimed=true,budget_attempt_id=%s,updated_at=now() WHERE run_id=%s", (identifier(budget_attempt_id),row.run_id))
@@ -273,7 +396,6 @@ class NativeLaunchStore:
                         and row.budget_attempt_id is None)
 
     def observe(self, principal, run_id, launch_sha256, native_record):
-        from .native_run_store import NativeRunRecord
         if not isinstance(native_record, NativeRunRecord):
             raise LaunchAuthorityError('native_launch_uncertain')
         with transaction(self._connect) as conn:
