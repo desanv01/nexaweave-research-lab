@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import dataclass
+import hashlib
 import json
 import math
 import time
@@ -363,3 +365,120 @@ def restore_native_memory(raw, *, expected_agent_id, context_creator):
     block.keep_rate = payload["keep_rate"]
     block.storage.save(payload["records"])
     return memory
+
+
+@dataclass(frozen=True)
+class _AgentMemoryOwner:
+    platform_id: int
+    camel_id: str
+    agent: object
+    action: object
+    memory: object
+    block: object
+    storage: object
+
+    def same_binding(self, other):
+        return (self.platform_id == other.platform_id and self.camel_id == other.camel_id
+                and self.agent is other.agent and self.action is other.action
+                and self.memory is other.memory and self.block is other.block
+                and self.storage is other.storage)
+
+
+def _valid_id(value):
+    return type(value) is int and 0 <= value < 2**63
+
+
+def _check_cut_deadline(deadline_monotonic):
+    if time.monotonic() >= deadline_monotonic:
+        raise RecordingError("limit_exceeded")
+
+
+def resolve_native_memory_cohort(graph, expected_graph, channel, prepared_agent_ids,
+                                 deadline_monotonic):
+    """Resolve the existing live CAMEL bindings at an owned capture read point."""
+    _check_cut_deadline(deadline_monotonic)
+    mappings = getattr(graph, "agent_mappings", None)
+    if (graph is not expected_graph or getattr(graph, "backend", None) != "igraph"
+            or type(mappings) is not dict or len(mappings) != len(prepared_agent_ids)
+            or graph.get_num_nodes() != len(prepared_agent_ids)
+            or not all(_valid_id(key) for key in mappings)
+            or set(mappings) != set(prepared_agent_ids)):
+        raise RecordingError()
+
+    owners = []
+    camel_ids = set()
+    object_ids = set()
+    for platform_id in prepared_agent_ids:
+        _check_cut_deadline(deadline_monotonic)
+        agent = mappings[platform_id]
+        if (graph.get_agent(platform_id) is not agent
+                or not _valid_id(getattr(agent, "social_agent_id", None))
+                or agent.social_agent_id != platform_id):
+            raise RecordingError()
+        action = getattr(getattr(agent, "env", None), "action", None)
+        if (getattr(action, "channel", None) is not channel
+                or not _valid_id(getattr(action, "agent_id", None))
+                or action.agent_id != platform_id):
+            raise RecordingError()
+
+        camel_id = getattr(agent, "agent_id", None)
+        memory = getattr(agent, "memory", None)
+        if (type(camel_id) is not str or not IDENTIFIER.fullmatch(camel_id)
+                or camel_id in camel_ids or type(memory) is not ChatHistoryMemory
+                or type(memory.agent_id) is not str or memory.agent_id != camel_id):
+            raise RecordingError()
+        block = memory._chat_history_block
+        if type(block) is not ChatHistoryBlock or type(block.storage) is not InMemoryKeyValueStorage:
+            raise RecordingError()
+        storage = block.storage
+        for value in (agent, action, memory, block, storage):
+            identity = id(value)
+            if identity in object_ids:
+                raise RecordingError()
+            object_ids.add(identity)
+        camel_ids.add(camel_id)
+        owners.append(_AgentMemoryOwner(platform_id, camel_id, agent, action, memory, block, storage))
+    return tuple(owners)
+
+
+def capture_dense_twitter_topology(graph, owners, deadline_monotonic):
+    """Describe the verified dense, directed, zero-edge graph at the held cut."""
+    _check_cut_deadline(deadline_monotonic)
+    from igraph import Graph
+    from oasis.social_agent.agent_graph import AgentGraph
+
+    _check_cut_deadline(deadline_monotonic)
+    if type(graph) is not AgentGraph or graph.backend != "igraph":
+        raise RecordingError()
+    native = graph.graph
+    mappings = graph.agent_mappings
+    count = len(owners)
+    if (not 1 <= count <= 128 or type(native) is not Graph
+            or type(mappings) is not dict or len(mappings) != count):
+        raise RecordingError()
+    _check_cut_deadline(deadline_monotonic)
+    if not native.is_directed() or native.vcount() != count or native.ecount() != 0:
+        raise RecordingError()
+
+    digest = hashlib.sha256(b"NTZ1")
+    try:
+        for index in range(count):
+            _check_cut_deadline(deadline_monotonic)
+            vertex = native.vs[index]
+            name = vertex["name"]
+            owner = owners[index]
+            platform_id = owner.platform_id
+            agent_id = getattr(owner.agent, "social_agent_id", None)
+            if (type(vertex.index) is not int or vertex.index != index
+                    or type(name) is not int or name != index
+                    or type(platform_id) is not int or platform_id != index
+                    or mappings.get(index) is not owner.agent
+                    or graph.get_agent(index) is not owner.agent
+                    or type(agent_id) is not int or agent_id != index):
+                raise RecordingError()
+            digest.update(bytes((name,)))
+    except (IndexError, KeyError):
+        raise RecordingError() from None
+    _check_cut_deadline(deadline_monotonic)
+    return {"version": 1, "directed": True, "vertex_count": count, "edge_count": 0,
+            "sha256": digest.hexdigest()}

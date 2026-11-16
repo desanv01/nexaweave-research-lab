@@ -18,7 +18,6 @@ import time
 
 from .native_recording_contracts import (
     HEX,
-    IDENTIFIER,
     MAX_EVENT_BYTES,
     MAX_EVENTS,
     MAX_JSON,
@@ -63,23 +62,6 @@ class _Request:
 class _Barrier:
     acknowledged: asyncio.Future
     release: asyncio.Event
-
-
-@dataclass(frozen=True)
-class _AgentMemoryOwner:
-    platform_id: int
-    camel_id: str
-    agent: object
-    action: object
-    memory: object
-    block: object
-    storage: object
-
-    def same_binding(self, other):
-        return (self.platform_id == other.platform_id and self.camel_id == other.camel_id
-                and self.agent is other.agent and self.action is other.action
-                and self.memory is other.memory and self.block is other.block
-                and self.storage is other.storage)
 
 
 class _OwnedChannel:
@@ -143,7 +125,10 @@ class NativeRoundCapture:
 
     def __init__(self, *, simulation_dir, destination, anchors,
                  include_memory=False, prepared_agent_ids=None, runner_config_sha256=None,
-                 include_engine_clock=False, include_recommendation_state=False):
+                 include_engine_clock=False, include_recommendation_state=False,
+                 include_topology=False):
+        if type(include_topology) is not bool or (include_topology and include_memory is not True):
+            raise RecordingError()
         if type(include_engine_clock) is not bool or type(include_recommendation_state) is not bool:
             raise RecordingError()
         if (runner_config_sha256 is not None
@@ -188,6 +173,7 @@ class NativeRoundCapture:
         self._clock_before_step = None
         self._clock_after_step = None
         self._include_memory = include_memory
+        self._include_topology = include_topology
         self._prepared_agent_ids = tuple(sorted(prepared_agent_ids)) if include_memory else None
         self._memory_graph = None
         self._memory_owners = ()
@@ -734,54 +720,11 @@ class NativeRoundCapture:
         return size, digest.hexdigest()
 
     def _resolve_memory_cohort(self, env, deadline):
-        from camel.memories import ChatHistoryMemory
-        from camel.memories.blocks.chat_history_block import ChatHistoryBlock
-        from camel.storages.key_value_storages.in_memory import InMemoryKeyValueStorage
+        from .native_checkpoint_memory import resolve_native_memory_cohort
 
-        self._remaining(deadline)
-        graph = env.agent_graph
-        mappings = getattr(graph, "agent_mappings", None)
-        if (graph is not self._memory_graph or getattr(graph, "backend", None) != "igraph"
-                or type(mappings) is not dict or len(mappings) != len(self._prepared_agent_ids)
-                or graph.get_num_nodes() != len(self._prepared_agent_ids)
-                or not all(_valid_id(key) for key in mappings)
-                or set(mappings) != set(self._prepared_agent_ids)):
-            raise RecordingError()
-
-        owners = []
-        camel_ids = set()
-        object_ids = set()
-        for platform_id in self._prepared_agent_ids:
-            self._remaining(deadline)
-            agent = mappings[platform_id]
-            if (graph.get_agent(platform_id) is not agent
-                    or not _valid_id(getattr(agent, "social_agent_id", None))
-                    or agent.social_agent_id != platform_id):
-                raise RecordingError()
-            action = getattr(getattr(agent, "env", None), "action", None)
-            if (getattr(action, "channel", None) is not self._channel
-                    or not _valid_id(getattr(action, "agent_id", None))
-                    or action.agent_id != platform_id):
-                raise RecordingError()
-
-            camel_id = getattr(agent, "agent_id", None)
-            memory = getattr(agent, "memory", None)
-            if (type(camel_id) is not str or not IDENTIFIER.fullmatch(camel_id)
-                    or camel_id in camel_ids or type(memory) is not ChatHistoryMemory
-                    or type(memory.agent_id) is not str or memory.agent_id != camel_id):
-                raise RecordingError()
-            block = memory._chat_history_block
-            if type(block) is not ChatHistoryBlock or type(block.storage) is not InMemoryKeyValueStorage:
-                raise RecordingError()
-            storage = block.storage
-            for value in (agent, action, memory, block, storage):
-                identity = id(value)
-                if identity in object_ids:
-                    raise RecordingError()
-                object_ids.add(identity)
-            camel_ids.add(camel_id)
-            owners.append(_AgentMemoryOwner(platform_id, camel_id, agent, action, memory, block, storage))
-        return tuple(owners)
+        return resolve_native_memory_cohort(
+            env.agent_graph, self._memory_graph, self._channel, self._prepared_agent_ids, deadline,
+        )
 
     def _verify_memory_users(self, connection, deadline):
         self._remaining(deadline)
@@ -799,7 +742,11 @@ class NativeRoundCapture:
         self._remaining(deadline)
 
     def _copy_memory_at_cut(self, deadline):
-        from .native_checkpoint_memory import NativeMemoryCaptureBudget, capture_native_memory
+        from .native_checkpoint_memory import (
+            NativeMemoryCaptureBudget,
+            capture_dense_twitter_topology,
+            capture_native_memory,
+        )
 
         barrier = self._barrier
         if (not self._sealed or barrier is None or not barrier.acknowledged.done()
@@ -811,6 +758,9 @@ class NativeRoundCapture:
                            for before, current in zip(self._memory_owners, owners, strict=True))):
             raise RecordingError()
 
+        topology = None
+        if self._include_topology:
+            topology = capture_dense_twitter_topology(self._env.agent_graph, owners, deadline)
         if self._text_remaining == 0:
             raise RecordingError("limit_exceeded")
         budget = NativeMemoryCaptureBudget(max_bytes=self._text_remaining, deadline_monotonic=deadline)
@@ -854,7 +804,7 @@ class NativeRoundCapture:
             "agent_count": len(owners),
             "bytes": size,
             "sha256": checksum,
-        }
+        }, topology
 
     def _validate_runner_position(self, position, round_num):
         if self._runner_config_digest is None:
@@ -1021,7 +971,9 @@ class NativeRoundCapture:
                 "continuation_supported": False,
             }
             if self._include_memory:
-                receipt["memory"] = self._copy_memory_at_cut(deadline)
+                receipt["memory"], topology = self._copy_memory_at_cut(deadline)
+                if self._include_topology:
+                    receipt["topology"] = topology
             if self._runner_config_digest is not None:
                 receipt["runner_state"] = self._copy_runner_at_cut(deadline)
             if self._include_engine_clock:
