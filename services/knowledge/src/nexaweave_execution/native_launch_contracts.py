@@ -7,6 +7,7 @@ from .native_run_contracts import NativeRunRequest, NativeRunReceipt, InvalidNat
 
 IDENTITY = ('schema_version', 'display_graph_id', 'scope', 'preparation', 'request',
             'limits', 'ceiling_microusd', 'model_label')
+_DECLARATION_KEYS = {'schema_version', 'launch_id', 'preparation'}
 
 
 class LaunchAuthorityError(RuntimeError):
@@ -25,18 +26,47 @@ def native_budget_episode(scope_group_id, run_id):
     return uuid5(NAMESPACE_URL,'mirofish:native-budget:v1:'+scope_group_id+':'+str(identifier(run_id)))
 
 
+def _version(value, keys):
+    if type(value) is not dict:
+        raise ValueError
+    version = value.get('schema_version')
+    if type(version) is not int or version not in (1, 2):
+        raise ValueError
+    expected = keys if version == 1 else keys | {'checkpoint'}
+    if set(value) != expected:
+        raise ValueError
+    return version
+
+
+def _checkpoint(value, run_id):
+    if type(value) is not dict or type(value.get('mode')) is not str:
+        raise ValueError
+    if value['mode'] == 'capture' and set(value) == {'mode'}:
+        return None
+    if value['mode'] != 'continue' or set(value) != {'mode', 'source_run_id', 'checkpoint_sha256'}:
+        raise ValueError
+    if type(value['source_run_id']) is not str:
+        raise ValueError
+    source = identifier(value['source_run_id'])
+    if source == run_id:
+        raise ValueError
+    return source, sha(value['checkpoint_sha256'])
+
+
 def validate_declaration(value):
     try:
-        if type(value) is not dict or set(value)!={'schema_version','launch_id','preparation'}:
+        version = _version(value, _DECLARATION_KEYS)
+        raw = canonical(value)
+        if len(raw) > 4096:
             raise ValueError
-        if type(value['schema_version']) is not int or value['schema_version']!=1 or len(canonical(value))>4096:
-            raise ValueError
-        identifier(value['launch_id'])
+        launch_id = identifier(value['launch_id'])
         prep=value['preparation']
         if type(prep) is not dict or set(prep)!={'operation_id','plan_sha256'}:
             raise ValueError
         identifier(prep['operation_id']);sha(prep['plan_sha256'])
-        return json.loads(canonical(value))
+        if version == 2:
+            _checkpoint(value['checkpoint'], launch_id)
+        return json.loads(raw)
     except (ValueError,TypeError,KeyError,UnicodeError):
         raise LaunchAuthorityError('invalid_request') from None
 
@@ -44,11 +74,11 @@ def validate_declaration(value):
 def validate_identity(value):
     from nexaweave_knowledge.contracts import KnowledgeScope
     try:
-        if type(value) is not dict or set(value) != set(IDENTITY) or len(canonical(value)) > 65536:
+        version = _version(value, set(IDENTITY))
+        raw = canonical(value)
+        if len(raw) > 65536:
             raise ValueError
-        value = json.loads(canonical(value))
-        if type(value['schema_version']) is not int or value['schema_version'] != 1:
-            raise ValueError
+        value = json.loads(raw)
         scope = KnowledgeScope.model_validate_json(json.dumps(value['scope']))
         if (type(value['scope']) is not dict or set(value['scope'])!={'schema_version','workspace_id','project_id','graph_id','run_id','branch_id','layer'}
                 or type(value['scope']['schema_version']) is not int or value['scope']['schema_version']!=1
@@ -65,7 +95,11 @@ def validate_identity(value):
             raise ValueError
         operation = identifier(prep['operation_id']); sha(prep['plan_sha256']); sha(prep['artifact_sha256'])
         req = NativeRunRequest.from_wire(value['request'])
-        if (req.schema_version != 1 or value['request'] != req.to_wire()
+        checkpoint = _checkpoint(value['checkpoint'], req.run_id) if version == 2 else None
+        if (req.schema_version != (1 if checkpoint is None else 2)
+                or (checkpoint is not None and checkpoint != (req.source_run_id, req.checkpoint_sha256))
+                or (version == 2 and (req.platforms != ('twitter',) or req.max_rounds != 1))
+                or value['request'] != req.to_wire()
                 or req.project_id != scope.project_id
                 or req.simulation_id != 'sim_' + operation.hex or prep['simulation_id'] != req.simulation_id
                 or prep['artifact_sha256'] != req.artifact_sha256 or not 0 <= req.seed <= 4294967295):
