@@ -340,17 +340,17 @@
     {
       "imported_path": "frontend/src/views/InteractionView.vue",
       "original_sha256": "11c23dfcba96c9f7b32eb14128fbcd661795e70328125ba216008fb13ea194a2",
-      "reason": "Main applies human-authorized visible NexaWeave branding/public repository links; preserves legal provenance, behavior and persisted compatibility.",
+      "reason": "Main applies human-authorized visible NexaWeave branding/public repository links; preserves legal provenance, behavior and persisted compatibility. W6.1 localizes workflow step and status labels through the shared catalog.",
       "phase": "U00-NexaWeave",
-      "current_sha256": "d14b7225b6c59bf213e6aaade15c034ecbeb82c955633c3e1957bf75d2eab996",
+      "current_sha256": "bd2b3d84ed495f375e62818d954210b96ad799fc4897a1359ce99395502a4a39",
       "review_status": "Main reviewed exact branding source; relevant build/export/browser and exact hosted acceptance pending."
     },
     {
       "imported_path": "frontend/src/views/MainView.vue",
       "original_sha256": "a8ec014c42edf3b1b294f1f81e2d335efb7a635bb8d5df7733636d0c8da431c6",
-      "reason": "Main applies human-authorized visible NexaWeave branding/public repository links; preserves legal provenance, behavior and persisted compatibility.",
+      "reason": "Main applies human-authorized visible NexaWeave branding/public repository links; preserves legal provenance, behavior and persisted compatibility. W6.1 localizes workflow step and status labels through the shared catalog.",
       "phase": "U00-NexaWeave",
-      "current_sha256": "50a44ac09d5a8af143c255dbbf07c088a0251140f4e4f79f14833cad36b14dac",
+      "current_sha256": "051420a58c3812c5f06f8c3abd9f7c6f5c398d9849253ab21b54eef8316763d5",
       "review_status": "Main reviewed exact branding source; relevant build/export/browser and exact hosted acceptance pending."
     },
     {
@@ -364,25 +364,25 @@
     {
       "imported_path": "frontend/src/views/ReportView.vue",
       "original_sha256": "ad15621e83d7c0a1499def1e8e2c08eab3d7a479ed75843e3d3d3bccf0ca6022",
-      "reason": "Main applies human-authorized visible NexaWeave branding/public repository links; preserves legal provenance, behavior and persisted compatibility.",
+      "reason": "Main applies human-authorized visible NexaWeave branding/public repository links; preserves legal provenance, behavior and persisted compatibility. W6.1 localizes workflow step and status labels through the shared catalog.",
       "phase": "U00-NexaWeave",
-      "current_sha256": "c2acef6efc6dc46854d1961764953de23126c0f1198627247260e47e131d3ed1",
+      "current_sha256": "e581a0730707c144c0ecd2e9e16180fc38867db1b6ffaba8d7ae2b26cf2392f5",
       "review_status": "Main reviewed exact branding source; relevant build/export/browser and exact hosted acceptance pending."
     },
     {
       "imported_path": "frontend/src/views/SimulationRunView.vue",
       "original_sha256": "1b3da793fe8bf7c67f3455e35a81273c4dc61333732a1ab5924ea9be482ec944",
-      "reason": "Main applies human-authorized visible NexaWeave branding/public repository links; preserves legal provenance, behavior and persisted compatibility.",
+      "reason": "Main applies human-authorized visible NexaWeave branding/public repository links; preserves legal provenance, behavior and persisted compatibility. W6.1 localizes workflow step and status labels through the shared catalog.",
       "phase": "U00-NexaWeave",
-      "current_sha256": "eb45a9118a01e3340c1572ecc681c7331c74de47f2f12614faf6ba615cfc241f",
+      "current_sha256": "032b6b68d60a15fa2670bfeb4f8a70f76c38f360b4dc9984e5116aae5bb71098",
       "review_status": "Main reviewed exact branding source; relevant build/export/browser and exact hosted acceptance pending."
     },
     {
       "imported_path": "frontend/src/views/SimulationView.vue",
       "original_sha256": "6657200000a169337dd30d30c218362220e46b8d7b42b08225992a60e5f6a1bf",
-      "reason": "Main applies human-authorized visible NexaWeave branding/public repository links; preserves legal provenance, behavior and persisted compatibility.",
+      "reason": "Main applies human-authorized visible NexaWeave branding/public repository links; preserves legal provenance, behavior and persisted compatibility. W6.1 localizes workflow step and status labels through the shared catalog.",
       "phase": "U00-NexaWeave",
-      "current_sha256": "00aecbce40a5a4b7716f4292de1f7ad77c73c07afda4324a5a26d6ab6ffa68ee",
+      "current_sha256": "78cb31977647dacd39d23cbf139b6d3750d15e932863975b8b64f54d65822a86",
       "review_status": "Main reviewed exact branding source; relevant build/export/browser and exact hosted acceptance pending."
     },
     {
@@ -395,8 +395,8 @@
     {
       "imported_path": "locales/en.json",
       "original_sha256": "b47c61ba64330cf5094ce611ff270c95f22f0ce4e98bfb6fa05ee6c6e5b93f84",
-      "current_sha256": "40f5a32ec8f4877d45d7880de76b190ca1a9fb5b9cc36353bd2f40aa65494fb6",
-      "reason": "U13a updates only the English supported-format label for DOCX. U11b adds only the English Home workbench navigation label; inherited catalog remains. Main applies human-authorized visible NexaWeave branding/public repository links; preserves legal provenance, behavior and persisted compatibility. Main correction2 fixes observed Home mobile overflow and removes unqualified scale/cost/ready claims while preserving controls, locale keys and placeholders. Connected report follow-up preserves original evidence and adds isolated one-shot shared-budget history; owned PDF retains original bytes with protected revision-bound reads.",
+      "current_sha256": "becff03e66ce9c82766b4d738d9d6fb05bbbfeca4348302145db29f1596ccd41",
+      "reason": "U13a updates only the English supported-format label for DOCX. U11b adds only the English Home workbench navigation label; inherited catalog remains. Main applies human-authorized visible NexaWeave branding/public repository links; preserves legal provenance, behavior and persisted compatibility. Main correction2 fixes observed Home mobile overflow and removes unqualified scale/cost/ready claims while preserving controls, locale keys and placeholders. Connected report follow-up preserves original evidence and adds isolated one-shot shared-budget history; owned PDF retains original bytes with protected revision-bound reads. W6.1 localizes workflow step and status labels through the shared catalog.",
       "phase": "U07h/U07i connected qualification on accepted NexaWeave base",
       "review_status": "Main reviewed exact branding source; relevant build/export/browser and exact hosted acceptance pending."
     },
@@ -410,8 +410,8 @@
     {
       "imported_path": "locales/zh.json",
       "original_sha256": "7d44d70ca75e89c79c2ce793ddceab32cf7b251bc9210cf81c04d37daf3daab8",
-      "current_sha256": "471dd304b266b2bce614bda2e94283ed39ee88a5dd5bea1f4e939fa103f9ff2b",
-      "reason": "U13a updates only the Chinese supported-format label for DOCX. U11b adds only the Chinese Home workbench navigation label; inherited catalog remains. Main applies human-authorized visible NexaWeave branding/public repository links; preserves legal provenance, behavior and persisted compatibility. Main correction2 fixes observed Home mobile overflow and removes unqualified scale/cost/ready claims while preserving controls, locale keys and placeholders. Connected report follow-up preserves original evidence and adds isolated one-shot shared-budget history; owned PDF retains original bytes with protected revision-bound reads.",
+      "current_sha256": "39978241b9a586996a5bf0428017c8c7d153c510cfbeac1f087865e17acd18b9",
+      "reason": "U13a updates only the Chinese supported-format label for DOCX. U11b adds only the Chinese Home workbench navigation label; inherited catalog remains. Main applies human-authorized visible NexaWeave branding/public repository links; preserves legal provenance, behavior and persisted compatibility. Main correction2 fixes observed Home mobile overflow and removes unqualified scale/cost/ready claims while preserving controls, locale keys and placeholders. Connected report follow-up preserves original evidence and adds isolated one-shot shared-budget history; owned PDF retains original bytes with protected revision-bound reads. W6.1 localizes workflow step and status labels through the shared catalog.",
       "phase": "U07h/U07i connected qualification on accepted NexaWeave base",
       "review_status": "Main reviewed exact branding source; relevant build/export/browser and exact hosted acceptance pending."
     },
@@ -472,6 +472,20 @@
       "current_sha256": "7ee244e4673703961c40a6f02ab11e63dc13fc54437aee5cbb3d6cc5ca0412ba",
       "reason": "Use this repository identity and observed aggregate star count; preserve original upstream state/chart bytes under docs/upstream/star-history references; never relabel upstream counts as NexaWeave popularity.",
       "phase": "NexaWeave canonical rebrand"
+    },
+    {
+      "imported_path": "backend/app/utils/ontology.py",
+      "original_sha256": "c220fff465ae465ad6c8b2fc263ca623a37394e78a4b9d0d8ad7bfc114e88d5c",
+      "current_sha256": "007620b7e0fe06992d6ef8b9eb1df5129eb5d63e4e37141618aca98e6abd4a60",
+      "reason": "W1.2 adds strict validation for reviewed ontology definitions and endpoint pairs.",
+      "phase": "W1.2 reviewed ontology validation"
+    },
+    {
+      "imported_path": "backend/tests/test_ontology_attributes.py",
+      "original_sha256": "2959000b2f327755bd75cefd24c6c46300c1cae8aeb70ee69f9d07989963c22c",
+      "current_sha256": "4c6465c9725cb00a798322006d16bb613fdfd23692e4842d6db85943b69cc63f",
+      "reason": "W1.2 adds focused fixtures for strict ontology validation and detached accepted edits.",
+      "phase": "W1.2 reviewed ontology validation"
     }
   ]
 }
