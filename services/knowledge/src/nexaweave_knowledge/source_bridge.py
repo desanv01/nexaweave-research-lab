@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+import json
 from typing import Callable
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 import psycopg
 
@@ -56,6 +57,53 @@ class BridgeUncertain(BridgeError):
 
 
 @dataclass(frozen=True)
+class RetainedWindow:
+    evidence_id: UUID
+    start: int
+    end: int
+    page: int | None
+    ordinal: int
+    count: int
+    sha256: str
+    retained_sha256: str
+    retained_byte_length: int
+    retained_codepoint_length: int
+
+
+def _retained_window(retained, evidence_id: UUID) -> tuple[RetainedWindow, str]:
+    if retained.codepoint_length <= 32768 or not 1 <= len(retained.passages) <= 100:
+        raise BridgeInvalid()
+    passages = sorted(retained.passages, key=lambda passage: passage.start)
+    end = 0
+    selected = None
+    for ordinal, passage in enumerate(passages, start=1):
+        if passage.start != end:
+            raise BridgeInvalid()
+        end = passage.end
+        if passage.evidence_id == evidence_id:
+            selected = (ordinal, passage)
+    if end != retained.codepoint_length:
+        raise BridgeInvalid()
+    if selected is None:
+        raise BridgeNotFound()
+    ordinal, passage = selected
+    return RetainedWindow(
+        passage.evidence_id, passage.start, passage.end, passage.page, ordinal,
+        len(passages), passage.excerpt_sha256, retained.text_sha256,
+        retained.byte_length, retained.codepoint_length,
+    ), passage.excerpt
+
+
+def _window_operation(scope, source_revision, window, ontology_revision) -> UUID:
+    identity = [scope.group_id, str(source_revision), window.retained_sha256,
+                window.start, window.end, str(window.evidence_id), window.sha256,
+                str(ontology_revision)]
+    return uuid5(NAMESPACE_URL, "mirofish:retained-window:v1:" + json.dumps(
+        identity, ensure_ascii=True, separators=(",", ":"),
+    ))
+
+
+@dataclass(frozen=True)
 class IngestionPlan:
     principal: str
     display_graph_id: str
@@ -66,6 +114,7 @@ class IngestionPlan:
     source_byte_length: int
     source_codepoint_length: int
     source_provenance: str = "retained_extracted_text"
+    window: RetainedWindow | None = None
 
 
 def _ontology(value: object) -> OntologySpec:
@@ -99,11 +148,16 @@ class SourceIngestionBridge:
         self._sources = SourceStore(connection_factory)
 
     def plan(self, principal: str, display_graph_id: str, source_revision: UUID,
-             operation_id: UUID, ontology: OntologySpec) -> IngestionPlan:
+             operation_id: UUID | None, ontology: OntologySpec, *,
+             evidence_id: UUID | None = None) -> IngestionPlan:
         try:
             principal, display_graph_id = _identity(principal, display_graph_id)
             principal_id(principal)
-            source_revision, operation_id = uuid_value(source_revision), uuid_value(operation_id)
+            source_revision = uuid_value(source_revision)
+            if evidence_id is None or operation_id is not None:
+                operation_id = uuid_value(operation_id)
+            if evidence_id is not None:
+                evidence_id = uuid_value(evidence_id)
             ontology = _ontology(ontology)
             binding = self._bindings.resolve(principal, display_graph_id)
             if not isinstance(binding, BindingRecord) or binding.principal != principal or binding.display_graph_id != display_graph_id:
@@ -115,16 +169,27 @@ class SourceIngestionBridge:
             retained = self._sources.get_source(principal, scope.project_id, source_revision)
             if retained.project_id != scope.project_id or retained.source_revision != source_revision:
                 raise BridgeNotFound()
-            if not retained.passages or retained.codepoint_length > 32768:
-                raise BridgeInvalid()
-            evidence_ids = tuple(item.evidence_id for item in retained.passages)
+            window = None
+            if evidence_id is None:
+                if not retained.passages or retained.codepoint_length > 32768:
+                    raise BridgeInvalid()
+                evidence_ids = tuple(item.evidence_id for item in retained.passages)
+                content, source_sha256 = retained.text, retained.text_sha256
+            else:
+                window, content = _retained_window(retained, evidence_id)
+                derived_operation = _window_operation(scope, source_revision, window, ontology.revision)
+                if operation_id is not None and operation_id != derived_operation:
+                    raise BridgeConflict()
+                operation_id = derived_operation
+                evidence_ids = (window.evidence_id,)
+                source_sha256 = window.sha256
             source = SourceEnvelope(
                 source_revision=retained.source_revision,
-                source_sha256=retained.text_sha256,
+                source_sha256=source_sha256,
                 ontology_revision=ontology.revision,
                 operation_id=operation_id,
                 source_kind="document",
-                content=retained.text,
+                content=content,
                 source_name=retained.name,
                 recorded_at=retained.recorded_at,
                 asserted_valid_at=None,
@@ -133,8 +198,9 @@ class SourceIngestionBridge:
             source = SourceEnvelope.model_validate(source.model_dump(warnings=False))
             fingerprint = request_fingerprint(scope, source, ontology)
             return IngestionPlan(principal, display_graph_id, scope, source, ontology,
-                                 fingerprint, retained.byte_length,
-                                 retained.codepoint_length)
+                                 fingerprint,
+                                 retained.byte_length if window is None else len(content.encode("utf-8")),
+                                 len(content), window=window)
         except BridgeError:
             raise
         except (ProjectNotFound, NotFound):
@@ -151,12 +217,14 @@ class SourceIngestionBridge:
                        ontology: OntologySpec,
                        coordinator: KnowledgeIngestionCoordinator, *,
                        authorize_model_call: Callable[[IngestionPlan], bool] | None = None,
+                       evidence_id: UUID | None = None,
                        ) -> CompletionReceipt:
         """Freshly plan, require host budget authorization, then use the coordinator."""
         # psycopg reads are synchronous. Cancellation while they finish in the
         # worker prevents this coroutine from authorizing or dispatching.
+        selector = {} if evidence_id is None else {"evidence_id": evidence_id}
         plan = await asyncio.to_thread(self.plan, principal, display_graph_id,
-                                       source_revision, operation_id, ontology)
+                                       source_revision, operation_id, ontology, **selector)
         if not isinstance(coordinator, KnowledgeIngestionCoordinator):
             raise BridgeInvalid()
         if authorize_model_call is None:
