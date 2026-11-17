@@ -1,9 +1,10 @@
 """Approved disposable PostgreSQL bridge and coordinator qualification."""
 
 import hashlib
+from io import BytesIO
 import json
 import os
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import psycopg
 import pytest
@@ -54,7 +55,9 @@ def ontology():
 def owned_fixture(factory, *, text="A😀猫", passages=True, layer=Layer.source):
     project, workspace, revision, graph = uuid4(), uuid4(), uuid4(), uuid4()
     ProjectStore(factory).create("owner", workspace, project, "proj_1", snapshot())
-    declaration = [{"evidence_id": str(uuid4()), "start": 1, "end": 3}] if passages else []
+    declaration = passages if type(passages) is list else (
+        [{"evidence_id": str(uuid4()), "start": 1, "end": 3}] if passages else []
+    )
     source = SourceStore(factory).ingest_text("owner", project, revision, "retained",
                                                text, declaration)
     scope = KnowledgeScope(workspace_id=workspace, project_id=project,
@@ -111,6 +114,113 @@ def test_real_owned_plan_cli_and_denials(factory, tmp_path, monkeypatch, capsys)
     Ledger(factory).tombstone_scope(scope)
     with pytest.raises(BridgeDenied):
         bridge.plan("owner", display, retained.source_revision, operation, spec)
+
+
+def test_retained_window_plan_and_budgeted_execution(factory):
+    from unittest.mock import AsyncMock
+
+    from nexaweave_execution import BudgetLedger, migrate as migrate_budget
+    from nexaweave_knowledge.operations import NotFound
+    from nexaweave_knowledge.source_ingestion_bootstrap import serve_once
+    from nexaweave_knowledge.source_ingestion_host import IngestionSettings, SourceIngestionHost
+    from nexaweave_knowledge.source_library import SourceSettings, encoded
+
+    first, second = "a" * 16400 + "😀", "猫" + "b" * 16400
+    evidence = (uuid4(), uuid4())
+    display, scope, retained = owned_fixture(factory, text=first + second, passages=[
+        {"evidence_id": str(evidence[0]), "start": 0, "end": len(first), "page": 1},
+        {"evidence_id": str(evidence[1]), "start": len(first), "end": len(first + second), "page": 2},
+    ])
+    with factory() as conn:
+        migrate_budget(conn)
+    account, ceiling = uuid4(), 4
+    budget = BudgetLedger(factory)
+    budget.create_account("owner", scope.project_id, account, 10)
+    settings = IngestionSettings(
+        SourceSettings("owner", display, scope, {}),
+        enabled=True, model_calls_authorized=True, account_id=account, ceiling_microusd=ceiling,
+        provider_environment={
+            "KNOWLEDGE_LLM_BASE_URL": "http://127.0.0.1:18000/v1",
+            "KNOWLEDGE_LLM_MODEL": "fixture", "KNOWLEDGE_LLM_API_KEY": "fixture",
+            "KNOWLEDGE_EMBEDDING_BASE_URL": "http://127.0.0.1:18001/v1",
+            "KNOWLEDGE_EMBEDDING_MODEL": "fixture", "KNOWLEDGE_EMBEDDING_API_KEY": "fixture",
+            "KNOWLEDGE_EMBEDDING_DIMENSION": "8", "KNOWLEDGE_NEO4J_URI": "bolt://127.0.0.1:17687",
+            "KNOWLEDGE_NEO4J_USER": "neo4j", "KNOWLEDGE_NEO4J_PASSWORD": "fixture",
+        },
+    )
+    provider = FakeProvider()
+    provider.ingest = AsyncMock(wraps=provider.ingest)
+    provider.close = AsyncMock()
+    host = SourceIngestionHost(settings, connection_factory=factory, provider_factory=lambda: provider)
+    spec = ontology().model_dump(mode="json")
+    source = {"source_revision": str(retained.source_revision), "ontology": spec}
+
+    def reply(payload, *, method="plan"):
+        raw = encoded({"version": 1, "request_id": str(uuid4()), "method": method,
+                       "scope": scope.model_dump(mode="json"), "payload": payload})
+        output = BytesIO()
+        serve_once(host, BytesIO(len(raw).to_bytes(4, "big") + raw), output)
+        framed = output.getvalue()
+        assert int.from_bytes(framed[:4], "big") == len(framed) - 4
+        return json.loads(framed[4:])
+
+    assert reply(dict(source, schema_version=1, operation_id=str(uuid4())))["error"] == {
+        "code": "invalid_request",
+    }
+    assert reply(dict(source, schema_version=2, evidence_id=str(uuid4())))["error"] == {
+        "code": "not_found",
+    }
+    operations = []
+    plans = []
+    for index, (item, excerpt) in enumerate(zip(evidence, (first, second))):
+        payload = dict(source, schema_version=2, evidence_id=str(item))
+        result = reply(payload)["result"]
+        assert reply(payload)["result"] == result
+        plans.append(result)
+        start = 0 if index == 0 else len(first)
+        digest = hashlib.sha256(excerpt.encode()).hexdigest()
+        assert result["window"] == {
+            "evidence_id": str(item), "start": start, "end": start + len(excerpt),
+            "page": index + 1, "ordinal": index + 1, "count": 2,
+            "sha256": digest, "retained_sha256": retained.text_sha256,
+            "retained_byte_length": retained.byte_length,
+            "retained_codepoint_length": retained.codepoint_length,
+        }
+        assert result["source_sha256"] == digest != retained.text_sha256
+        assert result["evidence_ids"] == [str(item)]
+        operation = UUID(result["operation_id"])
+        operations.append(operation)
+        with pytest.raises(NotFound):
+            Ledger(factory).get(scope, operation)
+    assert operations[0] != operations[1]
+    assert provider.calls == 0
+    assert budget.status("owner", account).remaining_microusd == 10
+
+    selected = dict(source, schema_version=2, evidence_id=str(evidence[0]))
+    result = reply(selected, method="execute")["result"]
+    expected = CompletionReceipt(
+        scope.group_id, scope.episode_uuid(operations[0]), plans[0]["fingerprint"], (evidence[0],),
+    )
+    record = Ledger(factory).get(scope, operations[0])
+    assert record.state == OperationState.completed and record.receipt == expected
+    assert result["state"] == "completed" and result["budget_state"] == "settled"
+    assert result["receipt"] == expected.json_value() and result["window"] == plans[0]["window"]
+    provider_scope, envelope, provider_ontology = provider.ingest.await_args.args
+    assert provider_scope == scope and provider_ontology.model_dump(mode="json") == spec
+    assert envelope.source_revision == retained.source_revision and envelope.operation_id == operations[0]
+    assert envelope.content == first and envelope.source_sha256 == plans[0]["source_sha256"]
+    assert envelope.evidence_ids == (evidence[0],)
+
+    assert reply(selected, method="execute")["result"] == result
+    changed_spec = dict(spec, entity_types=[dict(spec["entity_types"][0], description="Changed")])
+    assert reply(dict(selected, ontology=changed_spec), method="execute")["error"] == {"code": "conflict"}
+    assert reply({"operation_id": str(operations[1])}, method="status")["error"] == {"code": "not_found"}
+    with pytest.raises(NotFound):
+        Ledger(factory).get(scope, operations[1])
+    assert provider.calls == 1
+    assert provider.ingest.await_count == 1 and provider.close.await_count == 1
+    totals = budget.status("owner", account)
+    assert (totals.accounted_ceiling_microusd, totals.remaining_microusd) == (ceiling, 10 - ceiling)
 
 
 class FakeProvider:

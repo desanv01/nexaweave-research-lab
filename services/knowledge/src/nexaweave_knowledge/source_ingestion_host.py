@@ -28,8 +28,11 @@ def validate_payload(method, value):
         if set(value) != {"operation_id"}:
             raise ValueError
         return uuid_value(value["operation_id"]), None, None
-    if (method not in {"plan", "execute"} or set(value) != {"schema_version", "source_revision", "operation_id", "ontology"}
-            or type(value["schema_version"]) is not int or value["schema_version"] != 1):
+    version = value.get("schema_version")
+    if method not in {"plan", "execute"} or type(version) is not int or version not in (1, 2):
+        raise ValueError
+    identity_key = "operation_id" if version == 1 else "evidence_id"
+    if set(value) != {"schema_version", "source_revision", identity_key, "ontology"}:
         raise ValueError
     ontology = value["ontology"]
     if (type(ontology) is not dict or set(ontology) != {"schema_version", "revision", "entity_types", "edge_types"}
@@ -40,7 +43,12 @@ def validate_payload(method, value):
     # Reject missing/defaulted nested fields as well as coercion.
     if spec.model_dump(mode="json") != ontology:
         raise ValueError
-    return uuid_value(value["operation_id"]), uuid_value(value["source_revision"]), spec
+    revision = uuid_value(value["source_revision"])
+    if version == 1:
+        return uuid_value(value["operation_id"]), revision, spec
+    if type(value["evidence_id"]) is not str or value["source_revision"] != str(revision):
+        raise ValueError
+    return None, revision, spec, uuid_value(value["evidence_id"])
 
 
 @dataclass(frozen=True, repr=False)
@@ -163,7 +171,7 @@ class LazyGraphitiProvider:
 
 
 def plan_result(plan):
-    return {"schema_version": 1, "scope": plan.scope.model_dump(mode="json"),
+    result = {"schema_version": 1, "scope": plan.scope.model_dump(mode="json"),
         "operation_id": str(plan.source.operation_id), "episode_id": str(plan.scope.episode_uuid(plan.source.operation_id)),
         "fingerprint": plan.request_fingerprint, "evidence_ids": [str(v) for v in plan.source.evidence_ids],
         "source_revision": str(plan.source.source_revision), "source_sha256": plan.source.source_sha256,
@@ -171,6 +179,20 @@ def plan_result(plan):
         "ontology_revision": str(plan.ontology.revision), "eligibility_codepoint_limit": 32768,
         "spending_authorized": False, "graph_ingestion_executed": False, "model_calls_made": False,
         "actual_usage_microusd": None}
+    return _with_window(result, plan)
+
+
+def _with_window(result, plan):
+    window = plan.window
+    if window is not None:
+        result.update(schema_version=2, window={
+            "evidence_id": str(window.evidence_id), "start": window.start, "end": window.end,
+            "page": window.page, "ordinal": window.ordinal, "count": window.count,
+            "sha256": window.sha256, "retained_sha256": window.retained_sha256,
+            "retained_byte_length": window.retained_byte_length,
+            "retained_codepoint_length": window.retained_codepoint_length,
+        })
+    return result
 
 
 class SourceIngestionHost:
@@ -235,14 +257,14 @@ class SourceIngestionHost:
             "graph_ingestion_executed": state == "completed", "model_calls_made": None,
             "actual_usage_microusd": None}
 
-    async def _ingest(self, revision, operation, ontology):
+    async def _ingest(self, revision, operation, ontology, **selector):
         lazy = LazyGraphitiProvider(self.settings, factory=self.provider_factory)
         coordinator = KnowledgeIngestionCoordinator(self.ledger, lazy, timeout_seconds=60)
         budgeted = BudgetedIngestion(self.bridge, self.budget, coordinator)
         try:
             receipt = await budgeted.ingest(self.settings.source.principal, self.settings.source.display_graph_id,
                 revision, operation, ontology, account_id=self.settings.account_id,
-                ceiling_microusd=self.settings.ceiling_microusd)
+                ceiling_microusd=self.settings.ceiling_microusd, **selector)
             return receipt
         finally:
             # Cleanup tasks must finish within their existing bounded semantics
@@ -253,14 +275,19 @@ class SourceIngestionHost:
             await lazy.close()
 
     def execute(self, method, payload):
-        operation, revision, ontology = validate_payload(method, payload)
+        operation, revision, ontology, *evidence = validate_payload(method, payload)
+        selector = {"evidence_id": evidence[0]} if evidence else {}
         scope = self.authority.authorize()
         if method == "status":
             return self.status(operation)
         plan = self.bridge.plan(self.settings.source.principal, self.settings.source.display_graph_id,
-                                revision, operation, ontology)
+                                revision, operation, ontology, **selector)
         if plan.scope != scope:
             raise SourceError("source_denied")
+        if evidence:
+            if plan.window is None or plan.window.evidence_id != evidence[0]:
+                raise SourceError("uncertain")
+            operation = plan.source.operation_id
         if method == "plan":
             return plan_result(plan)
         self.settings.authorize_execution()
@@ -294,15 +321,15 @@ class SourceIngestionHost:
             saved = self.status(operation)
             if saved["state"] != "completed" or saved["receipt"] is None:
                 raise SourceError("uncertain")
-            return saved
-        receipt = asyncio.run(self._ingest(revision, operation, ontology))
+            return _with_window(saved, plan)
+        receipt = asyncio.run(self._ingest(revision, operation, ontology, **selector))
         valid = _receipt(receipt, plan.scope, operation, plan.request_fingerprint)
         if valid.evidence_ids != plan.source.evidence_ids:
             raise SourceError("uncertain")
         result = self.status(operation)
         if result["state"] != "completed" or result["budget_state"] != "settled" or result["receipt"] != valid.json_value():
             raise SourceError("uncertain")
-        return result
+        return _with_window(result, plan)
 
     def dispatch(self, raw):
         request_id = None

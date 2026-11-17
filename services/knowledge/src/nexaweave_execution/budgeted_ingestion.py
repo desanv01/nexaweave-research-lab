@@ -56,15 +56,17 @@ class BudgetedIngestion:
                 and first.request_fingerprint == second.request_fingerprint
                 and first.source_byte_length == second.source_byte_length
                 and first.source_codepoint_length == second.source_codepoint_length
-                and first.source_provenance == second.source_provenance)
+                and first.source_provenance == second.source_provenance
+                and first.window == second.window)
 
     async def ingest(self, principal: str, display_graph_id: str, source_revision: UUID,
                      operation_id: UUID, ontology: OntologySpec, *, account_id: UUID,
-                     ceiling_microusd: int) -> CompletionReceipt:
+                     ceiling_microusd: int, evidence_id: UUID | None = None) -> CompletionReceipt:
         """The host supplies a defensible maximum; no default authorizes spending."""
         ceiling = _money(ceiling_microusd)
+        selector = {} if evidence_id is None else {"evidence_id": evidence_id}
         plan = await asyncio.to_thread(self._bridge.plan, principal, display_graph_id,
-                                       source_revision, operation_id, ontology)
+                                       source_revision, operation_id, ontology, **selector)
         reservation = await asyncio.to_thread(self._ledger.reserve, principal, account_id,
                                               plan.scope, plan.source.operation_id,
                                               plan.request_fingerprint, ceiling,
@@ -108,7 +110,8 @@ class BudgetedIngestion:
             receipt = await self._bridge.dispatch(principal, display_graph_id,
                                                   source_revision, operation_id, ontology,
                                                   self._coordinator,
-                                                  authorize_model_call=lambda fresh: self._same_plan(plan, fresh))
+                                                  authorize_model_call=lambda fresh: self._same_plan(plan, fresh),
+                                                  **selector)
             await asyncio.to_thread(self._ledger.settle, principal, account_id, plan.scope,
                                     plan.source.operation_id, reservation.attempt_id,
                                     plan.request_fingerprint, plan.source.evidence_ids, receipt)
