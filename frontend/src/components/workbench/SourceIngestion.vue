@@ -1,9 +1,13 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
-import { freshId, operationId, validateOntology, ontologyNameIssue, ontologyDescriptionIssue } from '../../api/sourceIngestion.js'
+import { freshId, ingestionPassages, operationId, validateOntology, ontologyNameIssue, ontologyDescriptionIssue } from '../../api/sourceIngestion.js'
 import { copyFor } from '../../i18n/workbench.js'
+import { sourcePassageCopyFor } from '../../i18n/sourcePassages.js'
 const props = defineProps({ methods: { type: Object, required: true }, inspected: Object, connected: Boolean, busy: Boolean, resetVersion: Number, locale: { type: String, default: 'en' } })
 const copy = computed(() => copyFor(props.locale).ingestion)
+const passageCopy = computed(() => sourcePassageCopyFor(props.locale))
+const sourceCopy = computed(() => copyFor(props.locale).sources)
+const selectedEvidence = ref('')
 const entities = ref([]), edges = ref([]), plan = ref(null), snapshot = ref(null), attempt = ref(null), outcome = ref(null)
 const reviewed = ref(false), manual = ref(''), pending = ref(false), error = ref(''), phase = ref(''), reviewPanel = ref(null), planButton = ref(null)
 const validationShown = ref(false), errorSummary = ref(null)
@@ -52,7 +56,10 @@ function fieldTitle(problem) { return problem.labels.map(([key, ordinal]) => cop
 function focusField(id) { errorSummary.value?.closest('form')?.querySelector(`[id="${id}"]`)?.focus() }
 let generation = 0
 const locked = computed(() => !!attempt.value || pending.value || props.busy || !props.connected)
-const eligible = computed(() => !!props.inspected && props.inspected.source.codepoint_length <= 32768 && props.inspected.source.codepoint_length > 0 && props.inspected.passages.length > 0)
+const passages = computed(() => ingestionPassages(props.inspected))
+const selectedPassage = computed(() => passages.value.find(p => p.evidence_id === selectedEvidence.value))
+const wholeSourceEligible = computed(() => !!props.inspected && props.inspected.source.codepoint_length <= 32768 && props.inspected.source.codepoint_length > 0 && props.inspected.passages.length > 0)
+const eligible = computed(() => selectedEvidence.value ? !!selectedPassage.value : wholeSourceEligible.value)
 const unavailable = computed(() => !props.connected || props.busy || pending.value)
 const errorText = computed(() => {
   if (!error.value) return ''
@@ -67,9 +74,15 @@ function starter() {
   entities.value = [{ name: 'Person', description: 'A person mentioned in the source.', attributes: [] }, { name: 'Organization', description: 'An organization mentioned in the source.', attributes: [] }]
   edges.value = [{ name: 'WORKS_FOR', description: 'A declared employment relationship.', attributes: [], source_targets: [{ source: 'Person', target: 'Organization' }] }]
 }
-function clear() { generation++; validationShown.value = false; plan.value = null; snapshot.value = null; attempt.value = null; outcome.value = null; reviewed.value = false; manual.value = ''; pending.value = false; error.value = ''; phase.value = ''; starter() }
+function clear() { generation++; validationShown.value = false; plan.value = null; snapshot.value = null; attempt.value = null; outcome.value = null; reviewed.value = false; manual.value = ''; pending.value = false; error.value = ''; phase.value = ''; selectedEvidence.value = ''; starter() }
 // Source changes invalidate all old protected state, including in-flight replies.
 watch(() => [props.connected, props.resetVersion, props.inspected], clear, { flush: 'sync' })
+watch(selectedEvidence, () => {
+  if (attempt.value) return
+  generation++
+  plan.value = null; snapshot.value = null; outcome.value = null; reviewed.value = false
+  pending.value = false; error.value = ''; phase.value = ''
+}, { flush: 'sync' })
 watch([entities, edges], () => { if (!attempt.value) { generation++; plan.value = null; snapshot.value = null; reviewed.value = false; outcome.value = null; phase.value = '' } }, { deep: true, flush: 'sync' })
 onBeforeUnmount(clear)
 starter()
@@ -102,7 +115,10 @@ async function makePlan() {
   validationShown.value = false
   try {
     const ontology = validateOntology({ schema_version: 1, revision: freshId(), entity_types: JSON.parse(JSON.stringify(entities.value)), edge_types: JSON.parse(JSON.stringify(edges.value)) })
-    const payload = { schema_version: 1, source_revision: props.inspected.source.source_revision, operation_id: freshId(), ontology }
+    const source_revision = props.inspected.source.source_revision
+    const payload = selectedPassage.value
+      ? { schema_version: 2, source_revision, evidence_id: selectedPassage.value.evidence_id, ontology }
+      : { schema_version: 1, source_revision, operation_id: freshId(), ontology }
     // The transport clones the inspected source independently for correlation.
     return request(() => props.methods.plan(payload, props.inspected), data => { snapshot.value = payload; plan.value = data; phase.value = 'planned' })
   } catch (e) { error.value = e.code || 'invalid_request' }
@@ -117,14 +133,14 @@ function execute() {
 function statusKnown() {
   if (!attempt.value) return
   const saved = attempt.value
-  return request(() => props.methods.status({ operation_id: saved.payload.operation_id }, saved.known), data => { outcome.value = data; phase.value = 'returned' })
+  return request(() => props.methods.status({ operation_id: saved.known.operation_id }, saved.known), data => { outcome.value = data; phase.value = 'returned' })
 }
 function statusManual() {
   if (unavailable.value) return
   try {
     const id = operationId(manual.value)
     // Never weaken correlation by querying a known operation as manual recovery.
-    const known = attempt.value?.payload.operation_id === id ? attempt.value.known : undefined
+    const known = attempt.value?.known.operation_id === id ? attempt.value.known : undefined
     return request(() => props.methods.status({ operation_id: id }, known), data => { outcome.value = data; phase.value = 'returned' })
   } catch { error.value = 'invalid_request' }
 }
@@ -135,7 +151,20 @@ async function dismissPlan() { if (locked.value) return; plan.value = null; snap
     <h2 id="ingestion-title">{{ copy.title }}</h2><p>{{ copy.intro }}</p>
     <p class="notice">{{ copy.authorization }}</p><p>{{ copy.recoveryHint }}</p>
     <p v-if="!inspected">{{ copy.inspectFirst }}</p>
-    <div v-else class="selected-source"><h3>{{ inspected.source.source_name }}</h3><dl><dt>{{ copy.revision }}</dt><dd>{{ inspected.source.source_revision }}</dd><dt>{{ copy.digest }}</dt><dd>{{ inspected.source.text_sha256 }}</dd><dt>{{ copy.codepoints }}</dt><dd>{{ inspected.source.codepoint_length }} / 32768</dd></dl><p v-if="!eligible" class="notice">{{ copy.ineligible }}</p></div>
+    <div v-else class="selected-source">
+      <h3>{{ inspected.source.source_name }}</h3>
+      <dl><dt>{{ copy.revision }}</dt><dd>{{ inspected.source.source_revision }}</dd><dt>{{ copy.digest }}</dt><dd>{{ inspected.source.text_sha256 }}</dd><dt>{{ copy.codepoints }}</dt><dd>{{ inspected.source.codepoint_length }}<template v-if="!passages.length"> / 32768</template></dd></dl>
+      <label v-if="passages.length" for="ingestion-passage">
+        {{ passageCopy.selection }}
+        <select id="ingestion-passage" v-model="selectedEvidence" :disabled="locked">
+          <option value="">{{ passageCopy.choose }}</option>
+          <option v-for="passage in passages" :key="passage.evidence_id" :value="passage.evidence_id">
+            {{ passageCopy.position(passage.ordinal, passage.count) }} · {{ passage.start }}–{{ passage.end }}<template v-if="passage.page !== null"> · {{ sourceCopy.page }} {{ passage.page }}</template> · {{ passage.evidence_id }}
+          </option>
+        </select>
+      </label>
+      <p v-else-if="!eligible" class="notice">{{ copy.ineligible }}</p>
+    </div>
     <form @submit.prevent="makePlan">
       <div v-if="fieldErrors.length" ref="errorSummary" class="error-summary" tabindex="-1" aria-labelledby="ontology-error-title"><h3 id="ontology-error-title">{{ copy.validationSummary }}</h3><p>{{ copy.validationHint }}</p><ul><li v-for="problem in fieldErrors" :key="problem.id"><a :href="`#${problem.id}`" @click.prevent="focusField(problem.id)">{{ fieldTitle(problem) }}: {{ copy.validation[problem.code] }}</a></li></ul></div>
       <fieldset :disabled="locked || !eligible"><legend>{{ copy.ontology }}</legend><p>{{ copy.starter }}</p><p class="help">{{ copy.limits }}</p>
@@ -171,9 +200,15 @@ async function dismissPlan() { if (locked.value) return; plan.value = null; snap
     </form>
     <p class="feedback" role="status" aria-live="polite" aria-atomic="true">{{ copy[phase] || '' }} {{ errorText }}</p>
     <article v-if="plan" ref="reviewPanel" class="plan-review" tabindex="-1" @keydown.esc.stop.prevent="dismissPlan"><h3>{{ copy.review }}</h3><p>{{ copy.planFlags }}</p><dl><dt>{{ copy.operation }}</dt><dd class="operation-id">{{ plan.operation_id }}</dd><dt>{{ copy.episode }}</dt><dd>{{ plan.episode_id }}</dd><dt>{{ copy.fingerprint }}</dt><dd>{{ plan.fingerprint }}</dd><dt>{{ copy.evidence }}</dt><dd>{{ plan.evidence_ids.length }}</dd><dt>{{ copy.ontologyRevision }}</dt><dd>{{ plan.ontology_revision }}</dd></dl><ul><li v-for="id in plan.evidence_ids" :key="id">{{ id }}</li></ul>
+      <dl v-if="plan.window" class="passage-review">
+        <dt>{{ passageCopy.selection }}</dt><dd>{{ passageCopy.position(plan.window.ordinal, plan.window.count) }}</dd>
+        <dt>{{ sourceCopy.offsets }}</dt><dd>{{ plan.window.start }}–{{ plan.window.end }}</dd>
+        <dt>{{ sourceCopy.page }}</dt><dd>{{ plan.window.page ?? sourceCopy.unknownLayout }}</dd>
+        <dt>{{ sourceCopy.excerptDigest }}</dt><dd>{{ plan.window.sha256 }}</dd>
+      </dl>
       <p>{{ copy.charge }}</p><label class="acknowledgement"><input v-model="reviewed" type="checkbox" :disabled="!!attempt || unavailable">{{ copy.acknowledge }}</label><div class="actions"><button type="button" class="primary" :disabled="!reviewed || !!attempt || unavailable" @click="execute">{{ copy.execute }}</button><button type="button" :disabled="locked" @click="dismissPlan">{{ copy.dismiss }}</button></div>
     </article>
-    <div v-if="attempt" class="attempt"><h3>{{ copy.submitted }}</h3><p class="operation-id">{{ attempt.payload.operation_id }}</p><p>{{ copy.noRetry }}</p><button type="button" :disabled="unavailable" @click="statusKnown">{{ copy.checkStatus }}</button></div>
+    <div v-if="attempt" class="attempt"><h3>{{ copy.submitted }}</h3><p class="operation-id">{{ attempt.known.operation_id }}</p><p>{{ copy.noRetry }}</p><button type="button" :disabled="unavailable" @click="statusKnown">{{ copy.checkStatus }}</button></div>
     <article v-if="outcome" class="outcome"><h3>{{ copy.outcome }}</h3><p class="operation-id">{{ outcome.operation_id }}</p><dl><dt>{{ copy.graphState }}</dt><dd>{{ copy.graphStates[outcome.state] }}</dd><dt>{{ copy.budgetState }}</dt><dd>{{ copy.budgetStates[outcome.budget_state] }}</dd><dt>{{ copy.ceiling }}</dt><dd>{{ outcome.ceiling_microusd ?? copy.unknown }}</dd><dt>{{ copy.actualCharge }}</dt><dd>{{ copy.unknown }}</dd><dt>{{ copy.modelCalls }}</dt><dd>{{ copy.unknown }}</dd></dl><p>{{ copy.separate }}</p></article>
     <form class="manual-recovery" @submit.prevent="statusManual"><h3>{{ copy.manual }}</h3><p>{{ copy.manualHint }}</p><label for="ingestion-operation">{{ copy.operation }}<input id="ingestion-operation" v-model="manual" :disabled="unavailable" required maxlength="36" spellcheck="false" autocomplete="off"></label><button type="submit" :disabled="unavailable">{{ copy.recover }}</button></form>
   </section>

@@ -1,6 +1,6 @@
 // Isolated protected read client. Never share the inherited Axios interceptors.
 import { sourcePayload, sourceReadRequest, verifySourceInput, validateSourceResult, sourceOriginalPayload, verifyOriginalPdfInput, validateSourceOriginalResult } from './sourceLibrary.js'
-import { ingestionPayload, validateIngestionResult } from './sourceIngestion.js'
+import { ingestionPassages, ingestionPayload, validateIngestionResult } from './sourceIngestion.js'
 import { experimentSelection, validateExperimentCatalog, validateExperimentComparison } from './experimentComparison.js'
 import { populationOptions, validatePopulationPreview, validatePopulationExport } from './populationWorkbench.js'
 import { preparationPayload, preparationSource, preparationSources, validatePreparationResult, PREPARATION_CODES } from './simulationPreparation.js'
@@ -318,7 +318,16 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
       if (method === 'ingestionPlan') {
         await guarded(validateSourceResult('sourceGet', ingestionContext.inspected, { source_revision: payload.source_revision }))
         owned()
-        if (ingestionContext.inspected.source.codepoint_length > 32768 || !ingestionContext.inspected.passages.length) fail('invalid_request')
+        if (payload.schema_version === 2) {
+          if (!ingestionPassages(ingestionContext.inspected).some(p => p.evidence_id === payload.evidence_id)) fail('invalid_request')
+        } else if (ingestionContext.inspected.source.codepoint_length > 32768 || !ingestionContext.inspected.passages.length) {
+          fail('invalid_request')
+        }
+      }
+      if (method === 'ingestionExecute' && payload.schema_version === 2) {
+        const { known } = ingestionContext
+        if (known?.schema_version !== 2 || known.source_revision !== payload.source_revision ||
+            known.ontology_revision !== payload.ontology.revision || known.window?.evidence_id !== payload.evidence_id) fail('invalid_request')
       }
       const sourcePaths = { sourceList: 'library', sourceGet: 'item', sourceRetain: 'retain', sourceRetainOriginal: 'retain-original', sourceOriginalMetadata: 'original-metadata', sourceOriginalRead: 'original' }
       const ingestionPaths = { ingestionPlan: 'plan', ingestionExecute: 'execute', ingestionStatus: 'operation' }
