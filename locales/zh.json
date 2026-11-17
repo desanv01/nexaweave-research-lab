@@ -74,6 +74,11 @@
     "initializing": "初始化中..."
   },
   "main": {
+    "stepCounter": "第 {current}/{total} 步",
+    "statusBuildingGraph": "构建图谱中",
+    "statusGeneratingOntology": "生成本体中",
+    "statusPreparing": "准备中",
+    "statusProcessing": "处理中",
     "layoutGraph": "图谱",
     "layoutSplit": "双栏",
     "layoutWorkbench": "工作台",

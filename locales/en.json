@@ -74,6 +74,11 @@
     "initializing": "Initializing..."
   },
   "main": {
+    "stepCounter": "Step {current}/{total}",
+    "statusBuildingGraph": "Building Graph",
+    "statusGeneratingOntology": "Generating Ontology",
+    "statusPreparing": "Preparing",
+    "statusProcessing": "Processing",
     "layoutGraph": "Graph",
     "layoutSplit": "Split",
     "layoutWorkbench": "Workbench",
