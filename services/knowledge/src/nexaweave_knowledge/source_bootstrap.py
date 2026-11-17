@@ -31,17 +31,27 @@ def main():
         if directory.name != "nexaweave_knowledge" or "site-packages" not in directory.parts:
             raise ValueError
         for name in ("nexaweave_knowledge", "nexaweave_knowledge.source_library", "nexaweave_knowledge.stdio",
-                     "nexaweave_knowledge.bindings", "nexaweave_knowledge.contracts", "nexaweave_knowledge.operations"):
+                     "nexaweave_knowledge.bindings", "nexaweave_knowledge.contracts",
+                     "nexaweave_knowledge.operations"):
             if Path(sys.modules[name].__file__).resolve().parent != directory:
                 raise ValueError
         storage = directory.parent / "nexaweave_storage"
         for name in ("nexaweave_storage", "nexaweave_storage.source", "nexaweave_storage.store", "nexaweave_storage.validation"):
             if Path(sys.modules[name].__file__).resolve().parent != storage:
                 raise ValueError
+        dispatcher = SourceLibrary
+        if sys.argv[1:] == ["--ontology"]:
+            from nexaweave_knowledge.reviewed_ontology import ReviewedOntologySource
+
+            if Path(sys.modules["nexaweave_knowledge.reviewed_ontology"].__file__).resolve().parent != directory:
+                raise ValueError
+            dispatcher = ReviewedOntologySource
+        elif sys.argv[1:]:
+            raise ValueError
         if any(name in sys.modules for name in ("nexaweave_knowledge.provider", "nexaweave_knowledge.read_runtime",
                                                 "graphiti_core", "neo4j")):
             raise ValueError
-        serve_once(SourceLibrary(SourceSettings.from_environment()), sys.stdin.buffer, sys.stdout.buffer)
+        serve_once(dispatcher(SourceSettings.from_environment()), sys.stdin.buffer, sys.stdout.buffer)
         return 0
     except Exception:
         print("knowledge source unavailable", file=sys.stderr)
