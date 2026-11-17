@@ -218,9 +218,13 @@ class ProjectStore:
                 (principal, project_id, after_revision, limit)).fetchall()
             return [_record(row) for row in rows]
 
-    def update(self, principal, project_id, expected_revision, snapshot, evidence=()) -> ProjectRecord:
+    def update(self, principal, project_id, expected_revision, snapshot, evidence=(), *,
+               authorize_revision_write: Callable[[psycopg.Connection], None] | None = None) -> ProjectRecord:
+        """Update by revision, optionally locking trusted authority before the project row."""
         principal, project_id = principal_id(principal), uuid_value(project_id)
         expected_revision = _limit(expected_revision, 2_147_483_646)
+        if authorize_revision_write is not None and not callable(authorize_revision_write):
+            raise InvalidProject()
         # Validate and copy caller-owned values before opening any connection.
         if type(snapshot) is not dict or "project_id" not in snapshot:
             raise InvalidProject()
@@ -234,6 +238,8 @@ class ProjectStore:
         if proposed_display != row[0]:
             raise InvalidProject()
         with _transaction(self._factory) as conn:
+            if authorize_revision_write is not None:
+                authorize_revision_write(conn)
             row = conn.execute("SELECT current_revision FROM mf_app.projects WHERE principal=%s AND project_id=%s FOR UPDATE", (principal, project_id)).fetchone()
             if row is None:
                 raise NotFound()

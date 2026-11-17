@@ -89,6 +89,41 @@ def test_concurrent_cas_one_winner(factory):
     assert len(store.history("race", project)) == 2
 
 
+def test_tombstone_after_initial_read_refuses_guarded_revision(factory):
+    from nexaweave_knowledge.bindings import ScopeBindingStore
+    from nexaweave_knowledge.contracts import KnowledgeScope, Layer
+    from nexaweave_knowledge.operations import Ledger, Tombstoned, migrate as migrate_knowledge
+
+    with factory() as conn:
+        migrate_knowledge(conn)
+    principal, display = "ontology owner", "graph_" + uuid4().hex
+    scope = KnowledgeScope(
+        workspace_id=uuid4(), project_id=uuid4(), graph_id=uuid4(), layer=Layer.source,
+    )
+    store, bindings = ProjectStore(factory), ScopeBindingStore(factory)
+    initial = snapshot()
+    initial["graph_id"] = display
+    original = store.create(principal, scope.workspace_id, scope.project_id, "proj_1", initial)
+    bindings.bind(principal, display, scope)
+    assert bindings.resolve(principal, display).scope == scope
+    current = store.get(principal, scope.project_id)
+    assert current == original
+
+    assert Ledger(factory).tombstone_scope(scope).tombstoned
+    proposed = current.snapshot
+    proposed["ontology"] = {"entity_types": [], "edge_types": []}
+    guard_store = ScopeBindingStore(lambda: pytest.fail("guard opened a second connection"))
+    with pytest.raises(Tombstoned):
+        store.update(
+            principal, scope.project_id, current.revision, proposed, current.evidence,
+            authorize_revision_write=lambda conn: guard_store.resolve_for_write(
+                conn, principal, display, scope,
+            ),
+        )
+    assert store.get(principal, scope.project_id) == original
+    assert store.history(principal, scope.project_id) == [original]
+
+
 def test_schema_constraints_and_drift(factory):
     with factory() as connection:
         assert connection.execute("SELECT count(*) FROM pg_indexes WHERE schemaname='mf_app' AND indexname='projects_owner_workspace_list'").fetchone()[0] == 1
