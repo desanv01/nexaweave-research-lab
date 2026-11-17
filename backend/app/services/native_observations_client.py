@@ -22,9 +22,10 @@ def validate_payload(value):
     try:
         if type(value) is not dict or set(value) != {'schema_version', 'launch_id', 'launch_sha256', 'platform', 'offset', 'limit'}:
             raise ValueError
-        integer(value['schema_version'], 1, 1)
+        version = integer(value['schema_version'], 1, 2)
         uuid_string(value['launch_id']); sha(value['launch_sha256'])
-        if type(value['platform']) is not str or value['platform'] not in {'twitter', 'reddit'}:
+        if (type(value['platform']) is not str or value['platform'] not in {'twitter', 'reddit'}
+                or (version == 2 and value['platform'] != 'twitter')):
             raise ValueError
         integer(value['offset'], 0, RECORDS); integer(value['limit'], 1, 20)
         if len(encoded(value)) > REQUEST_BYTES:
@@ -38,10 +39,19 @@ def launch_reference(payload):
     return {k: payload[k] for k in ('schema_version', 'launch_id', 'launch_sha256')}
 
 
-def output_names(platforms):
+def action_log_name(platform, *, restored=False):
+    return 'actions.jsonl' if restored else platform + '/actions.jsonl'
+
+
+def output_names(platforms, *, restored=False):
     if type(platforms) is not list or platforms not in [['twitter'], ['reddit'], ['twitter', 'reddit']]:
         raise ValueError
-    return [name for platform in platforms for name in (platform + '_simulation.db', platform + '/actions.jsonl')]
+    if restored:
+        if platforms != ['twitter']:
+            raise ValueError
+        # Keep the exact native restored receipt manifest order.
+        return ['native.sqlite3', action_log_name('twitter', restored=True)]
+    return [name for platform in platforms for name in (platform + '_simulation.db', action_log_name(platform))]
 
 
 def validate_result(value, graph_id, scope, payload, principal):
@@ -52,23 +62,30 @@ def validate_result(value, graph_id, scope, payload, principal):
             raise ValueError
         if len(encoded(value)) > RESULT_BYTES:
             raise NativeObservationsError('result_too_large')
-        integer(value['schema_version'], 1, 1)
+        version = integer(value['schema_version'], 1, 2)
+        if version != integer(payload['schema_version'], 1, 2):
+            raise ValueError
         launch = validate_launch(value['launch'], graph_id, scope, launch_reference(payload), 'status')
         if launch['state'] != 'completed' or launch['receipt'] is None or launch['request']['principal'] != principal:
             raise ValueError
-        if payload['platform'] not in launch['request']['platforms']:
+        platforms = launch['request']['platforms']
+        restored = version == 2
+        if (payload['platform'] not in platforms
+                or (restored and (launch['checkpoint']['mode'] != 'continue' or launch['cancel_requested']))):
             raise ValueError
         manifest = value['manifest']
         if type(manifest) is not dict or set(manifest) != {'schema_version', 'files'}:
             raise ValueError
         integer(manifest['schema_version'], 1, 1)
-        names = output_names(launch['request']['platforms'])
+        names = output_names(platforms, restored=restored)
+        logs = {action_log_name(platform, restored=restored) for platform in platforms}
         if type(manifest['files']) is not list or len(manifest['files']) != len(names):
             raise ValueError
         for file, name in zip(manifest['files'], names):
             if type(file) is not dict or set(file) != {'name', 'sha256', 'size'} or file['name'] != name:
                 raise ValueError
-            sha(file['sha256']); integer(file['size'], 0, LOG_BYTES if name.endswith('/actions.jsonl') else OUTPUT_BYTES)
+            sha(file['sha256'])
+            integer(file['size'], 1 if restored else 0, LOG_BYTES if name in logs else OUTPUT_BYTES)
         if sum(file['size'] for file in manifest['files']) > AGGREGATE_BYTES or digest(manifest) != launch['receipt']['evidence_sha256']:
             raise ValueError
         for key in ('platform', 'offset', 'limit'):
@@ -107,7 +124,8 @@ def validate_result(value, graph_id, scope, payload, principal):
             _, observed = parse_record(raw)
             for key in COUNT_KEYS:
                 page_counts[key] += observed[key]
-        selected_file = next(file for file in manifest['files'] if file['name'] == payload['platform'] + '/actions.jsonl')
+        selected_log = action_log_name(payload['platform'], restored=restored)
+        selected_file = next(file for file in manifest['files'] if file['name'] == selected_log)
         minimum = (3 * total - 1 if total else 0) + sum(len(record['raw_json'].encode('utf-8')) - 2 for record in value['records'])
         if selected_file['size'] < minimum or total == 0 and selected_file['size'] != 0:
             raise ValueError
