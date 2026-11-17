@@ -75,8 +75,8 @@
     {
       "imported_path": "backend/app/services/oasis_profile_generator.py",
       "original_sha256": "ed9cd3416a46b922bc2f9bf0e9623435d9b96bdf0198db27602ca8c4f0dd0e37",
-      "current_sha256": "124e565981ec6cebe43b5a63b7fe8b91236cef7b0d82d8dc67a330574c0f9492",
-      "reason": "U03j basic-only/local RNG and inherited Twitter formatting. U03k explicit injected chat/context, strict neutral parsing without fallback, preserving legacy defaults. U03n strict-neutral realtime/final Reddit serialization preserves missing demographic attributes and supplied values; legacy defaults remain. NexaWeave canonical package/configuration and ordinary display names; reviewed derived source change preserving legal/provenance and persisted v1 identities.",
+      "current_sha256": "d9f595cbec4e1331705d220c1b50f9482dcd1a50abc2e5cb783fe4bef824a79e",
+      "reason": "U03j basic-only/local RNG and inherited Twitter formatting. U03k explicit injected chat/context, strict neutral parsing without fallback, preserving legacy defaults. U03n strict-neutral realtime/final Reddit serialization preserves missing demographic attributes and supplied values; legacy defaults remain. NexaWeave canonical package/configuration and ordinary display names; reviewed derived source change preserving legal/provenance and persisted v1 identities. W1.3 prevents generated handle collisions for strict grounded actors before paired-platform profile serialization.",
       "phase": "NexaWeave canonical rebrand"
     },
     {
