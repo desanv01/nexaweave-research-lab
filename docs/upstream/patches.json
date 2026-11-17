@@ -486,6 +486,14 @@
       "current_sha256": "4c6465c9725cb00a798322006d16bb613fdfd23692e4842d6db85943b69cc63f",
       "reason": "W1.2 adds focused fixtures for strict ontology validation and detached accepted edits.",
       "phase": "W1.2 reviewed ontology validation"
+    },
+    {
+      "imported_path": "frontend/src/components/Step3Simulation.vue",
+      "original_sha256": "66258c64ec91e4ebfc87e29013e3270bece2d526b43f384bcd4e9f1c90209d32",
+      "current_sha256": "ad6fa1eb095aec827fb1f7dd4a76d98a73b238ba7f7df95c62b6163563f28ccd",
+      "reason": "W6.1 localizes simulation monitor captions and action timestamps while preserving incoming actions and simulation behavior.",
+      "phase": "W6.1",
+      "review_status": "Scoped review complete. Exact hosted checks pending."
     }
   ]
 }
