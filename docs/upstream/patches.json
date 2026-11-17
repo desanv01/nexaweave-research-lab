@@ -486,6 +486,14 @@
       "current_sha256": "4c6465c9725cb00a798322006d16bb613fdfd23692e4842d6db85943b69cc63f",
       "reason": "W1.2 adds focused fixtures for strict ontology validation and detached accepted edits.",
       "phase": "W1.2 reviewed ontology validation"
+    },
+    {
+      "imported_path": "frontend/src/components/GraphPanel.vue",
+      "original_sha256": "10f297a24b93155adee025f043a10813298738cb39f127af5d67deb669af0468",
+      "current_sha256": "7e41bcaf1c8be5d32de27949e61941da238cc923c767edd022ffc16e1f7d9d54",
+      "reason": "W6.1 localizes graph controls and metadata, preserves displayed values and makes relation disclosure keyboard accessible.",
+      "phase": "U11 workbench and languages",
+      "review_status": "Scoped review complete. Exact hosted checks pending."
     }
   ]
 }
