@@ -75,3 +75,46 @@ Tests author local temporary Git repositories and commits only when Main execute
 them. Their 128-entry baselines are synthetic and do not prove original-archive
 identity. Main must separately build and verify the actual reviewed repository
 revision and retain exact check evidence. See [fixed limits](source-bundle-limits.md).
+
+## Installed knowledge-profile reconciliation
+
+Run the standalone report with Python 3.11 or later, the accepted
+`services/knowledge/uv.lock` bytes, that member's independently retained SHA-256,
+and the explicit site-packages directory of the qualified knowledge environment.
+Use a trusted interpreter. The invocation disables Python's ambient site hooks.
+
+```powershell
+python -I -S tools/report_installed_knowledge.py --lock C:/trusted/source/services/knowledge/uv.lock --expected-sha256 TRUSTED_LOWERCASE_64_HEX --site-packages C:/trusted/knowledge-env/Lib/site-packages
+```
+
+The supported profile uses the knowledge project's `test` and `source-pdf` extras.
+Its required witnesses are `nexaweave-knowledge`, `graphiti-core==0.30.2`,
+`PyMuPDF==1.26.7`, `pytest`, and `pytest-asyncio`. A witness requires one
+well-formed installed record matching the lock and any explicit profile pin.
+Other lock entries can describe optional extras or platform alternatives.
+
+The report reads immediate `.dist-info/METADATA` headers. Each directory must use
+`<distribution>-<version>.dist-info` with the exact metadata version. The
+distribution and metadata names must agree after folding case and collapsing runs of dots,
+underscores, and hyphens to one hyphen. A directory identity mismatch is
+malformed and cannot satisfy a witness. Lock comparisons use the normalized
+name and exact version strings. The report sorts installed observations by name
+and version and labels each as `matched`, `unlisted`, `mismatch`, `duplicate`, or
+`malformed`. Multiple valid records for the same name are duplicates. Missing
+or invalid metadata and linked entries have anonymous malformed rows with fixed
+reason codes. The report includes the lock digest and any missing witnesses.
+Output contains no filesystem paths beyond the fixed repository-relative lock
+name and no raw metadata. A completed report exits 0 even with discrepancies.
+Input or whole-report limit failures exit 2 with a fixed JSON error.
+
+Absolute local paths are required. The report checks path components and rejects
+symbolic links and Windows reparse points. On Windows, use operator-controlled lock
+and site-packages paths. Keep both paths and their parent directories stable for
+the entire report. The path-based checks compare identities at read boundaries.
+Concurrent parent path replacement falls outside the Windows audit boundary.
+
+The report caps the lock at 16 MiB, examines at most 8,192 immediate directory
+entries, reads up to 64 KiB per metadata entry and 16 MiB in aggregate, and limits UTF-8 JSON output
+to 4 MiB. The command reads files offline through the standard library. Installed
+metadata is a local observation. Artifact authenticity, license coverage, active
+dependency closure, and SBOM completion remain outside the report's scope.

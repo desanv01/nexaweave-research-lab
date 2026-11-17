@@ -121,6 +121,11 @@ class SourceBundleTests(unittest.TestCase):
         return modified, hashlib.sha256(modified.read_bytes()).hexdigest()
 
     def test_exact_blobs_and_determinism(self):
+        lock_member = "services/knowledge/uv.lock"
+        accepted_lock = (ROOT / lock_member).read_bytes()
+        self.repo.files[lock_member] = accepted_lock
+        self.repo.write(lock_member, accepted_lock)
+        self.repo.commit()
         self.repo.write("untracked-secret.txt", b"do not ship")
         self.repo.write("ignored.txt", b"do not ship")
         before = self.repo.git("rev-parse", "HEAD")
@@ -140,11 +145,114 @@ class SourceBundleTests(unittest.TestCase):
             self.assertFalse(manifest["all44_accepted"])
             inventory = json.loads(archive.read(bundle.INVENTORY_PATH))
             self.assertTrue(all(p["license"] == "NOASSERTION" for p in inventory["packages"]))
+            artifact_lock = archive.read(lock_member)
         result = bundle.verify_bundle(self.output, first["artifact_sha256"], self.repo.revision)
         self.assertEqual(result["source_file_count"], len(original))
         self.assertEqual(self.repo.git("rev-parse", "HEAD"), before)
         for name, data in original.items():
             self.assertEqual((self.repo.path / name).read_bytes(), data)
+
+        expected_sha = hashlib.sha256(accepted_lock).hexdigest()
+        self.assertIn({"path": lock_member, "sha256": expected_sha}, inventory["locks"])
+        lock_path = self.folder / "uv.lock"
+        lock_path.write_bytes(artifact_lock)
+        site_packages = self.folder / "site-packages"
+        site_packages.mkdir()
+        test_versions = {
+            item["name"]: item["version"] for item in inventory["packages"]
+            if item["lock_path"] == lock_member and item["name"] in {"pytest", "pytest-asyncio"}
+        }
+
+        def write_metadata(folder, name, version, *, body=b""):
+            directory = site_packages / (folder + ".dist-info")
+            directory.mkdir()
+            header = (f"Metadata-Version: 2.4\r\nName: {name}\r\nVersion: {version}\r\n"
+                      f"Summary: PRIVATE_HEADER {self.folder}\r\n\r\n").encode()
+            (directory / "METADATA").write_bytes(header + body)
+
+        for folder, name, version in (
+            ("graphiti_core-0.30.2", "Graphiti_Core", "0.30.2"),
+            ("nexaweave_knowledge-0.1.0", "NexaWeave-Knowledge", "0.1.0"),
+            ("psycopg-3.3.6", "Psycopg", "3.3.6"),
+            ("psycopg-3.3.5", "psycopg", "3.3.5"),
+            ("pymupdf-1.26.6", "PyMuPDF", "1.26.6"),
+            ("unlisted_example-1.0", "Unlisted.Example", "1.0"),
+            ("deceptive-" + test_versions["pytest"], "pytest", test_versions["pytest"]),
+            ("pytest_asyncio-" + test_versions["pytest-asyncio"] + ".999",
+             "pytest-asyncio", test_versions["pytest-asyncio"]),
+        ):
+            # Read identity from the header despite a body beyond the header cap.
+            write_metadata(folder, name, version, body=b"Name: ignored\n" * 6000)
+        malformed = site_packages / "malformed.dist-info"
+        malformed.mkdir()
+        (malformed / "METADATA").write_bytes(b"Name: graphiti-core\nName: duplicate\nVersion: 0.30.2\n\n")
+        overlong = site_packages / "overlong.dist-info"
+        overlong.mkdir()
+        (overlong / "METADATA").write_bytes(b"Summary: " + b"x" * (64 * 1024))
+        if os.name != "nt":
+            # An out-of-root target would give a false witness if traversed.
+            outside = self.folder / "elsewhere"
+            outside.write_bytes(f"Name: pytest\nVersion: {test_versions['pytest']}\n\n".encode())
+            alias = site_packages / ("pytest-" + test_versions["pytest"] + ".dist-info")
+            alias.mkdir()
+            (alias / "METADATA").symlink_to(outside)
+
+        def installed_cli(*args):
+            return subprocess.run(
+                [sys.executable, "-I", "-S", str(ROOT / "tools/report_installed_knowledge.py"), *args],
+                cwd=self.folder, env=self.repo.env, capture_output=True, check=False, timeout=15,
+            )
+
+        def reconcile(sha):
+            return installed_cli("--lock", str(lock_path), "--expected-sha256", sha,
+                                 "--site-packages", str(site_packages))
+
+        help_result = installed_cli("--help")
+        self.assertEqual((help_result.returncode, help_result.stderr), (0, b""))
+        self.assertIn(b"parent directories stable", b" ".join(help_result.stdout.split()))
+        report = reconcile(expected_sha)
+        self.assertEqual((report.returncode, report.stderr), (0, b""))
+        repeat = reconcile(expected_sha)
+        self.assertEqual((repeat.returncode, repeat.stdout, repeat.stderr), (0, report.stdout, b""))
+        self.assertNotIn(b"PRIVATE_HEADER", report.stdout)
+        self.assertNotIn(str(self.folder).encode(), report.stdout)
+        value = json.loads(report.stdout)
+        self.assertEqual((value["ok"], value["profile"], value["lock_sha256"]),
+                         (True, "test+source-pdf", expected_sha))
+        self.assertEqual(value["missing_required_witnesses"], ["pymupdf", "pytest", "pytest-asyncio"])
+        expected_records = [
+            {"name": "graphiti-core", "version": "0.30.2", "status": "matched"},
+            {"name": "nexaweave-knowledge", "version": "0.1.0", "status": "matched"},
+            {"name": "psycopg", "version": "3.3.5", "status": "duplicate"},
+            {"name": "psycopg", "version": "3.3.6", "status": "duplicate"},
+            {"name": "pymupdf", "version": "1.26.6", "status": "mismatch"},
+            {"name": "unlisted-example", "version": "1.0", "status": "unlisted"},
+        ]
+        reasons = ["directory_identity_mismatch", "directory_identity_mismatch", "header_limit", "identity_invalid"]
+        if os.name != "nt":
+            reasons.append("path_alias")
+        expected_records.extend(
+            {"name": None, "version": None, "status": "malformed", "reason": reason}
+            for reason in reasons
+        )
+        self.assertEqual(value["packages"], expected_records)
+        rejected = reconcile("0" * 64)
+        self.assertEqual((rejected.returncode, rejected.stderr), (2, b""))
+        self.assertEqual(json.loads(rejected.stdout), {"ok": False, "error": "lock_hash_mismatch"})
+
+        pinned_pdf = site_packages / "pymupdf-1.26.7.dist-info"
+        (site_packages / "pymupdf-1.26.6.dist-info").rename(pinned_pdf)
+        (pinned_pdf / "METADATA").write_bytes(b"Metadata-Version: 2.4\nName: PyMuPDF\nVersion: 1.26.7\n\n")
+        if os.name != "nt":
+            alias.rename(self.folder / "prior-metadata-alias")
+        for name, version in test_versions.items():
+            write_metadata(name.replace("-", "_").upper() + "-" + version, name, version)
+        repaired = reconcile(expected_sha)
+        self.assertEqual((repaired.returncode, repaired.stderr), (0, b""))
+        complete_profile = json.loads(repaired.stdout)
+        self.assertEqual(complete_profile["missing_required_witnesses"], [])
+        self.assertEqual({row["name"] for row in complete_profile["packages"] if row["status"] == "matched"},
+                         {"graphiti-core", "nexaweave-knowledge", "pymupdf", "pytest", "pytest-asyncio"})
 
     def test_tracked_worktree_dirty(self):
         self.repo.write("src/hello.py", b"dirty")
