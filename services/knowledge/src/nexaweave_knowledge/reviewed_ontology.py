@@ -206,3 +206,71 @@ class ReviewedOntologyHost:
             self._principal, self._scope.project_id, expected_revision, snapshot, current.evidence,
             authorize_revision_write=self._authorize_revision_write,
         )
+
+
+class ReviewedOntologySource:
+    """One ontology command over the fixed installed source frame."""
+
+    def __init__(self, settings):
+        self.settings = settings
+
+    def dispatch(self, raw):
+        from .source_library import (
+            ENVELOPE_OVERHEAD, ERROR_CODES, MAX_BYTES, SourceError, encoded, scope_value, uuid_value,
+        )
+        from .stdio import _object
+
+        request_id = None
+        try:
+            if type(raw) is not bytes or not 0 < len(raw) <= MAX_BYTES + ENVELOPE_OVERHEAD:
+                raise ValueError
+            value = _object(raw)
+            if (set(value) != {"version", "request_id", "method", "scope", "payload"}
+                    or type(value["version"]) is not int or value["version"] != 1):
+                raise ValueError
+            request_id = str(uuid_value(value["request_id"]))
+            settings = self.settings
+            if scope_value(value["scope"]) != settings.scope:
+                raise SourceError("source_denied")
+
+            method, payload = value["method"], value["payload"]
+            if type(payload) is not dict or len(encoded(payload)) > MAX_BYTES:
+                raise ValueError
+            if method == "ontology_load":
+                if payload:
+                    raise ValueError
+            elif method == "ontology_save":
+                if (set(payload) != {"schema_version", "expected_revision", "ontology"}
+                        or type(payload["schema_version"]) is not int or payload["schema_version"] != 1
+                        or type(payload["expected_revision"]) is not int
+                        or not 1 <= payload["expected_revision"] <= 2_147_483_646
+                        or type(payload["ontology"]) is not dict):
+                    raise ValueError
+            else:
+                raise ValueError
+
+            host = ReviewedOntologyHost(
+                principal=settings.principal, display_graph_id=settings.display_graph_id,
+                scope=settings.scope, connection_factory=settings.connect,
+            )
+            if method == "ontology_load":
+                record = host.load()
+            else:
+                record = host.save(expected_revision=payload["expected_revision"],
+                                   ontology=payload["ontology"])
+            result = {"schema_version": 1, "scope": settings.scope.model_dump(mode="json"),
+                      "project_revision": record.revision, "ontology": record.snapshot["ontology"]}
+            if len(encoded(result)) > MAX_BYTES:
+                raise SourceError("result_too_large")
+            return encoded({"version": 1, "request_id": request_id, "ok": True, "result": result})
+        except SourceError as error:
+            code = error.code if error.code in ERROR_CODES else "source_unavailable"
+        except NotFound:
+            code = "not_found"
+        except Conflict:
+            code = "conflict"
+        except (ValueError, TypeError, KeyError, UnicodeError, RecursionError, OverflowError):
+            code = "invalid_request"
+        except Exception:
+            code = "source_unavailable"
+        return encoded({"version": 1, "request_id": request_id, "ok": False, "error": {"code": code}})

@@ -87,11 +87,14 @@ def test_installed_source_ontology_load_save_retains_owned_revision_history(fact
         "KNOWLEDGE_PG_PASSWORD": pg["password"],
     })
 
-    def call(method, value, *, envelope_scope=settings):
+    def call(method, value, *, envelope_scope=settings, ontology_mode=True):
         request_id = str(uuid4())
         raw = request(envelope_scope, method, value, request_id=request_id)
+        command = [sys.executable, "-I", "-m", "nexaweave_knowledge.source_bootstrap"]
+        if ontology_mode:
+            command.append("--ontology")
         result = subprocess.run(
-            [sys.executable, "-I", "-m", "nexaweave_knowledge.source_bootstrap"],
+            command,
             cwd=tmp_path, env=env, input=len(raw).to_bytes(4, "big") + raw,
             capture_output=True, check=False, timeout=15,
         )
@@ -103,6 +106,10 @@ def test_installed_source_ontology_load_save_retains_owned_revision_history(fact
         return reply
 
     scope = settings.scope.model_dump(mode="json")
+    assert call("context", {}, ontology_mode=False)["result"] == {
+        "schema_version": 1, "binary_retained": False,
+        "graph_ingestion_executed": False, "scope": scope,
+    }
     empty = {"schema_version": 1, "scope": scope, "project_revision": original.revision,
              "ontology": None}
     assert call("ontology_load", {})["result"] == empty

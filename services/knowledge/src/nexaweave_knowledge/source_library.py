@@ -13,7 +13,6 @@ import psycopg
 from .bindings import ScopeBindingStore
 from .contracts import KnowledgeScope
 from .operations import (NotFound as BindingNotFound, Tombstoned, Conflict as BindingConflict)
-from .reviewed_ontology import ReviewedOntologyHost
 from .stdio import _object, PipeProtocolError
 from nexaweave_storage import ProjectStore, SourceStore, NotFound, Conflict
 
@@ -108,7 +107,7 @@ def declarations(revision, text, blocks):
 def validate_payload(method, payload):
     if type(payload) is not dict or len(encoded(payload)) > MAX_BYTES:
         raise ValueError
-    if method in {"context", "list", "ontology_load"}:
+    if method in {"context", "list"}:
         if payload:
             raise ValueError
     elif method in {"get", "binary_metadata", "binary_read"}:
@@ -124,13 +123,6 @@ def validate_payload(method, payload):
         declarations(payload["source_revision"], payload["text"], payload["blocks"])
     elif method in {"retain_pdf", "retain_pdf_binary"}:
         pdf_input(payload, version=2 if method == "retain_pdf_binary" else 1)
-    elif method == "ontology_save":
-        if (set(payload) != {"schema_version", "expected_revision", "ontology"}
-                or type(payload["schema_version"]) is not int or payload["schema_version"] != 1
-                or type(payload["expected_revision"]) is not int
-                or not 1 <= payload["expected_revision"] <= 2_147_483_646
-                or type(payload["ontology"]) is not dict):
-            raise ValueError
     else:
         raise ValueError
 
@@ -255,19 +247,6 @@ class SourceLibrary:
 
     def execute(self, method, payload):
         validate_payload(method, payload)
-        if method in {"ontology_load", "ontology_save"}:
-            settings = self.settings
-            host = ReviewedOntologyHost(
-                principal=settings.principal, display_graph_id=settings.display_graph_id,
-                scope=settings.scope, connection_factory=self.connect,
-            )
-            if method == "ontology_load":
-                record = host.load()
-            else:
-                record = host.save(expected_revision=payload["expected_revision"],
-                                   ontology=payload["ontology"])
-            return {"schema_version": 1, "scope": settings.scope.model_dump(mode="json"),
-                    "project_revision": record.revision, "ontology": record.snapshot["ontology"]}
         scope = self.authorize()
         store = SourceStore(self.connect)
         common = {"schema_version": 1, "binary_retained": False, "graph_ingestion_executed": False}
