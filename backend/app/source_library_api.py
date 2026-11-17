@@ -4,7 +4,8 @@ import threading
 from flask import Response, request
 from werkzeug.exceptions import BadRequest
 
-from .services.knowledge_source_client import MAX_BYTES, ENVELOPE_OVERHEAD, encoded
+from .services.knowledge_source_client import (MAX_BYTES, ENVELOPE_OVERHEAD, ONTOLOGY_METHODS,
+    encoded, validate_ontology_payload, validate_ontology_result)
 from .services.knowledge_source_facade import (KnowledgeSourceFacade, validate_upload,
     validate_public_result, validate_original_upload, validate_original_public_result)
 from .services.knowledge_transport import KnowledgeTransportError, _json_object, _uuid
@@ -46,7 +47,7 @@ def register_source_routes(app, settings, *, source_facade=None):
                 raise KnowledgeReadError("not_found")
             if request.args or request.headers.get("Transfer-Encoding") or request.headers.get("Content-Encoding"):
                 raise KnowledgeReadError("invalid_request")
-            if method in {"retain", "retain_pdf_binary"}:
+            if method in {"retain", "retain_pdf_binary", "ontology_save"}:
                 if (request.mimetype != "application/json" or request.content_length is None
                         or not 0 < request.content_length <= MAX_BYTES):
                     raise KnowledgeReadError("invalid_request")
@@ -56,14 +57,18 @@ def register_source_routes(app, settings, *, source_facade=None):
                 payload = _json_object(raw)
                 if method == "retain_pdf_binary":
                     validate_original_upload(payload)
+                elif method == "ontology_save":
+                    validate_ontology_payload(method, payload)
                 else:
                     validate_upload(payload)
             else:
                 if request.content_length not in (None, 0) or request.stream.read(1):
                     raise KnowledgeReadError("invalid_request")
-                payload = {} if method == "list" else {"source_revision": _uuid(revision)}
+                payload = {} if method in {"list", "ontology_load"} else {"source_revision": _uuid(revision)}
             data = reader().execute(method, graph_id, payload)
-            if method in {"retain_pdf_binary", "binary_metadata", "binary_read"}:
+            if method in ONTOLOGY_METHODS:
+                validate_ontology_result(method, data, settings.scope, payload)
+            elif method in {"retain_pdf_binary", "binary_metadata", "binary_read"}:
                 validate_original_public_result(method, data, settings.scope, payload)
             else:
                 validate_public_result(method, data, settings.scope, payload)
@@ -76,7 +81,9 @@ def register_source_routes(app, settings, *, source_facade=None):
         except KnowledgeReadError as error:
             return failure(error.code)
         except KnowledgeTransportError as error:
-            return failure(error.code if not error.outcome_unknown else "outcome_unknown")
+            if error.outcome_unknown:
+                return failure("source_unavailable" if method == "ontology_load" else "outcome_unknown")
+            return failure(error.code)
         except Exception:
             return failure("internal_error")
 
@@ -96,3 +103,7 @@ def register_source_routes(app, settings, *, source_facade=None):
                      "source_original_read",
                      lambda graph_id, source_revision: run("binary_read", graph_id, source_revision),
                      methods=["GET"])
+    app.add_url_rule("/api/source/ontology/<graph_id>", "source_ontology_load",
+                     lambda graph_id: run("ontology_load", graph_id), methods=["GET"])
+    app.add_url_rule("/api/source/ontology/<graph_id>", "source_ontology_save",
+                     lambda graph_id: run("ontology_save", graph_id), methods=["POST"])

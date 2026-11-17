@@ -44,6 +44,10 @@ class NativeObservationsHost:
         dto = validate_launch(dto, self.display_graph_id, self.scope_dto, launch_reference(payload), 'status')
         if dto['request']['principal'] != self.principal:
             raise NativeObservationsError('unauthorized')
+        if dto['schema_version'] == 2:
+            if dto['checkpoint']['mode'] != 'continue' or row.cancel_requested or native.cancel_requested:
+                raise NativeObservationsError('conflict')
+            self.launch._checkpoint_producer(row.request, row.frozen['identity']['preparation'])
         if prep.frozen['public']['schema_version'] == 2:
             self.launch.preparation._owned_row(prep, expected_revision=prep.project_revision)
         return row, prep, native, dto
@@ -51,17 +55,21 @@ class NativeObservationsHost:
     def page(self, payload):
         payload = validate_payload(payload)
         row, prep, native, launch = self._authority(payload)  # All authority failures before file access.
-        root = self.launch.preparation.root / ('sim_' + prep.operation_id.hex)
-        if self._artifacts(prep, root) != prep.receipt:
+        base = self.launch.preparation.root
+        prepared_root = base / ('sim_' + prep.operation_id.hex)
+        if self._artifacts(prep, prepared_root) != prep.receipt:
             raise NativeObservationsError('conflict')
-        with self.reader.page(root, row.request.platforms, payload['platform'], payload['offset'],
-                              payload['limit'], row.receipt['evidence_sha256']) as observed:
+        restored = launch['schema_version'] == 2
+        output_root = base / ('native_child_' + row.run_id.hex) if restored else prepared_root
+        reader_options = {"restored": True} if restored else {}
+        with self.reader.page(output_root, row.request.platforms, payload['platform'], payload['offset'],
+                              payload['limit'], row.receipt['evidence_sha256'], **reader_options) as observed:
             after, current, native_after, final_launch = self._authority(payload)
             if (after != row or current != prep or native_after != native or final_launch != launch
-                    or self._artifacts(current, root) != current.receipt):
+                    or self._artifacts(current, prepared_root) != current.receipt):
                 raise NativeObservationsError('conflict')
-            result = validate_result(dict(observed, schema_version=1, launch=launch), self.display_graph_id,
-                                     self.scope_dto, payload, self.principal)
+            result = validate_result(dict(observed, schema_version=launch['schema_version'], launch=launch),
+                                     self.display_graph_id, self.scope_dto, payload, self.principal)
         return result
 
     def _artifacts(self, prep, root):
