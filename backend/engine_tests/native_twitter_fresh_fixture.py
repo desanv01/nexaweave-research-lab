@@ -1,6 +1,7 @@
 """Private fixture for three sequential, independently owned Twitter children."""
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import random
@@ -35,7 +36,21 @@ def _checkpoint_post(pid, frames):
 _connected_restored_frames = None
 
 
+def _restored_wait_marker(child_dir):
+    return child_dir.with_name(child_dir.name + '.fixture-waiting')
+
+
+def _gated_checkpoint_twitter_backends(*, timeout_seconds, max_tokens, max_retries):
+    return _checkpoint_twitter_backends(timeout_seconds=timeout_seconds, max_tokens=max_tokens,
+                                        max_retries=max_retries, hold_restored_advance=True)
+
+
 def _scripted_checkpoint_twitter_backends(*, timeout_seconds, max_tokens, max_retries):
+    return _checkpoint_twitter_backends(timeout_seconds=timeout_seconds, max_tokens=max_tokens,
+                                        max_retries=max_retries, hold_restored_advance=False)
+
+
+def _checkpoint_twitter_backends(*, timeout_seconds, max_tokens, max_retries, hold_restored_advance):
     """Offline tool replies attest to the real installed histories in the restoring child."""
     from app.services import native_twitter_restore
     from app.services.native_checkpoint_memory import NativeMemoryCaptureBudget, capture_native_memory
@@ -58,6 +73,13 @@ def _scripted_checkpoint_twitter_backends(*, timeout_seconds, max_tokens, max_re
                 del raw
             _connected_restored_frames = tuple(frames)
             try:
+                if hold_restored_advance:
+                    deadline = kwargs['deadline_monotonic']
+                    assert monotonic() < deadline
+                    with _restored_wait_marker(child_dir).open('xb') as marker:
+                        marker.write(f'{os.getpid()}\n'.encode('ascii'))
+                    await asyncio.sleep(max(0, deadline - monotonic()))
+                    raise AssertionError('restored owner was not cancelled before the native action deadline')
                 return await advance(child_dir, **kwargs)
             finally:
                 _connected_restored_frames = None
