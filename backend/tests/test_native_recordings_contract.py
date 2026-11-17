@@ -112,6 +112,11 @@ def test_describe_is_detached_pinned_bounded_metadata_only(tmp_path):
     b'{"version":1,"operation":"metrics","platform":"twitter","limit":1,"cursor":"x"}',
     b'{"version":1,"operation":"playback","platform":"twitter","limit":1,"cursor":false}',
     b'{"version":1,"operation":"playback","platform":"twitter","limit":1,"nested":{"x":NaN}}',
+    b'{"version":1,"operation":"playback","platform":"twitter","limit":1,"include_round_action_counts":true}',
+    b'{"version":1,"operation":"playback","platform":"twitter","limit":1,"include_round_action_counts":false}',
+    b'{"version":1,"operation":"metrics","platform":"twitter","limit":1,"include_round_action_counts":true,"include_round_action_counts":true}',
+    *[b'{"version":1,"operation":"metrics","platform":"twitter","limit":1,"include_round_action_counts":'
+      + value + b'}' for value in (b'false', b'null', b'0', b'1', b'1.0', b'"true"', b'[]', b'{}')],
     b'\xff', b'x' * 8193,
 ])
 def test_strict_wire_rejects_malformed_or_selector_input(raw):
@@ -310,13 +315,42 @@ def test_successful_follow_fields_are_retained_in_file_order(tmp_path):
               "target_user_name": "Synthetic target", "future_field": ["inert", {"x": True}]},
               "result": None, "success": True}
     events.insert(4, follow)
+    failed_follow = dict(follow, round=1, success=False)
+    events[-1:-1] = [
+        {"timestamp": follow["timestamp"], "event_type": "round_start", "round": 1},
+        failed_follow,
+        {"timestamp": follow["timestamp"], "event_type": "round_end", "round": 1},
+    ]
     path.write_bytes(b"".join(canonical(e) + b"\n" for e in events))
+    before = hashes(root)
     bundle = tmp_path / "bundle"
     revision = capture(root, bundle)
     host = NativeRecording(bundle, anchors=ANCHORS, expected_revision=revision)
     page = host.read(request(limit=100))
     assert page["events"][4] == {"platform": "twitter", "source_event_offset": 4, "record": follow}
-    assert host.read(request("metrics"))["logged_action_counts"] == {"CREATE_POST": 2, "FOLLOW": 1}
+    assert [item["record"] for item in page["events"]] == events
+    assert "logged_round_action_counts" not in page
+    expected = {
+        "twitter": {"0": {"CREATE_POST": 2, "FOLLOW": 1}, "1": {"FOLLOW": 1}},
+        "reddit": {"0": {"CREATE_POST": 2}},
+    }
+    for p in ("twitter", "reddit"):
+        legacy = host.read(request("metrics", p))
+        assert "logged_round_action_counts" not in legacy
+        opted_request = canonical(dict(version=1, operation="metrics", platform=p,
+                                       limit=2, include_round_action_counts=True))
+        opted = host.read(opted_request)
+        # Exact maps retain identical round-zero actions and exclude every marker.
+        assert opted["logged_round_action_counts"] == expected[p]
+        assert {key: value for key, value in opted.items()
+                if key != "logged_round_action_counts"} == legacy
+        assert opted["recording_revision"] == revision
+        assert opted["anchors"] == ANCHORS.wire() and opted["platform"] == p
+        assert legacy["logged_action_counts"] == (
+            {"CREATE_POST": 2, "FOLLOW": 2} if p == "twitter" else {"CREATE_POST": 2})
+        opted["logged_round_action_counts"]["0"]["CREATE_POST"] = 999
+        assert host.read(opted_request)["logged_round_action_counts"] == expected[p]
+    assert hashes(root) == before
 
 
 @pytest.mark.parametrize("changes", [
