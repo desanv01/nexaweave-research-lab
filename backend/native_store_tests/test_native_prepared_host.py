@@ -12,6 +12,7 @@ from hashlib import sha256
 from itertools import islice
 from threading import Event
 from time import monotonic
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -228,9 +229,10 @@ def test_both_platforms_durable_attachment_and_exact_terminal_recovery(
 
 def test_trusted_host_consumes_completed_twitter_checkpoint_once(
         connection_factory, tmp_path, monkeypatch):
+    from app.services.durable_native_launch_host import _validate_checkpoint_config
     from app.services.native_prepared_host import NativePreparedHost
     from native_twitter_fresh_fixture import (
-        _DB_LIMIT, _LOG_LIMIT, _NEXT_POST, _PROFILE_LIMIT, _RECEIPT_LIMIT, _RESTORE_OUTPUTS,
+        _DB_LIMIT, _FIRST_POST, _LOG_LIMIT, _NEXT_POST, _PROFILE_LIMIT, _RECEIPT_LIMIT, _RESTORE_OUTPUTS,
         _RestoredModels, _captured_checkpoint, _captured_owners, _check_binding, _events,
         _owned_factory, _prepared_twitter, _producer_models,
     )
@@ -255,8 +257,16 @@ def test_trusted_host_consumes_completed_twitter_checkpoint_once(
         runtime_sha256="b" * 64, platforms=("twitter",), seed=7, max_rounds=1,
     ))
     root, prepared_inputs, prepared_binding, capture_request = _prepared_twitter(
-        tmp_path / "producer", original, 1, _producer_models,
+        tmp_path / "producer", original, 1, _producer_models, two_seeds=False,
     )
+    config_name = "simulation_config.json"
+    config_bytes = prepared_inputs[config_name]
+    descriptor = {"name": config_name, "size": len(config_bytes),
+                  "sha256": sha256(config_bytes).hexdigest()}
+    _validate_checkpoint_config(SimpleNamespace(receipt={"files": [descriptor]}), root)
+    wrong_receipt = {"files": [{**descriptor, "sha256": "0" * 64}]}
+    with pytest.raises(ValueError):
+        _validate_checkpoint_config(SimpleNamespace(receipt=wrong_receipt), root)
     checkpoint = root.parent / "checkpoint"
     lineage_dir = tmp_path / "lineage"
     lineage_path = lineage_dir / "lineage.json"
@@ -285,7 +295,7 @@ def test_trusted_host_consumes_completed_twitter_checkpoint_once(
     lineage = json.loads(lineage_raw)
     _check_binding(lineage, producer_pid, anchors, prepared_inputs, capture_request.artifact_sha256)
     database, memory, log, manifest, _, limits, pins = _captured_checkpoint(
-        checkpoint, lineage, prepared_inputs["simulation_config.json"],
+        checkpoint, lineage, config_bytes,
     )
     producer_db = root / "twitter_simulation.db"
     producer_log = root / "twitter" / "actions.jsonl"
@@ -293,11 +303,17 @@ def test_trusted_host_consumes_completed_twitter_checkpoint_once(
     for path in (producer_db, producer_log, lineage_path):
         pins[path] = _artifact(path, limits[path])
     checkpoint_rows = _native_rows(database)
-    _, old_trace, old_posts, _ = checkpoint_rows
+    _, old_trace, old_posts, old_recommendations = checkpoint_rows
+    seed, first_post = old_posts
+    round_one_tick = manifest["engine_clock"]["before_step"]
+    assert seed == (1, 0, "Synthetic initial event", round_one_tick - 1)
+    assert first_post[0] > seed[0] and first_post[1] in (0, 1)
+    assert first_post[2:] == (_FIRST_POST, round_one_tick)
+    assert old_recommendations == [(0, seed[0]), (1, seed[0])]
     assert _native_rows(producer_db) == checkpoint_rows
     prefix = _read_bounded(log, _LOG_LIMIT)
     assert _read_bounded(producer_log, _LOG_LIMIT).startswith(prefix)
-    assert _events(prefix)[-1]["event_type"] == "round_end" and len(old_posts) == 3
+    assert _events(prefix)[-1]["event_type"] == "round_end"
     _, expected_frames = zip(*_captured_owners(memory, lineage["owners"]), strict=True)
 
     request = replace(capture_request, schema_version=2, run_id=uuid4(),
@@ -349,7 +365,7 @@ def test_trusted_host_consumes_completed_twitter_checkpoint_once(
     )
     assert trace_owner == owner and trace_tick == tick
     assert json.loads(info)["post_id"] == post_id and json.loads(info)["content"] == content
-    assert len(recommendations) == 4 and all(recommended != post_id for _, recommended in recommendations)
+    assert recommendations == [(actor, old_post[0]) for actor in (0, 1) for old_post in old_posts]
     proof = json.loads(_read_bounded(probe_path, _RECEIPT_LIMIT))
     assert proof == {"pid": restored.child.process_id, "frames": [list(frame) for frame in expected_frames],
                      "step": {"agent_id": owner, "post_id": post_id, "after_step": tick + 1}}

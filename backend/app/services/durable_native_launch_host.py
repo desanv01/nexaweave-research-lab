@@ -27,12 +27,7 @@ def _validate_checkpoint_config(prep, root):
     if len(raw) != descriptor['size'] or hashlib.sha256(raw).hexdigest() != descriptor['sha256']:
         raise ValueError
     config = strict_json(raw)
-    if type(config) is not dict:
-        raise ValueError
-    validate_native_seed_plan(config)
-    events = config.get('event_config')
-    initial_posts = events.get('initial_posts') if type(events) is dict else None
-    if type(initial_posts) is not list or len(initial_posts) != 2:
+    if len(validate_native_seed_plan(config)) not in (1, 2):
         raise ValueError
     timing = config.get('time_config')
     if type(timing) is not dict:

@@ -316,7 +316,7 @@ def _live_memory(platform_id, agent):
     }
 
 
-def _prepared_twitter(parent, original_request, max_rounds, model_factory):
+def _prepared_twitter(parent, original_request, max_rounds, model_factory, *, two_seeds=True):
     from app.services.native_owned_session import _manifest
     from test_native_prepared_workflow import _prepared
     from test_native_round_capture import _read_bounded
@@ -334,9 +334,10 @@ def _prepared_twitter(parent, original_request, max_rounds, model_factory):
                                  agents_per_hour_min=1, agents_per_hour_max=1)
     for actor in config["agent_configs"]:
         actor["active_hours"] = [0, 1]
-    config["event_config"]["initial_posts"].append({
-        "poster_agent_id": 1, "content": "Second synthetic initial event",
-    })
+    if two_seeds:
+        config["event_config"]["initial_posts"].append({
+            "poster_agent_id": 1, "content": "Second synthetic initial event",
+        })
     config_path.write_bytes(_json_bytes(config))
     raw = {name: _read_bounded(root / name, _PROFILE_LIMIT) for name in _PREPARED}
     artifact = _manifest(root, _PREPARED, _PROFILE_LIMIT)
