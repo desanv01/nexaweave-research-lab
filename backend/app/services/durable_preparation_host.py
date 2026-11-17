@@ -13,12 +13,15 @@ import math
 import os
 from pathlib import Path
 import shutil
+import tempfile
 import threading
 import time
 from types import SimpleNamespace
 from uuid import UUID
 from nexaweave_execution.preparation_contracts import (validate_source_snapshots,
     document_envelope, validate_preparation_sources)
+from nexaweave_execution.native_seed_contracts import (SEED_BRIDGE_INDEX, seed_bridge_index,
+    validate_native_seed_plan)
 
 from .preparation_client import (PreparationError, canonical, digest, encoded, file_names,
     labels, text, uuid_string, validate_payload, validate_receipt, validate_result)
@@ -445,6 +448,43 @@ class DurablePreparationHost:
             self._owned_row(row)
         return result
 
+    @staticmethod
+    def _freeze_seed_bridge(root, opts):
+        from nexaweave_execution.native_owned_binding import _regular_bound_file
+
+        if SEED_BRIDGE_INDEX not in opts:
+            return
+        name = 'simulation_config.json'
+        config = json.loads(_regular_bound_file(root, name, 2097152))
+        if SEED_BRIDGE_INDEX in config:
+            raise PreparationError('preparation_failed')
+        config[SEED_BRIDGE_INDEX] = seed_bridge_index(
+            opts, opts['platforms'], len(validate_native_seed_plan(config)),
+        )
+        raw = encoded(config)
+        if len(raw) > 2097152:
+            raise PreparationError('preparation_failed')
+        sibling = identity = None
+        try:
+            # Replace the directory entry without opening the old file for writing.
+            with tempfile.NamedTemporaryFile(dir=root, prefix='.seed-bridge-', delete=False) as stream:
+                sibling = Path(stream.name)
+                identity = os.fstat(stream.fileno())
+                if stream.write(raw) != len(raw):
+                    raise PreparationError('preparation_failed')
+            current = sibling.lstat()
+            if not os.path.samestat(identity, current) or current.st_size != len(raw):
+                raise PreparationError('preparation_failed')
+            os.replace(sibling, root / name)
+            sibling = None
+        finally:
+            if sibling is not None and identity is not None:
+                try:
+                    if os.path.samestat(identity, sibling.lstat()):
+                        sibling.unlink()
+                except OSError:
+                    pass
+
     def _artifacts(self, row, root):
         from nexaweave_execution.native_owned_binding import _regular_bound_file, _manifest
         from .oasis_profile_generator import OasisProfileGenerator
@@ -452,6 +492,14 @@ class DurablePreparationHost:
         names = file_names(public['options']['platforms'])
         blobs = {n: _regular_bound_file(root, n, 2097152) for n in names}
         state, config, grounding = (json.loads(blobs[n]) for n in names[:3])
+        opts = public['options']
+        if SEED_BRIDGE_INDEX in opts or SEED_BRIDGE_INDEX in config:
+            try:
+                count = len(validate_native_seed_plan(config))
+                if seed_bridge_index(opts, opts['platforms'], count) != seed_bridge_index(config, opts['platforms'], count):
+                    raise ValueError
+            except ValueError:
+                raise PreparationError('preparation_failed') from None
         ids = [a['source_entity_uuid'] for a in public['actors']]
         sim = 'sim_' + row.operation_id.hex
         if (state.get('status') != 'ready' or state.get('simulation_id') != sim
@@ -602,6 +650,7 @@ class DurablePreparationHost:
             checkpoint()
             self.store.update(self.principal, dispatch, stage='publishing', completed=95)
             source = attempt / state.simulation_id
+            self._freeze_seed_bridge(source, opts)
             if row.frozen['public']['schema_version'] == 2:
                 self._owned_row(row, expected_revision=row.project_revision, deadline=deadline)
             receipt = self._artifacts(row, source)
