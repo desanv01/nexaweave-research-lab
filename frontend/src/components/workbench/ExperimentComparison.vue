@@ -11,6 +11,9 @@ const disabled = computed(() => !props.connected || props.busy || pending.value)
 const bytes = computed(() => new TextEncoder().encode(title.value).length)
 const titleInvalid = computed(() => title.value !== '' && (bytes.value > 160 || !title.value.trim() || /[\u0000-\u001f\u007f]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u.test(title.value)))
 const ordered = computed(() => catalog.value?.members.filter(m => selected.value.includes(m.member_id)).map(m => m.member_id) || [])
+const comparisonPlatforms = computed(() => ['twitter', 'reddit'].filter(platform =>
+  result.value?.members.some(member => member.platforms.includes(platform))
+))
 const valid = computed(() => { try { experimentSelection({ version: 1, title: title.value, member_ids: ordered.value }, catalog.value); return true } catch { return false } })
 const statusText = computed(() => pending.value ? copy.value.working : error.value ? copy.value[error.value] || copy.value.failed : copy.value[message.value] || copy.value.idle)
 const metricText = value => value === null ? copy.value.unavailable : String(value)
@@ -88,6 +91,26 @@ async function compare() {
       <dl class="accounting"><div v-for="(count, state) in result.accounting" :key="state"><dt>{{ stateText(state) }}</dt><dd>{{ count }}</dd></div></dl>
       <p>{{ copy.cancelIntent }}: {{ result.cancellation_intent.cancel_requested_count }} · {{ copy.cancelOverlap }}</p><p>{{ copy.declaredSeeds }}: {{ result.distinct_declared_seed_count }} · {{ copy.successfulSeeds }}: {{ result.distinct_successful_seed_count }}</p>
       <p class="limitations">{{ copy.limitations }}</p><p>{{ copy.spend }}: {{ copy.unknown }}</p>
+      <table class="action-total-comparison">
+        <caption>{{ copy.loggedTotal }}</caption>
+        <thead>
+          <tr>
+            <th scope="col">{{ copy.members }}</th>
+            <th v-for="platform in comparisonPlatforms" :key="platform" scope="col">{{ platform }}</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="member in result.members" :key="member.member_id">
+            <th scope="row">
+              {{ member.member_label }}
+              <span class="mono">{{ member.member_id }}</span>
+            </th>
+            <td v-for="platform in comparisonPlatforms" :key="platform">
+              {{ metricText(member.metrics?.[platform]?.logged_action_total ?? null) }}
+            </td>
+          </tr>
+        </tbody>
+      </table>
       <div class="member-grid">
         <article v-for="member in result.members" :key="member.member_id" class="result-member">
           <h4>{{ member.member_label }}</h4><p>{{ copy.case }}: {{ member.case_label }} · {{ copy.state }}: {{ stateText(member.disposition) }}</p><p>{{ copy.seed }}: <span class="mono seed">{{ member.seed }}</span></p><p>{{ copy.cancelIntent }}: {{ member.cancel_requested ? copy.yes : copy.no }}</p>
@@ -112,4 +135,27 @@ async function compare() {
 </template>
 <style scoped>
 .experiment-comparison{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:24px;margin-bottom:24px;min-width:0;overflow-wrap:anywhere}.experiment-comparison *{box-sizing:border-box}h2{font-size:1.25rem;margin:0 0 8px}h3{font-size:1.2rem}h4,h5{font-size:1rem;margin:8px 0}p{margin:8px 0}.section-heading{display:flex;flex-wrap:wrap;align-items:start;justify-content:space-between;gap:16px}.section-heading>div{flex:1 1 240px;min-width:0}.help{font-size:.875rem;color:var(--muted)}button,input{font:inherit;color:var(--ink);background:var(--surface);border:1px solid var(--control-border);border-radius:5px;min-height:44px;max-width:100%}button{padding:10px 16px;color:var(--primary);font-weight:550;cursor:pointer}button:disabled{opacity:.65;cursor:default}.primary{background:var(--primary);color:var(--surface)}input{padding:10px 12px;width:100%;min-width:0}fieldset{border:0;margin:16px 0;padding:0;min-width:0}legend{font-weight:650}.title-field{display:flex;flex-direction:column;gap:8px;margin-top:16px;font-weight:550}.member-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,270px),1fr));gap:16px;margin:16px 0}.catalog-member,.result-member,.distribution-card{min-width:0;border:1px solid var(--border);border-radius:6px;padding:16px}.member-choice{display:flex;align-items:center;gap:8px;min-height:44px;font-weight:650;cursor:pointer}.member-choice input{width:20px;min-height:20px;height:20px;flex-shrink:0}.feedback,.limitations{border-left:3px solid var(--primary);padding:8px 12px}.field-error{color:var(--ink);font-weight:650}.mono{font:.875rem/1.6 ui-monospace,Consolas,monospace;overflow-wrap:anywhere}.accounting,.catalog-identity{display:flex;flex-wrap:wrap;gap:16px}.accounting>div{flex:1 1 110px;background:var(--canvas);padding:12px}.accounting dd{font-size:1.5rem;font-weight:650}dt{font-weight:550}dd{margin:0 0 8px;overflow-wrap:anywhere}dl{margin:8px 0;min-width:0}summary{cursor:pointer;min-height:44px;padding:10px 0}details{min-width:0}details details{padding:0 8px;border-top:1px solid var(--border)}.comparison-result{margin-top:24px;border-top:1px solid var(--border);padding-top:16px;min-width:0}button:focus-visible,input:focus-visible,summary:focus-visible,[tabindex="-1"]:focus{outline:3px solid var(--primary);outline-offset:3px}.distributions,.comparability,.result-provenance{border-top:1px solid var(--border);margin-top:12px}.distribution-card{margin:8px 0}@media(max-width:480px){.experiment-comparison{padding:16px}.member-grid{gap:12px}.catalog-load,.compare-submit{width:100%}}
+.action-total-comparison {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
+  overflow-wrap: anywhere;
+}
+.action-total-comparison caption {
+  padding-block: 8px;
+  text-align: start;
+  font-weight: 650;
+}
+.action-total-comparison :is(th, td) {
+  padding: 8px;
+  border-bottom: 1px solid var(--border);
+  text-align: start;
+  vertical-align: top;
+}
+.action-total-comparison th:first-child {
+  width: 50%;
+}
+.action-total-comparison th span {
+  display: block;
+}
 </style>

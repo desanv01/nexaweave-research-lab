@@ -54,8 +54,14 @@ test('actual SFC makes no automatic requests on mount/connect/locale and uses la
 })
 test('actual SFC renders inert labels, exact seeds, unavailable versus zero, comparability and provenance in three languages', async () => {
   for (const locale of ['en', 'zh', 'ms']) {
-    let compares = 0, submitted
-    const mounted = mount({ locale, methods: { catalog: async () => catalog(), compare: async (payload, cat) => { compares++; submitted = payload; return result(cat, payload) } } })
+    let loads = 0, compares = 0, submitted
+    const mounted = mount({
+      locale,
+      methods: {
+        catalog: async () => { loads++; return catalog() },
+        compare: async (payload, cat) => { compares++; submitted = payload; return result(cat, payload) }
+      }
+    })
     try {
       await prepare(mounted); assert.equal(compares, 0); submit(mounted.root); await settle()
       assert.equal(compares, 1); assert.deepEqual(submitted.member_ids, ['m0', 'm1'])
@@ -64,10 +70,25 @@ test('actual SFC renders inert labels, exact seeds, unavailable versus zero, com
       assert.ok(panel.textContent.includes(malicious)); assert.equal(mounted.root.querySelector('img,script,a'), null)
       assert.deepEqual([...panel.querySelectorAll('.seed')].map(n => n.textContent), ['9007199254740993', '-9223372036854775808'])
       assert.equal(panel.querySelector('.logged-total').textContent, '0'); assert.ok(panel.querySelector('.unavailable-metrics').textContent.includes(copy.unavailable))
+      const table = panel.querySelector('.action-total-comparison')
+      assert.equal(table.caption.textContent.trim(), copy.loggedTotal)
+      const headers = [...table.tHead.rows[0].cells]
+      assert.deepEqual(headers.map(cell => [cell.tagName, cell.scope, cell.textContent.trim()]), [
+        ['TH', 'col', copy.members], ['TH', 'col', 'twitter']
+      ])
+      const rows = [...table.tBodies[0].rows]
+      assert.deepEqual(rows.map(({ cells: [member, total] }) => [
+        member.tagName, member.scope, member.querySelector('.mono').textContent,
+        total.tagName, total.textContent.trim()
+      ]), [['TH', 'row', 'm0', 'TD', '0'], ['TH', 'row', 'm1', 'TD', copy.unavailable]])
+      assert.ok(rows[0].cells[0].textContent.includes(malicious))
       assert.ok(panel.textContent.includes(copy.cancelOverlap)); assert.ok(panel.textContent.includes(copy.limitations)); assert.ok(panel.textContent.includes(copy.spend + ': ' + copy.unknown))
       assert.ok(panel.querySelector('.comparability').textContent.includes(copy.different)); assert.ok(panel.querySelector('.comparability').textContent.includes(copy.unavailable))
       const summary = panel.querySelector('.result-provenance summary'); summary.focus(); assert.equal(document.activeElement, summary)
       assert.ok(panel.querySelector('.distributions').textContent.includes(copy.statisticLabels.missing_count))
+      select(mounted.root, 1); await settle()
+      assert.equal(mounted.root.querySelector('.action-total-comparison'), null)
+      assert.deepEqual([loads, compares], [1, 1])
     } finally { mounted.cleanup() }
   }
 })
