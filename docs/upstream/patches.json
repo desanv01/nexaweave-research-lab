@@ -476,8 +476,8 @@
     {
       "imported_path": "backend/app/utils/ontology.py",
       "original_sha256": "c220fff465ae465ad6c8b2fc263ca623a37394e78a4b9d0d8ad7bfc114e88d5c",
-      "current_sha256": "007620b7e0fe06992d6ef8b9eb1df5129eb5d63e4e37141618aca98e6abd4a60",
-      "reason": "W1.2 adds strict validation for reviewed ontology definitions and endpoint pairs.",
+      "current_sha256": "5d769e6ad7386bf448be0465283b6505ab8c7cf9d36ca117b38b650d81895a9d",
+      "reason": "W1.2 adds strict validation for reviewed ontology definitions and endpoint pairs. W1.2 shares exact reviewed ontology validation with the installed owned source child.",
       "phase": "W1.2 reviewed ontology validation"
     },
     {
