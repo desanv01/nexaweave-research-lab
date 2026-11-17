@@ -5,7 +5,7 @@ from uuid import uuid4, UUID
 import pytest
 from app import create_app
 from app.services.knowledge_read_facade import ReadHostSettings
-from app.services.native_launch_client import NativeLaunchError, IDENTITY, digest, validate_result
+from app.services.native_launch_client import NativeLaunchError, IDENTITY, IDENTITY_V2, digest, validate_result
 from test_provider_neutral_preparation import SCOPE
 
 
@@ -15,7 +15,8 @@ def declaration():
 
 
 def reference(dto):
-    return {'schema_version':1,'launch_id':dto['request']['run_id'],'launch_sha256':dto['launch_sha256']}
+    return {'schema_version':dto['schema_version'],'launch_id':dto['request']['run_id'],
+            'launch_sha256':dto['launch_sha256']}
 
 
 def planned(payload):
@@ -27,6 +28,13 @@ def planned(payload):
                    'runtime_sha256':'c'*64,'platforms':['twitter','reddit'],'seed':7,'max_rounds':2},
         'limits':{'max_calls':10,'max_input_bytes':262144,'max_output_tokens':4096,'max_run_seconds':120},
         'ceiling_microusd':'4','model_label':'scripted 猫😀'}
+    if payload['schema_version'] == 2:
+        value['schema_version'] = 2
+        value['checkpoint'] = deepcopy(payload['checkpoint'])
+        value['request'].update(platforms=['twitter'], max_rounds=1)
+        if value['checkpoint']['mode'] == 'continue':
+            value['request'].update(schema_version=2, source_run_id=value['checkpoint']['source_run_id'],
+                                    checkpoint_sha256=value['checkpoint']['checkpoint_sha256'])
     value.update(launch_sha256=digest(value),state='planned',error_code=None,
                  authorization={'model_calls_enabled':False},workflow=None,receipt=None,cancel_requested=False,
                  cleanup={'known':False,'pending':None,'owner_thread_alive':None})
@@ -152,3 +160,107 @@ def test_validly_hashed_other_principal_dto_cannot_cross_flask_authority(api):
     facade.corrupt=corrupt
     reply=http.post('/api/native-launch/plan/display-1',json=declaration(),headers=headers)
     assert reply.status_code==502
+
+
+def checkpoint_declaration(mode):
+    checkpoint = {'mode': mode}
+    if mode == 'continue':
+        checkpoint.update(source_run_id=str(uuid4()), checkpoint_sha256='c' * 64)
+    return dict(declaration(), schema_version=2, checkpoint=checkpoint)
+
+
+@pytest.mark.parametrize('mode,request_version', [('capture', 1), ('continue', 2)])
+def test_v2_checkpoint_plan_and_reference_round_trip(api, mode, request_version):
+    http, facade, headers, _ = api
+    route = '/api/native-launch/{}/display-1'
+    payload = checkpoint_declaration(mode)
+    response = http.post(route.format('plan'), json=payload, headers=headers)
+    assert response.status_code == 200
+    dto = response.json['data']
+    assert dto['checkpoint'] == payload['checkpoint']
+    assert dto['launch_sha256'] == digest({key: dto[key] for key in IDENTITY_V2})
+    req = dto['request']
+    assert req['schema_version'] == request_version
+    assert req['platforms'] == ['twitter'] and req['max_rounds'] == 1
+    if mode == 'continue':
+        assert {key: req[key] for key in ('source_run_id', 'checkpoint_sha256')} == {
+            key: dto['checkpoint'][key] for key in ('source_run_id', 'checkpoint_sha256')}
+    else:
+        assert 'source_run_id' not in req and 'checkpoint_sha256' not in req
+
+    ref = reference(dto)
+    start = http.post(route.format('start'), json=ref, headers=headers)
+    assert start.status_code == 200 and start.json['data'] == dto
+    run_id = req['run_id']
+    facade.last.update(
+        state='cancelled', cancel_requested=True,
+        workflow={'workflow_id': 'mf-native-v1-' + UUID(run_id).hex + '-' + digest(req),
+                  'temporal_run_id': str(uuid4()), 'native_run_id': run_id},
+        receipt={'run_id': run_id, 'attempt_id': str(uuid4()), 'instance_id': str(uuid4()),
+                 'request_fingerprint': digest(req), 'outcome': 'cancelled',
+                 'evidence_sha256': 'd' * 64},
+    )
+    for method in ('status', 'cancel'):
+        response = http.post(route.format(method), json=ref, headers=headers)
+        assert response.status_code == 200 and response.json['data'] == facade.last
+    assert facade.calls == [('plan', payload), ('start', ref), ('status', ref), ('cancel', ref)]
+
+
+def test_v2_checkpoint_request_refuses_extra_and_unbound_fields(api):
+    http, facade, headers, _ = api
+    payload = checkpoint_declaration('continue')
+    checkpoint = payload['checkpoint']
+    for invalid in (
+        {key: value for key, value in payload.items() if key != 'checkpoint'},
+        dict(payload, schema_version=1),
+        dict(payload, checkpoint={'mode': 'restore'}),
+        dict(payload, checkpoint=dict(checkpoint, mode='capture')),
+        dict(payload, checkpoint=dict(checkpoint, checkpoint_sha256='A' * 64)),
+        dict(payload, checkpoint=dict(checkpoint, source_run_id=payload['launch_id'])),
+        dict(payload, checkpoint=dict(checkpoint, path='PRIVATE')),
+        dict(payload, checkpoint=dict(checkpoint, process_id=42)),
+    ):
+        reply = http.post('/api/native-launch/plan/display-1', json=invalid, headers=headers)
+        assert reply.status_code == 400 and reply.json['error']['code'] == 'invalid_request'
+
+    ref = reference(planned(payload))
+    for method in ('start', 'status', 'cancel'):
+        reply = http.post('/api/native-launch/' + method + '/display-1',
+                          json=dict(ref, checkpoint=checkpoint), headers=headers)
+        assert reply.status_code == 400 and reply.json['error']['code'] == 'invalid_request'
+    assert not facade.calls
+
+
+def test_v2_checkpoint_reply_refuses_misbound_identity_even_with_valid_digest(api):
+    http, facade, headers, _ = api
+    route = '/api/native-launch/{}/display-1'
+    payload = checkpoint_declaration('continue')
+
+    def change_source(dto):
+        source = str(uuid4())
+        dto['checkpoint']['source_run_id'] = source
+        dto['request']['source_run_id'] = source
+
+    for mutate in (
+        change_source,
+        lambda dto: dto['request'].update(checkpoint_sha256='e' * 64),
+        lambda dto: dto['request'].update(schema_version=1),
+        lambda dto: dto['request'].update(max_rounds=2),
+        lambda dto: dto['request'].update(principal='other'),
+        lambda dto: dto['checkpoint'].update(path='PRIVATE'),
+    ):
+        def corrupt(dto):
+            mutate(dto)
+            dto['launch_sha256'] = digest({key: dto[key] for key in IDENTITY_V2})
+
+        facade.corrupt = corrupt
+        reply = http.post(route.format('plan'), json=payload, headers=headers)
+        assert reply.status_code == 502 and reply.json['error']['code'] == 'invalid_reply'
+        assert 'PRIVATE' not in reply.get_data(as_text=True)
+
+    facade.corrupt = None
+    for plan in (declaration(), payload):
+        dto = http.post(route.format('plan'), json=plan, headers=headers).json['data']
+        wrong_version = dict(reference(dto), schema_version=3 - dto['schema_version'])
+        reply = http.post(route.format('status'), json=wrong_version, headers=headers)
+        assert reply.status_code == 502 and reply.json['error']['code'] == 'invalid_reply'
