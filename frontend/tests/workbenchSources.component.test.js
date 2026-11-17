@@ -343,11 +343,59 @@ test('selected retained passage resets review and recovers one derived operation
   }
 
   let mismatch = false, admitted, submitted
+  const ontologyAttributes = Array.from({ length: 6 }, (_, i) => ({
+    name: `detail_${i}`, type: 'text', description: `Detail ${i + 1}`
+  }))
+  const originalOntology = {
+    entity_types: [
+      { name: 'Person', description: 'A reviewed person.', attributes: ontologyAttributes, examples: ['立花 😀'] },
+      { name: 'Archive', description: 'A reviewed archive.', attributes: [ontologyAttributes[0]] }
+    ],
+    edge_types: [{
+      name: 'REFERS_TO', description: 'A reviewed reference.', attributes: [ontologyAttributes[0]],
+      source_targets: [{ source: 'Person', target: 'Entity' }]
+    }]
+  }
+  const reviewedDescription = 'The edited project description.'
+  const lostDescription = 'The edit whose save response was lost.'
+  const projectVersion = description => ({
+    ...originalOntology, entity_types: [{ ...originalOntology.entity_types[0], description }, originalOntology.entity_types[1]]
+  })
+  let projectRevision = 5, savedOntology = originalOntology, ontologyWrites = 0
+  let holdOntologyLoad = false, releaseOntologyLoad
   globalThis.fetch = async (url, options) => {
     calls.push({ url, options })
     if (url.includes('/data/')) return reply(projection('Actor', 'Person', 1))
     if (url.includes('/source/library/')) return reply({ ...viewFlags, sources: [source], has_more: false, window_limit: 20 })
     if (url.includes('/source/item/')) return reply({ ...viewFlags, source, text, offset_unit: 'unicode_codepoint', passages })
+    if (url.endsWith('/api/source/ontology/graph_1')) {
+      assert.equal(options.headers.Authorization, 'Bearer private-token')
+      assert.equal(options.credentials, 'omit')
+      assert.equal(options.redirect, 'error')
+      const result = () => reply({ schema_version: 1, scope, project_revision: projectRevision, ontology: savedOntology })
+      if (options.method === 'GET') {
+        assert.equal(options.body, undefined)
+        assert.equal(options.headers['Content-Type'], undefined)
+        if (holdOntologyLoad) return new Promise(resolve => { releaseOntologyLoad = () => resolve(result()) })
+        return result()
+      }
+      assert.equal(options.method, 'POST')
+      assert.equal(options.headers['Content-Type'], 'application/json')
+      const payload = JSON.parse(options.body)
+      ontologyWrites++
+      const description = ontologyWrites === 3 ? lostDescription : reviewedDescription
+      assert.deepEqual(payload, { schema_version: 1, expected_revision: projectRevision, ontology: projectVersion(description) })
+      projectRevision++
+      if (ontologyWrites === 1) {
+        savedOntology = projectVersion('A concurrent edit.')
+        return new Response(JSON.stringify({ success: false, error: { code: 'conflict' } }), {
+          status: 409, headers: { 'Content-Type': 'application/json' }
+        })
+      }
+      savedOntology = payload.ontology
+      if (ontologyWrites === 3) throw new TypeError('fixture drops the saved ontology reply')
+      return result()
+    }
     if (url.includes('/ingestion/plan/')) {
       const payload = JSON.parse(options.body)
       assert.deepEqual(Object.keys(payload).sort(), ['evidence_id', 'ontology', 'schema_version', 'source_revision'])
@@ -385,6 +433,9 @@ test('selected retained passage resets review and recovers one derived operation
   const manual = '#ingestion-operation'
   const plan = () => m.root.querySelector('.source-ingestion form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }))
   const callsFor = method => calls.filter(call => call.url.includes('/ingestion/' + method + '/'))
+  const control = name => m.root.querySelector('#reviewed-ontology-' + name)
+  const projectStatus = () => control('status')?.textContent
+  const ontologyWire = () => calls.filter(call => call.url.includes('/source/ontology/')).map(call => call.options.method)
   try {
     await connectRefresh(m)
     await inspectRefreshSource(m, { editEntityName: false })
@@ -405,6 +456,50 @@ test('selected retained passage resets review and recovers one derived operation
     assert.equal(m.root.querySelector(draft).value, description)
     assert.equal(m.root.querySelector(manual).value, uid(77))
     assert.equal(callsFor('execute').length, 0)
+
+    control('mode').click()
+    await nextTick()
+    assert.deepEqual(ontologyWire(), [])
+    assert.equal(control('mode').getAttribute('aria-pressed'), 'true')
+    assert.equal(control('status').getAttribute('role'), 'status')
+    control('load').click()
+    await waitFor(() => projectStatus().includes('Loaded project revision 5'))
+    assert.equal(m.root.querySelector(draft).value, originalOntology.entity_types[0].description)
+    assert.equal(m.root.querySelector('.source-ingestion select[id^="edge-pair-target-"]').value, 'Entity')
+    assert.equal(m.root.querySelectorAll('.source-ingestion input[id^="entity-attribute-name-"]').length, 7)
+    assert.equal(control('save').disabled, true)
+    input(m, draft, reviewedDescription)
+    await nextTick()
+    control('save').click()
+    await waitFor(() => projectStatus().includes('may have changed') && document.activeElement === control('load'))
+    assert.equal(m.root.querySelector(draft).value, reviewedDescription)
+    assert.equal(control('save').disabled, true)
+    assert.deepEqual(ontologyWire(), ['GET', 'POST'])
+
+    control('load').click()
+    await waitFor(() => projectStatus().includes('revision 6 differs') && control('keep'))
+    assert.equal(m.root.querySelector(draft).value, reviewedDescription)
+    assert.equal(control('save').disabled, true)
+    control('keep').click()
+    await nextTick()
+    control('save').click()
+    await waitFor(() => projectStatus().includes('Saved project revision 7'))
+    assert.equal(m.root.querySelector(draft).value, reviewedDescription)
+    assert.equal(control('save').disabled, true)
+
+    control('mode').click()
+    await nextTick()
+    assert.equal(picker().value, passages[1].evidence_id)
+    assert.equal(m.root.querySelector(draft).value, description)
+    assert.equal(m.root.querySelector(manual).value, uid(77))
+    control('mode').click()
+    await nextTick()
+    control('load').click()
+    await waitFor(() => projectStatus().includes('Loaded project revision 7'))
+    assert.equal(m.root.querySelector(draft).value, reviewedDescription)
+    assert.deepEqual(ontologyWire(), ['GET', 'POST', 'GET', 'POST', 'GET'])
+    control('mode').click()
+    await nextTick()
 
     mismatch = true
     plan()
@@ -429,6 +524,33 @@ test('selected retained passage resets review and recovers one derived operation
     assert.equal(callsFor('plan').length, 3)
     assert.equal(callsFor('execute').length, 1)
     assert.equal(callsFor('operation').length, 1)
+
+    control('mode').click()
+    await nextTick()
+    input(m, draft, lostDescription)
+    await nextTick()
+    control('save').click()
+    await waitFor(() => projectStatus().includes('could not be confirmed') && document.activeElement === control('load'))
+    assert.equal(m.root.querySelector(draft).value, lostDescription)
+    assert.equal(control('save').disabled, true)
+    assert.ok(m.root.querySelector('.source-ingestion .attempt').textContent.includes(admitted.plan.operation_id))
+    control('load').click()
+    await waitFor(() => projectStatus().includes('Saved project revision 8'))
+    assert.equal(m.root.querySelector(draft).value, lostDescription)
+    assert.equal(picker().value, passages[1].evidence_id)
+    assert.ok(m.root.querySelector('.source-ingestion .outcome').textContent.includes(admitted.plan.operation_id))
+    assert.deepEqual(ontologyWire(), ['GET', 'POST', 'GET', 'POST', 'GET', 'POST', 'GET'])
+
+    holdOntologyLoad = true
+    control('load').click()
+    await waitFor(() => releaseOntologyLoad)
+    m.root.querySelector('.connection-form button[type="button"]:not([aria-pressed])').click()
+    releaseOntologyLoad()
+    await waitFor(() => !m.root.querySelector('.graph-refresh'))
+    await connectRefresh(m)
+    control('mode').click()
+    await waitFor(() => projectStatus()?.includes('to start editing'))
+    assert.equal(control('save'), null)
   } finally {
     m.cleanup()
     globalThis.fetch = previous
