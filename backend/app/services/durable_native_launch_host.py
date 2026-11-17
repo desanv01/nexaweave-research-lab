@@ -5,10 +5,12 @@ injected host on its existing loop with a finite timeout. A lost reply never
 causes redispatch. No clients, threads or loops are constructed here.
 """
 from dataclasses import asdict, replace
+from datetime import timedelta
 import json
 import hashlib
 import math
 import pickle
+from time import monotonic
 from uuid import UUID, NAMESPACE_URL, uuid5
 from .native_launch_client import (NativeLaunchError, IDENTITY, digest, encoded,
     validate_payload, validate_result, validate_limits, text)
@@ -86,7 +88,7 @@ class DurableNativeLaunchHost:
     def __init__(self, *, preparation_host, connection_factory, runtime_sha256,
                  model_label='unconfigured', limits=None, model_factory=None,
                  account_id=None, ceiling_microusd=None, authorize=None,
-                 temporal_host=None, temporal_call=None):
+                 temporal_host=None, temporal_call=None, audited_scripted_interview=None):
         from nexaweave_execution.native_launch_store import NativeLaunchStore
         from nexaweave_execution.native_run_store import NativeRunStore
         from nexaweave_execution.budget import BudgetLedger
@@ -104,6 +106,12 @@ class DurableNativeLaunchHost:
         if model_factory is not None and type(model_factory) is not BoundedNativeModelFactory:
             raise NativeLaunchError('native_launch_unavailable')
         self.model_factory = model_factory
+        if audited_scripted_interview is not None:
+            from .native_launch_models import _validate_scripted_reply
+            if model_factory is None or model_factory.mode != 'scripted' or model_factory.platforms != ('twitter',):
+                raise NativeLaunchError('native_launch_unavailable')
+            _validate_scripted_reply(audited_scripted_interview, self.limits)
+        self._interview_reply = audited_scripted_interview
         self.account_id,self.ceiling,self.authorize = account_id,ceiling_microusd,authorize
         self.connect = connection_factory
         self.store,self.native,self.budget = NativeLaunchStore(connection_factory),NativeRunStore(connection_factory),BudgetLedger(connection_factory)
@@ -142,6 +150,9 @@ class DurableNativeLaunchHost:
         raw = pickle.dumps(self.model_factory)
         if len(raw)>65536:
             raise NativeLaunchError('native_launch_unavailable')
+        if self._interview_reply is not None:
+            # Persist the opt-in in the existing configuration fingerprint.
+            raw += b'\0owned-transient-interview-v1'
         return {'account_id':str(self.account_id) if self.account_id is not None else None,
                 'factory_sha256':hashlib.sha256(raw).hexdigest()}
 
@@ -430,6 +441,114 @@ class DurableNativeLaunchHost:
                     pass
         return self._dto(self._recover(row),'cancel',payload)
 
+    def interview(self, payload):
+        from nexaweave_execution.native_interview_protocol import InterviewUnavailable
+        from nexaweave_knowledge.contracts import KnowledgeScope
+
+        payload = validate_payload('interview', payload)
+        if self._interview_reply is None or self.temporal is None:
+            raise InterviewUnavailable()
+        row = self._row(payload)
+        prep, _ = self._current(row)
+        if payload['agent_id'] >= len(prep.frozen['public']['actors']):
+            raise NativeLaunchError('invalid_request')
+        if (row.request.schema_version != 1 or row.request.platforms != ('twitter',)
+                or row.cancel_requested or row.workflow is None or not self.authorization(row)['model_calls_enabled']):
+            raise InterviewUnavailable()
+        scope = KnowledgeScope.model_validate_json(json.dumps(self.scope_dto))
+
+        def admit(record, owner_id, send, command, expires):
+            return self._send_interview(row, scope.group_id, record, owner_id, send, command, expires)
+
+        completed = self.temporal.local_interview(row.request, payload, admit)
+        # Let ordinary owner cleanup and the original settlement run before
+        # taking any of the final authority locks. Recovery is idempotent.
+        self._recover(row)
+        return self._release_interview(row, scope.group_id, completed, payload)
+
+    def _release_interview(self, row, group_id, completed, payload):
+        from nexaweave_execution.budget import ReservationState
+        from nexaweave_execution.native_interview_protocol import InterviewUnavailable
+        from nexaweave_execution.native_launch_contracts import (
+            NativeBudgetReceipt, native_budget_episode, native_budget_fingerprint,
+        )
+        from nexaweave_execution.native_launch_store import transaction, _verify_current_preparation
+        from nexaweave_execution.native_run_contracts import RunState
+
+        if monotonic() >= completed.expires:
+            raise InterviewUnavailable()
+        receipt = completed.receipt
+        with transaction(self.connect) as conn:
+            live = self.store._get(conn, self.principal, row.run_id, True)
+            if (live.launch_sha256 != row.launch_sha256 or live.request != row.request
+                    or live.workflow != row.workflow or live.budget_attempt_id != row.budget_attempt_id
+                    or not live.dispatch_claimed or live.cancel_requested or live.state != 'completed'
+                    or live.receipt != receipt.to_wire() or not self.authorization(live)['model_calls_enabled']):
+                raise InterviewUnavailable()
+            _verify_current_preparation(conn, live.request, live.frozen['identity'])
+            current = self.native._owned(self.principal, row.run_id, lock=True, conn=conn)
+            if (current.request != row.request or current.state != RunState.completed or current.cancel_requested
+                    or current.owner_id != completed.owner_id or current.attempt_id != receipt.attempt_id
+                    or current.child != completed.child or current.receipt != receipt):
+                raise InterviewUnavailable()
+            account = self.budget._account(conn, self.principal, self.account_id)
+            budget = self.budget._row(conn, self.account_id, row.run_id)
+            expected = NativeBudgetReceipt(row.run_id, row.budget_attempt_id,
+                native_budget_fingerprint(row.launch_sha256), row.launch_sha256, receipt)
+            if (account[2] != row.request.project_id or budget is None
+                    or budget.state != ReservationState.settled or budget.receipt != expected
+                    or budget.scope_group_id != group_id or budget.evidence_ids
+                    or budget.episode_id != native_budget_episode(group_id, row.run_id)
+                    or budget.ceiling_microusd != self.ceiling):
+                raise InterviewUnavailable()
+            completed.confirm()
+            result = {key: payload[key] for key in ('schema_version', 'launch_id', 'launch_sha256',
+                       'command_id', 'platform', 'agent_id')}
+            reply = {**result, 'attempt_id': str(receipt.attempt_id), 'instance_id': str(receipt.instance_id),
+                     'request_fingerprint': receipt.request_fingerprint, 'response': completed.response,
+                     'display_graph_id': self.display_graph_id, 'scope': self.scope_dto}
+        completed.confirm()
+        return reply
+
+    def _send_interview(self, row, group_id, record, owner_id, send, command, expires):
+        from nexaweave_execution.budget import ReservationState
+        from nexaweave_execution.native_interview_protocol import InterviewUnavailable
+        from nexaweave_execution.native_launch_contracts import native_budget_episode, native_budget_fingerprint
+        from nexaweave_execution.native_launch_store import transaction, _verify_current_preparation
+        from nexaweave_execution.native_run_contracts import RunState
+
+        # Follow launch -> project -> preparation -> native ownership. Cancel
+        # serializes on the launch row before it marks the native row.
+        with transaction(self.connect) as conn:
+            live = self.store._get(conn, self.principal, row.run_id, True)
+            if (live.launch_sha256 != row.launch_sha256 or live.request != row.request
+                    or live.workflow != row.workflow or live.budget_attempt_id != row.budget_attempt_id
+                    or not live.dispatch_claimed or live.cancel_requested
+                    or live.state not in {'queued', 'starting', 'running'}
+                    or not self.authorization(live)['model_calls_enabled']):
+                raise InterviewUnavailable()
+            _verify_current_preparation(conn, live.request, live.frozen['identity'])
+            current = self.native._owned(self.principal, row.run_id, lock=True, conn=conn)
+            if (current.request != row.request or current.state != RunState.running or current.cancel_requested
+                    or current.owner_id != owner_id or current.attempt_id != record.attempt_id
+                    or current.child is None or current.child != record.child or current.lease_until is None):
+                raise InterviewUnavailable()
+            account = self.budget._account(conn, self.principal, self.account_id)
+            budget = self.budget._row(conn, self.account_id, row.run_id)
+            if (account[2] != row.request.project_id or budget is None or budget.state != ReservationState.started
+                    or budget.attempt_id != live.budget_attempt_id or budget.ceiling_microusd != self.ceiling
+                    or budget.scope_group_id != group_id or budget.evidence_ids
+                    or budget.episode_id != native_budget_episode(group_id, row.run_id)
+                    or budget.fingerprint != native_budget_fingerprint(row.launch_sha256)):
+                raise InterviewUnavailable()
+            now = conn.execute('SELECT clock_timestamp()').fetchone()[0]
+            remaining = expires - monotonic()
+            if remaining <= 0 or current.lease_until <= now + timedelta(seconds=remaining):
+                raise InterviewUnavailable()
+            # Admission hands off one bounded frame. The owner waits for its
+            # answer only after exiting this transaction.
+            return send(current, command, expires)
+
     def supervisor_factory(self,request):
         """Trusted Temporal callback: authorize frozen PG row before files."""
         from nexaweave_execution.native_run_contracts import NativeRunRequest
@@ -456,7 +575,8 @@ class DurableNativeLaunchHost:
                     runtime_sha256=request.runtime_sha256,model_factory=self.model_factory)
             if bound!=request:
                 raise NativeLaunchError('conflict')
-            factory = replace(factory,timeout_seconds=row.frozen['identity']['limits']['max_run_seconds'])
+            factory = replace(factory, timeout_seconds=row.frozen['identity']['limits']['max_run_seconds'],
+                              audited_scripted_interview=self._interview_reply)
         else:
             factory = self._checkpoint_factory(prep, ref, request, checkpoint)
         host = NativePreparedHost(principal=self.principal,request=request,session_factory=factory,

@@ -146,6 +146,14 @@ class NativeExecutionActivities:
             if entry.error_code is None:
                 entry.error_code = code
 
+    @staticmethod
+    def _stop_entry(entry: _Entry) -> None:
+        # Call under the registry lock, before accepting the stop. This fence
+        # acquires only the supervisor condition and performs no I/O.
+        if entry.supervisor is not None:
+            entry.supervisor.fence_interview()
+        entry.stop_requested = True
+
     def _accept_supervisor(self, entry: _Entry, request: NativeRunRequest,
                            value: object) -> NativeRunSupervisor:
         if not isinstance(value, NativeRunSupervisor):
@@ -161,9 +169,11 @@ class NativeExecutionActivities:
             except Exception:
                 mismatch = True
             if mismatch:
-                entry.stop_requested = True
+                self._stop_entry(entry)
                 entry.binding_invalid = True
                 entry.error_code = "invalid_supervisor"
+            elif entry.stop_requested:
+                value.fence_interview()
             stopped = entry.stop_requested
         if mismatch:
             self._schedule_cleanup(entry, cancel=False)
@@ -230,7 +240,8 @@ class NativeExecutionActivities:
 
     def _schedule_cleanup(self, entry: _Entry, *, cancel: bool) -> asyncio.Task | None:
         with self._lock:
-            entry.stop_requested = entry.stop_requested or cancel
+            if cancel:
+                self._stop_entry(entry)
             if entry.binding_invalid:
                 cancel = False  # Mismatched handles receive cleanup only.
             prior = entry.cleanup_task
@@ -341,6 +352,20 @@ class NativeExecutionActivities:
             raise NativeActivityError("native_heartbeat_failed")
         return task.result()
 
+    def local_interview(self, request, command, admit):
+        from .native_interview_protocol import InterviewUnavailable
+
+        if request.principal != self.principal:
+            raise InterviewUnavailable()
+        with self._lock:
+            entry = self._entries.get(request.run_id)
+            if (entry is None or entry.fingerprint != request.fingerprint
+                    or entry.stop_requested or entry.binding_invalid or entry.cleanup_proven
+                    or entry.supervisor is None or entry.supervisor.request != request):
+                raise InterviewUnavailable()
+            supervisor = entry.supervisor
+        return supervisor.interview(command, admit)
+
     async def local_status(self, request: NativeRunRequest) -> LocalNativeStatus:
         request = NativeRunRequest.from_wire(request)
         if request.principal != self.principal:
@@ -382,7 +407,7 @@ class NativeExecutionActivities:
             raise NativeActivityError("native_run_denied")
         entry = self._entry(request)
         with self._lock:
-            entry.stop_requested = True
+            self._stop_entry(entry)
             supervisor = entry.supervisor
             binding_invalid = entry.binding_invalid
         if binding_invalid:
@@ -404,7 +429,7 @@ class NativeExecutionActivities:
             raise NativeActivityError("native_run_denied")
         entry = self._entry(request)
         with self._lock:
-            entry.stop_requested = True
+            self._stop_entry(entry)
         task = self._schedule_cleanup(entry, cancel=False)
         if task is not None:
             try:
