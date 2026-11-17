@@ -1,3 +1,7 @@
+from copy import deepcopy
+
+import pytest
+
 from app.services.ontology_generator import OntologyGenerator
 from app.services.graph_builder import GraphBuilderService
 from app.utils.ontology import (
@@ -5,6 +9,7 @@ from app.utils.ontology import (
     MAX_ONTOLOGY_SOURCE_TARGETS,
     normalize_ontology_attribute,
     normalize_ontology_attributes,
+    validate_reviewed_ontology,
 )
 from zep_cloud.external_clients.ontology import (
     edge_model_to_api_schema,
@@ -255,3 +260,62 @@ def test_generator_caps_after_discarding_invalid_edge_endpoints():
     assert result["edge_types"][0]["source_targets"] == [
         {"source": "Person", "target": "Organization"}
     ]
+
+
+def _reviewed_ontology():
+    attribute = {"name": "role", "type": "text", "description": "Public role"}
+    return {
+        "entity_types": [{
+            "name": "Speaker",
+            "description": "A person who speaks in public.",
+            "attributes": [dict(attribute)],
+            "examples": ["A journalist"],
+        }],
+        "edge_types": [{
+            "name": "QUOTES",
+            "description": "Quotes another entity.",
+            "attributes": [dict(attribute)],
+            "source_targets": [{"source": "Speaker", "target": "Entity"}],
+        }],
+    }
+
+
+def test_reviewed_ontology_accepts_exact_endpoints_without_mutating_input():
+    ontology = _reviewed_ontology()
+    before = deepcopy(ontology)
+    validated = validate_reviewed_ontology(ontology)
+
+    assert validated == before == ontology
+    validated["edge_types"][0]["source_targets"][0]["target"] = "Speaker"
+    assert ontology == before
+
+
+@pytest.mark.parametrize("source_targets, error", [
+    ([{"source": "Speaker"}], "must contain source and target"),
+    ([{"source": "speaker", "target": "Entity"}], "unknown entity type"),
+    ([{"source": "Speaker", "target": "Organization"}], "unknown entity type"),
+    ([{"source": "Speaker", "target": "Entity"}] * 2, "duplicate endpoint pair"),
+])
+def test_reviewed_ontology_rejects_invalid_endpoint_pairs(source_targets, error):
+    ontology = _reviewed_ontology()
+    ontology["edge_types"][0]["source_targets"] = source_targets
+    before = deepcopy(ontology)
+
+    with pytest.raises(ValueError, match=error):
+        validate_reviewed_ontology(ontology)
+    assert ontology == before
+
+
+def test_reviewed_ontology_rejects_malformed_and_over_limit_attributes():
+    ontology = _reviewed_ontology()
+    entity = ontology["entity_types"][0]
+    entity["attributes"] = ["role"]
+    with pytest.raises(ValueError, match="must contain name, type and description"):
+        validate_reviewed_ontology(ontology)
+
+    entity["attributes"] = [
+        {"name": f"field_{index}", "type": "text", "description": "An attribute"}
+        for index in range(MAX_ONTOLOGY_ATTRIBUTES + 1)
+    ]
+    with pytest.raises(ValueError, match="attributes must contain"):
+        validate_reviewed_ontology(ontology)
