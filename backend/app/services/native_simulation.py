@@ -21,6 +21,7 @@ import stat
 import time
 import uuid
 from pathlib import Path
+from threading import current_thread
 
 from .knowledge_report_tools import NeutralCapabilityError
 from .native_controls import parse_execution_controls
@@ -760,6 +761,7 @@ class NativeSimulationSession:
             raise NeutralCapabilityError("invalid_request")
         self._claim_fresh_start()
         self._runner = asyncio.Runner()
+        self._owner_thread = current_thread()
         try:
             self._start_deadline = time.monotonic() + self.timeout_seconds
             self._runner.run(asyncio.wait_for(self._start_async(), self.timeout_seconds))
@@ -820,6 +822,24 @@ class NativeSimulationSession:
             raise
         except Exception:
             raise NeutralCapabilityError("interview_unavailable") from None
+
+    def transient_interview(self, *, platform, agent_id, prompt):
+        """Answer once through the live actor's audited scripted model."""
+        if (not self._started or self._closed or current_thread() is not self._owner_thread
+                or platform != "twitter" or platform not in self._platforms
+                or type(agent_id) is not int or agent_id not in self._agents
+                or type(prompt) is not str or not 1 <= len(prompt) <= 400
+                or not prompt.strip() or "\x00" in prompt):
+            raise NeutralCapabilityError("invalid_request")
+        try:
+            from .native_launch_models import run_transient_twitter_interview
+            actor = self._results[platform].agent_graph.get_agent(agent_id)
+            answer = run_transient_twitter_interview(
+                self._runner, self._models[platform], actor, agent_id, prompt, self._start_deadline,
+            )
+        except (Exception, asyncio.CancelledError):
+            raise NeutralCapabilityError("interview_unavailable") from None
+        return {"platform": platform, "agent_id": agent_id, "response": answer}
 
     def batch_interview(self, *, platform, agent_ids, prompt):
         if (type(agent_ids) is not list or not 1 <= len(agent_ids) <= 10
