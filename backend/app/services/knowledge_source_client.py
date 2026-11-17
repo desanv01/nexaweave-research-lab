@@ -8,7 +8,7 @@ from pathlib import Path
 from uuid import UUID, uuid5
 from unicodedata import category
 
-from .knowledge_reader import _scope
+from .knowledge_reader import KnowledgeReadError, _scope
 from .knowledge_transport import (KnowledgeProcessClient, KnowledgeInvalidRequest,
     KnowledgeTransportFailure, _json_object, _uuid, _ROOT_FIELDS)
 
@@ -22,6 +22,11 @@ CHILD_KEYS = ("KNOWLEDGE_PRINCIPAL", "KNOWLEDGE_DISPLAY_GRAPH_ID", "KNOWLEDGE_BO
     "KNOWLEDGE_PG_HOST", "KNOWLEDGE_PG_PORT", "KNOWLEDGE_PG_DATABASE", "KNOWLEDGE_PG_USER",
     "KNOWLEDGE_PG_PASSWORD")
 HASH = re.compile(r"[0-9a-f]{64}\Z")
+ONTOLOGY_METHODS = frozenset({"ontology_load", "ontology_save"})
+_ONTOLOGY_TYPE_FIELDS = {"name", "description", "attributes"}
+_RESERVED_ONTOLOGY_ATTRIBUTES = frozenset({
+    "uuid", "name", "group_id", "graph_id", "name_embedding", "summary", "created_at",
+})
 
 
 def pdf_upload(value, *, version=1):
@@ -391,7 +396,116 @@ def validate_result(method, value, scope, payload):
         raise KnowledgeTransportFailure(outcome_unknown=True) from None
 
 
+def _reviewed_text(value):
+    if type(value) is not str or not value.strip() or "\x00" in value:
+        raise ValueError
+    value.encode("utf-8")
+
+
+def _reviewed_names(entries, pattern, *, optional=(), required=()):
+    if type(entries) is not list or len(entries) > 10:
+        raise ValueError
+    required_fields = _ONTOLOGY_TYPE_FIELDS.union(required)
+    names = set()
+    for entry in entries:
+        if (type(entry) is not dict or not required_fields <= entry.keys()
+                or entry.keys() - required_fields - set(optional)):
+            raise ValueError
+        name = entry["name"]
+        if type(name) is not str or not re.fullmatch(pattern, name) or name in names:
+            raise ValueError
+        names.add(name)
+        _reviewed_text(entry["description"])
+        if len(entry["description"]) > 100:
+            raise ValueError
+        attributes = entry["attributes"]
+        if type(attributes) is not list or not 1 <= len(attributes) <= 10:
+            raise ValueError
+        attribute_names = set(_RESERVED_ONTOLOGY_ATTRIBUTES)
+        for attribute in attributes:
+            if type(attribute) is not dict or set(attribute) != {"name", "type", "description"}:
+                raise ValueError
+            attribute_name = attribute["name"]
+            if (type(attribute_name) is not str
+                    or not re.fullmatch(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)*", attribute_name)
+                    or attribute_name in attribute_names or attribute["type"] != "text"):
+                raise ValueError
+            attribute_names.add(attribute_name)
+            _reviewed_text(attribute["description"])
+        if "examples" in entry:
+            examples = entry["examples"]
+            if type(examples) is not list:
+                raise ValueError
+            for example in examples:
+                _reviewed_text(example)
+    return names
+
+
+def _validate_reviewed_ontology(value):
+    # This stdlib boundary checks the installed reviewed schema before public
+    # disclosure. Only the installed child authorizes and commits a revision.
+    if type(value) is not dict or set(value) != {"entity_types", "edge_types"}:
+        raise ValueError
+    names = _reviewed_names(value["entity_types"], r"[A-Z][A-Za-z0-9]*", optional=("examples",))
+    _reviewed_names(value["edge_types"], r"[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*", required=("source_targets",))
+    names.add("Entity")
+    for edge in value["edge_types"]:
+        targets = edge["source_targets"]
+        if type(targets) is not list or not 1 <= len(targets) <= 10:
+            raise ValueError
+        pairs = set()
+        for target in targets:
+            if type(target) is not dict or set(target) != {"source", "target"}:
+                raise ValueError
+            pair = (target["source"], target["target"])
+            if not all(type(name) is str and name in names for name in pair) or pair in pairs:
+                raise ValueError
+            pairs.add(pair)
+
+
+def validate_ontology_payload(method, value):
+    if type(value) is not dict:
+        raise ValueError
+    if method == "ontology_load":
+        if value:
+            raise ValueError
+        return
+    if (method != "ontology_save" or set(value) != {"schema_version", "expected_revision", "ontology"}
+            or type(value["schema_version"]) is not int or value["schema_version"] != 1
+            or type(value["expected_revision"]) is not int or not 1 <= value["expected_revision"] <= 2_147_483_646
+            or len(encoded(value)) > MAX_BYTES):
+        raise ValueError
+    _validate_reviewed_ontology(value["ontology"])
+
+
+def validate_ontology_result(method, value, scope, payload):
+    saving = method == "ontology_save"
+    try:
+        if (type(value) is not dict or set(value) != {"schema_version", "scope", "project_revision", "ontology"}
+                or type(value["schema_version"]) is not int or value["schema_version"] != 1
+                or _scope(value["scope"]) != scope or type(value["project_revision"]) is not int
+                or not 1 <= value["project_revision"] <= 2_147_483_647 or len(encoded(value)) > MAX_BYTES):
+            raise ValueError
+        ontology = value["ontology"]
+        if saving:
+            if value["project_revision"] != payload["expected_revision"] + 1 or ontology != payload["ontology"]:
+                raise ValueError
+            _validate_reviewed_ontology(ontology)
+        elif ontology is not None:
+            if type(ontology) is not dict:
+                raise ValueError
+            try:
+                _validate_reviewed_ontology(ontology)
+            except ValueError:
+                raise KnowledgeReadError("conflict") from None
+        return value
+    except (ValueError, TypeError, KeyError, UnicodeError, RecursionError, OverflowError):
+        raise KnowledgeTransportFailure(outcome_unknown=saving) from None
+
+
 class KnowledgeSourceProcessClient(KnowledgeProcessClient):
+    _validate_payload = staticmethod(validate_payload)
+
     def __init__(self, settings):
         self._scope = dict(settings.scope)
         script = Path(settings.bootstrap).with_name("source_bootstrap.py")
@@ -412,7 +526,7 @@ class KnowledgeSourceProcessClient(KnowledgeProcessClient):
             if (self._scope["layer"] != "source" or self._scope["run_id"] is not None
                     or self._scope["branch_id"] is not None):
                 raise ValueError
-            validate_payload(value["method"], value["payload"])
+            self._validate_payload(value["method"], value["payload"])
             return _uuid(value["request_id"])
         except (ValueError, TypeError, KeyError):
             raise KnowledgeInvalidRequest() from None
@@ -437,3 +551,10 @@ class KnowledgeSourceProcessClient(KnowledgeProcessClient):
                 raise ValueError
         except (ValueError, TypeError, KeyError):
             raise KnowledgeTransportFailure(outcome_unknown=True) from None
+
+
+class KnowledgeOntologyProcessClient(KnowledgeSourceProcessClient):
+    _validate_payload = staticmethod(validate_ontology_payload)
+
+    def _command(self):
+        return [*super()._command(), "--ontology"]

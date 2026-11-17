@@ -5,6 +5,7 @@ and provenance controls, not semantic extraction quality or paid-model readiness
 """
 import asyncio
 from contextlib import contextmanager
+from copy import deepcopy
 import hashlib
 import importlib.util
 import json
@@ -14,7 +15,7 @@ import subprocess
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from uuid import UUID, uuid4
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import pytest
 from neo4j import GraphDatabase
@@ -279,6 +280,129 @@ def test_real_production_http_sdk_ingestion_restart_and_denials(factory, tmp_pat
         assert any('Mira Vale works for Harbor Labs' in row['fact'] for row in facts)
         assert SourceStore(factory).get_source('owner',scope.project_id,retained.source_revision) == retained
         assert BudgetLedger(factory).status('owner',account).accounted_ceiling_microusd == 4
+
+
+def test_real_protected_http_selected_retained_passage(factory, tmp_path):
+    from backend.app.services.knowledge_ingestion_client import (
+        KnowledgeTransportFailure, validate_result,
+    )
+
+    display, scope, other_source, account, v1 = seed(factory)
+    prefix = 'a' * 32765 + '猫'
+    excerpt = 'Mira Vale works for Harbor Labs. 雪'
+    text = prefix + excerpt
+    start = len(prefix)
+    evidence_id = str(uuid4())
+    sources = SourceStore(factory)
+    retained = sources.ingest_text('owner', scope.project_id, uuid4(), 'two windows', text, [
+        {'evidence_id': str(uuid4()), 'start': 0, 'end': start},
+        {'evidence_id': evidence_id, 'start': start, 'end': len(text)},
+    ])
+    assert len(prefix.encode('utf-8')) == 32768 and start < 32768 < len(text)
+    assert len(retained.passages) == 2 and retained.passages[1].excerpt == excerpt
+    payload = {'schema_version': 2, 'source_revision': str(retained.source_revision),
+               'evidence_id': evidence_id, 'ontology': v1['ontology']}
+    excerpt_hash = hashlib.sha256(excerpt.encode('utf-8')).hexdigest()
+    retained_hash = hashlib.sha256(text.encode('utf-8')).hexdigest()
+    window = {
+        'evidence_id': evidence_id, 'start': start, 'end': len(text), 'page': None,
+        'ordinal': 2, 'count': 2, 'sha256': excerpt_hash, 'retained_sha256': retained_hash,
+        'retained_byte_length': len(text.encode('utf-8')), 'retained_codepoint_length': len(text),
+    }
+    operation_name = json.dumps(
+        [scope.group_id, payload['source_revision'], retained_hash, start, len(text),
+         evidence_id, excerpt_hash, payload['ontology']['revision']],
+        ensure_ascii=True, separators=(',', ':'),
+    )
+    operation = uuid5(NAMESPACE_URL, 'mirofish:retained-window:v1:' + operation_name)
+    episode = str(scope.episode_uuid(operation))
+    status_url = f'/api/source/ingestion/operation/{display}/{operation}'
+    plan_url, execute_url = (f'/api/source/ingestion/{method}/{display}' for method in ('plan', 'execute'))
+    budget = BudgetLedger(factory)
+
+    def reservations():
+        with factory() as connection:
+            return connection.execute(
+                'SELECT operation_id,attempt_id,state FROM mf_execution.reservations WHERE account_id=%s',
+                (account,),
+            ).fetchall()
+
+    with neo_scope(scope) as driver, model_server() as (model_port, records, errors, _state):
+        with host(tmp_path/'selected', scope, display, account, model_port) as (port, token, _events_path):
+            def post(route, body):
+                return _exchange(port, 'POST', route, body, token=token)
+
+            invalid = dict(payload, operation_id=str(operation))
+            status, _, reply = post(plan_url, invalid)
+            assert status == 400 and reply['error']['code'] == 'invalid_request'
+
+            status, headers, reply = post(plan_url, payload)
+            assert status == 200, reply
+            assert headers['Cache-Control'] == 'no-store'
+            plan = reply['data']
+            assert plan['schema_version'] == 2 and plan['window'] == window
+            assert plan['operation_id'] == str(operation) and plan['episode_id'] == episode
+            assert plan['evidence_ids'] == [evidence_id] and plan['source_sha256'] == excerpt_hash
+            assert plan['source_codepoint_length'] == len(excerpt)
+            assert plan['source_byte_length'] == len(excerpt.encode('utf-8'))
+            assert plan['model_calls_made'] is plan['spending_authorized'] is False
+
+            prefix_payload = dict(payload, evidence_id=str(retained.passages[0].evidence_id))
+            status, _, reply = post(plan_url, prefix_payload)
+            assert status == 200 and reply['data']['source_byte_length'] == 32768
+            oversized_plan = dict(reply['data'], source_byte_length=32769)
+            with pytest.raises(KnowledgeTransportFailure):
+                validate_result('plan', oversized_plan, scope.model_dump(mode='json'), prefix_payload)
+            assert records == [] and reservations() == []
+
+            foreign_evidence = dict(payload, evidence_id=str(other_source.passages[0].evidence_id))
+            status, _, reply = post(execute_url, foreign_evidence)
+            assert status == 404 and reply['error']['code'] == 'not_found'
+            assert records == [] and reservations() == []
+
+            status, _, reply = post(execute_url, payload)
+            assert status == 200, reply
+            executed = reply['data']
+            assert executed['schema_version'] == 2 and executed['window'] == window
+            assert executed['state'] == 'completed' and executed['budget_state'] == 'settled'
+            assert executed['operation_id'] == str(operation) and executed['episode_id'] == episode
+            assert executed['fingerprint'] == plan['fingerprint']
+            assert executed['receipt'] == {
+                'group_id': scope.group_id, 'episode_id': episode,
+                'fingerprint': plan['fingerprint'], 'evidence_ids': [evidence_id],
+            }
+            settled = reservations()
+            assert len(settled) == 1 and settled[0][0] == operation
+            assert isinstance(settled[0][1], UUID) and settled[0][2] == 'settled'
+            assert records and errors == []
+            request_count = len(records)
+
+            status, _, reply = post(execute_url, payload)
+            assert status == 200 and reply['data'] == executed
+            status, _, reply = _exchange(port, 'GET', status_url, token=token)
+            status_expected = {key: value for key, value in executed.items() if key != 'window'}
+            status_expected['schema_version'] = 1
+            assert status == 200 and reply['data'] == status_expected
+
+            changed = deepcopy(payload)
+            changed['ontology']['entity_types'][0]['description'] = 'Changed fixture entity'
+            status, _, reply = post(execute_url, changed)
+            assert status == 409 and reply['error']['code'] == 'conflict'
+            assert len(records) == request_count and errors == []
+            assert reservations() == settled
+
+        rows, _, _ = driver.execute_query(
+            'MATCH (e:Episodic {group_id:$group}), (m:MiroFishIngest {uuid:$episode}) '
+            'RETURN e.uuid AS episode_id, e.content AS content, m.status AS state, '
+            'm.fingerprint AS fingerprint, m.evidence_ids AS evidence_ids',
+            group=scope.group_id, episode=episode, routing_='r',
+        )
+        assert [row.data() for row in rows] == [{
+            'episode_id': episode, 'content': excerpt, 'state': 'complete',
+            'fingerprint': plan['fingerprint'], 'evidence_ids': [evidence_id],
+        }]
+        assert sources.get_source('owner', scope.project_id, retained.source_revision) == retained
+        assert budget.status('owner', account).accounted_ceiling_microusd == 4
 
 
 def test_real_sdk_failure_holds_money_and_never_retries(factory, tmp_path):

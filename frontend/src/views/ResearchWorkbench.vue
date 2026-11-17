@@ -81,7 +81,9 @@ const preparationMethods = Object.freeze({
 const ingestionMethods = Object.freeze({
   plan: (payload, inspected) => operation(() => client.ingestionPlan(payload, inspected), false, true, 'plan'),
   execute: (payload, known) => operation(() => client.ingestionExecute(payload, known), false, true, 'execute'),
-  status: (payload, known) => operation(() => client.ingestionStatus(payload, known, undefined, inspectedSource.value?.source.project_id), false, true, 'status')
+  status: (payload, known) => operation(() => client.ingestionStatus(payload, known, undefined, inspectedSource.value?.source.project_id), false, true, 'status'),
+  loadOntology: known => operation(() => client.sourceOntologyLoad(known, inspectedSource.value?.source.project_id), false, true, '', false, true),
+  saveOntology: (payload, known) => operation(() => client.sourceOntologySave(payload, known, inspectedSource.value?.source.project_id), false, true, '', false, true)
 })
 // Methods capture the single private client. Neither token nor origin is a prop.
 const sourceMethods = Object.freeze({
