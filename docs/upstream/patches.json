@@ -472,6 +472,20 @@
       "current_sha256": "7ee244e4673703961c40a6f02ab11e63dc13fc54437aee5cbb3d6cc5ca0412ba",
       "reason": "Use this repository identity and observed aggregate star count; preserve original upstream state/chart bytes under docs/upstream/star-history references; never relabel upstream counts as NexaWeave popularity.",
       "phase": "NexaWeave canonical rebrand"
+    },
+    {
+      "imported_path": "backend/app/utils/ontology.py",
+      "original_sha256": "c220fff465ae465ad6c8b2fc263ca623a37394e78a4b9d0d8ad7bfc114e88d5c",
+      "current_sha256": "007620b7e0fe06992d6ef8b9eb1df5129eb5d63e4e37141618aca98e6abd4a60",
+      "reason": "W1.2 adds strict validation for reviewed ontology definitions and endpoint pairs.",
+      "phase": "W1.2 reviewed ontology validation"
+    },
+    {
+      "imported_path": "backend/tests/test_ontology_attributes.py",
+      "original_sha256": "2959000b2f327755bd75cefd24c6c46300c1cae8aeb70ee69f9d07989963c22c",
+      "current_sha256": "4c6465c9725cb00a798322006d16bb613fdfd23692e4842d6db85943b69cc63f",
+      "reason": "W1.2 adds focused fixtures for strict ontology validation and detached accepted edits.",
+      "phase": "W1.2 reviewed ontology validation"
     }
   ]
 }
