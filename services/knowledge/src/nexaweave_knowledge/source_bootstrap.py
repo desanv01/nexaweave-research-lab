@@ -31,7 +31,8 @@ def main():
         if directory.name != "nexaweave_knowledge" or "site-packages" not in directory.parts:
             raise ValueError
         for name in ("nexaweave_knowledge", "nexaweave_knowledge.source_library", "nexaweave_knowledge.stdio",
-                     "nexaweave_knowledge.bindings", "nexaweave_knowledge.contracts", "nexaweave_knowledge.operations"):
+                     "nexaweave_knowledge.bindings", "nexaweave_knowledge.contracts",
+                     "nexaweave_knowledge.operations", "nexaweave_knowledge.reviewed_ontology"):
             if Path(sys.modules[name].__file__).resolve().parent != directory:
                 raise ValueError
         storage = directory.parent / "nexaweave_storage"

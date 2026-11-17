@@ -44,9 +44,10 @@ def factory():
     return connect
 
 
-def owned(factory, *, layer=Layer.source, run=None, branch=None, workspace_mismatch=False):
+def owned(factory, *, layer=Layer.source, run=None, branch=None, workspace_mismatch=False,
+          evidence=()):
     workspace, project, graph = uuid4(), uuid4(), uuid4()
-    ProjectStore(factory).create("owner", workspace, project, "proj_1", snapshot())
+    ProjectStore(factory).create("owner", workspace, project, "proj_1", snapshot(), evidence)
     scope = KnowledgeScope(workspace_id=uuid4() if workspace_mismatch else workspace,
         project_id=project, graph_id=graph, layer=layer, run_id=run, branch_id=branch)
     display = "graph_" + graph.hex
@@ -61,6 +62,78 @@ def payload(text="A😀猫\r\n雪", *, revision=None, name="retained", blocks=No
 def request(settings, method, value, *, request_id=None):
     return encoded({"version": 1, "request_id": request_id or str(uuid4()), "method": method,
         "scope": settings.scope.model_dump(mode="json"), "payload": value})
+
+
+@pytest.mark.postgres
+def test_installed_source_ontology_load_save_retains_owned_revision_history(factory, tmp_path):
+    evidence = ({
+        "evidence_id": str(uuid4()), "source_revision": str(uuid4()),
+        "sha256": "a" * 64, "object_key": "objects/fixture", "byte_length": 3,
+    },)
+    settings, project = owned(factory, evidence=evidence)
+    foreign, foreign_project = owned(factory)
+    store = ProjectStore(factory)
+    original = store.get("owner", project)
+    original_foreign = store.get("owner", foreign_project)
+    pg = conninfo_to_dict(os.environ["PROJECT_STORE_POSTGRES_TEST_DSN"])
+    runtime = {"SYSTEMROOT", "WINDIR", "PATH", "HOME", "TMPDIR", "TMP", "TEMP"}
+    env = {key: value for key, value in os.environ.items() if key.upper() in runtime}
+    env.update({
+        "KNOWLEDGE_PRINCIPAL": settings.principal,
+        "KNOWLEDGE_DISPLAY_GRAPH_ID": settings.display_graph_id,
+        "KNOWLEDGE_BOUND_SCOPE_JSON": settings.scope.model_dump_json(),
+        "KNOWLEDGE_PG_HOST": pg["host"], "KNOWLEDGE_PG_PORT": pg["port"],
+        "KNOWLEDGE_PG_DATABASE": pg["dbname"], "KNOWLEDGE_PG_USER": pg["user"],
+        "KNOWLEDGE_PG_PASSWORD": pg["password"],
+    })
+
+    def call(method, value, *, envelope_scope=settings):
+        request_id = str(uuid4())
+        raw = request(envelope_scope, method, value, request_id=request_id)
+        result = subprocess.run(
+            [sys.executable, "-I", "-m", "nexaweave_knowledge.source_bootstrap"],
+            cwd=tmp_path, env=env, input=len(raw).to_bytes(4, "big") + raw,
+            capture_output=True, check=False, timeout=15,
+        )
+        assert result.returncode == 0 and not result.stderr, "installed source child failed"
+        framed = result.stdout
+        assert len(framed) > 4 and int.from_bytes(framed[:4], "big") == len(framed) - 4
+        reply = json.loads(framed[4:])
+        assert reply["version"] == 1 and reply["request_id"] == request_id
+        return reply
+
+    scope = settings.scope.model_dump(mode="json")
+    empty = {"schema_version": 1, "scope": scope, "project_revision": original.revision,
+             "ontology": None}
+    assert call("ontology_load", {})["result"] == empty
+    ontology = {"entity_types": [{
+        "name": "Speaker", "description": "Public speaker",
+        "attributes": [{"name": "role", "type": "text", "description": "Public role"}],
+        "examples": ["记者"],
+    }], "edge_types": []}
+    save = {"schema_version": 1, "expected_revision": original.revision, "ontology": ontology}
+    current = {**empty, "project_revision": original.revision + 1, "ontology": ontology}
+    assert call("ontology_save", save)["result"] == current
+    assert call("ontology_load", {})["result"] == current
+    other = {**save, "ontology": {"entity_types": [], "edge_types": []}}
+    assert call("ontology_save", other)["error"] == {"code": "conflict"}
+    assert call("ontology_save", {**other, "expected_revision": current["project_revision"]},
+                envelope_scope=foreign)["error"] == {"code": "source_denied"}
+    saved = store.get("owner", project)
+    assert saved.snapshot == {**original.snapshot, "ontology": ontology}
+    assert saved.evidence == original.evidence == evidence
+
+    assert Ledger(factory).tombstone_scope(settings.scope).tombstoned
+    for method, value in (
+        ("ontology_load", {}),
+        ("ontology_save", {**other, "expected_revision": saved.revision}),
+    ):
+        reply = call(method, value)
+        assert reply == {"version": 1, "request_id": reply["request_id"],
+                         "ok": False, "error": {"code": "not_found"}}
+    assert store.get("owner", project) == saved
+    assert store.history("owner", project) == [original, saved]
+    assert store.history("owner", foreign_project) == [original_foreign]
 
 
 @pytest.mark.postgres
