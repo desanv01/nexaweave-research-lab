@@ -1,7 +1,8 @@
 """Main: real Flask HTTP -> fixed installed PG-only child -> owned retained text.
 
-No injected facade/transport/store. Owned process observations are not an OS
-sandbox or native libpq egress policy. Main runs only on the guarded fixture.
+Uses the real facade, transport, and store. The ontology loss check discards one
+validated save reply after the real transport returns. Owned process observations
+cover the fixture processes. Main runs only on the guarded fixture.
 """
 import base64
 from contextlib import contextmanager
@@ -54,10 +55,11 @@ def observe(frame,event,arg):
                 'PATH','LANG','SystemRoot','WINDIR','USERPROFILE','KNOWLEDGE_PRINCIPAL',
                 'KNOWLEDGE_DISPLAY_GRAPH_ID','KNOWLEDGE_BOUND_SCOPE_JSON','KNOWLEDGE_PG_HOST',
                 'KNOWLEDGE_PG_PORT','KNOWLEDGE_PG_DATABASE','KNOWLEDGE_PG_USER','KNOWLEDGE_PG_PASSWORD'}
-            safe=(len(args)==4 and args[1:3]==['-I','-u']
+            ontology=len(args)==5 and args[4]=='--ontology'
+            safe=((len(args)==4 or ontology) and args[1:3]==['-I','-u']
                 and Path(args[3]).name=='source_bootstrap.py' and 'site-packages' in Path(args[3]).parts
                 and not set(env)-allowed)
-            emit({'event':'spawn','pid':child.pid,'safe':safe})
+            emit({'event':'spawn','pid':child.pid,'safe':safe,'ontology':ontology})
     if event=='return' and module=='app.services.knowledge_transport' and name=='_stop_owned':
         owner=frame.f_locals.get('owner');child=getattr(owner,'process',None)
         threads=frame.f_locals.get('threads',[])
@@ -68,6 +70,37 @@ def observe(frame,event,arg):
 sys.setprofile(observe);threading.setprofile(observe)
 from app import create_app
 from werkzeug.serving import make_server
+
+discard_revision = os.environ.pop('SOURCE_HTTP_TEST_DISCARD_SAVE_REVISION', None)
+if discard_revision is not None:
+    from app.services.knowledge_source_client import KnowledgeOntologyProcessClient, validate_ontology_result
+    from app.services.knowledge_transport import KnowledgeTransportFailure, _json_object
+
+    pending = {int(discard_revision)}
+    transport_call = KnowledgeOntologyProcessClient.call
+
+    def call_with_reply_loss(client, raw):
+        response = transport_call(client, raw)
+        request = _json_object(raw)
+        if request['method'] != 'ontology_save':
+            return response
+        payload = request['payload']
+        revision = payload['expected_revision']
+        with lock:
+            if revision not in pending:
+                return response
+            reply = _json_object(response)
+            if reply['ok'] is not True:
+                return response
+            result = validate_ontology_result('ontology_save', reply['result'], request['scope'], payload)
+            pending.remove(revision)
+        # The real child sent its committed revision and closed normally before
+        # the completed transport returned. Withhold that body from the facade.
+        emit({'event': 'ontology_save_reply_discarded', 'revision': result['project_revision']})
+        raise KnowledgeTransportFailure(outcome_unknown=True)
+
+    KnowledgeOntologyProcessClient.call = call_with_reply_loss
+
 server=make_server('127.0.0.1',0,create_app(),threaded=True)
 emit({'event':'ready','port':server.server_port})
 def stop():
@@ -107,7 +140,8 @@ def _exchange(port, method, route, payload=None, *, token=None, origin=None):
 
 
 @contextmanager
-def _host(tmp_path, scope, display, *, mode='research_local'):
+def _host(tmp_path, scope, display, *, mode='research_local', allow_ontology=False,
+          discard_save_revision=None):
     from tools.run_unit_tests import _unit_environment
     backend=os.environ.get('NEXAWEAVE_WORKBENCH_BACKEND_PYTHON')
     python=os.environ.get('KNOWLEDGE_PYTHON');bootstrap=os.environ.get('KNOWLEDGE_BOOTSTRAP_SCRIPT')
@@ -132,6 +166,10 @@ def _host(tmp_path, scope, display, *, mode='research_local'):
         KNOWLEDGE_PG_USER=pg['user'],KNOWLEDGE_PG_PASSWORD=pg['password'],
         KNOWLEDGE_NEO4J_URI='bolt://127.0.0.1:17687',KNOWLEDGE_NEO4J_USER='neo4j',
         KNOWLEDGE_NEO4J_PASSWORD='unused-owned-source-fixture')
+    env.pop('SOURCE_HTTP_TEST_DISCARD_SAVE_REVISION', None)
+    if discard_save_revision is not None:
+        assert allow_ontology
+        env['SOURCE_HTTP_TEST_DISCARD_SAVE_REVISION'] = str(discard_save_revision)
     output=tmp_path/'source-http-events.jsonl';errors=tmp_path/'source-http-errors.log'
     process=None
     try:
@@ -162,13 +200,17 @@ def _host(tmp_path, scope, display, *, mode='research_local'):
     spawned=[event for event in events if event.get('event')=='spawn']
     cleaned=[event for event in events if event.get('event')=='cleanup']
     assert spawned and len(spawned)==len(cleaned) and all(event['safe'] for event in spawned)
+    assert allow_ontology or not any(event['ontology'] for event in spawned)
     assert all(event['closed'] for event in cleaned)
     assert {'event':'shutdown','loopback_blocked':0} in events
 
 
-def _seed(factory):
+def _seed(factory, *, ontology=None, evidence=()):
     workspace,project,graph=uuid4(),uuid4(),uuid4()
-    before=ProjectStore(factory).create('owner',workspace,project,'proj_1',snapshot())
+    initial = snapshot()
+    if ontology is not None:
+        initial['ontology'] = ontology
+    before=ProjectStore(factory).create('owner',workspace,project,'proj_1',initial,evidence)
     scope=KnowledgeScope(workspace_id=workspace,project_id=project,graph_id=graph,layer=Layer.source)
     display='source_'+graph.hex
     ScopeBindingStore(factory).bind('owner',display,scope)
@@ -404,3 +446,99 @@ def test_actual_http_v2_original_bytes_after_restart(factory, tmp_path):
         assert _exchange(port, 'GET', read_route, token=token,
                          origin='http://denied.example')[0] == 403
         assert _exchange(port, 'GET', f'/api/source/item/{display}/{revision}', token=token)[2]['data']['text'] == extract_pdf(binary).text
+
+
+def test_actual_http_reviewed_ontology_owned_revision_and_restart(factory, tmp_path):
+    evidence = ({
+        'evidence_id': str(uuid4()), 'source_revision': str(uuid4()),
+        'sha256': 'a' * 64, 'object_key': 'objects/fixture', 'byte_length': 3,
+    },)
+    scope, display, before = _seed(factory, evidence=evidence)
+    legacy = {'entity_types': [], 'edge_types': [], 'private_legacy': 'private fixture'}
+    foreign_scope, foreign_display, foreign_before = _seed(factory, ontology=legacy)
+    store = ProjectStore(factory)
+
+    route = '/api/source/ontology/' + display
+    foreign_route = '/api/source/ontology/' + foreign_display
+    empty = {
+        'schema_version': 1, 'scope': scope.model_dump(mode='json'),
+        'project_revision': before.revision, 'ontology': None,
+    }
+    ontology = {
+        'entity_types': [{
+            'name': 'Speaker', 'description': 'Public speaker', 'examples': ['\u8bb0\u8005'],
+            'attributes': [{'name': 'role', 'type': 'text', 'description': 'Public role'}],
+        }],
+        'edge_types': [{
+            'name': 'SPEAKS_FOR', 'description': 'Speaks for an entity',
+            'attributes': [{'name': 'capacity', 'type': 'text', 'description': 'Public capacity'}],
+            'source_targets': [{'source': 'Speaker', 'target': 'Entity'}],
+        }],
+    }
+    proposal = {'schema_version': 1, 'expected_revision': before.revision, 'ontology': ontology}
+    expected = dict(empty, project_revision=before.revision + 1, ontology=ontology)
+    conflict = {'success': False, 'error': {'code': 'conflict'}}
+
+    with _host(tmp_path, scope, display, allow_ontology=True) as (port, token, events):
+        assert _exchange(port, 'GET', route)[0] == 401
+        assert _exchange(port, 'GET', route, token=token, origin='http://denied.example')[0] == 403
+        assert _exchange(port, 'POST', foreign_route, proposal, token=token)[0] == 404
+        assert _exchange(port, 'POST', route, dict(proposal, scope=empty['scope']), token=token)[0] == 400
+        assert not [event for event in _events(events) if event['event'] == 'spawn']
+
+        status, headers, body = _exchange(port, 'GET', route, token=token, origin='http://localhost:3000')
+        assert status == 200 and body == {'success': True, 'data': empty}
+        assert headers['Cache-Control'] == 'no-store' and headers['X-Content-Type-Options'] == 'nosniff'
+        assert headers['Access-Control-Allow-Origin'] == 'http://localhost:3000'
+        status, headers, body = _exchange(port, 'POST', route, proposal, token=token)
+        assert status == 200 and body == {'success': True, 'data': expected}
+        assert headers['Cache-Control'] == 'no-store'
+        assert _exchange(port, 'GET', '/api/source/library/' + display, token=token)[0] == 200
+    assert [event['ontology'] for event in _events(events) if event['event'] == 'spawn'] == [True, True, False]
+    saved = store.get('owner', scope.project_id)
+
+    restarted = tmp_path / 'ontology-restart'
+    restarted.mkdir()
+    with _host(restarted, scope, display, allow_ontology=True,
+               discard_save_revision=saved.revision) as (port, token, events):
+        status, _, body = _exchange(port, 'GET', route, token=token)
+        assert status == 200 and body == {'success': True, 'data': expected}
+        stale = dict(proposal, ontology={'entity_types': [], 'edge_types': []})
+        status, headers, body = _exchange(port, 'POST', route, stale, token=token)
+        assert status == 409 and body == conflict
+        assert headers['Cache-Control'] == 'no-store'
+
+        updated = dict(ontology, entity_types=[dict(ontology['entity_types'][0], description='Reviewed speaker')])
+        second = dict(proposal, expected_revision=saved.revision, ontology=updated)
+        first_save_event = len(_events(events))
+        status, headers, body = _exchange(port, 'POST', route, second, token=token)
+        assert status == 503 and body == {'success': False, 'error': {'code': 'outcome_unknown'}}
+        assert headers['Cache-Control'] == 'no-store'
+        save_events = _events(events)[first_save_event:]
+        assert [event['event'] for event in save_events] == ['spawn', 'cleanup', 'ontology_save_reply_discarded']
+        assert save_events[0]['ontology'] and save_events[0]['safe'] and save_events[1]['closed']
+        assert save_events[2]['revision'] == saved.revision + 1
+
+        recovered = store.get('owner', scope.project_id)
+        assert recovered.revision == saved.revision + 1
+        assert recovered.snapshot == dict(saved.snapshot, ontology=updated)
+        assert recovered.evidence == saved.evidence == evidence
+        current = dict(expected, project_revision=recovered.revision, ontology=updated)
+        status, _, body = _exchange(port, 'GET', route, token=token)
+        assert status == 200 and body == {'success': True, 'data': current}
+    assert [event['ontology'] for event in _events(events) if event['event'] == 'spawn'] == [True, True, True, True]
+
+    legacy_root = tmp_path / 'ontology-legacy'
+    legacy_root.mkdir()
+    with _host(legacy_root, foreign_scope, foreign_display, allow_ontology=True) as (port, token, events):
+        status, headers, body = _exchange(port, 'GET', foreign_route, token=token)
+        assert status == 409 and body == conflict
+        assert headers['Cache-Control'] == 'no-store'
+    assert [event['ontology'] for event in _events(events) if event['event'] == 'spawn'] == [True]
+
+    assert before.snapshot['ontology'] is None
+    assert saved.revision == before.revision + 1
+    assert saved.snapshot == dict(before.snapshot, ontology=ontology)
+    assert saved.evidence == before.evidence == evidence
+    assert store.history('owner', scope.project_id) == [before, saved, recovered]
+    assert store.history('owner', foreign_scope.project_id) == [foreign_before]
