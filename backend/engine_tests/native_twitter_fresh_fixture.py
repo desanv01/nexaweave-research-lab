@@ -24,6 +24,65 @@ _FIRST_POST = "Synthetic native post 1"
 _NEXT_POST = "Synthetic native post 2"
 
 
+def _checkpoint_post(pid, frames):
+    content = f'Scripted connected checkpoint post {pid}'
+    if frames is not None:
+        wire = json.dumps(frames, ensure_ascii=True, separators=(',', ':')).encode('ascii')
+        content += ' context ' + sha256(wire).hexdigest()
+    return content
+
+
+_connected_restored_frames = None
+
+
+def _scripted_checkpoint_twitter_backends(*, timeout_seconds, max_tokens, max_retries):
+    """Offline tool replies attest to the real installed histories in the restoring child."""
+    from app.services import native_twitter_restore
+    from app.services.native_checkpoint_memory import NativeMemoryCaptureBudget, capture_native_memory
+    from test_durable_native_launch import scripted_native_backends
+
+    advance = native_twitter_restore._advance_restored_twitter_round
+    if not getattr(advance, '_connected_fixture_probe', False):
+        async def observe_advance(child_dir, **kwargs):
+            global _connected_restored_frames
+            assert _connected_restored_frames is None
+            graph = kwargs['graph']
+            budget = NativeMemoryCaptureBudget(max_bytes=2 * 1024 * 1024,
+                                               deadline_monotonic=kwargs['deadline_monotonic'])
+            assert len(graph.agent_mappings) == 2
+            frames = []
+            for platform_id, agent in sorted(graph.get_agents()):
+                assert platform_id == agent.social_agent_id
+                raw = capture_native_memory(agent.memory, expected_agent_id=agent.agent_id, budget=budget)
+                frames.append((platform_id, agent.agent_id, len(raw), sha256(raw).hexdigest()))
+                del raw
+            _connected_restored_frames = tuple(frames)
+            try:
+                return await advance(child_dir, **kwargs)
+            finally:
+                _connected_restored_frames = None
+                native_twitter_restore._advance_restored_twitter_round = advance
+
+        observe_advance._connected_fixture_probe = True
+        native_twitter_restore._advance_restored_twitter_round = observe_advance
+
+    model = scripted_native_backends(timeout_seconds=timeout_seconds, max_tokens=max_tokens,
+                                     max_retries=max_retries)['twitter']
+    genuine_reply = model.reply
+
+    def reply(tools):
+        result = genuine_reply(tools)
+        calls = result.choices[0].message.tool_calls
+        if calls:
+            call, = calls
+            assert call.function.name == 'create_post'
+            call.function.arguments = json.dumps({'content': _checkpoint_post(os.getpid(), _connected_restored_frames)})
+        return result
+
+    model.reply = reply
+    return {'twitter': model}
+
+
 def _scripted_models(consumed):
     from test_native_prepared_workflow import _offline_model
 

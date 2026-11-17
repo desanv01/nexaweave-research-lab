@@ -13,8 +13,14 @@ CODES = frozenset(('invalid_request not_found unauthorized origin_denied conflic
 STATES = frozenset('planned queued starting running completed failed cancelled uncertain'.split())
 IDENTITY = ('schema_version', 'display_graph_id', 'scope', 'preparation', 'request',
             'limits', 'ceiling_microusd', 'model_label')
+IDENTITY_V2 = (*IDENTITY, 'checkpoint')
 KEYS = set(IDENTITY) | {'launch_sha256', 'state', 'error_code', 'authorization',
                        'workflow', 'receipt', 'cancel_requested', 'cleanup'}
+_KEYS_V2 = KEYS | {'checkpoint'}
+_NATIVE_REQUEST_KEYS = {'schema_version', 'principal', 'project_id', 'project_revision',
+                        'simulation_id', 'run_id', 'artifact_sha256', 'runtime_sha256',
+                        'platforms', 'seed', 'max_rounds'}
+_CONTINUATION_KEYS = {'source_run_id', 'checkpoint_sha256'}
 
 
 class NativeLaunchError(RuntimeError):
@@ -23,18 +29,37 @@ class NativeLaunchError(RuntimeError):
         super().__init__(self.code)
 
 
+def _checkpoint(value, launch_id):
+    if type(value) is not dict or type(value.get('mode')) is not str:
+        raise ValueError
+    if value['mode'] == 'capture' and set(value) == {'mode'}:
+        return None
+    if value['mode'] != 'continue' or set(value) != ({'mode'} | _CONTINUATION_KEYS):
+        raise ValueError
+    source_run_id = uuid_string(value['source_run_id'])
+    if source_run_id == launch_id:
+        raise ValueError
+    return source_run_id, sha(value['checkpoint_sha256'])
+
+
 def validate_payload(method, value):
     try:
-        expected = {'schema_version', 'launch_id', 'preparation' if method == 'plan' else 'launch_sha256'}
-        if method not in {'plan', 'start', 'status', 'cancel'} or type(value) is not dict or set(value) != expected:
+        if method not in {'plan', 'start', 'status', 'cancel'} or type(value) is not dict:
             raise ValueError
-        integer(value['schema_version'], 1, 1)
-        uuid_string(value['launch_id'])
+        version = integer(value['schema_version'], 1, 2)
+        expected = {'schema_version', 'launch_id', 'preparation' if method == 'plan' else 'launch_sha256'}
+        if version == 2 and method == 'plan':
+            expected.add('checkpoint')
+        if set(value) != expected:
+            raise ValueError
+        launch_id = uuid_string(value['launch_id'])
         if method == 'plan':
             prep = value['preparation']
             if type(prep) is not dict or set(prep) != {'operation_id', 'plan_sha256'}:
                 raise ValueError
             uuid_string(prep['operation_id']); sha(prep['plan_sha256'])
+            if version == 2:
+                _checkpoint(value['checkpoint'], launch_id)
         else:
             sha(value['launch_sha256'])
         if len(encoded(value)) > REQUEST_BYTES:
@@ -55,9 +80,13 @@ def validate_limits(value):
 
 def validate_result(value, graph_id, scope, payload, method):
     try:
-        if type(value) is not dict or set(value) != KEYS or len(encoded(value)) > RESULT_BYTES:
+        if type(value) is not dict:
             raise ValueError
-        integer(value['schema_version'], 1, 1)
+        version = integer(value['schema_version'], 1, 2)
+        expected = KEYS if version == 1 else _KEYS_V2
+        if (version != integer(payload['schema_version'], 1, 2) or set(value) != expected
+                or len(encoded(value)) > RESULT_BYTES):
+            raise ValueError
         if value['display_graph_id'] != graph_id or value['scope'] != scope:
             raise ValueError
         if (type(scope) is not dict or set(scope) != {'schema_version', 'workspace_id', 'project_id', 'graph_id', 'layer', 'run_id', 'branch_id'}
@@ -71,11 +100,15 @@ def validate_result(value, graph_id, scope, payload, method):
         uuid_string(prep['operation_id']); sha(prep['plan_sha256']); sha(prep['artifact_sha256'])
         if prep['simulation_id'] != 'sim_' + UUID(prep['operation_id']).hex:
             raise ValueError
+        checkpoint = _checkpoint(value['checkpoint'], payload['launch_id']) if version == 2 else None
+        request_version = 1 if checkpoint is None else 2
+        request_keys = (_NATIVE_REQUEST_KEYS if request_version == 1
+                        else _NATIVE_REQUEST_KEYS | _CONTINUATION_KEYS)
         req = value['request']
-        if type(req) is not dict or set(req) != {'schema_version', 'principal', 'project_id', 'project_revision',
-                'simulation_id', 'run_id', 'artifact_sha256', 'runtime_sha256', 'platforms', 'seed', 'max_rounds'}:
+        if type(req) is not dict or set(req) != request_keys:
             raise ValueError
-        integer(req['schema_version'], 1, 1); integer(req['project_revision'], 1, 2147483647)
+        integer(req['schema_version'], request_version, request_version)
+        integer(req['project_revision'], 1, 2147483647)
         uuid_string(req['run_id']); uuid_string(req['project_id'])
         sha(req['artifact_sha256']); sha(req['runtime_sha256'])
         if (type(req['principal']) is not str or not re.fullmatch(r'[\x20-\x7e]{1,128}', req['principal'])
@@ -86,15 +119,23 @@ def validate_result(value, graph_id, scope, payload, method):
                 or req['platforms'] not in [['twitter'], ['reddit'], ['twitter', 'reddit']]):
             raise ValueError
         integer(req['seed'], 0, 4294967295); integer(req['max_rounds'], 1, 24)
+        if version == 2 and (req['platforms'] != ['twitter'] or req['max_rounds'] != 1):
+            raise ValueError
+        if checkpoint is not None and checkpoint != (
+                uuid_string(req['source_run_id']), sha(req['checkpoint_sha256'])):
+            raise ValueError
         validate_limits(value['limits']); text(value['model_label'], 128)
         ceiling = value['ceiling_microusd']
         if ceiling is not None and (type(ceiling) is not str or not re.fullmatch(r'[1-9][0-9]{0,18}', ceiling)
                                     or int(ceiling) > 9223372036854775807):
             raise ValueError
-        if sha(value['launch_sha256']) != digest({k: value[k] for k in IDENTITY}):
+        identity = IDENTITY if version == 1 else IDENTITY_V2
+        if sha(value['launch_sha256']) != digest({k: value[k] for k in identity}):
             raise ValueError
         if method == 'plan':
             if {k: prep[k] for k in ('operation_id', 'plan_sha256')} != payload['preparation']:
+                raise ValueError
+            if version == 2 and value['checkpoint'] != payload['checkpoint']:
                 raise ValueError
         elif value['launch_sha256'] != payload['launch_sha256']:
             raise ValueError
