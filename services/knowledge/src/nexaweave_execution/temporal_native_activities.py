@@ -42,7 +42,20 @@ class _Entry:
     stop_requested: bool = False
     binding_invalid: bool = False
     cleanup_proven: bool = False
+    factory_processed: bool = False
+    factory_failed_without_owner: bool = False
+    activity_finalized: bool = False
+    offload_unproven: bool = False
     error_code: str | None = None
+
+
+@dataclass(frozen=True)
+class NativeDrainResult:
+    admission_closed: bool
+    retained_count: int
+    closed_count: int
+    pending_run_ids: tuple[UUID, ...]
+    complete: bool
 
 
 @dataclass(frozen=True)
@@ -99,9 +112,59 @@ class NativeExecutionActivities:
         self._max = max_retained
         self._lock = threading.Lock()
         self._entries: dict[UUID, _Entry] = {}
+        self._admission_closed = False
+        self._drain_changed: asyncio.Event | None = None
+
+    @property
+    def admission_closed(self) -> bool:
+        with self._lock:
+            return self._admission_closed
+
+    def _notify_drain_locked(self) -> None:
+        if self._drain_changed is not None:
+            self._drain_changed.set()
+            self._drain_changed = None
+
+    async def drain_retained(self, wait_seconds: float) -> NativeDrainResult:
+        """Fence this activity loop permanently and wait on existing owned work."""
+        deadline = time.monotonic() + _finite(wait_seconds, 0, 30)
+        with self._lock:
+            first_drain = not self._admission_closed
+            self._admission_closed = True
+            retained = tuple(self._entries.values())
+            for entry in retained:
+                entry.stop_requested = True
+                if first_drain and entry.supervisor is not None and not entry.binding_invalid:
+                    entry.supervisor.fence_start()
+
+        # One scheduling pass per caller. Factory callbacks own late results.
+        for entry in retained:
+            self._schedule_cleanup(entry, cancel=False, retry=True)
+
+        while True:
+            with self._lock:
+                pending = tuple(entry.run_id for entry in retained if not (
+                    entry.factory_processed and entry.activity_finalized
+                    and not entry.inflight and not entry.offload_unproven
+                    and (entry.cleanup_task is None or entry.cleanup_task.done())
+                    and (entry.cleanup_proven or entry.factory_failed_without_owner)
+                ))
+                remaining = deadline - time.monotonic()
+                if not pending or remaining <= 0:
+                    return NativeDrainResult(True, len(retained), len(retained) - len(pending),
+                                             pending, not pending)
+                if self._drain_changed is None:
+                    self._drain_changed = asyncio.Event()
+                changed = self._drain_changed
+            try:
+                await asyncio.wait_for(changed.wait(), timeout=remaining)
+            except asyncio.TimeoutError:
+                continue
 
     def _admit(self, request: NativeRunRequest) -> _Entry:
         with self._lock:
+            if self._admission_closed:
+                raise NativeActivityError("dispatch_disabled")
             prior = self._entries.get(request.run_id)
             if prior is not None:
                 raise NativeActivityError("native_run_conflict" if prior.fingerprint != request.fingerprint
@@ -126,6 +189,9 @@ class NativeExecutionActivities:
             self._drain_task(entry, done)
             with self._lock:
                 entry.inflight.discard(done)
+                # Cancelling a to_thread task does not prove its worker stopped.
+                entry.offload_unproven |= done.cancelled()
+                self._notify_drain_locked()
         task.add_done_callback(finished)
         return task
 
@@ -165,6 +231,8 @@ class NativeExecutionActivities:
                 entry.binding_invalid = True
                 entry.error_code = "invalid_supervisor"
             stopped = entry.stop_requested
+            if self._admission_closed and not mismatch:
+                value.fence_start()
         if mismatch:
             self._schedule_cleanup(entry, cancel=False)
             raise NativeActivityError("invalid_supervisor")
@@ -174,6 +242,7 @@ class NativeExecutionActivities:
 
     def _factory_done(self, entry: _Entry, request: NativeRunRequest,
                       task: asyncio.Task) -> None:
+        failed_without_owner = not task.cancelled() and task.exception() is not None
         try:
             self._accept_supervisor(entry, request, task.result())
         except NativeActivityError as error:
@@ -183,6 +252,11 @@ class NativeExecutionActivities:
             with self._lock:
                 if entry.error_code is None:
                     entry.error_code = "native_execution_failed"
+        finally:
+            with self._lock:
+                entry.factory_processed = True
+                entry.factory_failed_without_owner = failed_without_owner and entry.supervisor is None
+                self._notify_drain_locked()
 
     async def _call(self, entry: _Entry, function, *args,
                     heartbeat_task: asyncio.Task | None = None):
@@ -228,21 +302,28 @@ class NativeExecutionActivities:
                 if entry.error_code is None:
                     entry.error_code = "native_cleanup_pending"
 
-    def _schedule_cleanup(self, entry: _Entry, *, cancel: bool) -> asyncio.Task | None:
+    def _schedule_cleanup(self, entry: _Entry, *, cancel: bool, retry: bool = False) -> asyncio.Task | None:
         with self._lock:
             entry.stop_requested = entry.stop_requested or cancel
-            if entry.binding_invalid:
-                cancel = False  # Mismatched handles receive cleanup only.
+            if entry.binding_invalid or self._admission_closed:
+                # Invalid handles only close. Fenced owners persist their own intent.
+                cancel = False
             prior = entry.cleanup_task
-            if prior is not None and not prior.done():
+            if prior is not None and (not prior.done() or (
+                    self._admission_closed and (entry.cleanup_proven or not retry))):
                 return prior
             if entry.supervisor is None:
                 return None
             entry.cleanup_proven = False
             task = asyncio.create_task(self._cleanup(entry, cancel=cancel))
             entry.cleanup_task = task
-            task.add_done_callback(lambda done: self._drain_task(entry, done))
+            task.add_done_callback(lambda done: self._cleanup_done(entry, done))
             return task
+
+    def _cleanup_done(self, entry: _Entry, task: asyncio.Task) -> None:
+        self._drain_task(entry, task)
+        with self._lock:
+            self._notify_drain_locked()
 
     @staticmethod
     def _terminal(status: SupervisorStatus, request: NativeRunRequest) -> dict[str, str] | None:
@@ -330,8 +411,12 @@ class NativeExecutionActivities:
                     await heartbeat_task
                 except (asyncio.CancelledError, Exception):
                     pass
-            if completed and entry is not None:
-                self._schedule_cleanup(entry, cancel=False)
+            if entry is not None:
+                if completed:
+                    self._schedule_cleanup(entry, cancel=False)
+                with self._lock:
+                    entry.activity_finalized = True
+                    self._notify_drain_locked()
 
     async def _await_task(self, task: asyncio.Task, heartbeat_task: asyncio.Task):
         done, _ = await asyncio.wait((task, heartbeat_task),
@@ -386,7 +471,7 @@ class NativeExecutionActivities:
             supervisor = entry.supervisor
             binding_invalid = entry.binding_invalid
         if binding_invalid:
-            self._schedule_cleanup(entry, cancel=False)
+            self._schedule_cleanup(entry, cancel=False, retry=True)
             return await self.local_status(request)
         if supervisor is not None:
             try:
@@ -395,7 +480,7 @@ class NativeExecutionActivities:
                 with self._lock:
                     if entry.error_code is None:
                         entry.error_code = "native_cleanup_pending"
-                self._schedule_cleanup(entry, cancel=True)
+                self._schedule_cleanup(entry, cancel=True, retry=True)
         return await self.local_status(request)
 
     async def retry_cleanup(self, request: NativeRunRequest) -> LocalNativeStatus:
@@ -405,7 +490,7 @@ class NativeExecutionActivities:
         entry = self._entry(request)
         with self._lock:
             entry.stop_requested = True
-        task = self._schedule_cleanup(entry, cancel=False)
+        task = self._schedule_cleanup(entry, cancel=False, retry=True)
         if task is not None:
             try:
                 await asyncio.shield(task)

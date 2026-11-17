@@ -303,6 +303,13 @@ class NativeRunSupervisor:
             raise SupervisorWaitTimeout()
         return self._snapshot(refresh=False)
 
+    def fence_start(self) -> None:
+        """Close the one-shot start gate without I/O or starting an owner."""
+        with self._condition:
+            self._close_requested = True
+            self._cancel_requested = True
+        self._wake.set()
+
     def request_cancel(self) -> SupervisorStatus:
         with self._condition:
             self._cancel_requested = True
