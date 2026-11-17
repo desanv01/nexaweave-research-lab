@@ -19,6 +19,28 @@ The installed distribution is `nexaweave-knowledge`; its canonical modules are `
 
 The manifest command checks archived source bytes and exceptions. The unit launcher uses dummy provider keys, disables .env loading, and blocks non-loopback connections in its guarded test processes while allowing local fixtures. Installing dependencies may contact a package registry. A passing run does not establish native engine, provider, browser or deployment qualification. Main owns execution and interpretation of project acceptance checks.
 
+## Opt-in scanned PDF uploads on Windows (W7.2)
+
+The ontology upload route uses ordinary text extraction by default. To enable
+OCR, set `NEXAWEAVE_SCANNED_PDF_OCR_ENABLED=1` in the backend process
+environment before startup. The supported profile requires:
+
+- Windows with a qualified child-process owner that enforces the 256 MiB
+  Windows Job commit limit. Use the pinned `PyMuPDF==1.26.7` package with its
+  OCR support available.
+- The preprovisioned English `eng.traineddata` asset in the `ocr_tessdata`
+  directory alongside the installed parser module. The parser requires an
+  ordinary, single-linked file of 4,113,088 bytes and verifies its pinned SHA-256
+  before recognition.
+
+The route tries OCR only for a single PDF of at most 2 MiB when ordinary
+extraction finds no text. The scan must match the bounded, single-page raw
+grayscale profile with a 1200 × 600 image. Text PDFs keep the ordinary path.
+After ordinary extraction admits a blank PDF, the route returns
+`422 no_extractable_text` when OCR is disabled or the OCR worker reports an
+unsupported scan. It returns `503 parser_unavailable` if OCR is attempted and
+the pinned package, English asset, or enforced process profile is unavailable.
+
 ## Opt-in PostgreSQL logical restore exercise (W8.2)
 
 Main/Codex alone qualifies and runs this selected exercise; authoring is not a
