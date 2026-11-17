@@ -8,7 +8,7 @@ from pathlib import Path
 import stat
 from decimal import Decimal
 from .native_observations_client import (NativeObservationsError, LOG_BYTES, LINE_BYTES, RECORDS,
-    DEPTH, OUTPUT_BYTES, AGGREGATE_BYTES, COUNT_KEYS, output_names, digest)
+    DEPTH, OUTPUT_BYTES, AGGREGATE_BYTES, COUNT_KEYS, action_log_name, output_names, digest)
 
 
 def _unique(pairs):
@@ -107,8 +107,8 @@ def _safe(path, directory=False):
 
 class NativeObservationReader:
     @contextmanager
-    def page(self, root, platforms, platform, offset, limit, evidence_sha256):
-        with self._read(root, platforms, platform, offset, limit, evidence_sha256) as result:
+    def page(self, root, platforms, platform, offset, limit, evidence_sha256, *, restored=False):
+        with self._read(root, platforms, platform, offset, limit, evidence_sha256, restored=restored) as result:
             yield result
 
     @contextmanager
@@ -124,11 +124,13 @@ class NativeObservationReader:
             yield result
 
     @contextmanager
-    def _read(self, root, platforms, platform, offset, limit, evidence_sha256, *, selection=None, connected=False):
+    def _read(self, root, platforms, platform, offset, limit, evidence_sha256, *,
+              selection=None, connected=False, restored=False):
         """Hold descriptors through final authority validation; recheck every file/ancestor."""
         try:
             root = Path(root)
-            names = output_names(list(platforms))
+            names = output_names(list(platforms), restored=restored)
+            log_platforms = {action_log_name(p, restored=restored): p for p in platforms}
             if not root.is_absolute() or root.resolve(strict=True) != root or platform not in platforms:
                 raise NativeObservationsError('evidence_invalid')
             ancestors = {}
@@ -143,13 +145,19 @@ class NativeObservationReader:
                         if parent not in ancestors:
                             ancestors[parent] = _identity(_safe(parent, True))
                     before = _safe(path)
-                    bound = LOG_BYTES if name.endswith('/actions.jsonl') else OUTPUT_BYTES
+                    log_platform = log_platforms.get(name)
+                    bound = LOG_BYTES if log_platform is not None else OUTPUT_BYTES
+                    if restored and before.st_size < 1:
+                        raise NativeObservationsError('evidence_invalid')
                     if before.st_size > bound:
                         raise NativeObservationsError('result_too_large')
                     total_size += before.st_size
                     if total_size > AGGREGATE_BYTES:
                         raise NativeObservationsError('result_too_large')
-                    descriptor = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_BINARY', 0))
+                    flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_BINARY', 0)
+                    if restored:
+                        flags |= getattr(os, 'O_NONBLOCK', 0)
+                    descriptor = os.open(path, flags)
                     stack.callback(os.close, descriptor)
                     current = os.fstat(descriptor)
                     path_identity, descriptor_identity = _identity(before), _identity(current)
@@ -166,13 +174,13 @@ class NativeObservationReader:
                         if not chunk:
                             raise NativeObservationsError('evidence_invalid')
                         remaining -= len(chunk); hasher.update(chunk)
-                        if name.endswith('/actions.jsonl'):
+                        if log_platform is not None:
                             chunks.append(chunk)
                     if os.read(descriptor, 1) or _identity(os.fstat(descriptor)) != descriptor_identity:
                         raise NativeObservationsError('evidence_invalid')
                     files.append({'name': name, 'sha256': hasher.hexdigest(), 'size': current.st_size})
-                    if chunks or name.endswith('/actions.jsonl'):
-                        logs[name.split('/')[0]] = b''.join(chunks)
+                    if log_platform is not None:
+                        logs[log_platform] = b''.join(chunks)
                 manifest = {'schema_version': 1, 'files': files}
                 if digest(manifest) != evidence_sha256:
                     raise NativeObservationsError('evidence_invalid')
