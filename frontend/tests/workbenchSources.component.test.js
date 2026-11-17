@@ -86,13 +86,13 @@ async function connectRefresh(m) {
   m.root.querySelector('.connection-form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }))
   await waitFor(() => m.root.querySelector('.graph-refresh') && !m.root.querySelector('.graph-refresh').disabled)
 }
-async function inspectRefreshSource(m) {
+async function inspectRefreshSource(m, { editEntityName = true } = {}) {
   m.root.querySelector('.source-library .source-actions button').click()
   await waitFor(() => m.root.querySelector('.source-list button') && !m.root.querySelector('.source-list button').disabled)
   m.root.querySelector('.source-list button').click()
   await waitFor(() => m.root.querySelector('#source-inspector') && m.root.querySelector('#ingestion-operation') && !m.root.querySelector('#ingestion-operation').disabled)
   input(m, '#ingestion-operation', uid(77))
-  input(m, '.source-ingestion input[id^="entity-name-"]', 'Investigator')
+  if (editEntityName) input(m, '.source-ingestion input[id^="entity-name-"]', 'Investigator')
 }
 
 test('real parent graph refresh updates overview/pages and actor choices without resetting source/catalog/ingestion recovery', async () => {
@@ -288,4 +288,150 @@ test('locale changes preserve held PDF lookup, revision, binary identity and exp
     assert.deepEqual(Buffer.from(await blobs[0].arrayBuffer()), original)
     assert.equal(calls.filter(call => call.url.includes('/source/original/')).length, 1)
   } finally { m.cleanup(); release?.(); globalThis.fetch = previous; URL.createObjectURL = oldCreate; URL.revokeObjectURL = oldRevoke; dom.window.HTMLAnchorElement.prototype.click = oldClick; shared.setUiLocale('en') }
+})
+
+test('selected retained passage resets review and recovers one derived operation in the workbench', async () => {
+  const previous = globalThis.fetch
+  const calls = []
+  const chunks = ['a'.repeat(16383) + '😀', '猫' + 'b'.repeat(16384)]
+  const text = chunks.join('')
+  const hash = value => createHash('sha256').update(value).digest('hex')
+  const source = { ...metadata.source, byte_length: Buffer.byteLength(text),
+    codepoint_length: 32769, text_sha256: hash(text) }
+  const passages = [
+    { evidence_id: uid(8), start: 0, end: 16384, page: null, excerpt_sha256: hash(chunks[0]) },
+    { evidence_id: uid(9), start: 16384, end: 32769, page: null, excerpt_sha256: hash(chunks[1]) }
+  ]
+  const viewFlags = { schema_version: 1, binary_retained: false, graph_ingestion_executed: false }
+  const scope = { schema_version: 1, workspace_id: uid(1), project_id: source.project_id, graph_id: uid(3),
+    run_id: null, branch_id: null, layer: 'source' }
+  // Fixture computes the installed domain-separated IDs independently of the browser.
+  const canonical = value => {
+    if (Array.isArray(value)) return value.map(canonical)
+    if (value && typeof value === 'object') return Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])]))
+    return value
+  }
+  const { schema_version: scopeVersion, ...groupScope } = scope
+  assert.equal(scopeVersion, 1)
+  const group = 'mf1_' + hash(JSON.stringify(canonical(groupScope)))
+  function urlUuid(name) {
+    const bytes = createHash('sha1').update(Buffer.from('6ba7b8119dad11d180b400c04fd430c8', 'hex')).update(name).digest()
+    bytes[6] = (bytes[6] & 15) | 80
+    bytes[8] = (bytes[8] & 63) | 128
+    const hex = bytes.subarray(0, 16).toString('hex')
+    return [hex.slice(0, 8), hex.slice(8, 12), hex.slice(12, 16), hex.slice(16, 20), hex.slice(20)].join('-')
+  }
+  function planReply(payload) {
+    const index = passages.findIndex(p => p.evidence_id === payload.evidence_id)
+    const { evidence_id, start, end, page, excerpt_sha256 } = passages[index]
+    const window = { evidence_id, start, end, page, ordinal: index + 1, count: 2,
+      sha256: excerpt_sha256, retained_sha256: source.text_sha256, retained_byte_length: source.byte_length,
+      retained_codepoint_length: source.codepoint_length }
+    const operation_id = urlUuid('mirofish:retained-window:v1:' + JSON.stringify([
+      group, source.source_revision, source.text_sha256, start, end, evidence_id, excerpt_sha256, payload.ontology.revision
+    ]))
+    const episode_id = urlUuid(`mirofish:episode:v1:${group}:${operation_id}`)
+    const evidence_ids = [evidence_id]
+    const envelope = { schema_version: 1, source_revision: source.source_revision, source_sha256: excerpt_sha256,
+      ontology_revision: payload.ontology.revision, operation_id, source_kind: 'document', content: chunks[index],
+      source_name: source.source_name, recorded_at: source.recorded_at, asserted_valid_at: null, evidence_ids }
+    const fingerprint = hash(JSON.stringify(canonical({ scope, source: envelope, ontology: payload.ontology })))
+    return { schema_version: 2, scope, operation_id, episode_id, fingerprint, evidence_ids, actual_usage_microusd: null,
+      graph_ingestion_executed: false, model_calls_made: false, spending_authorized: false, window,
+      source_revision: source.source_revision, source_sha256: excerpt_sha256, source_byte_length: Buffer.byteLength(chunks[index]),
+      source_codepoint_length: end - start, ontology_revision: payload.ontology.revision, eligibility_codepoint_limit: 32768 }
+  }
+
+  let mismatch = false, admitted, submitted
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, options })
+    if (url.includes('/data/')) return reply(projection('Actor', 'Person', 1))
+    if (url.includes('/source/library/')) return reply({ ...viewFlags, sources: [source], has_more: false, window_limit: 20 })
+    if (url.includes('/source/item/')) return reply({ ...viewFlags, source, text, offset_unit: 'unicode_codepoint', passages })
+    if (url.includes('/ingestion/plan/')) {
+      const payload = JSON.parse(options.body)
+      assert.deepEqual(Object.keys(payload).sort(), ['evidence_id', 'ontology', 'schema_version', 'source_revision'])
+      assert.equal(payload.schema_version, 2)
+      assert.equal(payload.source_revision, source.source_revision)
+      const plan = planReply(payload)
+      if (mismatch) return reply({ ...plan, window: { ...plan.window, evidence_id: passages[0].evidence_id } })
+      admitted = { payload, plan }
+      return reply(plan)
+    }
+    if (url.includes('/ingestion/execute/')) {
+      submitted = JSON.parse(options.body)
+      assert.deepEqual(submitted, admitted.payload)
+      throw new TypeError('fixture drops the execute reply')
+    }
+    if (url.includes('/ingestion/operation/')) {
+      assert.equal(options.method, 'GET')
+      assert.equal(options.body, undefined)
+      const { operation_id, episode_id, fingerprint, evidence_ids } = admitted.plan
+      assert.ok(url.endsWith('/ingestion/operation/graph_1/' + operation_id))
+      return reply({ schema_version: 1, scope, operation_id, episode_id, fingerprint, evidence_ids,
+        graph_ingestion_executed: true, model_calls_made: null, actual_usage_microusd: null,
+        state: 'completed', budget_state: 'settled', ceiling_microusd: 10,
+        receipt: { group_id: group, episode_id, fingerprint, evidence_ids } })
+    }
+    throw new Error('Unexpected passage fixture request')
+  }
+
+  shared.setUiLocale('en')
+  const m = mount(refreshParent.component)
+  const picker = () => m.root.querySelector('#ingestion-passage')
+  const review = () => m.root.querySelector('.source-ingestion .plan-review')
+  const draft = '.source-ingestion textarea[id^="entity-description-"]'
+  const description = 'A person investigating a retained source.'
+  const manual = '#ingestion-operation'
+  const plan = () => m.root.querySelector('.source-ingestion form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }))
+  const callsFor = method => calls.filter(call => call.url.includes('/ingestion/' + method + '/'))
+  try {
+    await connectRefresh(m)
+    await inspectRefreshSource(m, { editEntityName: false })
+    await waitFor(() => picker() && !picker().disabled)
+    assert.equal(picker().options.length, 3)
+    assert.equal(callsFor('plan').length, 0)
+    input(m, '#ingestion-passage', passages[0].evidence_id)
+    input(m, draft, description)
+    plan()
+    await waitFor(() => review()?.textContent.includes(admitted?.plan.operation_id) && !picker().disabled)
+    assert.equal(admitted.payload.evidence_id, passages[0].evidence_id)
+    review().querySelector('input[type="checkbox"]').click()
+    await waitFor(() => !review().querySelector('button.primary').disabled)
+
+    input(m, '#ingestion-passage', passages[1].evidence_id)
+    await nextTick()
+    assert.equal(review(), null)
+    assert.equal(m.root.querySelector(draft).value, description)
+    assert.equal(m.root.querySelector(manual).value, uid(77))
+    assert.equal(callsFor('execute').length, 0)
+
+    mismatch = true
+    plan()
+    await waitFor(() => !picker().disabled && m.root.querySelector('.source-ingestion .feedback').textContent.includes(copyFor('en').ingestion.failed))
+    assert.equal(review(), null)
+    mismatch = false
+    plan()
+    await waitFor(() => review()?.textContent.includes(admitted?.plan.operation_id) && !picker().disabled)
+    assert.equal(admitted.payload.evidence_id, passages[1].evidence_id)
+    assert.equal(review().querySelector('input[type="checkbox"]').checked, false)
+    assert.ok(review().querySelector('.passage-review').textContent.includes(passages[1].excerpt_sha256))
+    review().querySelector('input[type="checkbox"]').click()
+    await waitFor(() => !review().querySelector('button.primary').disabled)
+    review().querySelector('button.primary').click()
+    const status = () => m.root.querySelector('.source-ingestion .attempt button')
+    await waitFor(() => submitted && status() && !status().disabled)
+    assert.deepEqual(submitted, admitted.payload)
+    assert.equal(picker().disabled, true)
+    assert.equal(review().querySelector('button.primary').disabled, true)
+    status().click()
+    await waitFor(() => m.root.querySelector('.source-ingestion .outcome')?.textContent.includes(admitted.plan.operation_id))
+    assert.equal(callsFor('plan').length, 3)
+    assert.equal(callsFor('execute').length, 1)
+    assert.equal(callsFor('operation').length, 1)
+  } finally {
+    m.cleanup()
+    globalThis.fetch = previous
+    shared.setUiLocale('en')
+  }
 })
