@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
+from hashlib import sha256
 from uuid import uuid4
 
 import pytest
@@ -247,6 +248,96 @@ async def test_real_connected_layers_exact_retained_passages_and_historical_cuto
     payload = historical.model_dump_json()
     assert "😀" not in payload and all(identifier not in payload for identifier in (*f["edges"], *f["episodes"]))
     assert all(str(passage.evidence_id) not in payload for passage in f["retained"].passages)
+
+
+@pytest.mark.asyncio
+async def test_real_long_document_retrieves_exact_beginning_middle_and_end_passages(retained_graph):
+    f = retained_graph
+    scope = f["source"]
+    beginning = "😀 港 The harbor gate reopens at dawn."
+    middle = "Cafe\u0301 水 The reservoir drops two metres."
+    end = "🧭 山 The ridge beacon returns to service."
+    filler = "\n背景😀 Routine notes without the indexed claims.\n" * 800
+    text = beginning + filler + middle + filler + end
+    raw = text.encode("utf-8")
+    assert 32768 < len(text) < len(raw) <= 1048576
+    revision = uuid4()
+    source_name = "long retained research fixture"
+    facts = ("The harbor gate reopens at dawn.", "The reservoir drops two metres.",
+             "The ridge beacon returns to service.")
+    passages = []
+    expected = {}
+    rows = []
+    for excerpt, fact in zip((beginning, middle, end), facts, strict=True):
+        start = text.index(excerpt)
+        stop = start + len(excerpt)
+        evidence = uuid4()
+        passages.append({"evidence_id": str(evidence), "start": start, "end": stop})
+        edge, episode, subject, target = map(str, (uuid4(), uuid4(), uuid4(), uuid4()))
+        expected[edge] = (episode, evidence, fact, excerpt, start, stop)
+        rows.append({"edge": edge, "episode": episode, "subject": subject, "target": target,
+                     "evidence": str(evidence), "fact": fact})
+    assert passages[0]["start"] == 0 and passages[-1]["end"] == len(text)
+    middle_offset = passages[1]["start"]
+    assert len(text) // 3 < middle_offset < 2 * len(text) // 3
+    assert len(text[:middle_offset].encode("utf-8")) > middle_offset
+
+    # The source text and passage offsets go through actual PostgreSQL ingestion.
+    retained = SourceStore(f["factory"]).ingest_text(
+        "owner", scope.project_id, revision, source_name, text, passages,
+    )
+    source_digest = sha256(raw).hexdigest()
+    assert retained.source_revision == revision
+    assert retained.text_sha256 == source_digest and retained.codepoint_length == len(text)
+
+    # Seed the graph links explicitly. This exercises retrieval and citation
+    # resolution without testing provider extraction or semantic retrieval quality.
+    await f["writer"].execute_query(
+        "UNWIND $rows AS row "
+        "CREATE (a:Entity {uuid:row.subject,group_id:$group_id,name:'Document subject'}), "
+        "(b:Entity {uuid:row.target,group_id:$group_id,name:'Document object'}), "
+        "(e:Episodic {uuid:row.episode,group_id:$group_id,created_at:datetime($stamp)}), "
+        "(o:MiroFishIngest {uuid:row.episode,group_id:$group_id,status:'complete',evidence_ids:[row.evidence]}) "
+        "CREATE (a)-[:RELATES_TO {uuid:row.edge,group_id:$group_id,name:'DOCUMENT_FACT', "
+        "fact:row.fact,episodes:[row.episode],created_at:datetime($stamp),valid_at:datetime($stamp)}]->(b)",
+        parameters_={"rows": rows, "group_id": scope.group_id, "stamp": datetime.now(timezone.utc).isoformat()},
+    )
+    display = f["ids"][0]
+    service = EvidenceResearchService("owner", f["factory"], f["new_driver"])
+    result = await service.research(ResearchRequest(
+        display_graph_ids=(display,), text="harbor reservoir ridge", top_k=3,
+    ))
+    assert result.rank_basis == "lexical_token_overlap"
+    assert len(result.source_claims) == 3 and {claim.provider_id for claim in result.source_claims} == set(expected)
+    assert result.simulation_observations == result.other_claims == ()
+    for claim in result.source_claims:
+        episode, evidence, fact, excerpt, start, stop = expected[claim.provider_id]
+        assert claim.scope == scope and claim.fact == fact
+        assert (claim.overlap_tokens, claim.query_tokens) == (1, 3)
+        assert claim.episode_ids == (episode,) and claim.evidence_ids == (evidence,)
+        assert claim.unavailable_evidence_ids == ()
+        citation, = claim.citations
+        assert citation.project_id == scope.project_id and citation.evidence_id == evidence
+        assert citation.source_revision == revision and citation.source_name == source_name
+        assert citation.source_recorded_at == retained.recorded_at
+        assert citation.source_sha256 == source_digest
+        assert (citation.source_byte_length, citation.source_codepoint_length) == (len(raw), len(text))
+        assert (citation.offset_unit, citation.start, citation.end) == ("unicode_codepoint", start, stop)
+        assert citation.excerpt == excerpt == text[start:stop]
+        assert citation.excerpt_sha256 == sha256(excerpt.encode("utf-8")).hexdigest()
+
+    assert result.linked_citations == result.resolved_citations == 3 and result.unavailable_citations == 0
+    counts, = result.scopes
+    assert counts.display_graph_id == display and counts.scope == scope
+    assert (counts.pages, counts.scanned, counts.eligible, counts.returned) == (1, 4, 4, 3)
+    assert counts.excluded == counts.unknown == 0 and not counts.truncated
+    coverage, = result.passage_coverage
+    covered = len(beginning) + len(middle) + len(end)
+    assert (coverage.project_id, coverage.source_revision, coverage.source_sha256) == (
+        scope.project_id, revision, source_digest,
+    )
+    assert (coverage.retained_codepoints, coverage.retrieved_codepoints) == (len(text), covered)
+    assert coverage.retrieved_passage_fraction == covered / len(text)
 
 
 @pytest.mark.asyncio
