@@ -360,7 +360,8 @@ def main() -> int:
                 or not (ROOT / 'frontend/node_modules/playwright-core/package.json').is_file()):
             parser.error('explicit installed hosted Node/Chrome/browser runtime required')
         for path in (ROOT / 'services/knowledge/tests/research_browser_fixture.py',
-                     ROOT / 'frontend/tests/run-research-browser.mjs'):
+                     ROOT / 'frontend/tests/run-research-browser.mjs',
+                     ROOT / 'frontend/tests/research-browser-restart.mjs'):
             try:
                 _bounded_source_digest(path, 50000)
             except (OSError, ValueError):

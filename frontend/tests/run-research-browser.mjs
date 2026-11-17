@@ -3,6 +3,7 @@ import { chromium } from 'playwright-core'
 import { createHash } from 'node:crypto'
 import { lstat, realpath, readdir, mkdtemp, mkdir, rm, open } from 'node:fs/promises'
 import path from 'node:path'
+import { runResearchBrowserRestart } from './research-browser-restart.mjs'
 
 const WIRE = 7200
 const FRONTEND = 'http://127.0.0.1:4317'
@@ -692,24 +693,13 @@ async function reportRead(command) {
 }
 async function pdfAfterRestart(command) {
   commandRequest(command)
-  await page.locator('.connection-form button[type=button]').last().click()
-  await enabled(page.locator('.connection-form button[type=submit]'))
-  // This is a real UI GET with a deliberately wrong credential, not an API call.
   const invalid = connection.token === 'research-browser-invalid' ? 'research-browser-invalid-2' : 'research-browser-invalid'
-  await connectForm(page, invalid, 401)
-  await connectForm(page)
-  const original = await readPdf()
-  // Use a second ordinary frontend origin to observe actual server refusal.
-  // Do not override Origin headers, disable CORS, or ignore browser security.
-  const denied = await context.newPage(); observe(denied)
-  try {
-    phase = 'page-load'
-    await denied.goto('http://localhost:4317/research', { waitUntil: 'domcontentloaded' })
-    await denied.locator('#workbench-language').selectOption('en')
-    await connectForm(denied, connection.token, 403)
-  } finally { await denied.close() }
-  requireTrue(await page.locator('#bearer-token').inputValue() === '')
-  return { reference: { source_revision: pdf.source_revision }, proof: { pdf: original, auth_denied: true, origin_denied: true, token_cleared: true } }
+  return runResearchBrowserRestart({
+    page, context, pdfRevision: pdf.source_revision, notes: orderedSources.find(source => source.source_name === 'notes.md'),
+    connect: (target, status) => connectForm(target, status === 401 ? invalid : undefined, status),
+    readPdf, readItem: (revision, action) => exchange(page, sourceRoute('item', revision), 'GET', action, 4195328),
+    observe, enabled, sha, requireTrue, setPhase: value => { phase = value },
+  })
 }
 async function cleanup() {
   if (closing) return closing
