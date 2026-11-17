@@ -289,6 +289,9 @@ class KnowledgeProcessClient:
     def _response_limit(self, raw):
         return _RESPONSE_MAX
 
+    def _command(self):
+        return [self._python, "-I", "-u", self._script]
+
     def __init__(self, python_executable, bootstrap_script, *, timeout_seconds=120,
                  child_environment=None, cooperative_tick=None):
         if (type(timeout_seconds) not in (int, float) or not math.isfinite(timeout_seconds)
@@ -325,8 +328,7 @@ class KnowledgeProcessClient:
                 directory = private_directory.name
                 events = queue.Queue()
                 creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-                process = owner.start(subprocess.Popen,
-                    [self._python, "-I", "-u", self._script],
+                process = owner.start(subprocess.Popen, self._command(),
                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                     shell=False, close_fds=True, cwd=directory,
                     env=_private_environment(directory, self._python, self._extra_environment),
