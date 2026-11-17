@@ -6,6 +6,21 @@ These commands support source inspection, guarded unit checks and a frontend bui
 
 Use Python 3.12 and Node 24.14.1 or newer. The lean Python profile is pinned in tools/ci-unit-requirements.txt and resolves its transitive dependencies from a package index. It omits the full OASIS/CAMEL engine stack and is suitable for guarded source tests, not a live simulation engine. Use a disposable Python environment.
 
+## Install preflight
+
+Check each dependency profile against the [committed CI workflow](../../.github/workflows/ci.yml). The locked jobs select Python 3.12.13 and uv 0.11.25. Python 3.12 is the shared minor version for the [backend](../../backend/pyproject.toml) and [knowledge package](../../services/knowledge/pyproject.toml). CI keeps the lean unit profile, locked runtime profiles and frontend lock separate.
+
+| Profile | Prerequisites recorded in source |
+| --- | --- |
+| Native backend fixture | Locked `backend` environment with `dev`, `native-store` and `native-temporal` extras. The backend pins OASIS 0.2.5 and CAMEL 0.2.78. The native extras pin psycopg 3.3.6 and Temporal SDK 1.33.0. The Windows lane applies and checks a fingerprinted optional-import correction before installing the local knowledge package into its fixture environment. |
+| Knowledge and retained-source fixtures | Separate locked `services/knowledge` environment with Graphiti 0.30.2 and psycopg 3.3.6. CI selects the `test` extra for fixture checks, `source-pdf` for retained PDFs with PyMuPDF 1.26.7, and `execution` for the opt-in Temporal lane. The browser workbench lane also prepares a separate pruned HTTP environment. |
+
+The protected development entry point is [`backend/run.py`](../../backend/run.py). In `research_local` or `graphiti_readonly` it validates the protected configuration before startup and defaults to `127.0.0.1:5001`. Check the selected mode and explicit host and port settings before any authorized local launch.
+
+The [Neo4j Community](../../infra/compose.knowledge-test.yml) and [PostgreSQL](../../infra/compose.operations-test.yml) Compose files are loopback fixtures. Their host ports are `17687` and `17474` for Neo4j and `15432` for PostgreSQL. Each requires its own disposable password through the environment. The Linux Temporal lane uses a checksum-verified CLI 1.9.1 development server on `127.0.0.1:17233` with fixture-owned storage. The Windows lane uses its own guarded fixture helpers. Reuse these settings only with disposable test services.
+
+A supported clean install still needs an evidenced sequence. First provision and health-check owned PostgreSQL, Neo4j Community and Temporal with explicit local configuration. Then qualify the PostgreSQL bootstrap and migration dependency order from an empty database, beginning with project and revision authority before dependent catalogs. Establish scoped graph access and the Temporal namespace and worker configuration before enabling the protected service. Verify that a clean start and restart use the installed package, preserve the migrated data and enforce protected access. The fixture workflows provide evidence for parts of this sequence.
+
 ## Python source checks
 
 From the repository root:
