@@ -115,3 +115,28 @@ class ScopeBindingStore:
             if record.principal != principal or record.display_graph_id != display_graph_id:
                 raise Conflict("knowledge binding record conflict")
             return record
+
+    def resolve_for_write(
+        self, conn: psycopg.Connection, principal: str, display_graph_id: str,
+        expected_scope: KnowledgeScope,
+    ) -> BindingRecord:
+        """Hold the scope and binding through the caller's active write transaction."""
+        principal, display_graph_id = _identity(principal, display_graph_id)
+        group_id = expected_scope.group_id
+        # Match bind/tombstone ordering: acquire the scope before the binding.
+        if conn.execute(
+            "SELECT 1 FROM mf_knowledge.scopes WHERE group_id = %s FOR SHARE", (group_id,),
+        ).fetchone() is None:
+            raise NotFound("knowledge scope not found")
+        row = conn.execute(
+            _SELECT + "WHERE b.principal = %s AND b.display_graph_id = %s "
+            "AND b.group_id = %s FOR SHARE OF b",
+            (principal, display_graph_id, group_id),
+        ).fetchone()
+        if row is None:
+            raise NotFound("knowledge binding not found")
+        record = _stored(row)
+        if (record.principal != principal or record.display_graph_id != display_graph_id
+                or record.scope != expected_scope):
+            raise Conflict("knowledge binding record conflict")
+        return record
