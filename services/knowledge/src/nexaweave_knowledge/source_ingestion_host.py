@@ -1,8 +1,11 @@
 """Owned retained source workflow. Graphiti is imported only after budget start."""
 import asyncio
+import hashlib
+import json
 import os
 from dataclasses import dataclass
 from urllib.parse import urlsplit
+from uuid import NAMESPACE_URL, uuid5
 
 from .contracts import OntologySpec
 from .source_library import SourceSettings, SourceLibrary, SourceError, encoded, uuid_value, scope_value
@@ -29,8 +32,15 @@ def validate_payload(method, value):
             raise ValueError
         return uuid_value(value["operation_id"]), None, None
     version = value.get("schema_version")
-    if method not in {"plan", "execute"} or type(version) is not int or version not in (1, 2):
+    if method not in {"plan", "execute"} or type(version) is not int or version not in (1, 2, 3):
         raise ValueError
+    if version == 3:
+        if (method != "plan"
+                or set(value) != {"schema_version", "source_revision", "operation_id", "project_revision"}
+                or type(value["project_revision"]) is not int
+                or not 1 <= value["project_revision"] <= 2_147_483_647):
+            raise ValueError
+        return uuid_value(value["operation_id"]), uuid_value(value["source_revision"]), value["project_revision"]
     identity_key = "operation_id" if version == 1 else "evidence_id"
     if set(value) != {"schema_version", "source_revision", identity_key, "ontology"}:
         raise ValueError
@@ -274,12 +284,56 @@ class SourceIngestionHost:
                 await asyncio.gather(*tasks, return_exceptions=True)
             await lazy.close()
 
+    def _plan_saved_ontology(self, scope, operation, revision, project_revision):
+        from .reviewed_ontology import ReviewedOntologyHost, validate_reviewed_ontology
+
+        settings = self.settings.source
+        reviewed_host = ReviewedOntologyHost(
+            principal=settings.principal, display_graph_id=settings.display_graph_id,
+            scope=scope, connection_factory=self.connect,
+        )
+        saved = reviewed_host.load()
+        if saved.revision != project_revision:
+            raise SourceError("conflict")
+
+        try:
+            reviewed = validate_reviewed_ontology(saved.snapshot["ontology"])
+            identity = json.dumps(
+                {"scope": scope.model_dump(mode="json"), "project_revision": project_revision, "ontology": reviewed},
+                ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False,
+            )
+            ontology_id = uuid5(NAMESPACE_URL, "mirofish:saved-ontology:v3:" + identity)
+            inline = {
+                "schema_version": 1, "operation_id": str(operation), "source_revision": str(revision),
+                "ontology": {"schema_version": 1, "revision": str(ontology_id), **reviewed},
+            }
+            # Keep the existing whole-source planner's ontology bounds and
+            # require an exact projection, including every nested field.
+            _, _, ontology = validate_payload("plan", inline)
+        except ValueError:
+            raise SourceError("conflict") from None
+
+        plan = self.bridge.plan(settings.principal, settings.display_graph_id, revision, operation, ontology)
+        if plan.scope != scope:
+            raise SourceError("source_denied")
+        if reviewed_host.load() != saved:
+            raise SourceError("conflict")
+        fingerprint = hashlib.sha256(
+            b"mirofish:source-ingestion:saved-ontology-plan:v3\0" + identity.encode("utf-8")
+            + b"\0" + plan.request_fingerprint.encode("ascii"),
+        ).hexdigest()
+        result = plan_result(plan)
+        result.update(schema_version=3, project_revision=project_revision, fingerprint=fingerprint)
+        return result
+
     def execute(self, method, payload):
         operation, revision, ontology, *evidence = validate_payload(method, payload)
         selector = {"evidence_id": evidence[0]} if evidence else {}
         scope = self.authority.authorize()
         if method == "status":
             return self.status(operation)
+        if payload.get("schema_version") == 3:
+            return self._plan_saved_ontology(scope, operation, revision, ontology)
         plan = self.bridge.plan(self.settings.source.principal, self.settings.source.display_graph_id,
                                 revision, operation, ontology, **selector)
         if plan.scope != scope:
