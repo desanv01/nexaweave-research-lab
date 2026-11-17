@@ -117,9 +117,11 @@ def _checkpoint_http(monkeypatch, host, observations):
         assert len(response.get_data()) <= RESULT_BYTES + ENVELOPE_OVERHEAD
         body = response.json
         if refused:
-            status_limit = 600 if refused == ('invalid_reply',) else 500
-            assert 400 <= response.status_code < status_limit
-            assert any(body == {'success': False, 'error': {'code': code}} for code in refused)
+            status_by_code = {'conflict': 409, 'not_found': 404, 'invalid_reply': 502, 'evidence_invalid': 502}
+            assert any(
+                response.status_code == status_by_code[code] and body == {'success': False, 'error': {'code': code}}
+                for code in refused
+            ), (response.status_code, body)
             return None
         assert response.status_code == 200 and body == {'success': True, 'data': body['data']}
         return body['data']

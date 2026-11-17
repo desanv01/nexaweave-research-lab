@@ -61,8 +61,9 @@ class NativeObservationsHost:
             raise NativeObservationsError('conflict')
         restored = launch['schema_version'] == 2
         output_root = base / ('native_child_' + row.run_id.hex) if restored else prepared_root
+        reader_options = {"restored": True} if restored else {}
         with self.reader.page(output_root, row.request.platforms, payload['platform'], payload['offset'],
-                              payload['limit'], row.receipt['evidence_sha256'], restored=restored) as observed:
+                              payload['limit'], row.receipt['evidence_sha256'], **reader_options) as observed:
             after, current, native_after, final_launch = self._authority(payload)
             if (after != row or current != prep or native_after != native or final_launch != launch
                     or self._artifacts(current, prepared_root) != current.receipt):
