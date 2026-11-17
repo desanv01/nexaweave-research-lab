@@ -4,6 +4,8 @@ Scripted inherited rich persona/config and CAMEL responses, zero paid calls.
 No replacement prepared files or unrelated experiment-manifest run.
 """
 import asyncio
+import csv
+import io
 import json
 import os
 import sqlite3
@@ -21,7 +23,8 @@ from nexaweave_execution.temporal_native_host import TemporalNativeHost,NativeWo
 from nexaweave_execution.native_run_store import NativeRunStore
 from nexaweave_execution.native_launch_store import NativeLaunchStore
 from nexaweave_execution.native_launch_contracts import NativeBudgetReceipt
-from test_provider_neutral_preparation import ScriptedChat
+from app.services.oasis_profile_generator import OasisProfileGenerator
+from test_provider_neutral_preparation import ScriptedChat, uid
 from test_preparation_store import real_host,request,reference as preparation_reference
 from test_native_launch_store import factory,migrate_all,launch_host,declaration
 from test_native_launch_api import reference
@@ -132,6 +135,7 @@ def _checkpoint_http(monkeypatch, host, observations):
 @pytest.mark.asyncio
 async def test_new_inherited_ready_artifacts_run_actual_both_platforms_through_pg_temporal(factory,tmp_path,monkeypatch):
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(OasisProfileGenerator, '_generate_username', lambda self, name: 'paired_123')
     migrate_all(factory)
     temporal=await loopback_client()
     chat=RichConnectedChat()
@@ -159,8 +163,30 @@ async def test_new_inherited_ready_artifacts_run_actual_both_platforms_through_p
             assert ready['state']=='ready' and len(ready['actors'])==2 and ready['simulation_executed'] is False
             root=prep.root/ready['receipt']['simulation_id']
             original={file['name']:(root/file['name']).read_bytes() for file in ready['receipt']['files']}
+            assert ready['actors'] == [
+                {'source_entity_uuid': uid(10), 'name': '艾丽丝', 'labels': ['Person']},
+                {'source_entity_uuid': uid(11), 'name': '机构', 'labels': ['Organization']},
+            ]
             profiles=json.loads(original['reddit_profiles.json'])
             assert len(profiles)==2 and all(profile['age']==32 and profile['country']=='MY' for profile in profiles)
+            expected_profiles = [(0, '艾丽丝', 'paired_123'), (1, '机构', 'paired_123_2')]
+            assert [(row['user_id'], row['name'], row['username']) for row in profiles] == expected_profiles
+            twitter = list(csv.DictReader(io.StringIO(original['twitter_profiles.csv'].decode('utf-8'), newline='')))
+            assert [(int(row['user_id']), row['name'], row['username']) for row in twitter] == expected_profiles
+            config = json.loads(original['simulation_config.json'])
+            assert [(actor['agent_id'], actor['entity_uuid'], actor['entity_type']) for actor in config['agent_configs']] == [
+                (0, uid(10), 'Person'), (1, uid(11), 'Organization'),
+            ]
+            grounding = json.loads(original['source_grounding.json'])
+            evidence = [str(passage.evidence_id) for passage in retained.passages]
+            for actor in ready['actors']:
+                source_id = actor['source_entity_uuid']
+                record = grounding[source_id]
+                assert record['source_entity_uuid'] == source_id
+                assert record['labels'] == ['Entity', *actor['labels']]
+                assert record['evidence_ids'] == evidence
+                assert record['facts'][0]['edge_uuid'] == uid(20)
+                assert record['facts'][0]['evidence_ids'] == evidence
             dto=await asyncio.to_thread(host.plan,declaration(planned))
             assert dto['preparation']['artifact_sha256']==ready['receipt']['artifact_sha256']
             assert not created and not (root/'.native_prepared_start_claim').exists()
@@ -178,7 +204,7 @@ async def test_new_inherited_ready_artifacts_run_actual_both_platforms_through_p
             assert host.budget.status('owner',host.account_id).accounted_ceiling_microusd==8
             for platform in ('twitter','reddit'):
                 with sqlite3.connect(root/(platform+'_simulation.db')) as db:
-                    assert db.execute('SELECT COUNT(*) FROM user').fetchone()[0]==2
+                    assert db.execute('SELECT agent_id,user_id FROM user ORDER BY agent_id').fetchall() == [(0, 0), (1, 1)]
                     posts=[value[0] for value in db.execute('SELECT content FROM post')]
                     assert any(post.startswith('Scripted connected native post ') for post in posts)
                 lines=(root/platform/'actions.jsonl').read_text(encoding='utf-8').splitlines()

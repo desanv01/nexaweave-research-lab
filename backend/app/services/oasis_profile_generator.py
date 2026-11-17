@@ -363,6 +363,22 @@ class OasisProfileGenerator:
         # 添加随机后缀避免重复
         suffix = getattr(self, "_rng", random).randint(100, 999)
         return f"{username}_{suffix}"
+
+    @staticmethod
+    def disambiguate_usernames(profiles: List[OasisAgentProfile]) -> None:
+        """Resolve collisions in actor order before writing platform profiles."""
+        usernames = set()
+        for profile in profiles:
+            original = profile.user_name
+            candidate = original
+            number = 2
+            while candidate in usernames:
+                suffix = f"_{number}"
+                # Fit the native Reddit loader's username limit.
+                candidate = f"{original[:128 - len(suffix)]}{suffix}"
+                number += 1
+            profile.user_name = candidate
+            usernames.add(candidate)
     
     def _search_zep_for_entity(self, entity: EntityNode) -> Dict[str, Any]:
         """
@@ -1104,6 +1120,9 @@ class OasisProfileGenerator:
                     save_profiles_realtime()
         
         print(f"\n{'='*60}")
+        if getattr(self, "neutral_mode", False) and getattr(self, "strict_generation", False):
+            self.disambiguate_usernames(profiles)
+            save_profiles_realtime()
         print(f"人设生成完成！共生成 {len([p for p in profiles if p])} 个Agent")
         print(f"{'='*60}\n")
         
