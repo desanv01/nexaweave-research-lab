@@ -421,6 +421,36 @@ class Ledger:
             self._scope(conn, scope, allow_tombstone=True)
             return self._operation(conn, scope, operation_id)
 
+    def read_staged_event(self, scope, operation_id, fingerprint, *, authorize_admission):
+        """Read only an existing event, binding current authority and status in one transaction."""
+        scope, operation_id = _validated_scope(scope), _uuid(operation_id, "operation_id")
+        fingerprint = _fingerprint(fingerprint)
+        self._event_ack_scope(scope)
+        if not callable(authorize_admission):
+            raise ValueError("invalid staged authority")
+        with _transaction(self._connect) as conn:
+            authorize_admission(conn)
+            self._scope(conn, scope)
+            operation = self._operation(conn, scope, operation_id)
+            if operation.fingerprint != fingerprint:
+                raise Conflict("knowledge operation fingerprint conflict")
+            attempt = operation.current_attempt
+            if operation.state == OperationState.uncertain:
+                self._event_ack_attempt(conn, scope, operation, attempt)
+            elif operation.state == OperationState.running:
+                if attempt is None or operation.receipt is not None or operation.error_code is not None:
+                    raise InvalidTransition("knowledge running event status conflict")
+                self._matching_attempt(conn, scope, operation, attempt)
+            elif operation.state == OperationState.pending:
+                if (attempt is not None or operation.receipt is not None or operation.error_code is not None):
+                    raise InvalidTransition("knowledge pending event status conflict")
+            elif operation.state == OperationState.completed:
+                if attempt is None or operation.receipt is None or operation.error_code is not None:
+                    raise InvalidTransition("knowledge completed event status conflict")
+            else:
+                raise InvalidTransition("knowledge operation is outside event status")
+            return operation
+
     def claim(self, scope: KnowledgeScope, operation_id: UUID) -> Claim:
         scope, operation_id = _validated_scope(scope), _uuid(operation_id, "operation_id")
         with _transaction(self._connect) as conn:

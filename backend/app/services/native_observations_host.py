@@ -171,6 +171,37 @@ class NativeObservationsHost:
                     fingerprint=fingerprint, state='pending', completion_barrier_open=False,
                     graph_ingestion_executed=False)
 
+    def event_status(self, payload):
+        from nexaweave_knowledge.operations import (
+            CompletionReceipt, Conflict, InvalidTransition, Ledger, NotFound,
+            OperationState, StaleAttempt, StorageError, Tombstoned,
+        )
+
+        payload = validate_dispatch_payload(payload)
+        locator = {key: value for key, value in payload.items() if key != 'expected_fingerprint'}
+        scope, operation, fingerprint, authorize, _, source = self._event(locator)
+        if fingerprint != payload['expected_fingerprint']:
+            raise NativeObservationsError('conflict')
+        try:
+            row = Ledger(self.launch.connect).read_staged_event(
+                scope, operation, fingerprint, authorize_admission=authorize,
+            )
+        except Tombstoned:
+            raise NativeObservationsError('tombstoned') from None
+        except NotFound:
+            raise NativeObservationsError('not_found') from None
+        except (Conflict, InvalidTransition, StaleAttempt):
+            raise NativeObservationsError('conflict') from None
+        except StorageError:
+            raise NativeObservationsError('observations_unavailable') from None
+        completed = row.state == OperationState.completed
+        expected = CompletionReceipt(scope.group_id, scope.episode_uuid(operation), fingerprint, source.evidence_ids)
+        if completed and row.receipt != expected:
+            raise NativeObservationsError('conflict')
+        return dict(payload, scope=scope.model_dump(mode='json'), operation_id=str(operation),
+                    state=row.state.value, attempt_id=str(row.current_attempt) if row.current_attempt else None,
+                    completion_barrier_open=completed, receipt=expected.json_value() if completed else None)
+
     def dispatch_event(self, payload):
         from nexaweave_knowledge.operations import (
             Busy, Claim, CompletionReceipt, Conflict, InvalidTransition, Ledger, NotFound,
