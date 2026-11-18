@@ -105,6 +105,21 @@ jobs:
           uv pip install --python "$RUNNER_TEMP/workbench-backend/bin/python" --no-deps --reinstall services/knowledge
           uv pip install --python services/knowledge/.venv/bin/python --no-deps --reinstall services/knowledge
           printf 'NEXAWEAVE_WORKBENCH_BACKEND_PYTHON=%s\n' "$RUNNER_TEMP/workbench-backend/bin/python" >> "$GITHUB_ENV"
+      - name: Install distinct locked workbench dispatch authority backend
+        shell: bash
+        run: |
+          set -euo pipefail
+          authority="$RUNNER_TEMP/workbench-authority"
+          uv export --locked --project backend --no-dev --no-emit-project --extra native-store --prune openai --prune zep-cloud --prune httpx --prune camel-oasis --prune camel-ai --prune pymupdf --prune charset-normalizer --prune chardet --output-file "$RUNNER_TEMP/workbench-authority.txt" >/dev/null
+          uv venv --python 3.12.13 "$authority"
+          uv pip install --require-hashes --python "$authority/bin/python" -r "$RUNNER_TEMP/workbench-authority.txt"
+          wheels="$RUNNER_TEMP/workbench-authority-wheel"
+          uv build --wheel --python "$authority/bin/python" --out-dir "$wheels" services/knowledge
+          set -- "$wheels"/nexaweave_knowledge-*.whl
+          test "$#" -eq 1
+          test -f "$1"
+          uv pip install --python "$authority/bin/python" --no-deps "$1"
+          printf 'NEXAWEAVE_WORKBENCH_AUTHORITY_PYTHON=%s\n' "$authority/bin/python" >> "$GITHUB_ENV"
       - name: Start disposable real Neo4j Community
         run: docker compose -f infra/compose.knowledge-test.yml up -d --wait --wait-timeout 180
       - name: Start disposable research PostgreSQL
@@ -213,6 +228,10 @@ jobs:
           backend/.venv/bin/python tools/run_connected_report_tests.py --integration --caller-cancel
           backend/.venv/bin/python tools/run_connected_report_tests.py --integration --store-only
           backend/.venv/bin/python tools/run_connected_followup_tests.py --integration --store-only
+      - name: Qualify restored event dispatch through installed HTTP and graph writer
+        env:
+          KNOWLEDGE_PYTHON: ${{ github.workspace }}/services/knowledge/.venv/bin/python
+        run: backend/.venv/bin/python tools/run_workbench_evidence_tests.py --event-dispatch
       - name: Test database diagnostics on failure
         if: failure()
         run: docker compose -f infra/compose.knowledge-test.yml logs --tail 100 neo4j
@@ -266,6 +285,52 @@ jobs:
         run: docker compose -f infra/compose.operations-test.yml up -d --wait --wait-timeout 120
       - name: Verify real operation admission and concurrency
         run: services/knowledge/.venv/bin/python tools/run_operations_tests.py --postgres
+      - name: Qualify offline Neo4j Community dump and restore
+        shell: bash
+        timeout-minutes: 12
+        run: |
+          set -euo pipefail
+          test "$(uname -s)" = Linux
+          test "$(uname -m)" = x86_64
+          knowledge_python="$GITHUB_WORKSPACE/services/knowledge/.venv/bin/python"
+          timeout --kill-after=5s 45s uv pip install --python "$knowledge_python" --no-deps --reinstall "$GITHUB_WORKSPACE/services/knowledge"
+          provider_path="$("$knowledge_python" -I -B -c 'from importlib.util import find_spec; from pathlib import Path; print(Path(find_spec("nexaweave_knowledge").origin).resolve().with_name("provider.py"))')"
+          cmp -- "$GITHUB_WORKSPACE/services/knowledge/src/nexaweave_knowledge/provider.py" "$provider_path"
+
+          docker_cli="$(realpath -e -- "$(type -P docker)")"
+          [[ "$docker_cli" == /usr/bin/* || "$docker_cli" == /usr/local/bin/* ]]
+          test -f "$docker_cli"
+          test -x "$docker_cli"
+          test "$(stat -c '%u' -- "$docker_cli")" = 0
+          docker_socket="$(realpath -e -- /var/run/docker.sock)"
+          test "$docker_socket" = /run/docker.sock
+          test -S "$docker_socket"
+          docker_sha256="$(sha256sum < "$docker_cli")"
+          docker_sha256="${docker_sha256%% *}"
+          [[ "$docker_sha256" =~ ^[0-9a-f]{64}$ ]]
+
+          recovery_docker_config="$(mktemp -d -- "$RUNNER_TEMP/nexaweave-community-docker.XXXXXXXX")"
+          finish() {
+            status=$?
+            trap - EXIT
+            if ! rmdir -- "$recovery_docker_config"; then
+              status=1
+            fi
+            exit "$status"
+          }
+          trap finish EXIT
+          docker_local=(env -u DOCKER_CONTEXT -u DOCKER_HOST -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH
+            "$docker_cli" --config "$recovery_docker_config" --host "unix://$docker_socket")
+          docker_daemon_id="$(timeout --kill-after=5s 15s "${docker_local[@]}" info --format '{{.ID}}')"
+          [[ "$docker_daemon_id" =~ ^[A-Za-z0-9:_-]{8,128}$ ]]
+          image='neo4j:5.26.31-community@sha256:5eb12ad77fa46ab73e23df9ea1f43f5c0f2a79523435577648e046be042b9b93'
+          timeout --kill-after=5s 150s "${docker_local[@]}" image pull --quiet --platform linux/amd64 "$image"
+          image_id="$(timeout --kill-after=5s 15s "${docker_local[@]}" image inspect --format '{{.Id}}' "$image")"
+          [[ "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]]
+
+          "$knowledge_python" -B tools/run_neo4j_backup_restore_tests.py --integration \
+            --docker "$docker_cli" --docker-sha256 "$docker_sha256" --socket "$docker_socket" \
+            --daemon-id "$docker_daemon_id" --image "$image" --image-id "$image_id"
       - name: Test database diagnostics on failure
         if: failure()
         run: docker compose -f infra/compose.operations-test.yml logs --tail 100 postgres
