@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto'
 import { lstat, realpath, readdir, mkdtemp, mkdir, rm, open } from 'node:fs/promises'
 import path from 'node:path'
 import { installBodyObserver, ontologyStages } from './research-browser-ontology.mjs'
+import { inspectPreparedProfiles } from './research-browser-prepared-profiles.mjs'
 
 const WIRE = 7200
 const FRONTEND = 'http://127.0.0.1:4317'
@@ -542,6 +543,8 @@ async function preparationReady(command) {
   const observed = await exchange(page, prepRoute('status'), 'POST', () => page.locator('.preparation-workbench .refresh').click(), 263168)
   boundPreparation(observed.value); requireTrue(observed.value.state === 'ready' && observed.value.receipt)
   preparation = observed.value; digest(preparation.receipt.artifact_sha256)
+  const route = prepRoute('profiles')
+  await inspectPreparedProfiles({ page, preparation, route, url: connection.api_origin + route, exchange, enabled, requireTrue, same, sha })
   await enabled(page.locator('.native-launch .review'))
   return { reference: { ...prepReference(preparation), simulation_id: preparation.receipt.simulation_id, artifact_sha256: preparation.receipt.artifact_sha256 }, proof: sourceProof() }
 }
