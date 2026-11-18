@@ -398,9 +398,15 @@ class Ledger:
             if cleanup_failed and not control:
                 raise StorageError("knowledge read lock lost")
 
-    def admit(self, scope: KnowledgeScope, operation_id: UUID, fingerprint: str) -> OperationRecord:
+    def admit(self, scope: KnowledgeScope, operation_id: UUID, fingerprint: str, *,
+              authorize_admission: Callable[[psycopg.Connection], None] | None = None) -> OperationRecord:
+        """Optionally lock trusted caller authority before admitting a pending operation."""
         scope, operation_id, fingerprint = _validated_scope(scope), _uuid(operation_id, "operation_id"), _fingerprint(fingerprint)
+        if authorize_admission is not None and not callable(authorize_admission):
+            raise ValueError("invalid admission authority")
         with _transaction(self._connect) as conn:
+            if authorize_admission is not None:
+                authorize_admission(conn)
             self._scope(conn, scope, create=True)
             conn.execute("INSERT INTO mf_knowledge.operations(group_id, operation_id, fingerprint, state) VALUES (%s, %s, %s, 'pending') ON CONFLICT (group_id, operation_id) DO NOTHING",
                          (scope.group_id, operation_id, fingerprint))
