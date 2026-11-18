@@ -339,6 +339,24 @@ def observe_event_write(self, payload):
         raise OSError('test lost committed graph acknowledgement')
     return reply
 EventRuntime.write=observe_event_write
+original_status=Ledger.read_staged_event
+def observe_event_status(self,*args,**kwargs):
+    tripwire=Path('revoke-before-event-status')
+    if not tripwire.is_file():
+        return original_status(self,*args,**kwargs)
+    tripwire.unlink()
+    source=KnowledgeScope.model_validate_json(os.environ['KNOWLEDGE_BOUND_SCOPE_JSON'])
+    with self._connect() as conn:
+        changed=conn.execute('UPDATE mf_knowledge.scopes SET tombstoned=true WHERE group_id=%s AND NOT tombstoned',
+                             (source.group_id,))
+        assert changed.rowcount==1
+    try:
+        emit({'event':'status_authority_revoked'})
+        return original_status(self,*args,**kwargs)
+    finally:
+        with self._connect() as conn:
+            conn.execute('UPDATE mf_knowledge.scopes SET tombstoned=false WHERE group_id=%s',(source.group_id,))
+Ledger.read_staged_event=observe_event_status
 server=make_server"""))
 
 
@@ -432,6 +450,17 @@ async def _event_dispatch_failure(body, saved, output_path, writer, scope, episo
     return json.dumps(summary, sort_keys=True)
 
 
+async def _assert_event_status(send, request, scope, operation, row):
+    status, body = await send("event-status", request)
+    completed = row.state.value == "completed"
+    assert status == 200 and body == {
+        "success": True, "data": dict(request, scope=scope.model_dump(mode="json"),
+            operation_id=str(operation), state=row.state.value, completion_barrier_open=completed,
+            attempt_id=str(row.current_attempt) if row.current_attempt is not None else None,
+            receipt=row.receipt.json_value() if completed else None),
+    }
+
+
 async def _recover_event_ack(send, writer, ledger, scope, operation, episode, request, uncertain):
     """Exercise the same request and attempt with absent, altered and committed evidence."""
     from uuid import uuid5
@@ -454,6 +483,8 @@ async def _recover_event_ack(send, writer, ledger, scope, operation, episode, re
         return nodes, links
 
     baseline = await snapshot()
+    await _assert_event_status(send, request, scope, operation, uncertain)
+    assert ledger.get(scope, operation) == uncertain and await snapshot() == baseline
     marker = "MATCH (m:MiroFishIngest {uuid:$episode,group_id:$group}) "
     post = "MATCH (:Episodic {uuid:$episode,group_id:$group})-[:MENTIONS]->(p:NativePost {group_id:$group}) "
     for change, restore in (
@@ -483,6 +514,7 @@ async def _recover_event_ack(send, writer, ledger, scope, operation, episode, re
     saved = ledger.get(scope, operation)
     assert saved.state.value == "completed" and saved.current_attempt == uncertain.current_attempt
     assert saved.error_code is None and saved.receipt.json_value() == expected_receipt
+    await _assert_event_status(send, request, scope, operation, saved)
     assert await send("dispatch-event", request) == (200, recovered)
     assert ledger.get(scope, operation) == saved and await snapshot() == baseline
     return saved
@@ -563,12 +595,26 @@ async def test_actual_protected_restored_event_dispatch_replay_and_lost_ack(reta
                 assert (await send("dispatch-event", request, origin="http://evil.example"))[0] == 403
                 assert (await send("dispatch-event", request, graph=f["ids"][0]))[0] == 404
                 assert (await send("dispatch-event", request))[0] == 409
+                assert await send("event-status", request) == (
+                    404, {"success": False, "error": {"code": "not_found"}})
                 status, staged = await send("stage-event", locator)
                 assert status == 200 and staged["data"]["operation_id"] == str(operation)
                 pending = ledger.get(target_scope, operation)
                 assert pending.state.value == "pending" and pending.current_attempt is None
                 assert pending.fingerprint == staged["data"]["fingerprint"] == fingerprint
                 assert (await send("dispatch-event", unreviewed))[0] == 409
+                assert (await send("event-status", request, bearer=None))[0] == 401
+                assert (await send("event-status", request, origin="http://evil.example"))[0] == 403
+                assert (await send("event-status", request, graph=f["ids"][0]))[0] == 404
+                assert (await send("event-status", unreviewed))[0] == 409
+                assert (await send("event-status", dict(request, record_sha256="0" * 64)))[0] == 409
+                await _assert_event_status(send, request, target_scope, operation, pending)
+                if lost_ack:
+                    (directory / "revoke-before-event-status").write_bytes(b"1")
+                    assert await send("event-status", request) == (
+                        410, {"success": False, "error": {"code": "tombstoned"}})
+                    assert {"event": "status_authority_revoked"} in _events(output_path)
+                    await _assert_event_status(send, request, target_scope, operation, pending)
                 assert ledger.get(target_scope, operation) == pending
                 assert not [event for event in _events(output_path) if event.get("event") == "spawn"]
                 if not lost_ack:
@@ -594,6 +640,7 @@ async def test_actual_protected_restored_event_dispatch_replay_and_lost_ack(reta
                 else:
                     assert status == 200 and saved.state.value == "completed"
                     assert dispatched["data"]["receipt"] == saved.receipt.json_value()
+                    await _assert_event_status(send, request, target_scope, operation, saved)
                     assert await send("dispatch-event", request) == (200, dispatched)
                 records, _, _ = await f["writer"].execute_query(
                     "MATCH (m:MiroFishIngest {uuid:$episode,group_id:$group}), "

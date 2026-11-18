@@ -26,6 +26,9 @@ class NativeObservationsFacade:
     def dispatch_event(self, graph_id, payload):
         return self._execute(graph_id, validate_dispatch_payload(payload), operation='dispatch_event')
 
+    def event_status(self, graph_id, payload):
+        return self._execute(graph_id, validate_dispatch_payload(payload), operation='event_status')
+
     def _execute(self, graph_id, payload, *, operation='page'):
         if graph_id != self.settings.display_graph_id:
             raise NativeObservationsError('not_found')
