@@ -565,8 +565,8 @@ class NativeSimulationSession:
                                             agents[index]["entity_name"])
                 profiles["reddit"] = rows
             self._controls = parse_execution_controls(config, platforms, agents)
-            from nexaweave_execution.native_seed_contracts import validate_native_seed_plan
-            validate_native_seed_plan(config)
+            from nexaweave_execution.native_seed_contracts import seed_bridge_index, validate_native_seed_plan
+            seed_bridge_index(config, platforms, len(validate_native_seed_plan(config)))
             return config, agents, profiles, platforms
         except (OSError, ValueError, TypeError, KeyError, UnicodeError,
                 RecursionError, OverflowError,
@@ -728,6 +728,7 @@ class NativeSimulationSession:
 
     async def _start_async(self):
         from scripts import run_parallel_simulation as native
+        from native_seed_posts import owned_seed_bridge
         previous_random_state = random.getstate()
         completed = False
         try:
@@ -741,16 +742,19 @@ class NativeSimulationSession:
                 self._reddit_graph = build_reddit_agent_graph(
                     self._profiles["reddit"], self._models["reddit"],
                     list(self._reddit_actions))
-            for platform in self._platforms:
-                operation = (native.run_twitter_simulation if platform == "twitter"
-                             else native.run_reddit_simulation)
-                logger = (logs.get_twitter_logger() if platform == "twitter"
-                          else logs.get_reddit_logger())
-                result = await operation(self._config, str(self.simulation_dir),
-                                         logger, logs, self.max_rounds,
-                                         native_dependencies=self)
-                if result.env is None or result.agent_graph is None:
-                    raise NeutralCapabilityError("report_context_unavailable")
+            with owned_seed_bridge(self._config, self._platforms, self._profiles, self._results) as bridge:
+                for platform in self._platforms:
+                    operation = (native.run_twitter_simulation if platform == "twitter"
+                                 else native.run_reddit_simulation)
+                    logger = (logs.get_twitter_logger() if platform == "twitter"
+                              else logs.get_reddit_logger())
+                    result = await operation(self._config, str(self.simulation_dir),
+                                             logger, logs, self.max_rounds,
+                                             native_dependencies=self)
+                    if result.env is None or result.agent_graph is None:
+                        raise NeutralCapabilityError("report_context_unavailable")
+                    if bridge is not None and platform == "twitter":
+                        bridge.verify_source(result)
             completed = True
         finally:
             random.setstate(previous_random_state)
