@@ -410,8 +410,8 @@
     {
       "imported_path": "locales/zh.json",
       "original_sha256": "7d44d70ca75e89c79c2ce793ddceab32cf7b251bc9210cf81c04d37daf3daab8",
-      "current_sha256": "39978241b9a586996a5bf0428017c8c7d153c510cfbeac1f087865e17acd18b9",
-      "reason": "U13a updates only the Chinese supported-format label for DOCX. U11b adds only the Chinese Home workbench navigation label; inherited catalog remains. Main applies human-authorized visible NexaWeave branding/public repository links; preserves legal provenance, behavior and persisted compatibility. Main correction2 fixes observed Home mobile overflow and removes unqualified scale/cost/ready claims while preserving controls, locale keys and placeholders. Connected report follow-up preserves original evidence and adds isolated one-shot shared-budget history; owned PDF retains original bytes with protected revision-bound reads. W6.1 localizes workflow step and status labels through the shared catalog.",
+      "current_sha256": "d040c9a770ac6f0a30e7bc1e72fc4f0c4ac3350405e5672516a53d676f942e51",
+      "reason": "U13a updates only the Chinese supported-format label for DOCX. U11b adds only the Chinese Home workbench navigation label; inherited catalog remains. Main applies human-authorized visible NexaWeave branding/public repository links; preserves legal provenance, behavior and persisted compatibility. Main correction2 fixes observed Home mobile overflow and removes unqualified scale/cost/ready claims while preserving controls, locale keys and placeholders. Connected report follow-up preserves original evidence and adds isolated one-shot shared-budget history; owned PDF retains original bytes with protected revision-bound reads. W6.1 localizes workflow step and status labels through the shared catalog. W6.1 localizes history replay labels, the accessible close name, and replay guidance.",
       "phase": "U07h/U07i connected qualification on accepted NexaWeave base",
       "review_status": "Main reviewed exact branding source; relevant build/export/browser and exact hosted acceptance pending."
     },
@@ -486,6 +486,14 @@
       "current_sha256": "4c6465c9725cb00a798322006d16bb613fdfd23692e4842d6db85943b69cc63f",
       "reason": "W1.2 adds focused fixtures for strict ontology validation and detached accepted edits.",
       "phase": "W1.2 reviewed ontology validation"
+    },
+    {
+      "imported_path": "frontend/src/components/HistoryDatabase.vue",
+      "original_sha256": "5689a7f8ab62d0abecea9330f7395c68895da3612feded54bcff2c016089a888",
+      "current_sha256": "374172acfd415b106ffce67bd8f397206a149b918c40e70b8bc518f1adef55cc",
+      "reason": "W6.1 localizes history replay labels, the accessible close name, and replay guidance.",
+      "phase": "U11 workbench and languages",
+      "review_status": "Scoped review complete. Exact hosted checks pending."
     }
   ]
 }
