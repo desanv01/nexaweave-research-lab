@@ -10,7 +10,7 @@ from .preparation_client import canonical
 
 
 class NativeObservationsHost:
-    def __init__(self, *, launch_host, event_writer=None):
+    def __init__(self, *, launch_host, event_writer=None, event_verifier=None):
         from .durable_native_launch_host import DurableNativeLaunchHost
         if not isinstance(launch_host, DurableNativeLaunchHost):
             raise NativeObservationsError('observations_unavailable')
@@ -19,6 +19,7 @@ class NativeObservationsHost:
         self.scope_dto = json.loads(encoded(launch_host.scope_dto))
         self.reader = NativeObservationReader()
         self.event_writer = event_writer
+        self.event_verifier = event_verifier
 
     def _authority(self, payload):
         row = self.launch._row(launch_reference(payload))
@@ -173,7 +174,7 @@ class NativeObservationsHost:
     def dispatch_event(self, payload):
         from nexaweave_knowledge.operations import (
             Busy, Claim, CompletionReceipt, Conflict, InvalidTransition, Ledger, NotFound,
-            OperationState, StorageError, Tombstoned,
+            OperationState, StaleAttempt, StorageError, Tombstoned,
         )
         from nexaweave_knowledge.native_observation_event_bootstrap import WIRE_BYTES, event_projection
 
@@ -198,12 +199,13 @@ class NativeObservationsHost:
             raise NativeObservationsError('conflict') from None
         ledger = Ledger(self.launch.connect)
         try:
-            claimed = ledger.claim_staged(scope, operation, fingerprint, authorize_admission=authorize)
+            claimed = ledger.claim_staged(scope, operation, fingerprint, authorize_admission=authorize,
+                                         recover_event_ack=self.event_verifier is not None)
         except Tombstoned:
             raise NativeObservationsError('tombstoned') from None
         except Busy:
             raise NativeObservationsError('busy') from None
-        except (Conflict, InvalidTransition, NotFound):
+        except (Conflict, InvalidTransition, NotFound, StaleAttempt):
             raise NativeObservationsError('conflict') from None
         except StorageError:
             raise NativeObservationsError('observations_unavailable') from None
@@ -235,6 +237,15 @@ class NativeObservationsHost:
                 except Exception:
                     uncertain()
                     raise NativeObservationsError('observations_unavailable') from None
+        elif claimed.state == OperationState.uncertain:
+            try:
+                frame['attempt_id'] = str(claimed.current_attempt)
+                if canonical(self.event_verifier(frame)) != canonical(event_projection(frame)):
+                    raise ValueError
+                claimed = ledger.complete_event_ack(scope, operation, claimed.current_attempt, receipt,
+                                                   authorize_admission=authorize)
+            except Exception:
+                raise NativeObservationsError('observations_unavailable') from None
         if claimed.state != OperationState.completed or claimed.receipt != receipt or claimed.current_attempt is None:
             raise NativeObservationsError('conflict')
         return dict(payload, scope=scope.model_dump(mode='json'), operation_id=str(operation),

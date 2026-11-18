@@ -41,6 +41,8 @@ CONSOLE_MARKERS = {
     "invalid_configuration": b"error validating",
     "java_oom": b"outofmemoryerror",
     "read_only_filesystem": b"read-only file system",
+    "enospc": b"no space left on device",
+    "native_startup_failed": b"failed to start neo4j",
 }
 FIXTURE_SECONDS = 420
 CLEANUP_SECONDS = 60
@@ -290,6 +292,7 @@ class RecoveryFixture:
                    "--env", "NEO4J_PLUGINS=[]",
                    "--env", "NEO4J_dbms_usage__report_enabled=false",
                    "--env", "NEO4J_server_http_enabled=false",
+                   "--env", "NEO4J_db_tx__log_rotation_size=16m",
                    "--env", "NEO4J_server_memory_heap_initial__size=128m",
                    "--env", "NEO4J_server_memory_heap_max__size=256m",
                    "--env", "NEO4J_server_memory_pagecache_size=64m"))
