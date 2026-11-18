@@ -24,14 +24,32 @@ function detached(v, depth = 0) {
 export const NATIVE_LAUNCH_CODES = new Set('invalid_request not_found unauthorized origin_denied conflict busy tombstoned result_too_large model_calls_disabled budget_denied native_launch_unavailable native_launch_uncertain native_launch_failed invalid_reply internal_error'.split(' '))
 export const NATIVE_ERROR_STATUS = Object.freeze({ invalid_request: 400, not_found: 404, unauthorized: 401, origin_denied: 403, conflict: 409, busy: 503, tombstoned: 410, result_too_large: 413, model_calls_disabled: 409, budget_denied: 409, native_launch_unavailable: 503, native_launch_uncertain: 503, native_launch_failed: 503, invalid_reply: 502, internal_error: 500 })
 const identityKeys = 'schema_version display_graph_id scope preparation request limits ceiling_microusd model_label'.split(' ')
-export const nativeLaunchIdentity = plan => ({ schema_version: 1, launch_id: plan.request.run_id, launch_sha256: plan.launch_sha256 })
+export const nativeLaunchIdentity = plan => ({ schema_version: plan.schema_version, launch_id: plan.request.run_id, launch_sha256: plan.launch_sha256 })
+const completed = launch => launch.state === 'completed' && launch.receipt?.outcome === 'completed'
+export const checkpointReady = ready => ready?.state === 'ready' && ready.options?.max_rounds === 1 && same(ready.options.platforms, ['twitter'])
+export const completedCapture = launch => launch.schema_version === 2 && launch.checkpoint?.mode === 'capture' && completed(launch) && !launch.cancel_requested
+export const observableNativeLaunch = launch => completed(launch) &&
+  (launch.schema_version === 1 || launch.schema_version === 2 && launch.checkpoint?.mode === 'continue'
+    && !launch.cancel_requested && launch.receipt.evidence_sha256 !== launch.checkpoint.checkpoint_sha256)
+function checkpoint(value, launchId) {
+  if (value?.mode === 'capture') {
+    fields(value, 'mode')
+  } else {
+    fields(value, 'mode source_run_id checkpoint_sha256')
+    if (value.mode !== 'continue' || value.source_run_id === launchId) bad()
+    uuid(value.source_run_id); hash(value.checkpoint_sha256)
+  }
+}
 export function newNativeLaunchId() { if (!globalThis.crypto?.randomUUID) bad('invalid_request'); return globalThis.crypto.randomUUID() }
 export function nativeLaunchPayload(v, planning = false) {
   try {
-    fields(v, planning ? 'schema_version launch_id preparation' : 'schema_version launch_id launch_sha256')
-    if (v.schema_version !== 1) bad()
+    if (![1, 2].includes(v?.schema_version)) bad()
+    fields(v, planning ? 'schema_version launch_id preparation' + (v.schema_version === 2 ? ' checkpoint' : '') : 'schema_version launch_id launch_sha256')
     uuid(v.launch_id)
-    if (planning) { fields(v.preparation, 'operation_id plan_sha256'); uuid(v.preparation.operation_id); hash(v.preparation.plan_sha256) } else hash(v.launch_sha256)
+    if (planning) {
+      fields(v.preparation, 'operation_id plan_sha256'); uuid(v.preparation.operation_id); hash(v.preparation.plan_sha256)
+      if (v.schema_version === 2) checkpoint(v.checkpoint, v.launch_id)
+    } else hash(v.launch_sha256)
     const raw = JSON.stringify(v)
     if (enc.encode(raw).length > 4096) bad()
     return raw
@@ -49,14 +67,23 @@ export async function validateNativeLaunchResult(value, { graph, payload, prepar
     value = detached(value); payload = detached(payload); preparation = detached(preparation); if (known) known = detached(known)
     const ready = await nativeReadyPreparation(preparation, graph)
     if (enc.encode(JSON.stringify(value)).length > 65536) bad()
-    fields(value, 'schema_version display_graph_id scope preparation request limits ceiling_microusd model_label launch_sha256 state error_code authorization workflow receipt cancel_requested cleanup')
-    if (typeof graph !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(graph) || value.schema_version !== 1 || value.display_graph_id !== graph || !same(value.scope, ready.scope)) bad()
+    nativeLaunchPayload(payload, planning)
+    const checkpointed = payload.schema_version === 2
+    const identity = checkpointed ? [...identityKeys, 'checkpoint'] : identityKeys
+    fields(value, [...identity, 'launch_sha256', 'state', 'error_code', 'authorization', 'workflow', 'receipt', 'cancel_requested', 'cleanup'].join(' '))
+    if (typeof graph !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(graph) || value.schema_version !== payload.schema_version || value.display_graph_id !== graph || !same(value.scope, ready.scope)) bad()
+    if (checkpointed) {
+      checkpoint(value.checkpoint, payload.launch_id)
+      if (!checkpointReady(ready) || planning && !same(value.checkpoint, payload.checkpoint)) bad()
+    }
     fields(value.preparation, 'operation_id plan_sha256 simulation_id artifact_sha256')
     const binding = { operation_id: ready.operation_id, plan_sha256: ready.plan_sha256, simulation_id: ready.receipt.simulation_id, artifact_sha256: ready.receipt.artifact_sha256 }
     if (!same(value.preparation, binding)) bad()
     const r = value.request
-    fields(r, 'schema_version principal project_id project_revision simulation_id run_id artifact_sha256 runtime_sha256 platforms seed max_rounds')
-    if (r.schema_version !== 1 || typeof r.principal !== 'string' || !/^[\x20-\x7e]{1,128}$/.test(r.principal) || !r.principal.trim()) bad()
+    const continuing = checkpointed && value.checkpoint.mode === 'continue'
+    fields(r, 'schema_version principal project_id project_revision simulation_id run_id artifact_sha256 runtime_sha256 platforms seed max_rounds' + (continuing ? ' source_run_id checkpoint_sha256' : ''))
+    if (r.schema_version !== (continuing ? 2 : 1) || typeof r.principal !== 'string' || !/^[\x20-\x7e]{1,128}$/.test(r.principal) || !r.principal.trim()) bad()
+    if (continuing && (r.source_run_id !== value.checkpoint.source_run_id || r.checkpoint_sha256 !== value.checkpoint.checkpoint_sha256)) bad()
     uuid(r.project_id); uuid(r.run_id); int(r.project_revision, 2147483647); hash(r.artifact_sha256); hash(r.runtime_sha256)
     int(r.seed, 4294967295, 0); int(r.max_rounds, 24)
     if (r.project_id !== ready.scope.project_id || r.project_revision !== ready.project_revision || r.simulation_id !== binding.simulation_id || r.artifact_sha256 !== binding.artifact_sha256 || !same(r.platforms, ready.options.platforms) || r.seed !== ready.options.seed || r.max_rounds !== ready.options.max_rounds) bad()
@@ -83,12 +110,11 @@ export async function validateNativeLaunchResult(value, { graph, payload, prepar
     }
     if (value.state === 'completed' && value.receipt === null) bad()
     hash(value.launch_sha256)
-    if (value.launch_sha256 !== await sha256(enc.encode(ascii(Object.fromEntries(identityKeys.map(k => [k, value[k]])))))) bad()
-    nativeLaunchPayload(payload, planning)
+    if (value.launch_sha256 !== await sha256(enc.encode(ascii(Object.fromEntries(identity.map(k => [k, value[k]])))))) bad()
     if (r.run_id !== payload.launch_id) bad()
     if (planning) { if (payload.preparation.operation_id !== binding.operation_id || payload.preparation.plan_sha256 !== binding.plan_sha256 || !known && value.state !== 'planned') bad() }
     else if (!known || value.launch_sha256 !== payload.launch_sha256) bad()
-    if (known && (identityKeys.some(k => !same(value[k], known[k])) || value.launch_sha256 !== known.launch_sha256 || known.cancel_requested && !value.cancel_requested || known.workflow && !same(value.workflow, known.workflow) || known.receipt && (!same(value.receipt, known.receipt) || value.state !== known.state))) bad()
+    if (known && (identity.some(k => !same(value[k], known[k])) || value.launch_sha256 !== known.launch_sha256 || known.cancel_requested && !value.cancel_requested || known.workflow && !same(value.workflow, known.workflow) || known.receipt && (!same(value.receipt, known.receipt) || value.state !== known.state))) bad()
     return value
   } catch { bad('invalid_reply') }
 }

@@ -1,6 +1,6 @@
 // Receipt-bound reads only. This channel never starts an engine or a model.
 import { WorkbenchError, uniqueJson } from './workbench.js'
-import { nativeLaunchIdentity, validateNativeLaunchResult } from './nativeLaunch.js'
+import { nativeLaunchIdentity, observableNativeLaunch, validateNativeLaunchResult } from './nativeLaunch.js'
 import { sha256 } from './sourceLibrary.js'
 const encoder = new TextEncoder()
 const fail = (code = 'invalid_reply') => { throw new WorkbenchError(code) }
@@ -24,7 +24,7 @@ export const OBSERVATION_ERROR_STATUS = Object.freeze({ invalid_request: 400, no
 export function nativeObservationsPayload(value) {
   try {
     fields(value, 'schema_version launch_id launch_sha256 platform offset limit')
-    if (value.schema_version !== 1 || typeof value.launch_id !== 'string' || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(value.launch_id) || !['twitter', 'reddit'].includes(value.platform)) fail()
+    if (![1, 2].includes(value.schema_version) || typeof value.launch_id !== 'string' || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(value.launch_id) || !(value.schema_version === 2 ? ['twitter'] : ['twitter', 'reddit']).includes(value.platform)) fail()
     hash(value.launch_sha256); integer(value.offset, 10000); integer(value.limit, 20, 1)
     const raw = JSON.stringify(value); if (encoder.encode(raw).length > 4096) fail()
     return raw
@@ -34,7 +34,7 @@ export async function nativeObservationSelection(value, graph) {
   try {
     value = detach(value); fields(value, 'launch preparation')
     const launch = await validateNativeLaunchResult(value.launch, { graph, payload: nativeLaunchIdentity(value.launch), preparation: value.preparation, known: value.launch })
-    if (launch.state !== 'completed' || launch.receipt?.outcome !== 'completed') fail()
+    if (!observableNativeLaunch(launch)) fail()
     return { launch, preparation: value.preparation }
   } catch { fail() }
 }
@@ -71,18 +71,19 @@ export async function validateNativeObservationsResult(value, { graph, payload, 
     value = detach(value); payload = detach(payload); selection = detach(selection); if (knownPage) knownPage = detach(knownPage)
     nativeObservationsPayload(payload)
     const selected = await nativeObservationSelection(selection, graph)
-    if (payload.launch_id !== selected.launch.request.run_id || payload.launch_sha256 !== selected.launch.launch_sha256 || !selected.launch.request.platforms.includes(payload.platform)) fail()
+    if (payload.schema_version !== selected.launch.schema_version || payload.launch_id !== selected.launch.request.run_id || payload.launch_sha256 !== selected.launch.launch_sha256 || !selected.launch.request.platforms.includes(payload.platform)) fail()
     if (encoder.encode(JSON.stringify(value)).length > 262144) fail()
     fields(value, 'schema_version launch manifest platform offset limit total_records next_offset counts records')
-    if (value.schema_version !== 1 || value.platform !== payload.platform || value.offset !== payload.offset || value.limit !== payload.limit) fail()
+    if (value.schema_version !== payload.schema_version || value.platform !== payload.platform || value.offset !== payload.offset || value.limit !== payload.limit) fail()
     const launch = await validateNativeLaunchResult(value.launch, { graph, payload: nativeLaunchIdentity(selected.launch), preparation: selected.preparation, known: selected.launch })
-    if (launch.state !== 'completed' || ascii(launch.receipt) !== ascii(selected.launch.receipt)) fail()
+    if (!observableNativeLaunch(launch) || ascii(launch.receipt) !== ascii(selected.launch.receipt)) fail()
     fields(value.manifest, 'schema_version files')
-    const names = launch.request.platforms.flatMap(p => [p + '_simulation.db', p + '/actions.jsonl'])
+    const restored = launch.schema_version === 2
+    const names = restored ? ['native.sqlite3', 'actions.jsonl'] : launch.request.platforms.flatMap(p => [p + '_simulation.db', p + '/actions.jsonl'])
     if (value.manifest.schema_version !== 1 || !Array.isArray(value.manifest.files) || value.manifest.files.length !== names.length) fail()
     value.manifest.files.forEach((file, i) => {
       fields(file, 'name sha256 size'); hash(file.sha256); integer(file.size, 67108864)
-      if (file.name !== names[i] || file.name.endsWith('/actions.jsonl') && file.size > 8388608) fail()
+      if (file.name !== names[i] || file.name.endsWith('actions.jsonl') && file.size > 8388608) fail()
     })
     if (await sha256(encoder.encode(ascii(value.manifest))) !== launch.receipt.evidence_sha256) fail()
     integer(value.total_records, 10000)
@@ -105,7 +106,8 @@ export async function validateNativeObservationsResult(value, { graph, payload, 
       // The undisplayed records must be able to account for the remaining count.
       if (value.counts[key] < pageCounts[key] || value.counts[key] - pageCounts[key] > value.total_records - value.records.length) fail()
     }
-    const log = value.manifest.files.find(f => f.name === value.platform + '/actions.jsonl')
+    const logName = restored ? 'actions.jsonl' : value.platform + '/actions.jsonl'
+    const log = value.manifest.files.find(f => f.name === logName)
     // Every undisplayed object needs at least two bytes ({}), and adjacent
     // physical records need a one-byte LF separator. Known raw lengths replace
     // that two-byte floor; optional CRLF/final newline can only add bytes.
@@ -141,7 +143,7 @@ export function createNativeObservationsChannel({ fetchImpl, deadlineMs, connect
       const raw = nativeObservationsPayload(payload)
       payload = JSON.parse(raw); selection = detach(selection); if (knownPage) knownPage = detach(knownPage)
       const admitted = await guarded(nativeObservationSelection(selection, current.graph)); owned()
-      if (payload.launch_id !== admitted.launch.request.run_id || payload.launch_sha256 !== admitted.launch.launch_sha256 || !admitted.launch.request.platforms.includes(payload.platform)) fail('invalid_request')
+      if (payload.schema_version !== admitted.launch.schema_version || payload.launch_id !== admitted.launch.request.run_id || payload.launch_sha256 !== admitted.launch.launch_sha256 || !admitted.launch.request.platforms.includes(payload.platform)) fail('invalid_request')
       const response = await guarded(fetchImpl(`${current.origin}/api/native-observations/page/${current.graph}`, { method: 'POST', headers: { Authorization: `Bearer ${current.token}`, 'Content-Type': 'application/json' }, body: raw, signal: controller.signal, redirect: 'error', credentials: 'omit', cache: 'no-store', referrerPolicy: 'no-referrer' }))
       responseBody = response.body; owned()
       if ([401, 403].includes(response.status)) { denied(); fail(response.status === 401 ? 'unauthorized' : 'origin_denied') }

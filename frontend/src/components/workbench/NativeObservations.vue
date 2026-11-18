@@ -32,7 +32,7 @@ function changePlatform(event) {
 async function load(offset = 0) {
   if (locked.value) return
   const life = epoch, selection = JSON.parse(JSON.stringify(selected.value)), knownPage = page.value ? JSON.parse(JSON.stringify(page.value)) : null
-  const payload = { schema_version: 1, launch_id: selection.launch.request.run_id, launch_sha256: selection.launch.launch_sha256, platform: platform.value, offset, limit: 20 }
+  const payload = { schema_version: selection.launch.schema_version, launch_id: selection.launch.request.run_id, launch_sha256: selection.launch.launch_sha256, platform: platform.value, offset, limit: 20 }
   nativeObservationsPayload(payload)
   pending.value = true; error.value = ''; stale.value = false
   try {
