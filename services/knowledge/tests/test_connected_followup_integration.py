@@ -1,6 +1,8 @@
 """Main actual inherited source/native/report/followup journey; scripted offline transport."""
 import asyncio
 import base64
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 import hashlib
 import json
@@ -30,14 +32,14 @@ class FixturePhases:
         self.count = 0
         self.started = {}
 
-    def emit(self, phase, event, started, *, cleanup=False):
+    def emit(self, phase, event, started, *, cleanup=False, elapsed_seconds=None):
         active_error = sys.exception() if cleanup else None
         try:
             if self.count >= 128:
                 return
             now = time.monotonic()
-            elapsed = max(0.0, now - started)
-            if not math.isfinite(now) or not math.isfinite(elapsed) or now < 0:
+            elapsed = max(0.0, now - started) if elapsed_seconds is None else elapsed_seconds
+            if not math.isfinite(now) or not math.isfinite(elapsed) or now < 0 or elapsed < 0:
                 return
             self.count += 1
             record = dict(
@@ -183,6 +185,92 @@ class ScriptedFollowupTransport:
         with self.path.open('a',encoding='utf-8',newline='\n') as output:
             output.write(json.dumps(dict(closed=True,calls=self.count))+'\n')
 
+class RecoveryTimings:
+    """Measure local work inside each Windows recovery call."""
+    components = ('connection-acquisition', 'parent-verification', 'artifact-validation')
+
+    def __init__(self):
+        self.active = ContextVar('followup_recovery_timings', default=None)
+
+    @staticmethod
+    def clock():
+        try:
+            return time.perf_counter()
+        except Exception:
+            return None
+
+    def record(self, component, started, *, count=1):
+        try:
+            metrics = self.active.get()
+            if metrics is not None:
+                sample = metrics[component]
+                sample[0] += count
+                previous = sample[1]
+                sample[1] = None
+                if previous is None or started is None:
+                    return
+                ended = self.clock()
+                if ended is None:
+                    return
+                elapsed = ended - started
+                total = previous + elapsed
+                if elapsed >= 0 and math.isfinite(total):
+                    sample[1] = total
+        except Exception:
+            pass
+
+    def wrap(self, component, operation):
+        def measured(*args, **kwargs):
+            if self.active.get() is None:
+                return operation(*args, **kwargs)
+            started = self.clock()
+            try:
+                return operation(*args, **kwargs)
+            finally:
+                self.record(component, started)
+        return measured
+
+    def wrap_files(self, operation):
+        @contextmanager
+        def measured(*args, **kwargs):
+            if self.active.get() is None:
+                with operation(*args, **kwargs) as content:
+                    yield content
+                return
+            started = self.clock()
+            try:
+                with operation(*args, **kwargs) as content:
+                    self.record('artifact-validation', started, count=0)
+                    try:
+                        yield content
+                    finally:
+                        # Measure descriptor entry and exit, excluding the host
+                        # work performed while the descriptors are held.
+                        started = self.clock()
+            finally:
+                self.record('artifact-validation', started)
+        return measured
+
+    def run(self, operation, body, monkeypatch):
+        from app.services import durable_followup_host
+
+        metrics = {component: [0, 0.0] for component in self.components}
+        token = self.active.set(metrics)
+        try:
+            with monkeypatch.context() as probes:
+                # The history path calls freeze_parent directly. The imported
+                # verify_frozen_parent uses its own module's unwrapped freeze.
+                for name in ('freeze_parent', 'verify_frozen_parent'):
+                    probes.setattr(durable_followup_host, name, self.wrap(
+                        'parent-verification', getattr(durable_followup_host, name)))
+                probes.setattr(durable_followup_host, 'followup_files',
+                               self.wrap_files(durable_followup_host.followup_files))
+                result = operation(body)
+        finally:
+            self.active.reset(token)
+        return result, metrics
+
+
 @pytest.fixture(scope='module')
 def factory():
     from test_native_launch_store import factory as actual_factory
@@ -193,6 +281,11 @@ def factory():
 async def test_actual_report_followup_history_and_disabled_exports(factory, tmp_path, monkeypatch):
     global _followup_browser_completed
     browser_mode = _followup_browser_journey is True
+    recovery_timings = RecoveryTimings() if sys.platform == 'win32' and not browser_mode else None
+    if recovery_timings is not None:
+        # The fixture factory calls psycopg.connect on every invocation.
+        # Time acquisition only, preserving callers' transaction and close.
+        factory = recovery_timings.wrap('connection-acquisition', factory)
     _followup_browser_completed = False
     browser = None
     deadline = float(os.environ['NEXAWEAVE_FOLLOWUP_BROWSER_DEADLINE']) if browser_mode else None
@@ -561,8 +654,19 @@ async def test_actual_report_followup_history_and_disabled_exports(factory, tmp_
                 if browser_mode:
                     return await asyncio.to_thread(operation, body)
                 phases.start(phase)
-                result = await asyncio.to_thread(operation, body)
+                if recovery_timings is None:
+                    result = await asyncio.to_thread(operation, body)
+                else:
+                    result, metrics = await asyncio.to_thread(
+                        recovery_timings.run, operation, body, monkeypatch)
                 phases.end(phase)
+                if recovery_timings is not None:
+                    # Connection acquisition can be nested in parent
+                    # verification. These durations are not exclusive totals.
+                    for component, (count, elapsed) in metrics.items():
+                        if elapsed is not None:
+                            phases.emit(f'{phase}-{component}-calls-{count}',
+                                        'end', None, elapsed_seconds=elapsed)
                 return result
 
             phases.start('followup-disabled-history-exports-recovery')
