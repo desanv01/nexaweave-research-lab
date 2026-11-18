@@ -132,6 +132,25 @@ def _expected_prepared_profile(host, ready, original, ordinal):
     }}
 
 
+def configuration_reference(ready):
+    return {**reference(ready), 'source_revision': ready['source']['source_revision'],
+            'artifact_sha256': ready['receipt']['artifact_sha256']}
+
+
+def _expected_prepared_configuration(host, ready, original):
+    config = json.loads(original['simulation_config.json'])
+    options = ready['options']
+    topics = config['event_config']['hot_topics']
+    return {'success': True, 'data': {
+        **configuration_reference(ready), 'display_graph_id': host.display_graph_id, 'scope': host.scope_dto,
+        'project_revision': ready['project_revision'], 'goal': config['simulation_requirement'],
+        'time_activity': config['time_config'], 'hot_topics': topics[:64],
+        'hot_topics_omitted': max(0, len(topics) - 64),
+        'platform_controls': [config[platform + '_config'] for platform in options['platforms']],
+        'effective_controls': {key: options[key] for key in ('platforms', 'seed', 'max_rounds')},
+    }}
+
+
 def _installed_profile_bootstrap(reader_python, tmp_path, *, distinct, expected_bootstrap):
     import subprocess
     import sys
@@ -192,7 +211,7 @@ def assert_installed_prepared_profile(host, ready, original, source_revision, mo
                        KNOWLEDGE_READ_TOKEN=token, KNOWLEDGE_PREPARATION_ARTIFACT_ROOT=str(host.root.resolve()))
     expected = _expected_prepared_profile(host, ready, original, 0)
     selector = {**reference(ready), 'source_entity_uuid': ready['actors'][0]['source_entity_uuid']}
-    route = '/api/preparation/' + host.display_graph_id + '/profiles'
+    route = '/api/preparation/' + host.display_graph_id
     auth = {'Authorization': 'Bearer ' + token, 'Origin': 'http://localhost:3000'}
 
     started = []
@@ -210,18 +229,30 @@ def assert_installed_prepared_profile(host, ready, original, source_revision, mo
         configured.setattr(OwnedProcess, 'start', observe_start)
         with create_app().test_client() as client:
             assert not started
-            response = client.post(route, headers=auth, json=selector)
+            response = client.post(route + '/profiles', headers=auth, json=selector)
             assert response.status_code == 200
             assert 0 < len(response.data) <= RESULT_BYTES + ENVELOPE_OVERHEAD
             assert response.headers['Cache-Control'] == 'no-store'
             assert response.headers['X-Content-Type-Options'] == 'nosniff'
             assert response.headers['Access-Control-Allow-Origin'] == auth['Origin']
             assert response.json == expected
-    (owner, child, argv, cwd, keys), = started
-    assert Path(argv[0]) == reader_python and argv[1] == '-I' and set(argv[2:4]) == {'-B', '-u'}
-    assert len(argv) == 5 and Path(argv[4]).name == 'prepared_profile_inspection_child.py'
-    assert owner.closed and child.poll() == 0 and not cwd.exists()
-    assert not {'KNOWLEDGE_READ_TOKEN', 'KNOWLEDGE_NEO4J_PASSWORD', 'PYTHONPATH'} & keys
+            assert len(started) == 1
+            config_selector = configuration_reference(ready)
+            config_url = route + '/configuration'
+            assert client.post(config_url, json=config_selector).status_code == 401
+            assert client.post(config_url, headers=auth, json={**config_selector, 'path': 'simulation_config.json'}).status_code == 400
+            assert len(started) == 1
+            config = client.post(config_url, headers=auth, json=config_selector)
+            assert config.status_code == 200 and config.json == _expected_prepared_configuration(host, ready, original)
+            assert 0 < len(config.data) <= RESULT_BYTES + ENVELOPE_OVERHEAD
+            assert config.headers['Cache-Control'] == 'no-store'
+            assert config.headers['X-Content-Type-Options'] == 'nosniff'
+    assert len(started) == 2
+    for owner, child, argv, cwd, keys in started:
+        assert Path(argv[0]) == reader_python and argv[1] == '-I' and set(argv[2:4]) == {'-B', '-u'}
+        assert len(argv) == 5 and Path(argv[4]).name == 'prepared_profile_inspection_child.py'
+        assert owner.closed and child.poll() == 0 and not cwd.exists()
+        assert not {'KNOWLEDGE_READ_TOKEN', 'KNOWLEDGE_NEO4J_PASSWORD', 'PYTHONPATH'} & keys
 
 
 def test_pg_restart_duplicate_race_and_actual_inherited_publication(factory, tmp_path, monkeypatch):
@@ -230,6 +261,7 @@ def test_pg_restart_duplicate_race_and_actual_inherited_publication(factory, tmp
     import stat
     from pathlib import Path
     import sys
+    from hashlib import sha256
     from psycopg.conninfo import conninfo_to_dict
     from app import create_app
     from app.config import Config
@@ -237,8 +269,21 @@ def test_pg_restart_duplicate_race_and_actual_inherited_publication(factory, tmp
     from app.services.knowledge_preparation_facade import KnowledgePreparationFacade
     from app.services.knowledge_read_facade import ReadHostSettings
     from app.services.knowledge_transport import OwnedProcess
+    from test_provider_neutral_preparation import ScriptedChat
 
-    host, scope, retained, chat, wires, transport = real_host(factory, tmp_path)
+    topics = [f'fixture-topic-{index:02d}' for index in range(65)]
+
+    class ManyTopicsChat(ScriptedChat):
+        def create(self, **kwargs):
+            response = super().create(**kwargs)
+            if 'hot_topics' in kwargs['messages'][-1]['content']:
+                message = response.choices[0].message
+                event = json.loads(message.content)
+                event['hot_topics'] = topics
+                message.content = json.dumps(event)
+            return response
+
+    host, scope, retained, chat, wires, transport = real_host(factory, tmp_path, chat=ManyTopicsChat())
     payload = request(retained)
     planned = host.plan(payload)
     assert not chat.calls and transport.calls == 2
@@ -263,6 +308,20 @@ def test_pg_restart_duplicate_race_and_actual_inherited_publication(factory, tmp
     with pytest.raises(PreparationAuthorityError):
         host.generate(wires[0])
     assert len(chat.calls) == 4
+    assert ready['options']['platforms'] == ['twitter', 'reddit']
+
+    single_options = dict(payload['options'], platforms=['twitter'], max_rounds=1)
+    single_options.pop('twitter_to_reddit_seed_index', None)
+    single_planned = host.plan({**payload, 'operation_id': str(uuid4()), 'options': single_options})
+    host.start(reference(single_planned))
+    assert len(wires) == 2
+    host.generate(wires[1])
+    single_ready = host.status(reference(single_planned))
+    single_receipt = single_ready['receipt']
+    assert single_ready['state'] == 'ready'
+    assert fresh.get('owner', single_ready['operation_id']).receipt == single_receipt
+    single_root = tmp_path / single_receipt['simulation_id']
+    single_original = {pin['name']: (single_root / pin['name']).read_bytes() for pin in single_receipt['files']}
 
     class FixtureConfig(Config):
         DEBUG = False
@@ -298,6 +357,21 @@ def test_pg_restart_duplicate_race_and_actual_inherited_publication(factory, tmp
         assert stale.json == {'success': False, 'error': {'code': 'conflict'}}
         assert client.post(route, headers=auth, json={**selector, 'platform': 'twitter'}).status_code == 400
 
+    config_selector = configuration_reference(ready)
+    expected_config = _expected_prepared_configuration(host, ready, original)
+    assert json.loads(original['simulation_config.json'])['event_config']['hot_topics'] == topics
+    assert expected_config['data']['hot_topics'] == topics[:64]
+    assert expected_config['data']['hot_topics_omitted'] == 1
+    native, _ = host.bind_native(reference(ready), run_id=uuid4(), runtime_sha256='a' * 64, model_factory=dict)
+    assert expected_config['data']['effective_controls'] == {
+        'platforms': list(native.platforms), 'seed': native.seed, 'max_rounds': native.max_rounds}
+    single_expected = _expected_prepared_configuration(host, single_ready, single_original)
+    single_native, _ = host.bind_native(reference(single_ready), run_id=uuid4(),
+                                        runtime_sha256='a' * 64, model_factory=dict)
+    assert tuple(single_native.platforms) == ('twitter',) and single_native.max_rounds == 1
+    assert single_expected['data']['effective_controls'] == {
+        'platforms': ['twitter'], 'seed': single_native.seed, 'max_rounds': 1}
+
     configured_python = os.environ.get('KNOWLEDGE_PYTHON')
     reader_python = Path(configured_python or sys.executable)
     bootstrap = _installed_profile_bootstrap(reader_python, tmp_path, distinct=bool(configured_python),
@@ -318,6 +392,7 @@ def test_pg_restart_duplicate_race_and_actual_inherited_publication(factory, tmp
         'KNOWLEDGE_PREPARATION_ARTIFACT_ROOT': str(tmp_path.resolve()),
     }
     base = route.removesuffix('/profiles')
+    config_url = base + '/configuration'
     auth = {'Authorization': 'Bearer ' + token, 'Origin': 'http://localhost:3000'}
     native_import = builtins.__import__
     parent_dependencies = {'psycopg', 'nexaweave_knowledge', 'nexaweave_execution', 'nexaweave_storage'}
@@ -335,6 +410,24 @@ def test_pg_restart_duplicate_race_and_actual_inherited_publication(factory, tmp
         started.append((owner, child, tuple(argv), Path(kwargs['cwd']), set(kwargs['env'])))
         return child
 
+    def refuse_tamper(client, url, selection, filename, changed=None):
+        tampered = root / filename
+        sealed_mode = stat.S_IMODE(tampered.stat().st_mode)
+        editable_mode = sealed_mode | stat.S_IWUSR
+        try:
+            tampered.chmod(editable_mode)
+            tampered.write_bytes(original[filename] + b'\n' if changed is None else changed)
+            tampered.chmod(sealed_mode)
+            refused = client.post(url, headers=auth, json=selection)
+            assert refused.status_code == 409
+            assert refused.json == {'success': False, 'error': {'code': 'conflict'}}
+        finally:
+            try:
+                tampered.chmod(editable_mode)
+                tampered.write_bytes(original[filename])
+            finally:
+                tampered.chmod(sealed_mode)
+
     with monkeypatch.context() as configured:
         for key, value in settings.items():
             configured.setenv(key, value)
@@ -347,6 +440,11 @@ def test_pg_restart_duplicate_race_and_actual_inherited_publication(factory, tmp
             denied_origin = {**auth, 'Origin': 'http://denied.invalid'}
             assert client.post(route, headers=denied_origin, json=selector).status_code == 403
             assert client.post(route, headers=auth, json={**selector, 'platform': 'twitter'}).status_code == 400
+            assert client.post(config_url, json=config_selector).status_code == 401
+            assert client.post(config_url, headers=denied_origin, json=config_selector).status_code == 403
+            assert client.post(config_url, headers=auth, json={**config_selector, 'path': 'other.json'}).status_code == 400
+            foreign_url = '/api/preparation/graph_foreign/configuration'
+            assert client.post(foreign_url, headers=auth, json=config_selector).status_code == 404
             for method, body in [('plan', payload), ('start', reference(ready)), ('status', reference(ready))]:
                 unavailable = client.post(base + '/' + method, headers=auth, json=body)
                 assert unavailable.status_code == 503
@@ -361,22 +459,25 @@ def test_pg_restart_duplicate_race_and_actual_inherited_publication(factory, tmp
             assert foreign.status_code == 404 and foreign.json == {'success': False, 'error': {'code': 'not_found'}}
             stale = client.post(route, headers=auth, json={**selector, 'plan_sha256': '0' * 64})
             assert stale.status_code == 409 and stale.json == {'success': False, 'error': {'code': 'conflict'}}
-            tampered = root / 'twitter_profiles.csv'
-            sealed_mode = stat.S_IMODE(tampered.stat().st_mode)
-            editable_mode = sealed_mode | stat.S_IWUSR
-            try:
-                tampered.chmod(editable_mode)
-                tampered.write_bytes(original[tampered.name] + b'\n')
-                tampered.chmod(sealed_mode)
-                refused = client.post(route, headers=auth, json=selector)
-                assert refused.status_code == 409
-                assert refused.json == {'success': False, 'error': {'code': 'conflict'}}
-            finally:
-                try:
-                    tampered.chmod(editable_mode)
-                    tampered.write_bytes(original[tampered.name])
-                finally:
-                    tampered.chmod(sealed_mode)
+            refuse_tamper(client, route, selector, 'twitter_profiles.csv')
+            config = client.post(config_url, headers=auth, json=config_selector)
+            assert config.status_code == 200 and config.json == expected_config
+            assert config.headers['Cache-Control'] == 'no-store'
+            assert config.headers['X-Content-Type-Options'] == 'nosniff'
+            for field, replacement in [('source_revision', str(uuid4())), ('artifact_sha256', '0' * 64)]:
+                stale = client.post(config_url, headers=auth, json={**config_selector, field: replacement})
+                assert stale.status_code == 409
+                assert stale.json == {'success': False, 'error': {'code': 'conflict'}}
+            single_response = client.post(config_url, headers=auth, json=configuration_reference(single_ready))
+            assert single_response.status_code == 200 and single_response.json == single_expected
+            raw_config = original['simulation_config.json']
+            changed = raw_config.replace(b'fixture-topic-00', b'fixture-topic-XX', 1)
+            assert len(changed) == len(raw_config) and changed != raw_config
+            assert json.loads(changed)['event_config']['hot_topics'] == ['fixture-topic-XX', *topics[1:]]
+            config_pin = next(pin for pin in receipt['files'] if pin['name'] == 'simulation_config.json')
+            assert config_pin['size'] == len(changed) and config_pin['sha256'] == sha256(raw_config).hexdigest()
+            assert sha256(changed).hexdigest() != config_pin['sha256']
+            refuse_tamper(client, config_url, config_selector, 'simulation_config.json', changed)
             # Revoke only this fixture binding, keeping the owner READY row intact.
             with configured.context() as fixture_store:
                 fixture_store.setattr(builtins, '__import__', native_import)
@@ -390,12 +491,23 @@ def test_pg_restart_duplicate_race_and_actual_inherited_publication(factory, tmp
                 closed = client.post(route, headers=auth, json=selector)
                 assert closed.status_code == 503
                 assert closed.json == {'success': False, 'error': {'code': 'preparation_unavailable'}}
+                closed_config = client.post(config_url, headers=auth, json=config_selector)
+                assert closed_config.status_code == 503
+                assert closed_config.json == {'success': False, 'error': {'code': 'preparation_unavailable'}}
             finally:
                 with configured.context() as fixture_store:
                     fixture_store.setattr(builtins, '__import__', native_import)
                     assert host.bindings.bind('owner', host.display_graph_id, scope).scope == scope
+            with configured.context() as fixture_store:
+                fixture_store.setattr(builtins, '__import__', native_import)
+                updated = snapshot()
+                updated['name'] += ' revision'
+                ProjectStore(factory).update('owner', scope.project_id, ready['project_revision'], updated)
+            stale_project = client.post(config_url, headers=auth, json=config_selector)
+            assert stale_project.status_code == 409
+            assert stale_project.json == {'success': False, 'error': {'code': 'conflict'}}
     assert not blocked_imports
-    assert len(started) == 5
+    assert len(started) == 12
     for owner, child, argv, cwd, keys in started:
         assert Path(argv[0]) == reader_python and argv[1] == '-I' and set(argv[2:4]) == {'-B', '-u'}
         assert len(argv) == 5 and Path(argv[4]).name == 'prepared_profile_inspection_child.py'
@@ -404,6 +516,7 @@ def test_pg_restart_duplicate_race_and_actual_inherited_publication(factory, tmp
         assert not {'KNOWLEDGE_READ_TOKEN', 'KNOWLEDGE_NEO4J_PASSWORD', 'PYTHONPATH'} & keys
     assert (len(chat.calls), transport.calls, len(wires)) == prior_calls
     assert {name: (root / name).read_bytes() for name in original} == original
+    assert {name: (single_root / name).read_bytes() for name in single_original} == single_original
     with factory() as conn:
         assert host.budget._row(conn, host.account_id, UUID(payload['operation_id'])) == settled
     assert fresh.get('owner', selector['operation_id'], selector['plan_sha256']).receipt == receipt
