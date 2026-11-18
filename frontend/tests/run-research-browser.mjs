@@ -5,11 +5,11 @@ import { lstat, realpath, readdir, mkdtemp, mkdir, rm, open } from 'node:fs/prom
 import path from 'node:path'
 import { installBodyObserver, ontologyStages } from './research-browser-ontology.mjs'
 import { inspectPreparedProfiles } from './research-browser-prepared-profiles.mjs'
-import { inspectReadyConfiguration } from './research-browser-ready-configuration.mjs'
+import { browserMode, inspectReadyConfiguration, suggestPlatforms } from './research-browser-ready-configuration.mjs'
 
 const WIRE = 7200
 const FRONTEND = 'http://127.0.0.1:4317'
-const STAGES = ['connect', 'ontology-review', 'ontology-plan', 'ontology-execute', 'ontology-recover', 'preparation-plan', 'preparation-start', 'preparation-ready', 'native-start', 'native-ready', 'report-start', 'report-read', 'pdf-read-after-restart', 'close']
+const { stages: STAGES, twitterOnly } = browserMode(process.argv.slice(2))
 const UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/
 const HASH = /^[0-9a-f]{64}$/
 const decoder = new TextDecoder('utf-8', { fatal: true })
@@ -522,15 +522,7 @@ async function preparationPlan(command) {
   await scope.locator('#preparation-maximum').fill(String(options.max_agents))
   await scope.locator('#preparation-seed').fill(String(options.seed))
   await scope.locator('#preparation-rounds').fill(String(options.max_rounds))
-  requireTrue(same(options.platforms, ['twitter', 'reddit']))
-  const twitter = scope.getByLabel('Twitter', { exact: true })
-  const reddit = scope.getByLabel('Reddit', { exact: true })
-  await twitter.check(); await reddit.uncheck()
-  requireTrue(await twitter.isChecked() && !await reddit.isChecked())
-  await scope.locator('#preparation-requirement').fill(options.simulation_requirement)
-  await scope.locator('.suggest').click()
-  requireTrue(await twitter.isChecked() && await reddit.isChecked())
-  requireTrue(await scope.locator('.plan').count() === 0)
+  await suggestPlatforms({ scope, options, twitterOnly, requireTrue, same })
   const observed = await exchange(page, prepRoute('plan'), 'POST', () => scope.locator('.review').click(), 263168)
   requireTrue(observed.request.schema_version === 2 && observed.request.source_revision === pdf.source_revision && same(observed.request.source_revisions, request.source_revisions) && same(observed.request.options, options))
   requireTrue(observed.value.state === 'planned'); boundPreparation(observed.value)
@@ -551,10 +543,10 @@ async function preparationReady(command) {
   boundPreparation(observed.value); requireTrue(observed.value.state === 'ready' && observed.value.receipt)
   preparation = observed.value; digest(preparation.receipt.artifact_sha256)
   const route = prepRoute('profiles')
-  await inspectPreparedProfiles({ page, preparation, route, url: connection.api_origin + route, exchange, enabled, requireTrue, same, sha })
+  if (!twitterOnly) await inspectPreparedProfiles({ page, preparation, route, url: connection.api_origin + route, exchange, enabled, requireTrue, same, sha })
   const configRoute = prepRoute('configuration')
   await inspectReadyConfiguration({ page, preparation, route: configRoute, url: connection.api_origin + configRoute,
-    graph: connection.graph_id, project: orderedSources[0].project_id, exchange, enabled, requireTrue, keys, same, sha })
+    graph: connection.graph_id, project: orderedSources[0].project_id, twitterOnly, exchange, enabled, requireTrue, keys, same, sha })
   await enabled(page.locator('.native-launch .review'))
   return { reference: { ...prepReference(preparation), simulation_id: preparation.receipt.simulation_id, artifact_sha256: preparation.receipt.artifact_sha256 }, proof: sourceProof() }
 }
@@ -577,10 +569,12 @@ async function nativeReady(command) {
   const observed = await exchange(page, nativeRoute('status'), 'POST', () => scope.locator('.refresh').click(), 65664)
   boundLaunch(observed.value); requireTrue(observed.value.state === 'completed' && observed.value.receipt?.outcome === 'completed')
   launch = observed.value; digest(launch.receipt.evidence_sha256)
-  await enabled(scope.locator('.use-report')); await scope.locator('.use-report').click()
-  await enabled(page.locator('.connected-reports .report-review'))
-  requireTrue(await page.locator('.report-source-checkbox').count() === 0)
-  requireTrue(await page.locator('.report-prepared-sources li').count() === 4)
+  if (!twitterOnly) {
+    await enabled(scope.locator('.use-report')); await scope.locator('.use-report').click()
+    await enabled(page.locator('.connected-reports .report-review'))
+    requireTrue(await page.locator('.report-source-checkbox').count() === 0)
+    requireTrue(await page.locator('.report-prepared-sources li').count() === 4)
+  }
   return { reference: { ...launchReference(launch), evidence_sha256: launch.receipt.evidence_sha256 }, proof: { ...sourceProof(), preparation: prepReference(preparation) } }
 }
 async function reportStart(command) {

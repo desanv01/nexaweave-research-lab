@@ -20,21 +20,10 @@ import threading
 import time
 
 from app.utils.owned_process import OwnedProcess
+from research_browser_stages import FAILURE_PHASES, LAUNCH_ERRORS, ONTOLOGY, browser_stages
 
 ROOT = Path(__file__).resolve().parents[3]
-ONTOLOGY = ('ontology-review', 'ontology-plan', 'ontology-execute', 'ontology-recover')
-STAGES = ('connect', *ONTOLOGY, 'preparation-plan', 'preparation-start', 'preparation-ready',
-          'native-start', 'native-ready', 'report-start', 'report-read',
-          'pdf-read-after-restart', 'close')
-SECONDS = (60, 60, 60, 120, 60, 60, 60, 60, 60, 180, 180, 120, 60, 15)
 WIRE_BYTES = 7200
-FAILURE_PHASES = frozenset(('browser-launch', 'page-load', 'graph-connect',
-    'source-catalog', 'source-inspect', 'pdf-metadata', 'pdf-download', 'protocol', 'close', *ONTOLOGY))
-LAUNCH_ERRORS = frozenset(('launch-timeout', 'executable-missing', 'permission-refused',
-    'sandbox-refused', 'browser-closed', 'context-create-failed', 'page-create-failed', 'launch-unknown',
-    'namespace-refused', 'runtime-library-missing', 'crashpad-database-missing',
-    'profile-lock-refused', 'runtime-resource-refused', 'browser-process-sigtrap',
-    'browser-process-sigabrt', 'browser-process-exit1', 'cdp-protocol-refused'))
 
 
 def require(value, code='research_browser_refused'):
@@ -97,7 +86,10 @@ def failure_reply(reply, stage):
 
 class ResearchBrowserSession:
     """Same Flask/PG/Temporal hosts; only the actual UI dispatches mutations."""
-    def __init__(self, directory, prep, native_host, reports, selected, report_log):
+    def __init__(self, directory, prep, native_host, reports, selected, report_log, *, twitter_only=False):
+        require(type(twitter_only) is bool)
+        self.twitter_only = twitter_only
+        self.stages, self.seconds = browser_stages(twitter_only)
         require(os.name == 'posix' and sys.platform == 'linux')
         self.directory, self.prep = Path(directory), prep
         self.native_host, self.reports, self.selected = native_host, reports, selected
@@ -222,7 +214,8 @@ class ResearchBrowserSession:
                 native_launch_facade=NativeLaunchFacade(self.settings, host=self.native_host),
                 native_observations_facade=NativeObservationsFacade(self.settings,
                     host=NativeObservationsHost(launch_host=self.native_host)),
-                connected_report_facade=ConnectedReportFacade(self.settings, host=self.reports))
+                **({} if self.twitter_only else dict(
+                    connected_report_facade=ConnectedReportFacade(self.settings, host=self.reports))))
         finally:
             for key, value in previous.items():
                 if value is None:
@@ -335,7 +328,7 @@ class ResearchBrowserSession:
         self.server = self.server_thread = None
 
     def restart(self):
-        require(self.step < len(STAGES) and STAGES[self.step] in {
+        require(self.step < len(self.stages) and self.stages[self.step] in {
             'ontology-recover', 'pdf-read-after-restart'}, 'research_browser_restart_stage')
         port = self.port
         self._stop_http()
@@ -379,7 +372,7 @@ class ResearchBrowserSession:
 
     def _stdout(self, pipe):
         try:
-            for _ in STAGES:
+            for _ in self.stages:
                 raw = pipe.readline(WIRE_BYTES + 1)
                 if not raw:
                     return
@@ -451,8 +444,8 @@ class ResearchBrowserSession:
                     pass
                 require(time.monotonic() < ready, 'research_browser_vite_deadline')
                 time.sleep(.05)
-            self.driver = self._spawn([str(self.node), str(ROOT / 'frontend/tests/run-research-browser.mjs')],
-                                      protocol=True)
+            self.driver = self._spawn([str(self.node), str(ROOT / 'frontend/tests/run-research-browser.mjs')]
+                                      + (['--twitter-only'] if self.twitter_only else []), protocol=True)
             self.profile_root = Path(self.driver['directory'].name) / 'profile'
             self.profile_root.mkdir()
             self.perform('connect')
@@ -571,7 +564,7 @@ class ResearchBrowserSession:
         return self._perform(stage, request)
 
     def _perform(self, stage, request):
-        require(self.step < len(STAGES) and STAGES[self.step] == stage, 'research_browser_stage_order')
+        require(self.step < len(self.stages) and self.stages[self.step] == stage, 'research_browser_stage_order')
         if stage in ONTOLOGY:
             keys = {'source_revision'}
             if stage == 'ontology-plan':
@@ -580,7 +573,7 @@ class ResearchBrowserSession:
                 keys.add('operation_id')
             require(type(request) is dict and set(request) == keys
                     and request['source_revision'] == self.selected.revisions[0])
-        timeout = self._remaining(SECONDS[self.step])
+        timeout = self._remaining(self.seconds[self.step])
         end = time.monotonic() + timeout
         with self.lock:
             self.active, self.events, self.event_bytes = stage, deque(), 0
@@ -837,7 +830,7 @@ class ResearchBrowserSession:
             except Exception:
                 # Startup may precede Chrome creation; stage error is still primary.
                 pass
-        if self.driver and self.step == STAGES.index('close'):
+        if self.driver and self.step == self.stages.index('close'):
             try:
                 self.perform('close')
                 require(self.driver['process'].wait(timeout=3) == 0)

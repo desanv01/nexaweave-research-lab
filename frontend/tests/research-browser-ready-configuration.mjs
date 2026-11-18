@@ -4,8 +4,34 @@ const timeFields = ['total_simulation_hours', 'minutes_per_round', 'agents_per_h
 const periods = ['peak', 'off_peak', 'morning', 'work']
 const platformFields = ['viral_threshold', 'recency_weight', 'popularity_weight', 'relevance_weight', 'echo_chamber_strength']
 
+export function browserMode(args) {
+  const twitterOnly = args.length === 1 && args[0] === '--twitter-only'
+  if (args.length && !twitterOnly) throw new Error('research_browser_mode_refused')
+  const stages = ['connect', 'ontology-review', 'ontology-plan', 'ontology-execute', 'ontology-recover',
+    'preparation-plan', 'preparation-start', 'preparation-ready', 'native-start', 'native-ready']
+  if (!twitterOnly) stages.push('report-start', 'report-read', 'pdf-read-after-restart')
+  stages.push('close')
+  return { stages, twitterOnly }
+}
+
+export async function suggestPlatforms({ scope, options, twitterOnly, requireTrue, same }) {
+  requireTrue(same(options.platforms, twitterOnly ? ['twitter'] : ['twitter', 'reddit']))
+  const twitter = scope.getByLabel('Twitter', { exact: true })
+  const reddit = scope.getByLabel('Reddit', { exact: true })
+  if (twitterOnly) {
+    await twitter.uncheck(); await reddit.check()
+  } else {
+    await twitter.check(); await reddit.uncheck()
+  }
+  requireTrue(await twitter.isChecked() === !twitterOnly && await reddit.isChecked() === twitterOnly)
+  await scope.locator('#preparation-requirement').fill(options.simulation_requirement)
+  await scope.locator('.suggest').click()
+  requireTrue(await twitter.isChecked() && await reddit.isChecked() === !twitterOnly)
+  requireTrue(await scope.locator('.plan').count() === 0)
+}
+
 export async function inspectReadyConfiguration({
-  page, preparation, route, url, graph, project, exchange, enabled, requireTrue, keys, same, sha
+  page, preparation, route, url, graph, project, twitterOnly, exchange, enabled, requireTrue, keys, same, sha
 }) {
   const panel = page.locator('.preparation-workbench .prepared-configuration')
   const button = panel.locator('button.inspect-configuration')
@@ -36,7 +62,7 @@ export async function inspectReadyConfiguration({
 
     const effective = value.effective_controls
     keys(effective, ['platforms', 'seed', 'max_rounds'])
-    requireTrue(same(effective.platforms, ['twitter', 'reddit']) && same(effective.platforms, preparation.options.platforms) &&
+    requireTrue(same(effective.platforms, twitterOnly ? ['twitter'] : ['twitter', 'reddit']) && same(effective.platforms, preparation.options.platforms) &&
       effective.seed === preparation.options.seed && effective.max_rounds === 1 && effective.max_rounds === preparation.options.max_rounds)
 
     const activity = value.time_activity
@@ -51,7 +77,7 @@ export async function inspectReadyConfiguration({
     if (controls === null) notes.push(unavailable)
     const expected = {
       goal: value.goal,
-      effective: ['Twitter, Reddit', String(effective.seed), String(effective.max_rounds)],
+      effective: [twitterOnly ? 'Twitter' : 'Twitter, Reddit', String(effective.seed), String(effective.max_rounds)],
       time: activity === null ? [] : [
         ...timeFields.map(key => String(activity[key])),
         ...periods.flatMap(period => [
