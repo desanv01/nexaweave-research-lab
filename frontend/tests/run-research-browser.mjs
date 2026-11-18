@@ -5,6 +5,7 @@ import { lstat, realpath, readdir, mkdtemp, mkdir, rm, open } from 'node:fs/prom
 import path from 'node:path'
 import { installBodyObserver, ontologyStages } from './research-browser-ontology.mjs'
 import { inspectPreparedProfiles } from './research-browser-prepared-profiles.mjs'
+import { inspectReadyConfiguration } from './research-browser-ready-configuration.mjs'
 
 const WIRE = 7200
 const FRONTEND = 'http://127.0.0.1:4317'
@@ -551,6 +552,9 @@ async function preparationReady(command) {
   preparation = observed.value; digest(preparation.receipt.artifact_sha256)
   const route = prepRoute('profiles')
   await inspectPreparedProfiles({ page, preparation, route, url: connection.api_origin + route, exchange, enabled, requireTrue, same, sha })
+  const configRoute = prepRoute('configuration')
+  await inspectReadyConfiguration({ page, preparation, route: configRoute, url: connection.api_origin + configRoute,
+    graph: connection.graph_id, project: orderedSources[0].project_id, exchange, enabled, requireTrue, keys, same, sha })
   await enabled(page.locator('.native-launch .review'))
   return { reference: { ...prepReference(preparation), simulation_id: preparation.receipt.simulation_id, artifact_sha256: preparation.receipt.artifact_sha256 }, proof: sourceProof() }
 }
