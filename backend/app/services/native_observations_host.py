@@ -1,7 +1,9 @@
-"""Trusted authority reads only. No recovery, runtime polling, model or budget calls."""
+"""Receipt-bound observation reads and explicit pending event admission."""
+import hashlib
 import json
+from uuid import NAMESPACE_URL, uuid5
 from .native_observations_client import (NativeObservationsError, validate_payload, validate_result,
-    launch_reference, encoded)
+    launch_reference, encoded, stage_operation_id, stage_scope, validate_stage_payload)
 from .native_observation_reader import NativeObservationReader
 
 
@@ -53,7 +55,10 @@ class NativeObservationsHost:
         return row, prep, native, dto
 
     def page(self, payload):
-        payload = validate_payload(payload)
+        result, _, _, _ = self._read_page(validate_payload(payload))
+        return result
+
+    def _read_page(self, payload):
         row, prep, native, launch = self._authority(payload)  # All authority failures before file access.
         base = self.launch.preparation.root
         prepared_root = base / ('sim_' + prep.operation_id.hex)
@@ -70,7 +75,97 @@ class NativeObservationsHost:
                 raise NativeObservationsError('conflict')
             result = validate_result(dict(observed, schema_version=launch['schema_version'], launch=launch),
                                      self.display_graph_id, self.scope_dto, payload, self.principal)
-        return result
+        return result, row, prep, native
+
+    def stage_event(self, payload):
+        from nexaweave_execution.native_launch_store import _verify_checkpoint_source, _verify_current_preparation
+        from nexaweave_knowledge.bindings import ScopeBindingStore
+        from nexaweave_knowledge.contracts import KnowledgeScope, OntologySpec, SourceEnvelope
+        from nexaweave_knowledge.operations import Conflict, Ledger, NotFound, OperationState, StorageError, Tombstoned
+        from nexaweave_knowledge.operations import request_fingerprint
+
+        payload = validate_stage_payload(payload)
+        index = payload['record_index']
+        page, run, prep, native = self._read_page(dict(
+            launch_reference(payload), platform=payload['platform'], offset=index - 1, limit=3,
+        ))
+        # The restored writer appends one action bracketed by its round markers.
+        # Earlier successful actions belong to the copied checkpoint prefix.
+        if page['total_records'] != index + 2 or len(page['records']) != 3:
+            raise NativeObservationsError('conflict')
+        first, selected, last = page['records']
+        if selected['index'] != index or selected['record_sha256'] != payload['record_sha256']:
+            raise NativeObservationsError('conflict')
+        start, action, end = (json.loads(item['raw_json']) for item in (first, selected, last))
+        args = action.get('action_args')
+        round_number = action.get('round')
+        if (type(round_number) is not int or round_number < 1
+                or start.get('event_type') != 'round_start' or end.get('event_type') != 'round_end'
+                or any(type(marker.get('round')) is not int or marker['round'] != round_number
+                       for marker in (start, end))
+                or type(end.get('actions_count')) is not int or end['actions_count'] != 1
+                or action.get('action_type') != 'CREATE_POST' or action.get('success') is not True
+                or type(args) is not dict or type(args.get('content')) is not str or not args['content']
+                or type(args.get('post_id')) is not int or args['post_id'] < 1):
+            raise NativeObservationsError('conflict')
+
+        source_scope = KnowledgeScope.model_validate_json(encoded(self.scope_dto))
+        scope = KnowledgeScope.model_validate_json(encoded(stage_scope(self.scope_dto, payload['launch_id'])))
+        operation = stage_operation_id(payload['launch_id'], index)
+        ontology = OntologySpec(
+            revision=uuid5(NAMESPACE_URL, 'mirofish:restored-twitter-action-ontology:v1'),
+            entity_types=(
+                {'name': 'NativeActor', 'description': 'An actor in the native simulation'},
+                {'name': 'NativePost', 'description': 'A post created in the native simulation'},
+            ),
+            edge_types=({'name': 'AUTHORED', 'description': 'The actor created the post',
+                         'source_targets': ({'source': 'NativeActor', 'target': 'NativePost'},)},),
+        )
+        content = encoded({
+            'launch_sha256': run.launch_sha256, 'evidence_sha256': native.receipt.evidence_sha256,
+            'platform': 'twitter', 'record_index': index, 'record_sha256': selected['record_sha256'],
+            'raw_json': selected['raw_json'],
+        })
+        source = SourceEnvelope(
+            source_revision=operation, source_sha256=hashlib.sha256(content).hexdigest(),
+            ontology_revision=ontology.revision, operation_id=operation, source_kind='event',
+            content=content.decode('utf-8'), source_name='Restored Twitter action',
+            recorded_at=native.updated_at,
+            evidence_ids=(uuid5(operation, 'mirofish:restored-twitter-action-evidence:v1'),),
+        )
+        fingerprint = request_fingerprint(scope, source, ontology)
+
+        def authorize_admission(conn):
+            ScopeBindingStore(self.launch.connect).resolve_for_write(
+                conn, self.principal, self.display_graph_id, source_scope)
+            # Follow the native launch queue's lock order. Keep all locks through
+            # the pending operation insert on this same transaction.
+            current = self.launch.store._get(conn, self.principal, run.run_id, lock=True)
+            if current != run:
+                raise NativeObservationsError('conflict')
+            identity = run.frozen['identity']
+            _verify_current_preparation(conn, run.request, identity)
+            if self.launch.preparation.store._get(conn, self.principal, prep.operation_id) != prep:
+                raise NativeObservationsError('conflict')
+            _verify_checkpoint_source(conn, run.request, identity)
+            if self.launch.native._owned(self.principal, run.run_id, lock=True, conn=conn) != native:
+                raise NativeObservationsError('conflict')
+
+        try:
+            admitted = Ledger(self.launch.connect).admit(
+                scope, operation, fingerprint, authorize_admission=authorize_admission,
+            )
+        except Tombstoned:
+            raise NativeObservationsError('tombstoned') from None
+        except (Conflict, NotFound):
+            raise NativeObservationsError('conflict') from None
+        except StorageError:
+            raise NativeObservationsError('observations_unavailable') from None
+        if admitted.state != OperationState.pending:
+            raise NativeObservationsError('conflict')
+        return dict(payload, scope=scope.model_dump(mode='json'), operation_id=str(operation),
+                    fingerprint=fingerprint, state='pending', completion_barrier_open=False,
+                    graph_ingestion_executed=False)
 
     def _artifacts(self, prep, root):
         try:

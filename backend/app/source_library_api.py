@@ -103,7 +103,9 @@ def register_source_routes(app, settings, *, source_facade=None):
                      "source_original_read",
                      lambda graph_id, source_revision: run("binary_read", graph_id, source_revision),
                      methods=["GET"])
-    app.add_url_rule("/api/source/ontology/<graph_id>", "source_ontology_load",
-                     lambda graph_id: run("ontology_load", graph_id), methods=["GET"])
-    app.add_url_rule("/api/source/ontology/<graph_id>", "source_ontology_save",
-                     lambda graph_id: run("ontology_save", graph_id), methods=["POST"])
+    def ontology(graph_id):
+        operation = "ontology_save" if request.method == "POST" else "ontology_load"
+        return run(operation, graph_id)
+
+    app.add_url_rule("/api/source/ontology/<graph_id>", "source_ontology",
+                     ontology, methods=["GET", "POST"])

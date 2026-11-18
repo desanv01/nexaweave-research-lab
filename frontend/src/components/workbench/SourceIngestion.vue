@@ -15,6 +15,7 @@ const plan = ref(null), snapshot = ref(null), attempt = ref(null), outcome = ref
 const editingReviewed = ref(false), ontologyCopy = computed(() => reviewedOntologyCopyFor(props.locale))
 const loadedOntology = ref(null), projectDraft = ref(null), ontologyPending = ref(false)
 const ontologyStatus = ref('initial'), mustLoadOntology = ref(false), needsDraftChoice = ref(false)
+const ineligibleRevision = ref(null)
 const loadButton = ref(null)
 let ontologyEpoch = 0
 const emptyOntology = () => ({ entity_types: [], edge_types: [] })
@@ -86,6 +87,16 @@ const passages = computed(() => ingestionPassages(props.inspected))
 const selectedPassage = computed(() => passages.value.find(p => p.evidence_id === selectedEvidence.value))
 const wholeSourceEligible = computed(() => !!props.inspected && props.inspected.source.codepoint_length <= 32768 && props.inspected.source.codepoint_length > 0 && props.inspected.passages.length > 0)
 const eligible = computed(() => selectedEvidence.value ? !!selectedPassage.value : wholeSourceEligible.value)
+const savedIneligible = computed(() => ineligibleRevision.value !== null &&
+  ineligibleRevision.value === loadedOntology.value?.project_revision)
+const savedEligible = computed(() => editingReviewed.value && wholeSourceEligible.value &&
+  !!loadedOntology.value?.ontology && !ontologyDirty.value && !mustLoadOntology.value &&
+  !needsDraftChoice.value && !savedIneligible.value)
+const savedReviewCurrent = computed(() => savedEligible.value &&
+  snapshot.value?.source_revision === props.inspected?.source.source_revision &&
+  snapshot.value?.project_revision === loadedOntology.value?.project_revision)
+const executeDisabled = computed(() => locked.value || !reviewed.value ||
+  (snapshot.value?.schema_version === 4 ? !savedReviewCurrent.value : editingReviewed.value))
 const errorText = computed(() => {
   if (!error.value) return ''
   if (['model_calls_disabled', 'budget_denied', 'source_denied'].includes(error.value)) return copy.value.denied
@@ -112,8 +123,12 @@ function clearUnsentReview() {
   if (attempt.value) return
   generation++
   plan.value = null; snapshot.value = null; reviewed.value = false; outcome.value = null; phase.value = ''
+  pending.value = false; error.value = ''
 }
 watch([inlineEntities, inlineEdges], clearUnsentReview, { deep: true, flush: 'sync' })
+watch(projectDraft, () => {
+  if (editingReviewed.value) clearUnsentReview()
+}, { deep: true, flush: 'sync' })
 
 function clearProjectOntology() {
   ontologyEpoch++
@@ -124,6 +139,7 @@ function clearProjectOntology() {
   ontologyStatus.value = 'initial'
   mustLoadOntology.value = false
   needsDraftChoice.value = false
+  ineligibleRevision.value = null
 }
 function toggleOntologyMode() {
   if (unavailable.value) return
@@ -161,6 +177,7 @@ async function ontologyAction(working, action, apply, onError) {
 }
 function loadOntology() {
   if (!editingReviewed.value || unavailable.value) return
+  clearUnsentReview()
   const keepDraft = ontologyDirty.value || needsDraftChoice.value || mustLoadOntology.value && !!projectDraft.value
   const prior = loadedOntology.value
   return ontologyAction('loading', () => props.methods.loadOntology(prior), data => {
@@ -169,7 +186,10 @@ function loadOntology() {
       ontologyStatus.value = 'loadFailed'
       return
     }
-    if (prior?.project_revision !== data.project_revision) clearUnsentReview()
+    if (prior?.project_revision !== data.project_revision) {
+      clearUnsentReview()
+      ineligibleRevision.value = null
+    }
     const matchesDraft = sameOntologyValue(projectDraft.value, data.ontology)
     loadedOntology.value = data
     mustLoadOntology.value = false
@@ -191,6 +211,7 @@ function saveOntology() {
   return ontologyAction('saving', () => props.methods.saveOntology(payload, prior), data => {
     clearUnsentReview()
     loadedOntology.value = data
+    ineligibleRevision.value = null
     ontologyStatus.value = 'saved'
   }, code => {
     if (code === 'limit_exceeded') { ontologyStatus.value = 'limit'; return }
@@ -215,7 +236,7 @@ function defaultPair() {
 function addEdge() { if (!editorLocked.value && edges.value.length < 10) edges.value.push({ name: '', description: '', attributes: [], source_targets: [defaultPair()] }) }
 function addAttribute(item) { if (!editorLocked.value && item.attributes.length < attributeLimit.value) item.attributes.push({ name: '', description: '', type: 'text' }) }
 function addPair(edge) { if (!editorLocked.value && edge.source_targets.length < 10) edge.source_targets.push(defaultPair()) }
-async function request(action, apply) {
+async function request(action, apply, projectRevision = null) {
   if (unavailable.value) return
   const epoch = ++generation
   pending.value = true; outcome.value = null; error.value = ''; phase.value = 'working'
@@ -223,7 +244,20 @@ async function request(action, apply) {
     const data = await action()
     if (epoch !== generation || !props.connected) return
     apply(data); await nextTick(); reviewPanel.value?.focus()
-  } catch (e) { if (epoch === generation && props.connected) { error.value = e.code || 'invalid_reply'; phase.value = attempt.value ? 'unknown' : '' } }
+  } catch (e) {
+    if (epoch === generation && props.connected) {
+      if (projectRevision !== null && e?.code === 'conflict') {
+        mustLoadOntology.value = true
+        ontologyStatus.value = 'conflict'
+        plan.value = null; snapshot.value = null; reviewed.value = false
+      } else if (projectRevision !== null && e?.code === 'ontology_ineligible') {
+        ineligibleRevision.value = projectRevision
+        plan.value = null; snapshot.value = null; reviewed.value = false
+      }
+      error.value = savedIneligible.value && e?.code === 'ontology_ineligible' ? '' : e?.code || 'invalid_reply'
+      phase.value = attempt.value ? 'unknown' : ''
+    }
+  }
   finally { if (epoch === generation) pending.value = false }
 }
 async function makePlan() {
@@ -248,12 +282,29 @@ async function makePlan() {
     return request(() => props.methods.plan(payload, props.inspected), data => { snapshot.value = payload; plan.value = data; phase.value = 'planned' })
   } catch (e) { error.value = e.code || 'invalid_request' }
 }
+function makeSavedPlan() {
+  if (locked.value || !savedEligible.value) return
+  clearUnsentReview()
+  try {
+    const saved = loadedOntology.value
+    const payload = { schema_version: 4, source_revision: props.inspected.source.source_revision,
+      operation_id: freshId(), project_revision: saved.project_revision }
+    return request(() => props.methods.plan(payload, props.inspected, saved), data => {
+      if (!savedEligible.value || loadedOntology.value !== saved) return
+      snapshot.value = payload; plan.value = data; phase.value = 'planned'
+    }, saved.project_revision)
+  } catch (e) { error.value = e?.code || 'invalid_request' }
+}
 function execute() {
-  if (editingReviewed.value || unavailable.value || attempt.value || !plan.value || !snapshot.value || !reviewed.value) return
+  if (!plan.value || !snapshot.value || executeDisabled.value) return
+  const savedRequest = snapshot.value.schema_version === 4
+  const payload = savedRequest ? { ...snapshot.value, fingerprint: plan.value.fingerprint,
+    execution_fingerprint: plan.value.execution_fingerprint } : snapshot.value
   // Latch before entering any asynchronous code; every failure remains status-only.
-  attempt.value = { payload: snapshot.value, known: plan.value }
+  attempt.value = { payload, known: plan.value }
   reviewed.value = false
-  return request(() => props.methods.execute(attempt.value.payload, attempt.value.known), data => { outcome.value = data; phase.value = 'returned' })
+  return request(() => props.methods.execute(attempt.value.payload, attempt.value.known),
+    data => { outcome.value = data; phase.value = 'returned' }, savedRequest ? payload.project_revision : null)
 }
 function statusKnown() {
   if (!attempt.value) return
@@ -281,7 +332,7 @@ async function dismissPlan() { if (locked.value) return; plan.value = null; snap
       <dl><dt>{{ copy.revision }}</dt><dd>{{ inspected.source.source_revision }}</dd><dt>{{ copy.digest }}</dt><dd>{{ inspected.source.text_sha256 }}</dd><dt>{{ copy.codepoints }}</dt><dd>{{ inspected.source.codepoint_length }}<template v-if="!passages.length"> / 32768</template></dd></dl>
       <label v-if="passages.length" for="ingestion-passage">
         {{ passageCopy.selection }}
-        <select id="ingestion-passage" v-model="selectedEvidence" :disabled="locked">
+        <select id="ingestion-passage" v-model="selectedEvidence" :disabled="locked || editingReviewed">
           <option value="">{{ passageCopy.choose }}</option>
           <option v-for="passage in passages" :key="passage.evidence_id" :value="passage.evidence_id">
             {{ passageCopy.position(passage.ordinal, passage.count) }} · {{ passage.start }}–{{ passage.end }}<template v-if="passage.page !== null"> · {{ sourceCopy.page }} {{ passage.page }}</template> · {{ passage.evidence_id }}
@@ -296,6 +347,9 @@ async function dismissPlan() { if (locked.value) return; plan.value = null; snap
     </div>
     <template v-if="editingReviewed">
       <p id="reviewed-ontology-status" class="feedback" role="status" aria-live="polite" aria-atomic="true">{{ ontologyMessage }}<template v-if="loadedOntology?.project_revision === MAX_PROJECT_REVISION"> {{ ontologyCopy.exhausted }}</template></p>
+      <p id="saved-ingestion-help" class="help">{{ ontologyCopy.planHelp }}</p>
+      <p v-if="savedIneligible" id="saved-ingestion-ineligible" class="notice" role="status">{{ ontologyCopy.ineligible }}</p>
+      <button id="saved-ingestion-plan" ref="planButton" type="button" :disabled="locked || !savedEligible" :aria-describedby="savedIneligible ? 'saved-ingestion-help saved-ingestion-ineligible' : 'saved-ingestion-help'" @click="makeSavedPlan">{{ ontologyCopy.plan }}</button>
       <div v-if="needsDraftChoice && !mustLoadOntology" class="actions">
         <button id="reviewed-ontology-keep" type="button" :disabled="unavailable" @click="chooseOntologyDraft(true)">{{ ontologyCopy.keepDraft }}</button>
         <button type="button" :disabled="unavailable" @click="chooseOntologyDraft(false)">{{ ontologyCopy.useSaved }}</button>
@@ -348,14 +402,14 @@ async function dismissPlan() { if (locked.value) return; plan.value = null; snap
       </fieldset>
     </form>
     <p class="feedback" role="status" aria-live="polite" aria-atomic="true">{{ copy[phase] || '' }} {{ errorText }}</p>
-    <article v-if="plan && !editingReviewed" ref="reviewPanel" class="plan-review" tabindex="-1" @keydown.esc.stop.prevent="dismissPlan"><h3>{{ copy.review }}</h3><p>{{ copy.planFlags }}</p><dl><dt>{{ copy.operation }}</dt><dd class="operation-id">{{ plan.operation_id }}</dd><dt>{{ copy.episode }}</dt><dd>{{ plan.episode_id }}</dd><dt>{{ copy.fingerprint }}</dt><dd>{{ plan.fingerprint }}</dd><dt>{{ copy.evidence }}</dt><dd>{{ plan.evidence_ids.length }}</dd><dt>{{ copy.ontologyRevision }}</dt><dd>{{ plan.ontology_revision }}</dd></dl><ul><li v-for="id in plan.evidence_ids" :key="id">{{ id }}</li></ul>
+    <article v-if="plan && editingReviewed === (plan.schema_version === 4)" ref="reviewPanel" class="plan-review" tabindex="-1" @keydown.esc.stop.prevent="dismissPlan"><h3>{{ copy.review }}</h3><p>{{ copy.planFlags }}</p><dl><dt>{{ copy.operation }}</dt><dd class="operation-id">{{ plan.operation_id }}</dd><dt>{{ copy.episode }}</dt><dd>{{ plan.episode_id }}</dd><dt>{{ plan.schema_version === 4 ? ontologyCopy.reviewFingerprint : copy.fingerprint }}</dt><dd>{{ plan.fingerprint }}</dd><template v-if="plan.schema_version === 4"><dt>{{ ontologyCopy.executionFingerprint }}</dt><dd>{{ plan.execution_fingerprint }}</dd><dt>{{ ontologyCopy.projectRevision }}</dt><dd>{{ plan.project_revision }}</dd></template><dt>{{ copy.evidence }}</dt><dd>{{ plan.evidence_ids.length }}</dd><dt>{{ copy.ontologyRevision }}</dt><dd>{{ plan.ontology_revision }}</dd></dl><ul><li v-for="id in plan.evidence_ids" :key="id">{{ id }}</li></ul>
       <dl v-if="plan.window" class="passage-review">
         <dt>{{ passageCopy.selection }}</dt><dd>{{ passageCopy.position(plan.window.ordinal, plan.window.count) }}</dd>
         <dt>{{ sourceCopy.offsets }}</dt><dd>{{ plan.window.start }}–{{ plan.window.end }}</dd>
         <dt>{{ sourceCopy.page }}</dt><dd>{{ plan.window.page ?? sourceCopy.unknownLayout }}</dd>
         <dt>{{ sourceCopy.excerptDigest }}</dt><dd>{{ plan.window.sha256 }}</dd>
       </dl>
-      <p>{{ copy.charge }}</p><label class="acknowledgement"><input v-model="reviewed" type="checkbox" :disabled="!!attempt || unavailable">{{ copy.acknowledge }}</label><div class="actions"><button type="button" class="primary" :disabled="!reviewed || !!attempt || unavailable" @click="execute">{{ copy.execute }}</button><button type="button" :disabled="locked" @click="dismissPlan">{{ copy.dismiss }}</button></div>
+      <p>{{ copy.charge }}</p><label class="acknowledgement"><input v-model="reviewed" type="checkbox" :disabled="locked || (plan.schema_version === 4 && !savedReviewCurrent)">{{ copy.acknowledge }}</label><div class="actions"><button type="button" class="primary" :disabled="executeDisabled" @click="execute">{{ copy.execute }}</button><button type="button" :disabled="locked" @click="dismissPlan">{{ copy.dismiss }}</button></div>
     </article>
     <div v-if="attempt" class="attempt"><h3>{{ copy.submitted }}</h3><p class="operation-id">{{ attempt.known.operation_id }}</p><p>{{ copy.noRetry }}</p><button type="button" :disabled="unavailable" @click="statusKnown">{{ copy.checkStatus }}</button></div>
     <article v-if="outcome" class="outcome"><h3>{{ copy.outcome }}</h3><p class="operation-id">{{ outcome.operation_id }}</p><dl><dt>{{ copy.graphState }}</dt><dd>{{ copy.graphStates[outcome.state] }}</dd><dt>{{ copy.budgetState }}</dt><dd>{{ copy.budgetStates[outcome.budget_state] }}</dd><dt>{{ copy.ceiling }}</dt><dd>{{ outcome.ceiling_microusd ?? copy.unknown }}</dd><dt>{{ copy.actualCharge }}</dt><dd>{{ copy.unknown }}</dd><dt>{{ copy.modelCalls }}</dt><dd>{{ copy.unknown }}</dd></dl><p>{{ copy.separate }}</p></article>
