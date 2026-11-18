@@ -20,6 +20,7 @@ const connected = ref(false), busy = ref(false), status = ref('disconnected'), e
 const ingestionRequest = ref('')
 const bannerError = computed(() => {
   if (errorCode.value && ['unauthorized', 'origin_denied'].includes(errorCode.value)) return safeError(copy.value, errorCode.value)
+  if (errorCode.value === 'ontology_ineligible') return ''
   if (ingestionRequest.value && (errorCode.value || status.value === 'cancelled')) return copy.value.ingestionBanner[ingestionRequest.value]
   return errorCode.value ? safeError(copy.value, errorCode.value) : ''
 })
@@ -79,7 +80,7 @@ const preparationMethods = Object.freeze({
   status: payload => operation(() => client.preparationStatus(payload), false, true)
 })
 const ingestionMethods = Object.freeze({
-  plan: (payload, inspected) => operation(() => client.ingestionPlan(payload, inspected), false, true, 'plan'),
+  plan: (payload, inspected, saved) => operation(() => client.ingestionPlan(payload, inspected, saved?.scope, saved), false, true, 'plan'),
   execute: (payload, known) => operation(() => client.ingestionExecute(payload, known), false, true, 'execute'),
   status: (payload, known) => operation(() => client.ingestionStatus(payload, known, undefined, inspectedSource.value?.source.project_id), false, true, 'status'),
   loadOntology: known => operation(() => client.sourceOntologyLoad(known, inspectedSource.value?.source.project_id), false, true, '', false, true),

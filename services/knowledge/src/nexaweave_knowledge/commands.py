@@ -128,7 +128,11 @@ def _parse(raw: bytes) -> _Command:
             if not isinstance(payload, dict) or set(payload) != {"source", "ontology"}:
                 raise _BadRequest
             source = _nested_model(SourceEnvelope, payload["source"])
+            if not isinstance(payload["ontology"], dict) or "saved_ontology" in payload["ontology"]:
+                raise _BadRequest
             ontology = _nested_model(OntologySpec, payload["ontology"])
+            if any("examples" in entity for entity in payload["ontology"]["entity_types"]):
+                raise _BadRequest
             if source.ontology_revision != ontology.revision or len(set(source.evidence_ids)) != len(source.evidence_ids):
                 raise _BadRequest
             payload = (source, ontology)
