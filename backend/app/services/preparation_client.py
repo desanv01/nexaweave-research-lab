@@ -93,9 +93,11 @@ def options(value):
 def validate_payload(method, value):
     try:
         keys = {'schema_version', 'operation_id'} | ({'source_revision', 'options'} if method == 'plan' else {'plan_sha256'})
+        if method == 'configuration':
+            keys |= {'source_revision', 'artifact_sha256'}
         if method == 'plan' and type(value) is dict and value.get('schema_version') == 2:
             keys.add('source_revisions')
-        if method not in {'plan', 'start', 'status'} or type(value) is not dict or set(value) != keys:
+        if method not in {'plan', 'start', 'status', 'configuration'} or type(value) is not dict or set(value) != keys:
             raise ValueError
         integer(value['schema_version'], 1, 2 if method == 'plan' else 1)
         uuid_string(value['operation_id'])
@@ -107,6 +109,9 @@ def validate_payload(method, value):
                 source_revisions(value['source_revisions'], value['source_revision'])
         else:
             sha(value['plan_sha256'])
+            if method == 'configuration':
+                uuid_string(value['source_revision'])
+                sha(value['artifact_sha256'])
         if len(encoded(value)) > REQUEST_BYTES:
             raise ValueError
     except (ValueError, TypeError, KeyError, UnicodeError, RecursionError):

@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from knowledge_transport import _read_exact
 from preparation_client import ENVELOPE_OVERHEAD, REQUEST_BYTES, RESULT_BYTES, PreparationError, encoded
 from prepared_profile_inspection import (
-    PROFILE_ERRORS, PreparationReadAuthority, inspect_prepared_profile, profile_request, validate_profile_result,
+    PROFILE_ERRORS, PreparationReadAuthority, inspect_prepared, read_request, read_result,
 )
 
 
@@ -28,7 +28,7 @@ class _ReadAuthority(PreparationReadAuthority):
         self.projects, self.sources = ProjectStore(connect), SourceStore(connect)
 
 
-def _read_profile(settings, request, deadline):
+def _inspect(settings, request, deadline):
     import psycopg
 
     if settings.scope.layer != 'source' or settings.scope.run_id is not None or settings.scope.branch_id is not None:
@@ -47,10 +47,11 @@ def _read_profile(settings, request, deadline):
                                '-c statement_timeout=5000 -c lock_timeout=2000')
 
     host = _ReadAuthority(settings, root, connect)
+    method = request['method']
     payload = request['payload']
-    result = inspect_prepared_profile(host, payload, deadline=deadline)
+    result = inspect_prepared(method, host, payload, deadline=deadline)
     check()
-    return validate_profile_result(result, settings.display_graph_id, host.scope_dto, payload)
+    return read_result(method, result, settings.display_graph_id, host.scope_dto, payload)
 
 
 def main():
@@ -66,9 +67,9 @@ def main():
         from nexaweave_knowledge.source_library import SourceSettings
 
         settings = SourceSettings.from_environment()
-        request = profile_request(raw, settings.scope.model_dump(mode='json'))
+        request = read_request(raw, settings.scope.model_dump(mode='json'))
         request_id = request['request_id']
-        result = _read_profile(settings, request, deadline)
+        result = _inspect(settings, request, deadline)
         reply = encoded({'version': 1, 'request_id': request_id, 'ok': True, 'result': result})
         if len(reply) > RESULT_BYTES + ENVELOPE_OVERHEAD:
             raise PreparationError('result_too_large')
