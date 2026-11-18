@@ -3,7 +3,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { webcrypto } from 'node:crypto'
+import { createHash, webcrypto } from 'node:crypto'
 import { JSDOM } from 'jsdom'
 import { parse, compileScript } from '@vue/compiler-sfc'
 import { createWorkbenchClient } from '../src/api/workbench.js'
@@ -325,6 +325,194 @@ function retainedExportDossier(request) {
   const normalized = { ...request, valid_at: request.valid_at ?? null, recorded_before: request.recorded_before ?? null }
   return { schema_version: 1, mode: 'model_free_evidence_dossier', request: normalized, sections: request.sections.map((s, i) => ({ ordinal: i + 1, heading: s.heading, source_claim_keys: [], simulation_observation_keys: [], other_claim_keys: [] })), claims: [], references: [], research_trace: request.sections.map((s, i) => ({ ordinal: i + 1, request_sha256: 'a'.repeat(64), response_sha256: 'b'.repeat(64), query: s.query, top_k: s.top_k, display_graph_ids: request.display_graph_ids, valid_at: null, recorded_before: null, scopes: [{ display_graph_id: 'graph_1', scope, pages: 1, scanned: 0, eligible: 0, excluded: 0, unknown: 0, returned: 0, truncated: false }], passage_coverage: [], competing_claim_candidates: [], linked_citations: 0, resolved_citations: 0, unavailable_citations: 0, historical: false, historical_semantics: 'retained_edges_not_bitemporal_reconstruction', rank_basis: 'lexical_token_overlap' })), summary: { section_count: request.sections.length, query_count: request.sections.length, distinct_scoped_facts: 0, reference_links: 0, resolved_references: 0, unavailable_references: 0, query_reference_links: 0, query_resolved_references: 0, query_unavailable_references: 0, scanned_per_query_sum: 0, unknown_per_query_sum: 0, truncated_query_scopes: 0, passage_coverage: [], coverage_label: 'retrieved_passage_union_per_retained_revision' }, input_sha256: 'a'.repeat(64), trace_sha256: 'b'.repeat(64), records_sha256: 'c'.repeat(64), model_generated: false, semantic_judge_used: false, claim_support_status: 'not_reviewed', consistency: 'individually_guarded_queries_not_atomic_snapshot', limitations: ['Lexical only'], markdown: '\uFEFF# 中😀\r\n<script>inert</script> &#60;img&#62;' }
 }
+
+test('actual nested experiment comparison downloads one bounded current protected JSON attachment', async () => {
+  const media = 'application/vnd.nexaweave.comparison-report+json'
+  const filename = 'nexaweave-comparison-report.json'
+  const selection = { version: 1, title: malicious, member_ids: ['member:1', 'member:2'] }
+  const base = experimentCatalog()
+  const [left] = base.members
+  const cat = { ...base, members: [{ ...left, state: 'completed' }, {
+    ...left, member_id: 'member:2', member_label: 'Unavailable <script>猫</script>',
+    run_id: '22222222-2222-2222-2222-222222222222', state: 'running', seed: '0', cancel_requested: false
+  }] }
+  const hash = 'c'.repeat(64)
+  const tables = 'post follow like dislike comment comment_like comment_dislike mute trace'.split(' ')
+  const members = cat.members.map((member, i) => ({
+    ...member, disposition: i ? 'pending' : 'successful', project_revision: 1,
+    runtime_sha256: hash, prepared_artifact_sha256: hash, request_fingerprint: hash, record_digest: hash,
+    recording: i ? null : { version: 1, recording_revision: hash, platforms: ['twitter'], runtime_sha256: hash,
+      anchors: { graph_id: 'recorded.graph', simulation_id: 'simulation', branch_id: 'branch',
+        run_id: member.run_id, project_id: uuid, project_revision: 1 },
+      runtime_versions: { python: '3.11', sqlite: '3', oasis: '0.2', camel: '0.2' },
+      artifact_sha256: { 'simulation_config.json': hash, 'source_grounding.json': hash, 'twitter_profiles.csv': hash } },
+    metrics: i ? null : { twitter: { logged_action_total: 0, logged_action_by_type: {},
+      final_table_counts: Object.fromEntries(tables.map(table => [table, table === 'post' ? 0 : null])) } }
+  }))
+  const equalCell = value => ({ left: value, right: value, equal: true })
+  const pair = { left_member_id: 'member:1', right_member_id: 'member:2', fields: {
+    seed: { left: left.seed, right: '0', equal: false }, max_rounds: equalCell(2),
+    runtime_sha256: equalCell(hash), platforms: equalCell(['twitter']), project_revision: equalCell(1),
+    prepared_artifact_sha256: equalCell(hash),
+    artifact_sha256: { left: members[0].recording.artifact_sha256, right: null, equal: null },
+    runtime_versions: { left: members[0].recording.runtime_versions, right: null, equal: null }
+  } }
+  const coverage = { atomic_cohort_snapshot: false, statistics: 'descriptive_completed_available_observations_only',
+    labels_prove_controlled_intervention: false, hashes_prove_semantic_equivalence: false, digests_are_signatures: false,
+    possible_initial_log_duplicates: true, post_log_interviews_may_exist_in_trace: true, exact_event_row_links: false,
+    historical_or_causal_truth: false, missing_metrics_are_zero: false }
+  const dist = observed => ({ sample_count: observed ? 1 : 0, missing_count: observed ? 1 : 2,
+    min: observed ? 0 : null, max: observed ? 0 : null, arithmetic_mean: observed ? 0 : null,
+    median: observed ? 0 : null, population_standard_deviation: observed ? 0 : null })
+  const comparison = { version: 1, title: selection.title, project_id: uuid, project_revision: 1,
+    cohort_manifest_digest: cat.cohort_manifest_digest, public_projection_digest: 'd'.repeat(64),
+    native_result_digest: 'e'.repeat(64), coverage, members, comparability_matrix: [pair],
+    accounting: { successful: 1, failed: 0, cancelled: 0, pending: 1, uncertain: 0 },
+    cancellation_intent: { cancel_requested_count: 1, overlaps_disposition_accounting: true },
+    distinct_declared_seed_count: 2, distinct_successful_seed_count: 1, causal_attribution_supported: false,
+    provider_quality_assessed: false, shared_budget_enforcement_supported: false, actual_provider_spend: null,
+    ensemble_launch_supported: false, distributions: [{ case_label: 'Case', platform: 'twitter', member_count: 2,
+      successful_count: 1, non_successful_count: 1, distinct_declared_seed_count: 2, distinct_successful_seed_count: 1,
+      metrics: { logged_action_total: dist(true), logged_action_by_type: {},
+        final_table_counts: Object.fromEntries(tables.map(table => [table, dist(table === 'post')])) } }] }
+  const projection = { version: 1, title: selection.title, project_id: uuid, project_revision: 1,
+    cohort_manifest_digest: 'a'.repeat(64), public_projection_digest: 'd'.repeat(64), native_result_digest: 'e'.repeat(64),
+    coverage, members: members.map((member, i) => ({
+      member_id: member.member_id, member_label: member.member_label, case_label: 'Case', run_id: member.run_id,
+      disposition: i ? 'pending' : 'successful', project_revision: 1, request_fingerprint: hash, record_digest: hash,
+      recording_revision: i ? null : hash
+    })),
+    pairs: [{ ...pair, platform_differences: [{ platform: 'twitter', left_logged_action_total: 0,
+      right_logged_action_total: null, right_minus_left: null }] }] }
+  const canonical = value => JSON.stringify(value, (_key, item) =>
+    item && typeof item === 'object' && !Array.isArray(item)
+      ? Object.fromEntries(Object.keys(item).sort().map(key => [key, item[key]])) : item
+  ).replace(/[\u007f-\uffff]/g, unit => '\\u' + unit.charCodeAt(0).toString(16).padStart(4, '0'))
+  const attachment = (value, digest = createHash('sha256').update(canonical(value)).digest('hex')) =>
+    Buffer.from(canonical({ ...value, report_digest: digest }), 'ascii')
+  const original = attachment(projection)
+  const replyReport = (body = original, type = media, extra = {}) =>
+    new Response(body, { headers: { 'Content-Type': type, ...extra } })
+  const previousFetch = globalThis.fetch, priorCreate = URL.createObjectURL, priorRevoke = URL.revokeObjectURL
+  const priorClick = dom.window.HTMLAnchorElement.prototype.click
+  const calls = [], blobs = [], clicks = [], revoked = []
+  let nextAttachment = () => replyReport()
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, options })
+    if (url.endsWith('/api/graph/data/graph_1')) return response(graphResult)
+    if (url.endsWith('/api/experiments/catalog')) return response(cat)
+    assert.equal(url, 'http://127.0.0.1:5001/api/experiments/compare')
+    assert.equal(options.method, 'POST')
+    assert.deepEqual(JSON.parse(options.body), selection)
+    assert.equal(options.headers.Authorization, 'Bearer secret')
+    assert.equal(options.headers['Content-Type'], 'application/json')
+    assert.equal(options.redirect, 'error'); assert.equal(options.credentials, 'omit')
+    assert.equal(options.cache, 'no-store'); assert.equal(options.referrerPolicy, 'no-referrer')
+    return options.headers.Accept === undefined ? response(comparison) : nextAttachment()
+  }
+  URL.createObjectURL = blob => { blobs.push(blob); return 'blob:comparison-fixture' }
+  URL.revokeObjectURL = url => revoked.push(url)
+  dom.window.HTMLAnchorElement.prototype.click = function () {
+    assert.ok(document.body.contains(this))
+    clicks.push({ href: this.href, filename: this.download })
+  }
+  const mounted = mount(workbench.component)
+  const { root } = mounted
+  const button = () => root.querySelector('.comparison-download button')
+  const feedback = () => root.querySelector('.comparison-download [role="status"]')?.textContent
+  const waitFor = async condition => {
+    for (let i = 0; i < 150; i++) {
+      await settle()
+      if (condition()) return
+      await new Promise(resolve => setTimeout(resolve, 5))
+    }
+    assert.fail('Timed out awaiting the protected comparison control')
+  }
+  try {
+    assert.equal(calls.length, 0)
+    input(root, '#graph-id', 'graph_1'); input(root, '#bearer-token', 'secret')
+    root.querySelector('.connection-form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }))
+    await waitFor(() => !root.querySelector('.catalog-load').disabled)
+    root.querySelector('.catalog-load').click()
+    await waitFor(() => root.querySelector('#experiment-member-1'))
+    root.querySelector('#experiment-member-1').click()
+    root.querySelector('#experiment-member-0').click()
+    input(root, '#experiment-comparison-title', selection.title)
+    assert.equal(calls.length, 2)
+    await waitFor(() => !root.querySelector('.compare-submit').disabled)
+    root.querySelector('.compare-submit').click()
+    await waitFor(() => button() && !button().disabled)
+    assert.equal(document.activeElement, root.querySelector('.comparison-result'))
+    assert.equal(root.querySelector('.logged-total').textContent, '0')
+    assert.ok(root.querySelector('.unavailable-metrics'))
+    for (const locale of ['zh', 'ms', 'en']) {
+      input(root, '#workbench-language', locale); await settle()
+      assert.equal(button().textContent, copyFor(locale).exports.json)
+    }
+    assert.equal(calls.length, 3); assert.equal(blobs.length, 0)
+    assert.equal(root.querySelector('.experiment-comparison img, .experiment-comparison script, .experiment-comparison a'), null)
+    const sectionsBefore = document.querySelectorAll('a').length
+    button().focus(); button().click(); button().click()
+    await waitFor(() => feedback() === copyFor('en').exports.requested && !button().disabled)
+    assert.equal(calls.length, 4)
+    assert.equal(calls[3].options.headers.Accept, media)
+    assert.equal(calls[3].url, calls[2].url)
+    assert.equal(calls[3].options.body, calls[2].options.body)
+    assert.deepEqual(clicks, [{ href: 'blob:comparison-fixture', filename }])
+    assert.equal(blobs.length, 1); assert.equal(blobs[0].type, media)
+    assert.deepEqual(Buffer.from(await blobs[0].arrayBuffer()), original)
+    assert.equal(document.querySelectorAll('a').length, sectionsBefore)
+    assert.equal(document.activeElement, button())
+    assert.equal(root.querySelector('#bearer-token').value, '')
+    assert.ok(!root.textContent.includes('Bearer secret'))
+
+    const altered = structuredClone(projection)
+    altered.pairs[0].platform_differences[0].left_logged_action_total = null
+    const originalWire = original.toString('ascii')
+    const decimalWire = originalWire.replace('"left_logged_action_total":0,', '"left_logged_action_total":0.0,')
+    assert.notEqual(decimalWire, originalWire)
+    assert.deepEqual(JSON.parse(decimalWire), JSON.parse(originalWire))
+    for (const refusal of [
+      () => replyReport(original, 'application/json'),
+      () => replyReport(attachment(projection, '0'.repeat(64))),
+      () => replyReport(attachment({ ...projection, project_revision: 2 })),
+      () => replyReport(attachment(altered)),
+      () => replyReport(Buffer.from(decimalWire, 'ascii')),
+      () => replyReport(original, media, { 'Content-Length': '524289' }),
+      () => replyReport(new Uint8Array(524289)),
+      () => replyReport(Buffer.from('{"version":1,"version":1}')),
+      () => replyReport(new Uint8Array([0xff]))
+    ]) {
+      nextAttachment = refusal
+      const count = calls.length
+      button().click()
+      await waitFor(() => calls.length === count + 1 && !button().disabled &&
+        feedback() === copyFor('en').experiments.invalidReply)
+      assert.equal(blobs.length, 1); assert.equal(clicks.length, 1)
+    }
+    assert.deepEqual(revoked, ['blob:comparison-fixture'])
+    for (const action of ['cancel', 'disconnect']) {
+      let release
+      nextAttachment = () => new Promise(resolve => { release = resolve })
+      const count = calls.length
+      button().click()
+      await waitFor(() => release)
+      clickText(root, copyFor('en')[action])
+      await waitFor(() => calls.at(-1).options.signal.aborted)
+      release(replyReport())
+      await settle()
+      assert.equal(calls.length, count + 1)
+      assert.equal(blobs.length, 1); assert.equal(clicks.length, 1)
+      if (action === 'cancel') await waitFor(() => feedback() === copyFor('en').experiments.cancelled && !button().disabled)
+      else assert.equal(button(), null)
+    }
+  } finally {
+    mounted.cleanup()
+    globalThis.fetch = previousFetch
+    URL.createObjectURL = priorCreate; URL.revokeObjectURL = priorRevoke
+    dom.window.HTMLAnchorElement.prototype.click = priorClick
+  }
+})
 test('actual route admits dossier then exports locally; new request, disconnect, authorization failure and unmount clean its URL', async () => {
   for (const lifecycle of ['request', 'disconnect', 'authorization', 'unmount']) {
     const previousFetch = globalThis.fetch, priorCreate = URL.createObjectURL, priorRevoke = URL.revokeObjectURL, priorClick = dom.window.HTMLAnchorElement.prototype.click
