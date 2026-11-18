@@ -185,13 +185,92 @@ test('actual SFC never fetches on mount/locale change and uses native accessible
   } finally { m.cleanup() }
 })
 test('review is explicit, detached, inert, source-bound and invalidated by input changes', async () => {
-  let producer, calls = 0
-  const m = mount({ methods: { plan: async p => { calls++; return producer = planned(p) } } })
+  let producer, starts = 0, statuses = 0
+  const calls = []
+  const m = mount({ source: null, methods: {
+    plan: async (payload, inspected) => {
+      calls.push({ payload: clone(payload), source: clone(inspected) })
+      return producer = planned(payload)
+    },
+    start: () => { starts++ },
+    status: () => { statuses++ },
+  } })
+  const suggest = () => m.root.querySelector('.suggest')
+  const platformFields = () => [...m.root.querySelectorAll('.platforms input')]
+  const platforms = () => platformFields().map(field => field.checked)
+  async function guide(goal, expected, feedback) {
+    input(m.root, '#preparation-requirement', goal)
+    await nextTick()
+    suggest().click()
+    await nextTick()
+    assert.deepEqual(platforms(), expected)
+    assert.ok(m.root.querySelector('.feedback').textContent.includes(feedback))
+    assert.equal(calls.length, 0)
+    assert.equal(m.root.querySelector('.plan'), null)
+  }
   try {
-    begin(m.root); await settle(); assert.equal(calls, 1); assert.ok(m.root.querySelector('.plan')); assert.equal(m.root.querySelector('.start').disabled, false)
-    producer.actors[0].name = 'mutation'; await settle(); assert.ok(m.root.textContent.includes(hostile)); assert.equal(m.root.textContent.includes('mutation'), false); assert.equal(m.root.querySelector('img,script,a'), null)
+    assert.equal(suggest().type, 'button')
+    assert.equal(suggest().closest('fieldset').disabled, true)
+    m.props.source = clone(source)
+    await nextTick()
+    assert.deepEqual(platforms(), [true, false])
+    await guide('Do not use Reddit.', [true, false], preparationCopy.en.suggestionUnclear)
+    await guide('Ignore this example.\nUse Reddit.', [true, false], preparationCopy.en.suggestionUnclear)
+    await guide('The rejected option follows. Use Reddit.', [true, false], preparationCopy.en.suggestionUnclear)
+    await guide('Run a simulation after removing support on Reddit.', [true, false], preparationCopy.en.suggestionUnclear)
+    await guide('Simulate on Twitter or Reddit.', [true, false], preparationCopy.en.suggestionUnclear)
+    await guide('Use Reddit. Twitter may also be relevant.', [true, false], preparationCopy.en.suggestionUnclear)
+    await guide('Run on Reddit.', [false, true], preparationCopy.en.suggested)
+    await guide('Use Twitter.', [true, false], preparationCopy.en.suggested)
+    m.props.locale = 'zh'
+    await guide('使用 Twitter 和 Reddit。', [true, true], preparationCopy.zh.suggested)
+    m.props.locale = 'ms'
+    await guide('Sila gunakan Reddit.', [false, true], preparationCopy.ms.suggested)
+    m.props.locale = 'en'
+    const goal = 'Study responses 中😀.\nRun the simulation on both Twitter and Reddit.'
+    await guide(goal, [true, true], preparationCopy.en.suggested)
+
+    submit(m.root)
+    await settle()
+    assert.equal(calls.length, 1)
+    assert.deepEqual(calls[0].source, source)
+    assert.equal(calls[0].payload.schema_version, 1)
+    assert.equal(calls[0].payload.source_revision, source.source_revision)
+    assert.deepEqual(calls[0].payload.options, {
+      types: null, max_agents: 10, seed: 0, platforms: ['twitter', 'reddit'], max_rounds: 10, simulation_requirement: goal,
+    })
+    assert.ok(m.root.querySelector('.plan'))
+    assert.equal(m.root.querySelector('.start').disabled, false)
+    producer.actors[0].name = 'mutation'
+    await settle()
+    assert.ok(m.root.textContent.includes(hostile))
+    assert.equal(m.root.textContent.includes('mutation'), false)
+    assert.equal(m.root.querySelector('img,script,a'), null)
     assert.equal(document.activeElement, m.root.querySelector('.feedback'))
-    input(m.root, '#preparation-seed', '1'); await settle(); assert.equal(m.root.querySelector('.start'), null); assert.equal(m.root.querySelector('.plan'), null); assert.ok(m.root.textContent.includes(preparationCopy.en.changed)); assert.equal(calls, 1)
+
+    platformFields()[0].click()
+    await nextTick()
+    assert.deepEqual(platforms(), [false, true])
+    assert.equal(m.root.querySelector('.start'), null)
+    assert.equal(m.root.querySelector('.plan'), null)
+    assert.ok(m.root.textContent.includes(preparationCopy.en.changed))
+    assert.equal(calls.length, 1)
+    submit(m.root)
+    await settle()
+    assert.equal(calls.length, 2)
+    assert.deepEqual(calls[1].source, source)
+    assert.equal(calls[1].payload.source_revision, calls[0].payload.source_revision)
+    assert.deepEqual(calls[1].payload.options, { ...calls[0].payload.options, platforms: ['reddit'] })
+    assert.equal(m.root.querySelector('.start').disabled, false)
+
+    input(m.root, '#preparation-seed', '1')
+    await nextTick()
+    assert.equal(m.root.querySelector('.start'), null)
+    assert.equal(m.root.querySelector('.plan'), null)
+    assert.ok(m.root.textContent.includes(preparationCopy.en.changed))
+    assert.equal(calls.length, 2)
+    assert.equal(starts, 0)
+    assert.equal(statuses, 0)
   } finally { m.cleanup() }
 })
 test('integer boundaries are honest and rounds above accepted native 24 never request', async () => {
