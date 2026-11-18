@@ -111,22 +111,86 @@ def test_real_pg_project_revision_change_inside_reader_refuses_page(pg_factory, 
     assert launch.native.get('owner', row.run_id) == native
 
 
-@pytest.mark.postgres
-def test_real_pg_receipt_event_stage_replay_and_revision_before_insert(pg_factory, tmp_path, monkeypatch):
+def seed_receipt_event(pg_factory, root):
     from hashlib import sha256
-    from app import create_app
-    from app.services.knowledge_read_facade import ReadHostSettings
-    from app.services.native_observations_client import digest, encoded, stage_operation_id
-    from app.services.native_observations_facade import NativeObservationsFacade
-    from app.services.native_observations_host import NativeObservationsHost
+    from app.services.native_observations_client import digest, encoded
     from nexaweave_execution.native_run_contracts import NativeChildIdentity, NativeRunReceipt
     from nexaweave_knowledge.contracts import Layer
-    from nexaweave_knowledge.operations import Ledger
-    from nexaweave_storage import ProjectStore
     from test_native_launch_store import (
         _continuation, _put_authority, _terminal_source, _twitter_authority,
         declaration, launch_host, ready_host,
     )
+
+    root.mkdir()
+    prep, scope, plan = ready_host(pg_factory, root, checkpoint=True)
+    launch = launch_host(prep, pg_factory)
+    dto = launch.plan(declaration(plan))
+    template = launch.store.get('owner', dto['request']['run_id'])
+    producer = _terminal_source(pg_factory, prep, scope, launch, template, capture=True)
+    frozen = _twitter_authority(template, _continuation(producer))
+    planned = _put_authority(launch.store, frozen)
+    req = planned.request
+
+    # The store fixture assumes the native receipts. The restored output
+    # manifest and records still pass the real bounded observation reader.
+    prior = {'round': 1, 'action_type': 'CREATE_POST', 'success': True,
+             'action_args': {'content': 'copied prefix', 'post_id': 1}}
+    action = {'round': 2, 'action_type': 'CREATE_POST', 'success': True,
+              'agent_id': 0, 'agent_name': 'Recorded actor',
+              'action_args': {'content': 'restored action', 'post_id': 2}}
+    samples = tuple(encoded(event) for event in (
+        {'round': 1, 'event_type': 'round_start'}, prior,
+        {'round': 1, 'event_type': 'round_end', 'actions_count': 1},
+        {'round': 2, 'event_type': 'round_start'}, action,
+        {'round': 2, 'event_type': 'round_end', 'actions_count': 1},
+    ))
+    files = {
+        'native.sqlite3': b'Assumed owned native database fixture',
+        'actions.jsonl': b'\n'.join(samples) + b'\n',
+    }
+    output = prep.root / ('native_child_' + req.run_id.hex)
+    output.mkdir()
+    manifest = {'schema_version': 1, 'files': [
+        {'name': name, 'sha256': sha256(raw).hexdigest(), 'size': len(raw)}
+        for name, raw in files.items()
+    ]}
+    for name, raw in files.items():
+        (output / name).write_bytes(raw)
+
+    reservation = launch.budget.reserve_native(
+        'owner', prep.account_id, scope, req, planned.launch_sha256, 4)
+    queued, won = launch.store.queue('owner', req.run_id, planned.launch_sha256, reservation.attempt_id)
+    assert won and queued.dispatch_claimed
+    launch.native.register(req)
+    owner = uuid4()
+    claim = launch.native.claim_start('owner', req.run_id, owner)
+    child = NativeChildIdentity(uuid4(), 12345, 'f' * 64)
+    launch.native.attach('owner', req.run_id, claim.attempt_id, owner, child)
+    receipt = NativeRunReceipt(req.run_id, claim.attempt_id, child.instance_id,
+                               req.fingerprint, 'completed', digest(manifest))
+    terminal = launch.native.settle('owner', req.run_id, claim.attempt_id, owner, receipt)
+    completed = launch.store.observe('owner', req.run_id, planned.launch_sha256, terminal)
+    launch.store.workflow('owner', req.run_id, completed.launch_sha256, {
+        'workflow_id': 'mf-native-v1-' + req.run_id.hex + '-' + req.fingerprint,
+        'temporal_run_id': str(uuid4()), 'native_run_id': str(req.run_id),
+    })
+
+    payload = {'schema_version': 2, 'launch_id': str(req.run_id), 'launch_sha256': completed.launch_sha256,
+               'platform': 'twitter', 'record_index': 4, 'record_sha256': sha256(samples[4]).hexdigest()}
+    return launch, payload, scope.model_copy(update={
+        'layer': Layer.simulation, 'run_id': req.run_id,
+    }), sha256(samples[1]).hexdigest()
+
+
+@pytest.mark.postgres
+def test_real_pg_receipt_event_stage_replay_and_revision_before_insert(pg_factory, tmp_path, monkeypatch):
+    from app import create_app
+    from app.services.knowledge_read_facade import ReadHostSettings
+    from app.services.native_observations_client import stage_operation_id
+    from app.services.native_observations_facade import NativeObservationsFacade
+    from app.services.native_observations_host import NativeObservationsHost
+    from nexaweave_knowledge.operations import Ledger
+    from nexaweave_storage import ProjectStore
 
     token = '0123456789abcdef' * 4
     monkeypatch.setenv('NEXAWEAVE_APP_MODE', 'research_local')
@@ -135,59 +199,7 @@ def test_real_pg_receipt_event_stage_replay_and_revision_before_insert(pg_factor
     auth = {'Authorization': 'Bearer ' + token}
 
     def seed(root):
-        root.mkdir()
-        prep, scope, plan = ready_host(pg_factory, root, checkpoint=True)
-        launch = launch_host(prep, pg_factory)
-        dto = launch.plan(declaration(plan))
-        template = launch.store.get('owner', dto['request']['run_id'])
-        producer = _terminal_source(pg_factory, prep, scope, launch, template, capture=True)
-        frozen = _twitter_authority(template, _continuation(producer))
-        planned = _put_authority(launch.store, frozen)
-        req = planned.request
-
-        # The store fixture assumes the native receipts. The restored output
-        # manifest and records still pass the real bounded observation reader.
-        prior = {'round': 1, 'action_type': 'CREATE_POST', 'success': True,
-                 'action_args': {'content': 'copied prefix', 'post_id': 1}}
-        action = {'round': 2, 'action_type': 'CREATE_POST', 'success': True,
-                  'action_args': {'content': 'restored action', 'post_id': 2}}
-        samples = tuple(encoded(event) for event in (
-            {'round': 1, 'event_type': 'round_start'}, prior,
-            {'round': 1, 'event_type': 'round_end', 'actions_count': 1},
-            {'round': 2, 'event_type': 'round_start'}, action,
-            {'round': 2, 'event_type': 'round_end', 'actions_count': 1},
-        ))
-        files = {
-            'native.sqlite3': b'Assumed owned native database fixture',
-            'actions.jsonl': b'\n'.join(samples) + b'\n',
-        }
-        output = prep.root / ('native_child_' + req.run_id.hex)
-        output.mkdir()
-        manifest = {'schema_version': 1, 'files': [
-            {'name': name, 'sha256': sha256(raw).hexdigest(), 'size': len(raw)}
-            for name, raw in files.items()
-        ]}
-        for name, raw in files.items():
-            (output / name).write_bytes(raw)
-
-        reservation = launch.budget.reserve_native(
-            'owner', prep.account_id, scope, req, planned.launch_sha256, 4)
-        queued, won = launch.store.queue('owner', req.run_id, planned.launch_sha256, reservation.attempt_id)
-        assert won and queued.dispatch_claimed
-        launch.native.register(req)
-        owner = uuid4()
-        claim = launch.native.claim_start('owner', req.run_id, owner)
-        child = NativeChildIdentity(uuid4(), 12345, 'f' * 64)
-        launch.native.attach('owner', req.run_id, claim.attempt_id, owner, child)
-        receipt = NativeRunReceipt(req.run_id, claim.attempt_id, child.instance_id,
-                                   req.fingerprint, 'completed', digest(manifest))
-        terminal = launch.native.settle('owner', req.run_id, claim.attempt_id, owner, receipt)
-        completed = launch.store.observe('owner', req.run_id, planned.launch_sha256, terminal)
-        launch.store.workflow('owner', req.run_id, completed.launch_sha256, {
-            'workflow_id': 'mf-native-v1-' + req.run_id.hex + '-' + req.fingerprint,
-            'temporal_run_id': str(uuid4()), 'native_run_id': str(req.run_id),
-        })
-
+        launch, payload, scope, prefix_hash = seed_receipt_event(pg_factory, root)
         settings = ReadHostSettings('python', 'read_bootstrap.py', token, 'owner',
                                     launch.display_graph_id, launch.scope_dto, {})
         with monkeypatch.context() as patch:
@@ -195,11 +207,7 @@ def test_real_pg_receipt_event_stage_replay_and_revision_before_insert(pg_factor
             app = create_app(native_observations_facade=NativeObservationsFacade(
                 settings, host=NativeObservationsHost(launch_host=launch)))
         route = '/api/native-observations/stage-event/' + launch.display_graph_id
-        payload = {'schema_version': 2, 'launch_id': str(req.run_id), 'launch_sha256': completed.launch_sha256,
-                   'platform': 'twitter', 'record_index': 4, 'record_sha256': sha256(samples[4]).hexdigest()}
-        return app.test_client(), route, payload, scope.model_copy(update={
-            'layer': Layer.simulation, 'run_id': req.run_id,
-        }), sha256(samples[1]).hexdigest()
+        return app.test_client(), route, payload, scope, prefix_hash
 
     client, route, request, scope, prefix_hash = seed(tmp_path / 'stage')
     assert client.post(route, json=request).status_code == 401
