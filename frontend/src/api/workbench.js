@@ -286,7 +286,7 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
     if (method === 'experimentCompare') {
       try { experimentRequest = experimentSelection(payload, ingestionContext); payload = experimentRequest.payload } catch { fail('invalid_request') }
     }
-    const ingestionRaw = ingestion ? ingestionPayload(payload, method === 'ingestionStatus') : undefined
+    const ingestionRaw = ingestion ? ingestionPayload(payload, method === 'ingestionStatus', method === 'ingestionExecute') : undefined
     if (ingestion) {
       payload = JSON.parse(ingestionRaw)
       ingestionContext = JSON.parse(JSON.stringify({ ...ingestionContext, ...(ingestionScope ? { scope: ingestionScope } : {}) }))
@@ -331,6 +331,11 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
         const { known } = ingestionContext
         if (known?.schema_version !== 2 || known.source_revision !== payload.source_revision ||
             known.ontology_revision !== payload.ontology.revision || known.window?.evidence_id !== payload.evidence_id) fail('invalid_request')
+      }
+      if (method === 'ingestionExecute' && payload.schema_version === 4) {
+        const { known } = ingestionContext
+        if (known?.schema_version !== 4 || ['source_revision', 'operation_id', 'project_revision', 'fingerprint', 'execution_fingerprint']
+          .some(key => known[key] !== payload[key])) fail('invalid_request')
       }
       const sourcePaths = { sourceList: 'library', sourceGet: 'item', sourceRetain: 'retain', sourceRetainOriginal: 'retain-original', sourceOriginalMetadata: 'original-metadata', sourceOriginalRead: 'original', sourceOntologyLoad: 'ontology', sourceOntologySave: 'ontology' }
       const ingestionPaths = { ingestionPlan: 'plan', ingestionExecute: 'execute', ingestionStatus: 'operation' }
@@ -377,6 +382,11 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
       if (!obj(value) || typeof value.success !== 'boolean') fail()
       if (!response.ok || !value.success) {
         shape(value, 'success error'); shape(value.error, 'code')
+        if (ingestion && (response.status === 422 || value.error.code === 'ontology_ineligible')) {
+          if (value.success !== false || response.status !== 422 || value.error.code !== 'ontology_ineligible' ||
+              payload.schema_version !== 4 || !['ingestionPlan', 'ingestionExecute'].includes(method)) fail()
+          fail('ontology_ineligible')
+        }
         if (value.success !== false || !(ontology ? Object.hasOwn(REVIEWED_ONTOLOGY_ERROR_STATUS, value.error.code) && response.status === REVIEWED_ONTOLOGY_ERROR_STATUS[value.error.code] : native ? NATIVE_LAUNCH_CODES.has(value.error.code) && response.status === NATIVE_ERROR_STATUS[value.error.code] : preparation ? PREPARATION_CODES.has(value.error.code) : SERVER_CODES.has(value.error.code) || experiment && response.status === 503 && value.error.code === 'experiment_unavailable' || (source || ingestion) && ['source_unavailable', 'source_denied', 'outcome_unknown', 'cancelled', 'uncertain', 'model_calls_disabled', 'budget_denied'].includes(value.error.code))) fail()
         if (['unauthorized', 'origin_denied'].includes(value.error.code)) disconnect()
         fail(value.error.code)
@@ -482,7 +492,7 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
     connectedFollowupDownload: (payload, known) => followups.download(payload, known),
     connectedFollowupHistory: payload => followups.history(payload),
     clearConnectedFollowups: () => followups.clear(),
-    ingestionPlan: (payload, inspected, scope) => request('ingestionPlan', payload, { inspected, scope }),
+    ingestionPlan: (payload, inspected, scope, saved) => request('ingestionPlan', payload, { inspected, scope, saved }),
     ingestionExecute: (payload, known) => request('ingestionExecute', payload, { known, scope: known.scope }),
     ingestionStatus: (payload, known, scope, project) => request('ingestionStatus', payload, { known, scope, project }),
     cancel, cancelShared, disconnect

@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from threading import Event
 from types import ModuleType
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 import pytest
 from psycopg.conninfo import conninfo_to_dict
@@ -268,7 +268,8 @@ finally:
 """
 
 
-def test_installed_saved_ontology_dry_plan_revision_and_repeat(factory, tmp_path):
+def test_installed_saved_ontology_dry_plan_revision_and_repeat(factory, tmp_path, monkeypatch):
+    from nexaweave_execution.budgeted_ingestion import BudgetedIngestion
     display, scope, retained = owned_fixture(factory)
     projects = ProjectStore(factory)
     original = projects.get("owner", scope.project_id)
@@ -327,6 +328,11 @@ def test_installed_saved_ontology_dry_plan_revision_and_repeat(factory, tmp_path
     planned = framed("plan", payload)
     result = planned["result"]
     assert set(planned) == {"ok", "result"} and planned["ok"] is True
+    assert set(result) == {"schema_version", "scope", "operation_id", "episode_id", "fingerprint",
+                           "evidence_ids", "source_revision", "source_sha256", "source_byte_length",
+                           "source_codepoint_length", "ontology_revision", "eligibility_codepoint_limit",
+                           "spending_authorized", "graph_ingestion_executed", "model_calls_made",
+                           "actual_usage_microusd", "project_revision"}
     assert result["schema_version"] == 3 and result["project_revision"] == saved.revision
     assert result["scope"] == scope_wire and result["operation_id"] == str(operation)
     assert result["episode_id"] == str(scope.episode_uuid(operation))
@@ -353,13 +359,32 @@ def test_installed_saved_ontology_dry_plan_revision_and_repeat(factory, tmp_path
         saved_identity,
         legacy["result"]["fingerprint"].encode("ascii"),
     ))).hexdigest()
+    assert result["ontology_revision"] == str(uuid5(
+        NAMESPACE_URL, "mirofish:saved-ontology:v3:" + saved_identity.decode("utf-8")))
     assert result["fingerprint"] == expected_fingerprint
     assert framed("execute", payload) == {"ok": False, "error": {"code": "invalid_request"}}
+    v4_payload = dict(payload, schema_version=4)
+    v4 = framed("plan", v4_payload)["result"]
+    assert v4["schema_version"] == 4 and v4["project_revision"] == saved.revision
+    assert v4["ontology_revision"] == str(uuid5(
+        NAMESPACE_URL, "mirofish:saved-ontology:v4:" + saved_identity.decode("utf-8")))
+    inline_v4 = {**inline, "ontology": {**inline["ontology"], "revision": v4["ontology_revision"]}}
+    untagged_v4 = framed("plan", inline_v4)["result"]["fingerprint"]
+    assert v4["fingerprint"] == hashlib.sha256(b"\0".join((
+        b"mirofish:source-ingestion:saved-ontology-plan:v4", saved_identity, untagged_v4.encode("ascii"),
+    ))).hexdigest()
+    assert len(v4["execution_fingerprint"]) == 64
+    assert len({v4["execution_fingerprint"], v4["fingerprint"], expected_fingerprint, untagged_v4}) == 4
+    execution = dict(v4_payload, fingerprint=v4["fingerprint"], execution_fingerprint=v4["execution_fingerprint"])
+    assert framed("execute", dict(execution, schema_version=3)) == {
+        "ok": False, "error": {"code": "invalid_request"},
+    }
 
     advanced = review.save(expected_revision=saved.revision, ontology=reviewed)
     assert advanced.revision == saved.revision + 1 and advanced.snapshot == saved.snapshot
     conflict = {"ok": False, "error": {"code": "conflict"}}
     assert framed("plan", payload) == conflict
+    assert framed("execute", execution) == conflict
     newer = framed("plan", dict(payload, project_revision=advanced.revision))
     updated = newer["result"]
     assert newer["ok"] is True
@@ -368,10 +393,40 @@ def test_installed_saved_ontology_dry_plan_revision_and_repeat(factory, tmp_path
     assert updated == dict(result, project_revision=advanced.revision,
                            fingerprint=updated["fingerprint"], ontology_revision=updated["ontology_revision"])
 
-    unsupported = dict(reviewed, entity_types=[dict(reviewed["entity_types"][0], examples=["Example"])])
-    outside = review.save(expected_revision=advanced.revision, ontology=unsupported)
-    assert framed("plan", dict(payload, project_revision=outside.revision)) == conflict
-    assert projects.history("owner", scope.project_id) == [original, saved, advanced, outside]
+    with_examples = dict(reviewed, entity_types=[dict(reviewed["entity_types"][0], examples=["Example"])])
+    current = review.save(expected_revision=advanced.revision, ontology=with_examples)
+    assert framed("plan", dict(payload, project_revision=current.revision)) == conflict
+    current_payload = dict(v4_payload, project_revision=current.revision)
+    current_plan = framed("plan", current_payload)["result"]
+    assert current_plan["project_revision"] == current.revision
+    assert current_plan["execution_fingerprint"] != v4["execution_fingerprint"]
+
+    # Change the persisted revision after the draft is rechecked and immediately
+    # before the spending transaction. The installed child above covers framing.
+    admitted = BudgetedIngestion._admit_saved
+    advanced_at_admission = []
+    outside = dict(reviewed, entity_types=[dict(reviewed["entity_types"][0], attributes=[
+        dict(reviewed["entity_types"][0]["attributes"][0], description="a" * 501),
+    ])])
+    def advance_before_admission(self, *args):
+        advanced_at_admission.append(review.save(expected_revision=current.revision, ontology=outside))
+        return admitted(self, *args)
+    monkeypatch.setattr(BudgetedIngestion, "_admit_saved", advance_before_admission)
+    settings = IngestionSettings(SourceSettings("owner", display, scope, {}), True, True, account, 4,
+                                configured()[0].provider_environment)
+    constructed = []
+    host = SourceIngestionHost(settings, connection_factory=factory,
+                               provider_factory=lambda: constructed.append(True))
+    attempted = reply(host, "execute", dict(current_payload, fingerprint=current_plan["fingerprint"],
+                                          execution_fingerprint=current_plan["execution_fingerprint"]))
+    assert attempted["error"] == conflict["error"] and attempted["ok"] is False
+    assert len(advanced_at_admission) == 1 and constructed == []
+    outside_payload = dict(v4_payload, project_revision=advanced_at_admission[0].revision)
+    assert framed("plan", outside_payload) == {"ok": False, "error": {"code": "ontology_ineligible"}}
+    assert framed("execute", dict(execution, project_revision=outside_payload["project_revision"])) == {
+        "ok": False, "error": {"code": "ontology_ineligible"},
+    }
+    assert projects.history("owner", scope.project_id) == [original, saved, advanced, current, *advanced_at_admission]
     with pytest.raises(OperationNotFound):
         Ledger(factory).get(scope, operation)
     with factory() as conn:
