@@ -436,6 +436,7 @@ test('actual nested experiment comparison downloads one bounded current protecte
     root.querySelector('.catalog-load').click()
     await waitFor(() => root.querySelector('#experiment-member-1'))
     root.querySelector('#experiment-member-1').click()
+    await settle()
     root.querySelector('#experiment-member-0').click()
     input(root, '#experiment-comparison-title', selection.title)
     assert.equal(calls.length, 2)
