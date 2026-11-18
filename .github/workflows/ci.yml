@@ -228,6 +228,10 @@ jobs:
           backend/.venv/bin/python tools/run_connected_report_tests.py --integration --caller-cancel
           backend/.venv/bin/python tools/run_connected_report_tests.py --integration --store-only
           backend/.venv/bin/python tools/run_connected_followup_tests.py --integration --store-only
+      - name: Qualify restored event dispatch through installed HTTP and graph writer
+        env:
+          KNOWLEDGE_PYTHON: ${{ github.workspace }}/services/knowledge/.venv/bin/python
+        run: backend/.venv/bin/python tools/run_workbench_evidence_tests.py --event-dispatch
       - name: Test database diagnostics on failure
         if: failure()
         run: docker compose -f infra/compose.knowledge-test.yml logs --tail 100 neo4j
