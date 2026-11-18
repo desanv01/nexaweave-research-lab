@@ -313,6 +313,9 @@ async def test_actual_http_installed_pipe_retained_evidence_history_and_denial(r
 _EVENT_HTTP_CHILD = (_HTTP_CHILD
     .replace("blocked=('nexaweave_knowledge','graphiti_core'", "blocked=('neo4j','graphiti_core'")
     .replace("'read_bootstrap.py','evidence_bootstrap.py'}", "'native_observation_event_bootstrap.py'}")
+    .replace("len(arguments)==4 and arguments[1:3]", "len(arguments)>=4 and arguments[4:] in ([],['--verify-uncertain']) and arguments[1:3]")
+    .replace("'bootstrap':Path(arguments[3]).name if len(arguments)==4 else None",
+             "'bootstrap':Path(arguments[3]).name if len(arguments)>=4 else None,'verify':arguments[4:]==['--verify-uncertain']")
     .replace("server=make_server", """
 from app.services.native_observations_event_runtime import EventRuntime
 from nexaweave_knowledge.contracts import KnowledgeScope
@@ -429,6 +432,62 @@ async def _event_dispatch_failure(body, saved, output_path, writer, scope, episo
     return json.dumps(summary, sort_keys=True)
 
 
+async def _recover_event_ack(send, writer, ledger, scope, operation, episode, request, uncertain):
+    """Exercise the same request and attempt with absent, altered and committed evidence."""
+    from uuid import uuid5
+
+    params = {"group": scope.group_id, "episode": episode, "attempt": str(uncertain.current_attempt),
+              "foreign": str(operation)}
+
+    async def graph(query):
+        rows, _, _ = await writer.execute_query(query, parameters_=params)
+        return rows
+
+    async def snapshot():
+        nodes = await graph(
+            "MATCH (n {group_id:$group}) RETURN labels(n) AS labels, properties(n) AS props "
+            "ORDER BY n.uuid, labels")
+        links = await graph(
+            "MATCH (a {group_id:$group})-[r]->(b {group_id:$group}) "
+            "RETURN a.uuid AS src, b.uuid AS dst, type(r) AS kind, properties(r) AS props "
+            "ORDER BY src, dst, kind")
+        return nodes, links
+
+    baseline = await snapshot()
+    marker = "MATCH (m:MiroFishIngest {uuid:$episode,group_id:$group}) "
+    post = "MATCH (:Episodic {uuid:$episode,group_id:$group})-[:MENTIONS]->(p:NativePost {group_id:$group}) "
+    for change, restore in (
+        (marker + "REMOVE m:MiroFishIngest SET m:FixtureHiddenEventAck",
+         "MATCH (m:FixtureHiddenEventAck {uuid:$episode,group_id:$group}) "
+         "REMOVE m:FixtureHiddenEventAck SET m:MiroFishIngest"),
+        (marker + "SET m.attempt_id=$foreign", marker + "SET m.attempt_id=$attempt"),
+        (post + "SET p.summary='fixture altered post'", post + "SET p.summary='restored action'"),
+    ):
+        try:
+            await graph(change)
+            altered = await snapshot()
+            assert altered != baseline
+            status, failure = await send("dispatch-event", request)
+            assert status == 503 and failure == {"success": False, "error": {"code": "observations_unavailable"}}
+            assert ledger.get(scope, operation) == uncertain
+            assert await snapshot() == altered
+        finally:
+            await graph(restore)
+        assert await snapshot() == baseline
+    expected_receipt = {
+        "group_id": scope.group_id, "episode_id": episode, "fingerprint": uncertain.fingerprint,
+        "evidence_ids": [str(uuid5(operation, "mirofish:restored-twitter-action-evidence:v1"))],
+    }
+    status, recovered = await send("dispatch-event", request)
+    assert status == 200 and recovered["data"]["receipt"] == expected_receipt
+    saved = ledger.get(scope, operation)
+    assert saved.state.value == "completed" and saved.current_attempt == uncertain.current_attempt
+    assert saved.error_code is None and saved.receipt.json_value() == expected_receipt
+    assert await send("dispatch-event", request) == (200, recovered)
+    assert ledger.get(scope, operation) == saved and await snapshot() == baseline
+    return saved
+
+
 @pytest.mark.asyncio
 async def test_actual_protected_restored_event_dispatch_replay_and_lost_ack(retained_graph, tmp_path, monkeypatch):
     from hashlib import sha256
@@ -529,8 +588,9 @@ async def test_actual_protected_restored_event_dispatch_replay_and_lost_ack(reta
                 assert saved.current_attempt is not None
                 if lost_ack:
                     assert status == 503 and saved.state.value == "uncertain" and saved.receipt is None
-                    assert (await send("dispatch-event", request))[0] in (409, 503)
-                    assert ledger.get(target_scope, operation) == saved
+                    assert saved.error_code == "event_ack_uncertain"
+                    saved = await _recover_event_ack(send, f["writer"], ledger, target_scope,
+                                                     operation, episode, request, saved)
                 else:
                     assert status == 200 and saved.state.value == "completed"
                     assert dispatched["data"]["receipt"] == saved.receipt.json_value()
@@ -553,6 +613,14 @@ async def test_actual_protected_restored_event_dispatch_replay_and_lost_ack(reta
                 assert json.loads(marker["scope_json"]) == target_scope.model_dump(mode="json")
                 assert marker["status"] == "complete" and len(marker["evidence_ids"]) == 1
                 with f["factory"]() as conn:
+                    assert conn.execute(
+                        "SELECT attempt_id,outcome,error_code FROM mf_knowledge.attempts "
+                        "WHERE group_id=%s AND operation_id=%s", (target_scope.group_id, operation),
+                    ).fetchall() == [(saved.current_attempt, "completed", None)]
+                    assert conn.execute(
+                        "SELECT attempt_id FROM mf_knowledge.scope_admissions WHERE group_id=%s",
+                        (target_scope.group_id,),
+                    ).fetchone() is None
                     assert conn.execute("SELECT count(*) FROM mf_execution.reservations WHERE operation_id=%s",
                                         (operation,)).fetchone() == (0,)
                 process.stdin.write(b"x")
@@ -562,7 +630,9 @@ async def test_actual_protected_restored_event_dispatch_replay_and_lost_ack(reta
             events = _events(output_path)
             spawned = [event for event in events if event.get("event") == "spawn"]
             closed = [event for event in events if event.get("event") == "cleanup"]
-            assert len(spawned) == len(closed) == 1 and spawned[0]["safe"] and closed[0]["closed"]
+            assert len(spawned) == len(closed) == (5 if lost_ack else 1)
+            assert all(event["safe"] for event in spawned) and all(event["closed"] for event in closed)
+            assert [event["verify"] for event in spawned] == [False] + [True] * (4 if lost_ack else 0)
             assert [event for event in events if event.get("event") == "graph_ack"] == [
                 {"event": "graph_ack", "attempt_id": str(saved.current_attempt)}]
             assert {"event": "shutdown", "loopback_blocked": 0} in events
