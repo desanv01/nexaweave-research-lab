@@ -304,3 +304,218 @@ async def test_actual_http_installed_pipe_retained_evidence_history_and_denial(r
     preserved = await EvidenceResearchService("owner", f["factory"], f["new_driver"],
         trusted_scope=f["source"]).research(research)
     assert preserved == expected
+
+
+_EVENT_HTTP_CHILD = (_HTTP_CHILD
+    .replace("blocked=('nexaweave_knowledge','graphiti_core'", "blocked=('neo4j','graphiti_core'")
+    .replace("'read_bootstrap.py','evidence_bootstrap.py'}", "'native_observation_event_bootstrap.py'}")
+    .replace("server=make_server", """
+from app.services.native_observations_event_runtime import EventRuntime
+from nexaweave_knowledge.contracts import KnowledgeScope
+from nexaweave_knowledge.operations import Ledger
+from uuid import UUID
+import psycopg
+original_write=EventRuntime.write
+def observe_event_write(self, payload):
+    reply=original_write(self,payload)
+    extra=self.environment
+    def connect():
+        return psycopg.connect(host=extra['KNOWLEDGE_PG_HOST'],port=int(extra['KNOWLEDGE_PG_PORT']),
+            dbname=extra['KNOWLEDGE_PG_DATABASE'],user=extra['KNOWLEDGE_PG_USER'],
+            password=extra['KNOWLEDGE_PG_PASSWORD'],connect_timeout=3)
+    scope=KnowledgeScope.model_validate_json(json.dumps(payload['scope']))
+    row=Ledger(connect).get(scope,UUID(payload['operation_id']))
+    assert row.state.value=='running' and str(row.current_attempt)==payload['attempt_id']
+    assert reply['marker']['attempt_id']==payload['attempt_id']
+    emit({'event':'graph_ack','attempt_id':payload['attempt_id']})
+    if os.environ.get('WORKBENCH_TEST_EVENT_LOST_ACK')=='1':
+        raise OSError('test lost committed graph acknowledgement')
+    return reply
+EventRuntime.write=observe_event_write
+server=make_server"""))
+
+
+async def _invalid_event_writer(backend, directory, env, path, request, token):
+    directory.mkdir()
+    output_path = directory / "server-events.jsonl"
+    invalid_env = dict(env, NEXAWEAVE_OBSERVATION_NEO4J_URI="bolt://127.0.0.1:65536")
+    with output_path.open("wb") as output, (directory / "errors.log").open("wb") as errors:
+        process = subprocess.Popen([str(backend), "-I", "-u", "-c", _EVENT_HTTP_CHILD],
+            stdin=subprocess.PIPE, stdout=output, stderr=errors, cwd=directory, env=invalid_env,
+            shell=False, close_fds=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        try:
+            deadline = time.monotonic() + 20
+            ready = []
+            while time.monotonic() < deadline and process.poll() is None:
+                ready = [event for event in _events(output_path) if event.get("event") == "ready"]
+                if ready:
+                    break
+                await asyncio.sleep(0.05)
+            assert ready, "invalid writer settings must leave HTTP available"
+            status, _, body = await asyncio.to_thread(_exchange, ready[0]["port"], "POST", path, request, token=token)
+            assert status == 503 and body == {"success": False, "error": {"code": "observations_unavailable"}}
+            process.stdin.write(b"x")
+            process.stdin.flush()
+            process.stdin.close()
+            assert await asyncio.to_thread(process.wait, timeout=10) == 0
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    await asyncio.to_thread(process.wait, timeout=2)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    await asyncio.to_thread(process.wait, timeout=5)
+            if not process.stdin.closed:
+                process.stdin.close()
+    events = _events(output_path)
+    assert not [event for event in events if event.get("event") in {"spawn", "graph_ack"}]
+    assert {"event": "shutdown", "loopback_blocked": 0} in events
+
+
+@pytest.mark.asyncio
+async def test_actual_protected_restored_event_dispatch_replay_and_lost_ack(retained_graph, tmp_path, monkeypatch):
+    from hashlib import sha256
+    from uuid import UUID
+
+    root = Path(__file__).resolve().parents[3]
+    monkeypatch.syspath_prepend(str(root / "backend"))
+    monkeypatch.syspath_prepend(str(root / "backend/tests"))
+    from app.services.native_observations_client import stage_operation_id
+    from app.services.native_observations_host import NativeObservationsHost
+    from test_native_observations_authority import seed_receipt_event
+    from tools.run_unit_tests import _unit_environment
+
+    f = retained_graph
+    backend = Path(os.environ["NEXAWEAVE_WORKBENCH_AUTHORITY_PYTHON"])
+    bootstrap = Path(os.environ["KNOWLEDGE_BOOTSTRAP_SCRIPT"])
+    script = bootstrap.with_name("native_observation_event_bootstrap.py")
+    pg = conninfo_to_dict(os.environ["PROJECT_STORE_POSTGRES_TEST_DSN"])
+    token = "0123456789abcdef" * 4
+
+    for lost_ack in (False, True):
+        directory = tmp_path / ("lost-ack" if lost_ack else "dispatch")
+        directory.mkdir()
+        launch, locator, target_scope, _ = seed_receipt_event(f["factory"], directory / "artifacts")
+        operation = stage_operation_id(locator["launch_id"], locator["record_index"])
+        fingerprint = NativeObservationsHost(launch_host=launch)._event(locator)[2]
+        episode = str(target_scope.episode_uuid(operation))
+        display = launch.display_graph_id
+        ledger = Ledger(f["factory"])
+        env = _unit_environment(directory)
+        env.update(WORKBENCH_TEST_ROOT=str(Path(__file__).resolve().parents[3]),
+            WORKBENCH_TEST_EVENT_LOST_ACK=str(int(lost_ack)),
+            NEXAWEAVE_APP_MODE="research_local", PYTHON_DOTENV_DISABLED="1", FLASK_HOST="127.0.0.1",
+            FLASK_DEBUG="0", NEXAWEAVE_ALLOWED_ORIGINS="http://localhost:3000", KNOWLEDGE_READ_TOKEN=token,
+            KNOWLEDGE_PYTHON=os.environ["KNOWLEDGE_PYTHON"], KNOWLEDGE_BOOTSTRAP_SCRIPT=str(bootstrap),
+            KNOWLEDGE_PRINCIPAL="owner", KNOWLEDGE_DISPLAY_GRAPH_ID=display,
+            KNOWLEDGE_BOUND_SCOPE_JSON=json.dumps(launch.scope_dto),
+            KNOWLEDGE_PG_HOST=pg["host"], KNOWLEDGE_PG_PORT=pg["port"], KNOWLEDGE_PG_DATABASE=pg["dbname"],
+            KNOWLEDGE_PG_USER=pg["user"], KNOWLEDGE_PG_PASSWORD=pg["password"],
+            KNOWLEDGE_NEO4J_URI="bolt://127.0.0.1:17687", KNOWLEDGE_NEO4J_USER="neo4j",
+            KNOWLEDGE_NEO4J_PASSWORD=os.environ["KNOWLEDGE_TEST_PASSWORD"],
+            NEXAWEAVE_OBSERVATION_EVENTS_ENABLED="1",
+            NEXAWEAVE_OBSERVATION_ARTIFACT_ROOT=str(launch.preparation.root),
+            NEXAWEAVE_OBSERVATION_RUNTIME_SHA256=launch.runtime_sha256,
+            NEXAWEAVE_OBSERVATION_CHILD_SHA256=sha256(script.read_bytes()).hexdigest(),
+            NEXAWEAVE_OBSERVATION_NEO4J_URI="bolt://127.0.0.1:17687", NEXAWEAVE_OBSERVATION_NEO4J_USER="neo4j",
+            NEXAWEAVE_OBSERVATION_NEO4J_PASSWORD=os.environ["KNOWLEDGE_TEST_PASSWORD"])
+        output_path = directory / "server-events.jsonl"
+        process = None
+        try:
+            with output_path.open("wb") as output, (directory / "errors.log").open("wb") as errors:
+                process = subprocess.Popen([str(backend), "-I", "-u", "-c", _EVENT_HTTP_CHILD],
+                    stdin=subprocess.PIPE, stdout=output, stderr=errors, cwd=directory, env=env,
+                    shell=False, close_fds=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                deadline = time.monotonic() + 20
+                ready = []
+                while time.monotonic() < deadline and process.poll() is None:
+                    ready = [event for event in _events(output_path) if event.get("event") == "ready"]
+                    if ready:
+                        break
+                    await asyncio.sleep(0.05)
+                assert ready, "split HTTP startup failed"
+
+                async def send(action, value, *, bearer=token, graph=display, origin=None):
+                    path = f"/api/native-observations/{action}/{graph}"
+                    status, _, body = await asyncio.to_thread(_exchange, ready[0]["port"], "POST",
+                                                              path, value, token=bearer, origin=origin)
+                    return status, body
+
+                unreviewed = dict(locator, expected_fingerprint="0" * 64)
+                request = dict(locator, expected_fingerprint=fingerprint)
+                assert (await send("dispatch-event", request, bearer=None))[0] == 401
+                assert (await send("dispatch-event", request, origin="http://evil.example"))[0] == 403
+                assert (await send("dispatch-event", request, graph=f["ids"][0]))[0] == 404
+                assert (await send("dispatch-event", request))[0] == 409
+                status, staged = await send("stage-event", locator)
+                assert status == 200 and staged["data"]["operation_id"] == str(operation)
+                pending = ledger.get(target_scope, operation)
+                assert pending.state.value == "pending" and pending.current_attempt is None
+                assert pending.fingerprint == staged["data"]["fingerprint"] == fingerprint
+                assert (await send("dispatch-event", unreviewed))[0] == 409
+                assert ledger.get(target_scope, operation) == pending
+                assert not [event for event in _events(output_path) if event.get("event") == "spawn"]
+                if not lost_ack:
+                    await _invalid_event_writer(backend, directory / "invalid-writer", env,
+                                                f"/api/native-observations/dispatch-event/{display}", request, token)
+                    assert ledger.get(target_scope, operation) == pending
+                    records, _, _ = await f["writer"].execute_query(
+                        "MATCH (n {group_id:$group}) RETURN count(n) AS nodes",
+                        parameters_={"group": target_scope.group_id})
+                    assert len(records) == 1 and records[0]["nodes"] == 0
+                status, dispatched = await send("dispatch-event", request)
+                saved = ledger.get(target_scope, operation)
+                assert saved.current_attempt is not None
+                if lost_ack:
+                    assert status == 503 and saved.state.value == "uncertain" and saved.receipt is None
+                    assert (await send("dispatch-event", request))[0] in (409, 503)
+                    assert ledger.get(target_scope, operation) == saved
+                else:
+                    assert status == 200 and saved.state.value == "completed"
+                    assert dispatched["data"]["receipt"] == saved.receipt.json_value()
+                    assert await send("dispatch-event", request) == (200, dispatched)
+                records, _, _ = await f["writer"].execute_query(
+                    "MATCH (m:MiroFishIngest {uuid:$episode,group_id:$group}), "
+                    "(e:Episodic {uuid:$episode,group_id:$group})-[:MENTIONS]->(a:NativeActor {group_id:$group}), "
+                    "(e)-[:MENTIONS]->(p:NativePost {group_id:$group}), "
+                    "(a)-[r:RELATES_TO {group_id:$group}]->(p) "
+                    "RETURN properties(m) AS marker,a.native_id AS actor,a.name AS name,p.native_id AS post,"
+                    "p.summary AS content,r.fact AS fact,r.episodes AS episodes LIMIT 2",
+                    parameters_={"group": target_scope.group_id, "episode": episode})
+                record, = records
+                marker = record["marker"]
+                assert (record["actor"], record["name"], record["post"], record["content"], record["fact"],
+                        record["episodes"]) == (0, "Recorded actor", 2, "restored action", "restored action", [episode])
+                assert marker["operation_id"] == str(operation) and marker["attempt_id"] == str(saved.current_attempt)
+                assert marker["fingerprint"] == pending.fingerprint and marker["record_sha256"] == locator["record_sha256"]
+                assert marker["receipt_sha256"] == launch.store.get("owner", UUID(locator["launch_id"])).receipt["evidence_sha256"]
+                assert json.loads(marker["scope_json"]) == target_scope.model_dump(mode="json")
+                assert marker["status"] == "complete" and len(marker["evidence_ids"]) == 1
+                with f["factory"]() as conn:
+                    assert conn.execute("SELECT count(*) FROM mf_execution.reservations WHERE operation_id=%s",
+                                        (operation,)).fetchone() == (0,)
+                process.stdin.write(b"x")
+                process.stdin.flush()
+                process.stdin.close()
+                assert await asyncio.to_thread(process.wait, timeout=10) == 0
+            events = _events(output_path)
+            spawned = [event for event in events if event.get("event") == "spawn"]
+            closed = [event for event in events if event.get("event") == "cleanup"]
+            assert len(spawned) == len(closed) == 1 and spawned[0]["safe"] and closed[0]["closed"]
+            assert [event for event in events if event.get("event") == "graph_ack"] == [
+                {"event": "graph_ack", "attempt_id": str(saved.current_attempt)}]
+            assert {"event": "shutdown", "loopback_blocked": 0} in events
+        finally:
+            if process is not None:
+                if process.poll() is None:
+                    process.terminate()
+                    try:
+                        await asyncio.to_thread(process.wait, timeout=2)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        await asyncio.to_thread(process.wait, timeout=5)
+                if process.stdin is not None and not process.stdin.closed:
+                    process.stdin.close()
+            await f["writer"].execute_query("MATCH (n {group_id:$group}) DETACH DELETE n",
+                                            parameters_={"group": target_scope.group_id})

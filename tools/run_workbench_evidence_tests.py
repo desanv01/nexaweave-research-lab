@@ -1,5 +1,7 @@
-"""Main-owned evidence dispatcher/graph-pipe and optional real HTTP qualification."""
+"""Guarded evidence and workbench HTTP tests."""
 import argparse
+from hashlib import sha256
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -9,6 +11,43 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from tools.run_unit_tests import LoopbackOnlySockets, _unit_environment
+
+_HTTP_CASES = {
+    'test_actual_http_installed_pipe_retained_evidence_history_and_denial',
+    'test_actual_protected_restored_event_dispatch_replay_and_lost_ack',
+}
+_PROBE = """
+import hashlib, importlib.util, json, sys
+from pathlib import Path
+
+profile = sys.argv[1]
+prefix = Path(sys.prefix).resolve()
+assert prefix != Path(sys.base_prefix).resolve()
+if profile == 'pruned':
+    assert all(importlib.util.find_spec(name) is None for name in ('psycopg', 'pydantic'))
+    print(json.dumps([str(prefix), None]))
+    sys.exit(0)
+for name in ('nexaweave_execution', 'nexaweave_knowledge'):
+    package = Path(importlib.util.find_spec(name).origin).resolve().parent
+    assert 'site-packages' in package.parts and package.is_relative_to(prefix)
+if profile == 'authority':
+    assert sys.implementation.name == 'cpython' and sys.version_info[:3] == (3, 12, 13)
+    import psycopg, pydantic
+    assert all(Path(module.__file__).resolve().is_relative_to(prefix) for module in (psycopg, pydantic))
+child = package / 'native_observation_event_bootstrap.py'
+assert not child.is_symlink() and 0 < child.stat().st_size <= 16000
+assert hashlib.sha256(child.read_bytes()).hexdigest() == sys.argv[2]
+assert all((package / name).is_file() for name in ('read_bootstrap.py', 'evidence_bootstrap.py'))
+print(json.dumps([str(prefix), str(package / 'read_bootstrap.py')]))
+"""
+
+
+def probe(executable, profile, expected, env, directory):
+    result = subprocess.run([executable, '-I', '-c', _PROBE, profile, expected],
+        env=env, cwd=directory, capture_output=True, timeout=30, check=False)
+    if result.returncode or result.stderr or not 0 < len(result.stdout) <= 8192:
+        raise ValueError
+    return json.loads(result.stdout)
 
 
 def child(integration):
@@ -20,6 +59,7 @@ def child(integration):
         targets.append('test_workbench_http_integration.py')
     class Results:
         passed = {name: 0 for name in targets}
+        http_passed = set()
         unexpected_skips = 0
         def pytest_runtest_logreport(self, report):
             if report.skipped and not (
@@ -31,6 +71,8 @@ def child(integration):
                 for name in targets:
                     if name + '::' in report.nodeid:
                         self.passed[name] += 1
+                        if name == 'test_workbench_http_integration.py':
+                            self.http_passed.add(report.nodeid.rsplit('::', 1)[-1])
     results = Results()
     try:
         status = int(pytest.main(['-q', '-p', 'pytest_asyncio.plugin', '-o', 'asyncio_mode=auto',
@@ -38,7 +80,8 @@ def child(integration):
             *(str(ROOT / 'services/knowledge/tests' / name) for name in targets)], plugins=[results]))
     finally:
         guard.restore()
-    if guard.blocked_attempts or results.unexpected_skips or not all(results.passed.values()):
+    if (guard.blocked_attempts or results.unexpected_skips or not all(results.passed.values())
+            or integration and not _HTTP_CASES <= results.http_passed):
         print('workbench_evidence_qualification_incomplete', file=sys.stderr)
         return 1
     return status
@@ -62,24 +105,29 @@ def main():
             neo = os.environ.get('KNOWLEDGE_TEST_PASSWORD')
             backend = os.environ.get('NEXAWEAVE_WORKBENCH_BACKEND_PYTHON')
             if not pg or not neo or not backend or not Path(backend).is_absolute() or not Path(backend).is_file():
-                parser.error('approved fixture passwords and locked backend interpreter required')
-            # -I verifies the actual installed package, ignoring source PYTHONPATH.
-            installed = subprocess.run([sys.executable, '-I', '-c',
-                "import nexaweave_knowledge; from pathlib import Path; p=Path(nexaweave_knowledge.__file__).resolve(); "
-                "assert 'site-packages' in p.parts; assert p.with_name('evidence_bootstrap.py').is_file(); "
-                "print(p.with_name('read_bootstrap.py'))"], env=env, cwd=directory,
-                capture_output=True, timeout=30, check=False)
-            if installed.returncode or installed.stderr:
-                parser.error('non-editable installed knowledge package required')
+                parser.error('fixture passwords and backend required')
+            authority = os.environ.get('NEXAWEAVE_WORKBENCH_AUTHORITY_PYTHON')
+            if not authority or not Path(authority).is_absolute() or not Path(authority).is_file() or authority == backend:
+                parser.error('distinct locked authority backend required')
+            try:
+                candidate = ROOT / 'services/knowledge/src/nexaweave_knowledge/native_observation_event_bootstrap.py'
+                expected = sha256(candidate.read_bytes()).hexdigest()
+                pruned_prefix, _ = probe(backend, 'pruned', expected, env, directory)
+                authority_prefix, _ = probe(authority, 'authority', expected, env, directory)
+                knowledge_prefix, bootstrap = probe(sys.executable, 'knowledge', expected, env, directory)
+                if len({pruned_prefix, authority_prefix, knowledge_prefix}) != 3:
+                    raise ValueError
+            except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+                parser.error('workbench profile or event child mismatch')
             env.update(PROJECT_STORE_POSTGRES_INTEGRATION='1', KNOWLEDGE_INTEGRATION='1',
                        KNOWLEDGE_TEST_PASSWORD=neo, NEXAWEAVE_WORKBENCH_BACKEND_PYTHON=backend,
+                       NEXAWEAVE_WORKBENCH_AUTHORITY_PYTHON=authority,
                        KNOWLEDGE_PYTHON=str(Path(sys.executable).absolute()),
-                       KNOWLEDGE_BOOTSTRAP_SCRIPT=installed.stdout.decode().strip())
+                       KNOWLEDGE_BOOTSTRAP_SCRIPT=bootstrap)
             env['PROJECT_STORE_POSTGRES_TEST_DSN'] = make_conninfo(host='127.0.0.1', port=15432,
                 dbname='mirofish_operations_test', user='mirofish_fixture', password=pg, connect_timeout=5)
-        command = [sys.executable, str(Path(__file__).resolve()), '--child']
-        if args.integration:
-            command.append('--integration')
+        command = [sys.executable, __file__, '--child']
+        command += ['--integration'] if args.integration else []
         try:
             return subprocess.run(command, env=env, cwd=directory, timeout=600, check=False).returncode
         except subprocess.TimeoutExpired:

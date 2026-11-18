@@ -87,6 +87,36 @@ def launch_reference(payload):
     return {k: payload[k] for k in ('schema_version', 'launch_id', 'launch_sha256')}
 
 
+def validate_dispatch_payload(value):
+    try:
+        if type(value) is not dict or set(value) != _STAGE_KEYS | {'expected_fingerprint'}:
+            raise ValueError
+        locator = validate_stage_payload({key: value[key] for key in _STAGE_KEYS})
+        return dict(locator, expected_fingerprint=sha(value['expected_fingerprint']))
+    except (ValueError, TypeError, KeyError):
+        raise NativeObservationsError('invalid_request') from None
+
+
+def validate_dispatch_result(value, source_scope, payload):
+    try:
+        if type(value) is not dict or set(value) != set(payload) | {'scope', 'operation_id', 'state', 'receipt'}:
+            raise ValueError
+        if validate_dispatch_payload({key: value[key] for key in payload}) != payload:
+            raise ValueError
+        from nexaweave_knowledge.contracts import KnowledgeScope
+        scope = KnowledgeScope.model_validate_json(encoded(stage_scope(source_scope, payload['launch_id'])))
+        operation = stage_operation_id(payload['launch_id'], payload['record_index'])
+        evidence = uuid5(operation, 'mirofish:restored-twitter-action-evidence:v1')
+        if (encoded(value['scope']) != encoded(scope.model_dump(mode='json'))
+                or value['state'] != 'completed' or value['operation_id'] != str(operation)
+                or value['receipt'] != {'group_id': scope.group_id, 'episode_id': str(scope.episode_uuid(operation)),
+                                       'fingerprint': payload['expected_fingerprint'], 'evidence_ids': [str(evidence)]}):
+            raise ValueError
+        return json.loads(encoded(value))
+    except (NativeObservationsError, ValueError, TypeError, KeyError, UnicodeError, RecursionError):
+        raise NativeObservationsError('invalid_reply') from None
+
+
 def action_log_name(platform, *, restored=False):
     return 'actions.jsonl' if restored else platform + '/actions.jsonl'
 

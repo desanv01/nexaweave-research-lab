@@ -105,6 +105,21 @@ jobs:
           uv pip install --python "$RUNNER_TEMP/workbench-backend/bin/python" --no-deps --reinstall services/knowledge
           uv pip install --python services/knowledge/.venv/bin/python --no-deps --reinstall services/knowledge
           printf 'NEXAWEAVE_WORKBENCH_BACKEND_PYTHON=%s\n' "$RUNNER_TEMP/workbench-backend/bin/python" >> "$GITHUB_ENV"
+      - name: Install distinct locked workbench dispatch authority backend
+        shell: bash
+        run: |
+          set -euo pipefail
+          authority="$RUNNER_TEMP/workbench-authority"
+          uv export --locked --project backend --no-dev --no-emit-project --extra native-store --prune openai --prune zep-cloud --prune httpx --prune camel-oasis --prune camel-ai --prune pymupdf --prune charset-normalizer --prune chardet --output-file "$RUNNER_TEMP/workbench-authority.txt" >/dev/null
+          uv venv --python 3.12.13 "$authority"
+          uv pip install --require-hashes --python "$authority/bin/python" -r "$RUNNER_TEMP/workbench-authority.txt"
+          wheels="$RUNNER_TEMP/workbench-authority-wheel"
+          uv build --wheel --python "$authority/bin/python" --out-dir "$wheels" services/knowledge
+          set -- "$wheels"/nexaweave_knowledge-*.whl
+          test "$#" -eq 1
+          test -f "$1"
+          uv pip install --python "$authority/bin/python" --no-deps "$1"
+          printf 'NEXAWEAVE_WORKBENCH_AUTHORITY_PYTHON=%s\n' "$authority/bin/python" >> "$GITHUB_ENV"
       - name: Start disposable real Neo4j Community
         run: docker compose -f infra/compose.knowledge-test.yml up -d --wait --wait-timeout 180
       - name: Start disposable research PostgreSQL

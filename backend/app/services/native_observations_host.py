@@ -1,14 +1,15 @@
 """Receipt-bound observation reads and explicit pending event admission."""
 import hashlib
 import json
-from uuid import NAMESPACE_URL, uuid5
+from uuid import uuid5
 from .native_observations_client import (NativeObservationsError, validate_payload, validate_result,
-    launch_reference, encoded, stage_operation_id, stage_scope, validate_stage_payload)
+    launch_reference, encoded, stage_operation_id, stage_scope, validate_stage_payload,
+    validate_dispatch_payload)
 from .native_observation_reader import NativeObservationReader
 
 
 class NativeObservationsHost:
-    def __init__(self, *, launch_host):
+    def __init__(self, *, launch_host, event_writer=None):
         from .durable_native_launch_host import DurableNativeLaunchHost
         if not isinstance(launch_host, DurableNativeLaunchHost):
             raise NativeObservationsError('observations_unavailable')
@@ -16,6 +17,7 @@ class NativeObservationsHost:
         self.principal, self.display_graph_id = launch_host.principal, launch_host.display_graph_id
         self.scope_dto = json.loads(encoded(launch_host.scope_dto))
         self.reader = NativeObservationReader()
+        self.event_writer = event_writer
 
     def _authority(self, payload):
         row = self.launch._row(launch_reference(payload))
@@ -34,6 +36,8 @@ class NativeObservationsHost:
                 or native.child.instance_id != native.receipt.instance_id):
             raise NativeObservationsError('conflict')
         if payload['platform'] not in row.request.platforms:
+            raise NativeObservationsError('conflict')
+        if self.event_writer is not None and row.request.runtime_sha256 != self.launch.runtime_sha256:
             raise NativeObservationsError('conflict')
         # Existing authorization inspects frozen configuration only; it never constructs
         # providers. Cleanup remains unknown because runtime polling is not a read here.
@@ -77,14 +81,13 @@ class NativeObservationsHost:
                                      self.display_graph_id, self.scope_dto, payload, self.principal)
         return result, row, prep, native
 
-    def stage_event(self, payload):
+    def _event(self, payload):
         from nexaweave_execution.native_launch_store import _verify_checkpoint_source, _verify_current_preparation
         from nexaweave_knowledge.bindings import ScopeBindingStore
-        from nexaweave_knowledge.contracts import KnowledgeScope, OntologySpec, SourceEnvelope
-        from nexaweave_knowledge.operations import Conflict, Ledger, NotFound, OperationState, StorageError, Tombstoned
+        from nexaweave_knowledge.contracts import KnowledgeScope, SourceEnvelope
+        from nexaweave_knowledge.native_observation_event_bootstrap import event_ontology
         from nexaweave_knowledge.operations import request_fingerprint
 
-        payload = validate_stage_payload(payload)
         index = payload['record_index']
         page, run, prep, native = self._read_page(dict(
             launch_reference(payload), platform=payload['platform'], offset=index - 1, limit=3,
@@ -112,15 +115,7 @@ class NativeObservationsHost:
         source_scope = KnowledgeScope.model_validate_json(encoded(self.scope_dto))
         scope = KnowledgeScope.model_validate_json(encoded(stage_scope(self.scope_dto, payload['launch_id'])))
         operation = stage_operation_id(payload['launch_id'], index)
-        ontology = OntologySpec(
-            revision=uuid5(NAMESPACE_URL, 'mirofish:restored-twitter-action-ontology:v1'),
-            entity_types=(
-                {'name': 'NativeActor', 'description': 'An actor in the native simulation'},
-                {'name': 'NativePost', 'description': 'A post created in the native simulation'},
-            ),
-            edge_types=({'name': 'AUTHORED', 'description': 'The actor created the post',
-                         'source_targets': ({'source': 'NativeActor', 'target': 'NativePost'},)},),
-        )
+        ontology = event_ontology()
         content = encoded({
             'launch_sha256': run.launch_sha256, 'evidence_sha256': native.receipt.evidence_sha256,
             'platform': 'twitter', 'record_index': index, 'record_sha256': selected['record_sha256'],
@@ -151,6 +146,13 @@ class NativeObservationsHost:
             if self.launch.native._owned(self.principal, run.run_id, lock=True, conn=conn) != native:
                 raise NativeObservationsError('conflict')
 
+        return scope, operation, fingerprint, authorize_admission, action, source
+
+    def stage_event(self, payload):
+        from nexaweave_knowledge.operations import Conflict, Ledger, NotFound, OperationState, StorageError, Tombstoned
+
+        payload = validate_stage_payload(payload)
+        scope, operation, fingerprint, authorize_admission, _, _ = self._event(payload)
         try:
             admitted = Ledger(self.launch.connect).admit(
                 scope, operation, fingerprint, authorize_admission=authorize_admission,
@@ -166,6 +168,76 @@ class NativeObservationsHost:
         return dict(payload, scope=scope.model_dump(mode='json'), operation_id=str(operation),
                     fingerprint=fingerprint, state='pending', completion_barrier_open=False,
                     graph_ingestion_executed=False)
+
+    def dispatch_event(self, payload):
+        from nexaweave_knowledge.operations import (
+            Busy, Claim, CompletionReceipt, Conflict, InvalidTransition, Ledger, NotFound,
+            OperationState, StorageError, Tombstoned,
+        )
+        from nexaweave_knowledge.native_observation_event_bootstrap import WIRE_BYTES, event_projection
+
+        payload = validate_dispatch_payload(payload)
+        if self.event_writer is None:
+            raise NativeObservationsError('observations_unavailable')
+        locator = {key: value for key, value in payload.items() if key != 'expected_fingerprint'}
+        scope, operation, fingerprint, authorize, action, source = self._event(locator)
+        if fingerprint != payload['expected_fingerprint']:
+            raise NativeObservationsError('conflict')
+        actor = action.get('agent_id')
+        if type(actor) is not int or not 0 <= actor <= 2**53 - 1:
+            raise NativeObservationsError('conflict')
+        episode = scope.episode_uuid(operation)
+        receipt = CompletionReceipt(scope.group_id, episode, fingerprint, source.evidence_ids)
+        frame = {'version': 1, 'scope': scope.model_dump(mode='json'), 'operation_id': str(operation),
+                 'attempt_id': str(operation), 'fingerprint': fingerprint, 'source': source.model_dump(mode='json')}
+        try:
+            if max(len(encoded(frame)), len(encoded(event_projection(frame)))) > WIRE_BYTES:
+                raise NativeObservationsError('result_too_large')
+        except (KeyError, ValueError, TypeError, OverflowError):
+            raise NativeObservationsError('conflict') from None
+        ledger = Ledger(self.launch.connect)
+        try:
+            claimed = ledger.claim_staged(scope, operation, fingerprint, authorize_admission=authorize)
+        except Tombstoned:
+            raise NativeObservationsError('tombstoned') from None
+        except Busy:
+            raise NativeObservationsError('busy') from None
+        except (Conflict, InvalidTransition, NotFound):
+            raise NativeObservationsError('conflict') from None
+        except StorageError:
+            raise NativeObservationsError('observations_unavailable') from None
+
+        if isinstance(claimed, Claim):
+            def uncertain():
+                try:
+                    ledger.mark_uncertain(scope, operation, claimed.attempt_id, 'event_ack_uncertain')
+                except Exception:
+                    # Even if classification fails, the existing running admission fences replay.
+                    pass
+
+            try:
+                frame['attempt_id'] = str(claimed.attempt_id)
+                if encoded(self.event_writer(frame)) != encoded(event_projection(frame)):
+                    raise ValueError
+            except Exception:
+                uncertain()
+                raise NativeObservationsError('observations_unavailable') from None
+            try:
+                claimed = ledger.complete(scope, operation, claimed.attempt_id, receipt)
+            except Exception:
+                try:
+                    observed = ledger.get(scope, operation)
+                    if (observed.state != OperationState.completed or observed.current_attempt != claimed.attempt_id
+                            or observed.receipt != receipt):
+                        raise ValueError
+                    claimed = observed
+                except Exception:
+                    uncertain()
+                    raise NativeObservationsError('observations_unavailable') from None
+        if claimed.state != OperationState.completed or claimed.receipt != receipt or claimed.current_attempt is None:
+            raise NativeObservationsError('conflict')
+        return dict(payload, scope=scope.model_dump(mode='json'), operation_id=str(operation),
+                    state='completed', receipt=receipt.json_value())
 
     def _artifacts(self, prep, root):
         try:
