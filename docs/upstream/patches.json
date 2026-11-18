@@ -486,6 +486,14 @@
       "current_sha256": "4c6465c9725cb00a798322006d16bb613fdfd23692e4842d6db85943b69cc63f",
       "reason": "W1.2 adds focused fixtures for strict ontology validation and detached accepted edits.",
       "phase": "W1.2 reviewed ontology validation"
+    },
+    {
+      "imported_path": "frontend/src/components/Step1GraphBuild.vue",
+      "original_sha256": "2eda6d5ad075363a9b4bc198eedf72ef04d52a41d9e539968d0c9371168e308d",
+      "current_sha256": "975e3c03a34ca4e882b1d397aeac45f784639e0836d3b80471bf6920ccd95c76",
+      "reason": "W6.1 localizes initial graph ontology detail labels while preserving the displayed ontology and existing workflow.",
+      "phase": "W6.1",
+      "review_status": "Scoped review complete. Exact hosted checks pending."
     }
   ]
 }
