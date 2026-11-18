@@ -398,9 +398,15 @@ class Ledger:
             if cleanup_failed and not control:
                 raise StorageError("knowledge read lock lost")
 
-    def admit(self, scope: KnowledgeScope, operation_id: UUID, fingerprint: str) -> OperationRecord:
+    def admit(self, scope: KnowledgeScope, operation_id: UUID, fingerprint: str, *,
+              authorize_admission: Callable[[psycopg.Connection], None] | None = None) -> OperationRecord:
+        """Optionally lock trusted caller authority before admitting a pending operation."""
         scope, operation_id, fingerprint = _validated_scope(scope), _uuid(operation_id, "operation_id"), _fingerprint(fingerprint)
+        if authorize_admission is not None and not callable(authorize_admission):
+            raise ValueError("invalid admission authority")
         with _transaction(self._connect) as conn:
+            if authorize_admission is not None:
+                authorize_admission(conn)
             self._scope(conn, scope, create=True)
             conn.execute("INSERT INTO mf_knowledge.operations(group_id, operation_id, fingerprint, state) VALUES (%s, %s, %s, 'pending') ON CONFLICT (group_id, operation_id) DO NOTHING",
                          (scope.group_id, operation_id, fingerprint))
@@ -426,14 +432,40 @@ class Ledger:
                 raise Busy("knowledge scope write admission busy")
             if operation.state not in (OperationState.pending, OperationState.failed_no_effect):
                 raise InvalidTransition("knowledge operation cannot be claimed")
-            token = uuid4()
-            conn.execute("INSERT INTO mf_knowledge.attempts(group_id, operation_id, attempt_id) VALUES (%s, %s, %s)",
-                         (scope.group_id, operation_id, token))
-            conn.execute("INSERT INTO mf_knowledge.scope_admissions(group_id, operation_id, attempt_id) VALUES (%s, %s, %s)",
-                         (scope.group_id, operation_id, token))
-            conn.execute("UPDATE mf_knowledge.operations SET state = 'running', current_attempt = %s, receipt = NULL, error_code = NULL, updated_at = now() WHERE group_id = %s AND operation_id = %s",
-                         (token, scope.group_id, operation_id))
-            return Claim(self._updated(conn, scope, operation_id), token)
+            return self._start_attempt(conn, scope, operation_id)
+
+    def claim_staged(self, scope: KnowledgeScope, operation_id: UUID, fingerprint: str, *,
+                     authorize_admission: Callable[[psycopg.Connection], None]) -> Claim | OperationRecord:
+        """Claim only a reviewed pending operation, or return exact completed authority."""
+        scope, operation_id = _validated_scope(scope), _uuid(operation_id, "operation_id")
+        fingerprint = _fingerprint(fingerprint)
+        if not callable(authorize_admission):
+            raise ValueError("invalid staged authority")
+        with _transaction(self._connect) as conn:
+            authorize_admission(conn)
+            if conn.execute("SELECT pg_try_advisory_xact_lock(%s)", (_read_lock_key(scope.group_id),)).fetchone() != (True,):
+                raise Busy("knowledge scope read admission busy")
+            self._scope(conn, scope)
+            operation = self._operation(conn, scope, operation_id)
+            if operation.fingerprint != fingerprint:
+                raise Conflict("knowledge operation fingerprint conflict")
+            if operation.state == OperationState.completed:
+                return operation
+            if self._admission(conn, scope) is not None:
+                raise Busy("knowledge scope write admission busy")
+            if operation.state != OperationState.pending or operation.current_attempt is not None:
+                raise InvalidTransition("knowledge operation is not pending")
+            return self._start_attempt(conn, scope, operation_id)
+
+    def _start_attempt(self, conn, scope, operation_id):
+        token = uuid4()
+        conn.execute("INSERT INTO mf_knowledge.attempts(group_id, operation_id, attempt_id) VALUES (%s, %s, %s)",
+                     (scope.group_id, operation_id, token))
+        conn.execute("INSERT INTO mf_knowledge.scope_admissions(group_id, operation_id, attempt_id) VALUES (%s, %s, %s)",
+                     (scope.group_id, operation_id, token))
+        conn.execute("UPDATE mf_knowledge.operations SET state = 'running', current_attempt = %s, receipt = NULL, error_code = NULL, updated_at = now() WHERE group_id = %s AND operation_id = %s",
+                     (token, scope.group_id, operation_id))
+        return Claim(self._updated(conn, scope, operation_id), token)
 
     def heartbeat(self, scope: KnowledgeScope, operation_id: UUID, attempt_id: UUID) -> OperationRecord:
         scope, operation_id, attempt_id = _validated_scope(scope), _uuid(operation_id, "operation_id"), _uuid(attempt_id, "attempt_id")

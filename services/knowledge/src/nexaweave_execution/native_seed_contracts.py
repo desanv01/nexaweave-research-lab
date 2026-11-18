@@ -6,6 +6,20 @@ engine, provider, model factory or database. Returned tuples snapshot the plan.
 from dataclasses import dataclass
 
 
+SEED_BRIDGE_INDEX = "twitter_to_reddit_seed_index"
+
+
+def seed_bridge_index(value, platforms, seed_count=None):
+    """Read the optional zero-based ordinal, without supplying a default."""
+    if SEED_BRIDGE_INDEX not in value:
+        return None
+    index = value[SEED_BRIDGE_INDEX]
+    if (type(index) is not int or index < 0 or tuple(platforms) != ("twitter", "reddit")
+            or (seed_count is not None and index >= seed_count)):
+        raise ValueError("invalid Twitter to Reddit seed index")
+    return index
+
+
 @dataclass(frozen=True)
 class NativeSeedPost:
     actor_id: int

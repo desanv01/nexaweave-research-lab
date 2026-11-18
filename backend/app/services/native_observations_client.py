@@ -1,6 +1,7 @@
 """SDK-free, finite completed-observations wire contract."""
 import hashlib
 import json
+from uuid import UUID, uuid5
 from .preparation_client import encoded, digest, integer, sha, uuid_string
 from .native_launch_client import validate_result as validate_launch, NativeLaunchError
 
@@ -10,6 +11,7 @@ OUTPUT_BYTES, AGGREGATE_BYTES = 67108864, 268435456
 CODES = frozenset(('invalid_request not_found unauthorized origin_denied conflict tombstoned busy '
                   'result_too_large observations_unavailable evidence_invalid invalid_reply internal_error').split())
 COUNT_KEYS = {'event_records', 'action_records', 'successful_action_records', 'failed_action_records'}
+_STAGE_KEYS = {'schema_version', 'launch_id', 'launch_sha256', 'platform', 'record_index', 'record_sha256'}
 
 
 class NativeObservationsError(RuntimeError):
@@ -35,8 +37,84 @@ def validate_payload(value):
         raise NativeObservationsError('invalid_request') from None
 
 
+def validate_stage_payload(value):
+    try:
+        if type(value) is not dict or set(value) != _STAGE_KEYS or value['platform'] != 'twitter':
+            raise ValueError
+        integer(value['schema_version'], 2, 2)
+        integer(value['record_index'], 1, RECORDS - 2)
+        uuid_string(value['launch_id'])
+        sha(value['launch_sha256'])
+        sha(value['record_sha256'])
+        if len(encoded(value)) > REQUEST_BYTES:
+            raise ValueError
+        return json.loads(encoded(value))
+    except (ValueError, TypeError, UnicodeError, RecursionError):
+        raise NativeObservationsError('invalid_request') from None
+
+
+def stage_scope(source_scope, launch_id):
+    return dict(source_scope, layer='simulation', run_id=launch_id)
+
+
+def stage_operation_id(launch_id, index):
+    return uuid5(UUID(launch_id), f'mirofish:restored-twitter-action:v1:{index}')
+
+
+def validate_stage_result(value, source_scope, payload):
+    try:
+        if type(value) is not dict or set(value) != _STAGE_KEYS | {
+                'scope', 'operation_id', 'fingerprint', 'state', 'completion_barrier_open',
+                'graph_ingestion_executed'}:
+            raise ValueError
+        if validate_stage_payload({key: value[key] for key in _STAGE_KEYS}) != payload:
+            raise ValueError
+        if (digest(value['scope']) != digest(stage_scope(source_scope, payload['launch_id']))
+                or value['operation_id'] != str(stage_operation_id(payload['launch_id'], payload['record_index']))
+                or value['state'] != 'pending' or value['completion_barrier_open'] is not False
+                or value['graph_ingestion_executed'] is not False):
+            raise ValueError
+        sha(value['fingerprint'])
+        body = encoded(value)
+        if len(body) > RESULT_BYTES:
+            raise ValueError
+        return json.loads(body)
+    except (NativeObservationsError, ValueError, TypeError, UnicodeError, RecursionError):
+        raise NativeObservationsError('invalid_reply') from None
+
+
 def launch_reference(payload):
     return {k: payload[k] for k in ('schema_version', 'launch_id', 'launch_sha256')}
+
+
+def validate_dispatch_payload(value):
+    try:
+        if type(value) is not dict or set(value) != _STAGE_KEYS | {'expected_fingerprint'}:
+            raise ValueError
+        locator = validate_stage_payload({key: value[key] for key in _STAGE_KEYS})
+        return dict(locator, expected_fingerprint=sha(value['expected_fingerprint']))
+    except (ValueError, TypeError, KeyError):
+        raise NativeObservationsError('invalid_request') from None
+
+
+def validate_dispatch_result(value, source_scope, payload):
+    try:
+        if type(value) is not dict or set(value) != set(payload) | {'scope', 'operation_id', 'state', 'receipt'}:
+            raise ValueError
+        if validate_dispatch_payload({key: value[key] for key in payload}) != payload:
+            raise ValueError
+        from nexaweave_knowledge.contracts import KnowledgeScope
+        scope = KnowledgeScope.model_validate_json(encoded(stage_scope(source_scope, payload['launch_id'])))
+        operation = stage_operation_id(payload['launch_id'], payload['record_index'])
+        evidence = uuid5(operation, 'mirofish:restored-twitter-action-evidence:v1')
+        if (encoded(value['scope']) != encoded(scope.model_dump(mode='json'))
+                or value['state'] != 'completed' or value['operation_id'] != str(operation)
+                or value['receipt'] != {'group_id': scope.group_id, 'episode_id': str(scope.episode_uuid(operation)),
+                                       'fingerprint': payload['expected_fingerprint'], 'evidence_ids': [str(evidence)]}):
+            raise ValueError
+        return json.loads(encoded(value))
+    except (NativeObservationsError, ValueError, TypeError, KeyError, UnicodeError, RecursionError):
+        raise NativeObservationsError('invalid_reply') from None
 
 
 def action_log_name(platform, *, restored=False):

@@ -359,10 +359,13 @@ def main() -> int:
                 or not chrome.is_file() or not os.access(chrome, os.X_OK)
                 or not (ROOT / 'frontend/node_modules/playwright-core/package.json').is_file()):
             parser.error('explicit installed hosted Node/Chrome/browser runtime required')
-        for path in (ROOT / 'services/knowledge/tests/research_browser_fixture.py',
-                     ROOT / 'frontend/tests/run-research-browser.mjs'):
+        for path, cap in (
+            (ROOT / 'services/knowledge/tests/research_browser_fixture.py', 50000),
+            (ROOT / 'frontend/tests/run-research-browser.mjs', 50000),
+            (ROOT / 'frontend/tests/research-browser-ontology.mjs', 16000),
+        ):
             try:
-                _bounded_source_digest(path, 50000)
+                _bounded_source_digest(path, cap)
             except (OSError, ValueError):
                 parser.error('reviewed browser fixture sources required')
         browser_environment = dict(NEXAWEAVE_RESEARCH_BROWSER_NODE=str(node),
