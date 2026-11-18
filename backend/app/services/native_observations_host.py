@@ -6,6 +6,7 @@ from .native_observations_client import (NativeObservationsError, validate_paylo
     launch_reference, encoded, stage_operation_id, stage_scope, validate_stage_payload,
     validate_dispatch_payload)
 from .native_observation_reader import NativeObservationReader
+from .preparation_client import canonical
 
 
 class NativeObservationsHost:
@@ -217,7 +218,7 @@ class NativeObservationsHost:
 
             try:
                 frame['attempt_id'] = str(claimed.attempt_id)
-                if encoded(self.event_writer(frame)) != encoded(event_projection(frame)):
+                if canonical(self.event_writer(frame)) != canonical(event_projection(frame)):
                     raise ValueError
             except Exception:
                 uncertain()
