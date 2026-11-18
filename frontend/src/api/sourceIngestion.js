@@ -1,6 +1,7 @@
 // Source graph DTOs only. Credentials and transport remain in workbench.js.
 import { WorkbenchError, awareTimestamp } from './workbench.js'
 import { sha256 } from './sourceLibrary.js'
+import { MAX_PROJECT_REVISION, validateReviewedOntology } from './reviewedOntology.js'
 const enc = new TextEncoder()
 const bad = (code = 'invalid_reply') => { throw new WorkbenchError(code) }
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
@@ -52,11 +53,15 @@ export function validateOntology(v) {
     return v
   } catch { bad('invalid_request') }
 }
-export function ingestionPayload(v, status = false) {
+export function ingestionPayload(v, status = false, execute = false) {
   try {
     if (status) {
       shape(v, 'operation_id')
       id(v.operation_id)
+    } else if (v?.schema_version === 4) {
+      shape(v, 'schema_version source_revision operation_id project_revision' + (execute ? ' fingerprint execution_fingerprint' : ''))
+      id(v.source_revision); id(v.operation_id); int(v.project_revision, MAX_PROJECT_REVISION, 1)
+      if (execute) { digest(v.fingerprint); digest(v.execution_fingerprint) }
     } else {
       if (![1, 2].includes(v?.schema_version)) bad()
       const selector = v.schema_version === 1 ? 'operation_id' : 'evidence_id'
@@ -195,14 +200,40 @@ async function validateSelectedPlan(v, inspected, payload) {
   })
   if (v.fingerprint !== fingerprint) bad()
 }
+
+async function validateSavedPlan(v, context) {
+  const { payload, inspected, saved } = context
+  if (!saved || !sameScope(saved.scope, v.scope) || saved.project_revision !== payload.project_revision ||
+      v.project_revision !== payload.project_revision || v.execution_fingerprint === v.fingerprint) bad()
+  digest(v.execution_fingerprint)
+  const ontology = saved.ontology
+  validateReviewedOntology(ontology, 'invalid_reply')
+  const identity = JSON.stringify(canonical({ scope: v.scope, project_revision: v.project_revision, ontology }))
+  const revision = await urlUuid('mirofish:saved-ontology:v4:' + identity)
+  if (v.ontology_revision !== revision) bad()
+  const projected = { ...payload, ontology: { schema_version: 1, revision, ...ontology } }
+  const sourceFields = {
+    source_sha256: inspected.source.text_sha256, operation_id: payload.operation_id,
+    content: inspected.text, evidence_ids: inspected.passages.map(p => p.evidence_id)
+  }
+  const review = await sourceFingerprint(v.scope, inspected, projected, sourceFields)
+  // The saved authority tag belongs to the persisted execution identity only.
+  const execution = await sourceFingerprint(v.scope, inspected, {
+    ...projected, ontology: { ...projected.ontology, saved_ontology: 'project_revision_v4' }
+  }, sourceFields)
+  if (v.execution_fingerprint !== execution ||
+      v.fingerprint !== await sha256(enc.encode('mirofish:source-ingestion:saved-ontology-plan:v4\0' + identity + '\0' + review))) bad()
+}
+
 export async function validateIngestionResult(method, v, context) {
   try {
     const planning = method === 'ingestionPlan'
+    const savedPlan = planning && context.payload.schema_version === 4
     const selected = method !== 'ingestionStatus' && context.payload.schema_version === 2
     const common = 'schema_version scope operation_id episode_id fingerprint evidence_ids graph_ingestion_executed model_calls_made actual_usage_microusd'
-    shape(v, common + (planning ? ' source_revision source_sha256 source_byte_length source_codepoint_length ontology_revision eligibility_codepoint_limit spending_authorized' : ' state budget_state ceiling_microusd receipt') + (selected ? ' window' : ''))
+    shape(v, common + (planning ? ' source_revision source_sha256 source_byte_length source_codepoint_length ontology_revision eligibility_codepoint_limit spending_authorized' : ' state budget_state ceiling_microusd receipt') + (selected ? ' window' : '') + (savedPlan ? ' project_revision execution_fingerprint' : ''))
     validateIngestionScope(v.scope); id(v.operation_id); id(v.episode_id); digest(v.fingerprint)
-    if (v.schema_version !== (selected ? 2 : 1) || !selected && v.operation_id !== context.payload.operation_id || v.actual_usage_microusd !== null || context.scope && !sameScope(context.scope, v.scope) || context.project && v.scope.project_id !== context.project) bad()
+    if (v.schema_version !== (savedPlan ? 4 : selected ? 2 : 1) || !selected && v.operation_id !== context.payload.operation_id || v.actual_usage_microusd !== null || context.scope && !sameScope(context.scope, v.scope) || context.project && v.scope.project_id !== context.project) bad()
     const identities = await ingestionIdentities(v.scope, v.operation_id)
     if (v.episode_id !== identities.episode_id) bad()
     array(v.evidence_ids, 100, planning || method === 'ingestionExecute' ? 1 : 0); v.evidence_ids.forEach(id)
@@ -213,7 +244,7 @@ export async function validateIngestionResult(method, v, context) {
     }
     if (planning) {
       const source = context.inspected?.source
-      if (!source || v.scope.project_id !== source.project_id || v.source_revision !== context.payload.source_revision || v.source_revision !== source.source_revision || v.ontology_revision !== context.payload.ontology.revision || v.eligibility_codepoint_limit !== 32768 || v.spending_authorized !== false || v.graph_ingestion_executed !== false || v.model_calls_made !== false) bad()
+      if (!source || v.scope.project_id !== source.project_id || v.source_revision !== context.payload.source_revision || v.source_revision !== source.source_revision || !savedPlan && v.ontology_revision !== context.payload.ontology.revision || v.eligibility_codepoint_limit !== 32768 || v.spending_authorized !== false || v.graph_ingestion_executed !== false || v.model_calls_made !== false) bad()
       digest(v.source_sha256); id(v.source_revision); id(v.ontology_revision); int(v.source_codepoint_length, 32768, 1); int(v.source_byte_length, 4 * v.source_codepoint_length, v.source_codepoint_length)
       if (selected) {
         await validateSelectedPlan(v, context.inspected, context.payload)
@@ -221,7 +252,8 @@ export async function validateIngestionResult(method, v, context) {
         if (v.source_sha256 !== source.text_sha256 || v.source_byte_length !== source.byte_length ||
             v.source_codepoint_length !== source.codepoint_length ||
             !same(v.evidence_ids, context.inspected.passages.map(p => p.evidence_id))) bad()
-        if (v.fingerprint !== await ingestionFingerprint(v.scope, context.inspected, context.payload)) bad()
+        if (savedPlan) await validateSavedPlan(v, context)
+        else if (v.fingerprint !== await ingestionFingerprint(v.scope, context.inspected, context.payload)) bad()
       }
     } else {
       if (!['pending', 'running', 'completed', 'uncertain', 'cancelled', 'failed_no_effect', 'not_admitted'].includes(v.state) || !['reserved', 'started', 'settled', 'uncertain', 'released', 'not_reserved'].includes(v.budget_state) || typeof v.graph_ingestion_executed !== 'boolean' || v.model_calls_made !== null) bad()
@@ -234,7 +266,9 @@ export async function validateIngestionResult(method, v, context) {
       if (method === 'ingestionExecute' && (v.state !== 'completed' || v.budget_state !== 'settled')) bad()
       const known = context.known
       if (selected && (!known?.window || !sameWindow(v.window, known.window))) bad()
-      if (known && (!sameScope(known.scope, v.scope) || known.operation_id !== v.operation_id || known.episode_id !== v.episode_id || known.fingerprint !== v.fingerprint || !same(known.evidence_ids, v.evidence_ids))) bad()
+      if (known && (!sameScope(known.scope, v.scope) || known.operation_id !== v.operation_id || known.episode_id !== v.episode_id ||
+          (known.schema_version === 4 ? known.execution_fingerprint : known.fingerprint) !== v.fingerprint ||
+          !same(known.evidence_ids, v.evidence_ids))) bad()
     }
     if (enc.encode(JSON.stringify(v)).length > 262144) bad()
     return v

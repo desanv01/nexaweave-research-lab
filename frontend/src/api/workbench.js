@@ -1,6 +1,7 @@
 // Isolated protected read client. Never share the inherited Axios interceptors.
 import { sourcePayload, sourceReadRequest, verifySourceInput, validateSourceResult, sourceOriginalPayload, verifyOriginalPdfInput, validateSourceOriginalResult } from './sourceLibrary.js'
 import { ingestionPassages, ingestionPayload, validateIngestionResult } from './sourceIngestion.js'
+import { reviewedOntologyRequest, validateReviewedOntologyResult, REVIEWED_ONTOLOGY_ERROR_STATUS } from './reviewedOntology.js'
 import { experimentSelection, validateExperimentCatalog, validateExperimentComparison } from './experimentComparison.js'
 import { populationOptions, validatePopulationPreview, validatePopulationExport } from './populationWorkbench.js'
 import { preparationPayload, preparationSource, preparationSources, validatePreparationResult, PREPARATION_CODES } from './simulationPreparation.js'
@@ -233,8 +234,9 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
   async function request(method, payload, ingestionContext, options = {}) {
     if (!connection || (method !== 'graph' && !authenticated)) fail('disconnected')
     const population = method.startsWith('population')
-    // Original PDF reads have no effect on report or follow-up ownership.
-    if (['sourceOriginalMetadata', 'sourceOriginalRead'].includes(method)) cancelShared()
+    const ontology = method === 'sourceOntologyLoad' || method === 'sourceOntologySave'
+    // These source operations leave report and follow-up ownership alone.
+    if (ontology || ['sourceOriginalMetadata', 'sourceOriginalRead'].includes(method)) cancelShared()
     else cancel(method === 'populationExport')
     const source = method.startsWith('source'), ingestion = method.startsWith('ingestion'), experiment = method.startsWith('experiment')
     const original = ['sourceRetainOriginal', 'sourceOriginalMetadata', 'sourceOriginalRead'].includes(method)
@@ -284,13 +286,14 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
     if (method === 'experimentCompare') {
       try { experimentRequest = experimentSelection(payload, ingestionContext); payload = experimentRequest.payload } catch { fail('invalid_request') }
     }
-    const ingestionRaw = ingestion ? ingestionPayload(payload, method === 'ingestionStatus') : undefined
+    const ingestionRaw = ingestion ? ingestionPayload(payload, method === 'ingestionStatus', method === 'ingestionExecute') : undefined
     if (ingestion) {
       payload = JSON.parse(ingestionRaw)
       ingestionContext = JSON.parse(JSON.stringify({ ...ingestionContext, ...(ingestionScope ? { scope: ingestionScope } : {}) }))
     }
     const originalRaw = original ? sourceOriginalPayload(method, payload) : undefined
-    const raw = native ? nativeRaw : preparation ? preparationRaw : population ? JSON.stringify(populationRequest) : experiment ? experimentRequest?.raw : ingestion ? (method === 'ingestionStatus' ? undefined : ingestionRaw) : original ? (method === 'sourceRetainOriginal' ? originalRaw : undefined) : method === 'graph' || method === 'sourceList' || method === 'sourceGet' ? undefined : method === 'sourceRetain' ? sourcePayload(payload) : requestPayload(method, payload, connection.graph)
+    const ontologyRequest = ontology ? reviewedOntologyRequest(method, payload, ingestionContext?.known, ingestionContext?.project) : undefined
+    const raw = ontology ? ontologyRequest.raw : native ? nativeRaw : preparation ? preparationRaw : population ? JSON.stringify(populationRequest) : experiment ? experimentRequest?.raw : ingestion ? (method === 'ingestionStatus' ? undefined : ingestionRaw) : original ? (method === 'sourceRetainOriginal' ? originalRaw : undefined) : method === 'graph' || method === 'sourceList' || method === 'sourceGet' ? undefined : method === 'sourceRetain' ? sourcePayload(payload) : requestPayload(method, payload, connection.graph)
     if (population && encoder.encode(raw).length > 16384) fail('invalid_request')
     const sourceRequest = original ? (method === 'sourceRetainOriginal' ? JSON.parse(originalRaw) : originalRaw) : method === 'sourceGet' ? sourceReadRequest(payload) : method === 'sourceRetain' ? JSON.parse(raw) : undefined
     const epoch = generation, current = connection, controller = new AbortController()
@@ -329,7 +332,12 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
         if (known?.schema_version !== 2 || known.source_revision !== payload.source_revision ||
             known.ontology_revision !== payload.ontology.revision || known.window?.evidence_id !== payload.evidence_id) fail('invalid_request')
       }
-      const sourcePaths = { sourceList: 'library', sourceGet: 'item', sourceRetain: 'retain', sourceRetainOriginal: 'retain-original', sourceOriginalMetadata: 'original-metadata', sourceOriginalRead: 'original' }
+      if (method === 'ingestionExecute' && payload.schema_version === 4) {
+        const { known } = ingestionContext
+        if (known?.schema_version !== 4 || ['source_revision', 'operation_id', 'project_revision', 'fingerprint', 'execution_fingerprint']
+          .some(key => known[key] !== payload[key])) fail('invalid_request')
+      }
+      const sourcePaths = { sourceList: 'library', sourceGet: 'item', sourceRetain: 'retain', sourceRetainOriginal: 'retain-original', sourceOriginalMetadata: 'original-metadata', sourceOriginalRead: 'original', sourceOntologyLoad: 'ontology', sourceOntologySave: 'ontology' }
       const ingestionPaths = { ingestionPlan: 'plan', ingestionExecute: 'execute', ingestionStatus: 'operation' }
       const path = native ? `/api/native-launch/${{ nativeLaunchPlan: 'plan', nativeLaunchStart: 'start', nativeLaunchStatus: 'status', nativeLaunchCancel: 'cancel' }[method]}/${current.graph}` : preparation ? `/api/preparation/${current.graph}/${{ preparationPlan: 'plan', preparationStart: 'start', preparationStatus: 'status' }[method]}` : population ? `/api/graph/population/${current.graph}/${method === 'populationPreview' ? 'preview' : 'export'}` : experiment ? `/api/experiments/${method === 'experimentCatalog' ? 'catalog' : 'compare'}` : ingestion ? `/api/source/ingestion/${ingestionPaths[method]}/${current.graph}${method === 'ingestionStatus' ? '/' + payload.operation_id : ''}` : source ? `/api/source/${sourcePaths[method]}/${current.graph}${['sourceGet', 'sourceOriginalMetadata', 'sourceOriginalRead'].includes(method) ? '/' + sourceRequest.source_revision : ''}` : `/api/graph/${paths[method]}/${current.graph}`
       // Fence before invoking fetch, including synchronous throws and lost replies.
@@ -374,10 +382,16 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
       if (!obj(value) || typeof value.success !== 'boolean') fail()
       if (!response.ok || !value.success) {
         shape(value, 'success error'); shape(value.error, 'code')
-        if (value.success !== false || !(native ? NATIVE_LAUNCH_CODES.has(value.error.code) && response.status === NATIVE_ERROR_STATUS[value.error.code] : preparation ? PREPARATION_CODES.has(value.error.code) : SERVER_CODES.has(value.error.code) || experiment && response.status === 503 && value.error.code === 'experiment_unavailable' || (source || ingestion) && ['source_unavailable', 'source_denied', 'outcome_unknown', 'cancelled', 'uncertain', 'model_calls_disabled', 'budget_denied'].includes(value.error.code))) fail()
+        if (ingestion && (response.status === 422 || value.error.code === 'ontology_ineligible')) {
+          if (value.success !== false || response.status !== 422 || value.error.code !== 'ontology_ineligible' ||
+              payload.schema_version !== 4 || !['ingestionPlan', 'ingestionExecute'].includes(method)) fail()
+          fail('ontology_ineligible')
+        }
+        if (value.success !== false || !(ontology ? Object.hasOwn(REVIEWED_ONTOLOGY_ERROR_STATUS, value.error.code) && response.status === REVIEWED_ONTOLOGY_ERROR_STATUS[value.error.code] : native ? NATIVE_LAUNCH_CODES.has(value.error.code) && response.status === NATIVE_ERROR_STATUS[value.error.code] : preparation ? PREPARATION_CODES.has(value.error.code) : SERVER_CODES.has(value.error.code) || experiment && response.status === 503 && value.error.code === 'experiment_unavailable' || (source || ingestion) && ['source_unavailable', 'source_denied', 'outcome_unknown', 'cancelled', 'uncertain', 'model_calls_disabled', 'budget_denied'].includes(value.error.code))) fail()
         if (['unauthorized', 'origin_denied'].includes(value.error.code)) disconnect()
         fail(value.error.code)
       }
+      if (ontology && response.status !== 200) fail()
       shape(value, 'success data')
       let result
       if (native) {
@@ -388,6 +402,8 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
         try { result = method === 'experimentCatalog' ? validateExperimentCatalog(value.data) : validateExperimentComparison(value.data, experimentRequest.catalog, experimentRequest.payload) } catch { fail('invalid_reply') }
       } else if (population) {
         try { result = validatePopulationPreview(value.data, current.graph, populationRequest) } catch { fail('invalid_reply') }
+      } else if (ontology) {
+        result = validateReviewedOntologyResult(value.data, ontologyRequest)
       } else result = original ? await guarded(validateSourceOriginalResult(method, value.data, sourceRequest)) : ingestion ? await guarded(validateIngestionResult(method, value.data, { ...ingestionContext, payload })) : source ? await guarded(validateSourceResult(method, value.data, sourceRequest)) : validateResult(method, value.data, current.graph)
       if (method === 'research' && [...result.source_claims, ...result.simulation_observations, ...result.other_claims].length > (payload.top_k ?? 10)) fail()
       if (method === 'dossier') {
@@ -445,6 +461,8 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
     sourceRetainOriginal: (payload, options) => request('sourceRetainOriginal', payload, undefined, options),
     sourceOriginalMetadata: (payload, options) => request('sourceOriginalMetadata', payload, undefined, options),
     sourceOriginalRead: (payload, options) => request('sourceOriginalRead', payload, undefined, options),
+    sourceOntologyLoad: (known, project) => request('sourceOntologyLoad', undefined, { known, project }),
+    sourceOntologySave: (payload, known, project) => request('sourceOntologySave', payload, { known, project }),
     experimentCatalog: () => request('experimentCatalog'),
     experimentCompare: (payload, catalog) => request('experimentCompare', payload, catalog),
     populationPreview: options => request('populationPreview', { options }),
@@ -474,7 +492,7 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
     connectedFollowupDownload: (payload, known) => followups.download(payload, known),
     connectedFollowupHistory: payload => followups.history(payload),
     clearConnectedFollowups: () => followups.clear(),
-    ingestionPlan: (payload, inspected, scope) => request('ingestionPlan', payload, { inspected, scope }),
+    ingestionPlan: (payload, inspected, scope, saved) => request('ingestionPlan', payload, { inspected, scope, saved }),
     ingestionExecute: (payload, known) => request('ingestionExecute', payload, { known, scope: known.scope }),
     ingestionStatus: (payload, known, scope, project) => request('ingestionStatus', payload, { known, scope, project }),
     cancel, cancelShared, disconnect

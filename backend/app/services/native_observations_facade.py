@@ -1,6 +1,6 @@
 """Cold optional trusted composition and four-call admission, without SDK imports."""
 import threading
-from .native_observations_client import NativeObservationsError, CODES, validate_payload
+from .native_observations_client import NativeObservationsError, CODES, validate_payload, validate_stage_payload
 
 TRANSLATIONS = {'native_run_denied': 'unauthorized', 'native_run_conflict': 'conflict',
     'native_run_busy': 'busy', 'native_run_uncertain': 'conflict',
@@ -15,7 +15,12 @@ class NativeObservationsFacade:
         self._calls = threading.BoundedSemaphore(4)
 
     def execute(self, graph_id, payload):
-        payload = validate_payload(payload)
+        return self._execute(graph_id, validate_payload(payload))
+
+    def stage_event(self, graph_id, payload):
+        return self._execute(graph_id, validate_stage_payload(payload), stage=True)
+
+    def _execute(self, graph_id, payload, *, stage=False):
         if graph_id != self.settings.display_graph_id:
             raise NativeObservationsError('not_found')
         if self.host is None or (self.host.principal != self.settings.principal
@@ -24,6 +29,8 @@ class NativeObservationsFacade:
         if not self._calls.acquire(blocking=False):
             raise NativeObservationsError('busy')
         try:
+            if stage:
+                return self.host.stage_event(payload)
             return self.host.page(payload)
         except NativeObservationsError:
             raise
