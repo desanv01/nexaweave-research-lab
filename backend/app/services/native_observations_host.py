@@ -4,7 +4,7 @@ import json
 from uuid import uuid5
 from .native_observations_client import (NativeObservationsError, validate_payload, validate_result,
     launch_reference, encoded, stage_operation_id, stage_scope, validate_stage_payload,
-    validate_dispatch_payload)
+    validate_dispatch_payload, validate_event_status_payload)
 from .native_observation_reader import NativeObservationReader
 from .preparation_client import canonical
 
@@ -177,10 +177,11 @@ class NativeObservationsHost:
             OperationState, StaleAttempt, StorageError, Tombstoned,
         )
 
-        payload = validate_dispatch_payload(payload)
+        payload = validate_event_status_payload(payload)
+        by_record = payload['schema_version'] == 3
         locator = {key: value for key, value in payload.items() if key != 'expected_fingerprint'}
-        scope, operation, fingerprint, authorize, _, source = self._event(locator)
-        if fingerprint != payload['expected_fingerprint']:
+        scope, operation, fingerprint, authorize, _, source = self._event(dict(locator, schema_version=2))
+        if not by_record and fingerprint != payload['expected_fingerprint']:
             raise NativeObservationsError('conflict')
         try:
             row = Ledger(self.launch.connect).read_staged_event(
@@ -198,9 +199,12 @@ class NativeObservationsHost:
         expected = CompletionReceipt(scope.group_id, scope.episode_uuid(operation), fingerprint, source.evidence_ids)
         if completed and row.receipt != expected:
             raise NativeObservationsError('conflict')
-        return dict(payload, scope=scope.model_dump(mode='json'), operation_id=str(operation),
+        result = dict(payload, scope=scope.model_dump(mode='json'), operation_id=str(operation),
                     state=row.state.value, attempt_id=str(row.current_attempt) if row.current_attempt else None,
                     completion_barrier_open=completed, receipt=expected.json_value() if completed else None)
+        if by_record:
+            result['fingerprint'] = fingerprint
+        return result
 
     def dispatch_event(self, payload):
         from nexaweave_knowledge.operations import (
