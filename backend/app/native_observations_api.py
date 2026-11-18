@@ -3,7 +3,8 @@ from flask import Response, request
 from werkzeug.exceptions import BadRequest
 from .services.native_observations_client import (NativeObservationsError, CODES, REQUEST_BYTES,
     RESULT_BYTES, ENVELOPE_OVERHEAD, encoded, validate_payload, validate_result,
-    validate_stage_payload, validate_stage_result, validate_dispatch_payload, validate_dispatch_result)
+    validate_stage_payload, validate_stage_result, validate_dispatch_payload, validate_dispatch_result,
+    validate_event_status_result)
 from .services.native_observations_facade import NativeObservationsFacade
 from .services.native_observations_event_runtime import EventRuntime
 from .services.knowledge_transport import _json_object
@@ -43,7 +44,10 @@ def register_native_observations_routes(app, settings, *, native_observations_fa
             if len(raw) != request.content_length or len(raw) > REQUEST_BYTES:
                 raise NativeObservationsError('invalid_request')
             value = _json_object(raw)
-            if operation == 'dispatch':
+            if operation == 'event-status':
+                payload = validate_dispatch_payload(value)
+                data = validate_event_status_result(facade.event_status(graph_id, payload), settings.scope, payload)
+            elif operation == 'dispatch':
                 payload = validate_dispatch_payload(value)
                 data = validate_dispatch_result(facade.dispatch_event(graph_id, payload), settings.scope, payload)
             elif operation == 'stage':
@@ -74,3 +78,7 @@ def register_native_observations_routes(app, settings, *, native_observations_fa
     @app.post('/api/native-observations/dispatch-event/<graph_id>')
     def observations_dispatch_event(graph_id):
         return run(graph_id, operation='dispatch')
+
+    @app.post('/api/native-observations/event-status/<graph_id>')
+    def observations_event_status(graph_id):
+        return run(graph_id, operation='event-status')
