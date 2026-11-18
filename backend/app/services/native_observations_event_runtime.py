@@ -83,7 +83,7 @@ class EventRuntime:
             read_facade=KnowledgeReadFacade(settings), artifact_root=self.root)
         launch = DurableNativeLaunchHost(preparation_host=preparation,
             connection_factory=connect, runtime_sha256=self.runtime_sha256)
-        return NativeObservationsHost(launch_host=launch, event_writer=self.write)
+        return NativeObservationsHost(launch_host=launch, event_writer=self.write, event_verifier=self.verify)
 
     def _check_script(self):
         from nexaweave_execution.native_owned_binding import _regular_bound_file
@@ -94,6 +94,12 @@ class EventRuntime:
             raise ValueError
 
     def write(self, value):
+        return self._call(value, [])
+
+    def verify(self, value):
+        return self._call(value, ['--verify-uncertain'])
+
+    def _call(self, value, arguments):
         from ..utils.owned_process import OwnedProcess
 
         raw = encoded(value)
@@ -105,7 +111,7 @@ class EventRuntime:
         owner.bind_private_directory(directory)
         threads = []
         try:
-            process = owner.start(subprocess.Popen, [self.python, '-I', '-u', self.script],
+            process = owner.start(subprocess.Popen, [self.python, '-I', '-u', self.script, *arguments],
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                 shell=False, close_fds=True, cwd=directory.name,
                 env=_private_environment(directory.name, self.python, self.environment))

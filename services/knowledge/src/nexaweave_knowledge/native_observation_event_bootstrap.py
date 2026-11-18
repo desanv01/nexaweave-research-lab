@@ -124,8 +124,8 @@ def event_projection(frame):
     }
 
 
-def _apply(frame):
-    from neo4j import GraphDatabase
+def _apply(frame, *, verify_uncertain=False):
+    from neo4j import GraphDatabase, READ_ACCESS, WRITE_ACCESS
     from nexaweave_knowledge.contracts import Layer
     from nexaweave_knowledge.operations import Ledger, OperationState
     from nexaweave_knowledge.read_runtime import ReadSettings
@@ -141,25 +141,38 @@ def _apply(frame):
     projection = event_projection(frame)
     operation = _uuid(frame['operation_id'])
     attempt = _uuid(frame['attempt_id'])
-    row = Ledger(settings.connection).get(scope, operation)
-    if (row.state != OperationState.running or row.current_attempt != attempt
-            or row.fingerprint != frame['fingerprint']):
-        raise ValueError
+    if verify_uncertain:
+        def connect():
+            conn = settings.connection()
+            try:
+                conn.read_only = True
+            except BaseException:
+                conn.close()
+                raise
+            return conn
+        Ledger(connect).require_event_ack_candidate(scope, operation, attempt, frame['fingerprint'])
+    else:
+        row = Ledger(settings.connection).get(scope, operation)
+        if (row.state != OperationState.running or row.current_attempt != attempt
+                or row.fingerprint != frame['fingerprint']):
+            raise ValueError
     group = scope.group_id
     episode = projection['episode']['uuid']
     with GraphDatabase.driver(settings.neo4j_uri, auth=(settings.neo4j_user, settings.neo4j_password),
                               connection_timeout=3, connection_acquisition_timeout=5,
                               max_transaction_retry_time=0) as driver:
-        with driver.session() as session:
-            with session.begin_transaction(timeout=5) as tx:
-                existing = tx.run(
-                    "MATCH (n {group_id:$group_id}) WHERE n.uuid IN $ids RETURN n.uuid LIMIT 1",
-                    group_id=group, ids=[projection[key]['uuid'] for key in ('actor', 'post', 'episode')],
-                ).single()
-                if existing is not None:
-                    raise ValueError
-                tx.run(CREATE, **projection).consume()
-                tx.commit()
+        mode = READ_ACCESS if verify_uncertain else WRITE_ACCESS
+        with driver.session(default_access_mode=mode) as session:
+            if not verify_uncertain:
+                with session.begin_transaction(timeout=5) as tx:
+                    existing = tx.run(
+                        "MATCH (n {group_id:$group_id}) WHERE n.uuid IN $ids RETURN n.uuid LIMIT 1",
+                        group_id=group, ids=[projection[key]['uuid'] for key in ('actor', 'post', 'episode')],
+                    ).single()
+                    if existing is not None:
+                        raise ValueError
+                    tx.run(CREATE, **projection).consume()
+                    tx.commit()
             with session.begin_transaction(timeout=5) as tx:
                 result = tx.run(READ, group_id=group, episode_id=episode,
                                 edge_id=projection['edge']['uuid']).single(strict=True)
@@ -175,7 +188,7 @@ def main():
         from pathlib import Path
         import nexaweave_knowledge
 
-        if len(sys.argv) != 1:
+        if sys.argv[1:] not in ([], ['--verify-uncertain']):
             raise ValueError
         if Path(__file__).resolve().parent != Path(nexaweave_knowledge.__file__).resolve().parent:
             raise ValueError
@@ -186,7 +199,7 @@ def main():
         raw = stream.read(length)
         if len(raw) != length or stream.read(1):
             raise ValueError
-        observed = _apply(_object(raw))
+        observed = _apply(_object(raw), verify_uncertain=bool(sys.argv[1:]))
         reply = json.dumps(observed, ensure_ascii=False, sort_keys=True, allow_nan=False,
                            separators=(',', ':')).encode('utf-8')
         if not 0 < len(reply) <= WIRE_BYTES:
