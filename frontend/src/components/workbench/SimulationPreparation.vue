@@ -16,6 +16,7 @@ const additionalSources = computed(() => {
   })
 })
 const plan = ref(null), durable = ref(null), pending = ref(false), attempted = ref(false), error = ref(''), notice = ref(''), feedback = ref(null)
+const suggestion = ref('')
 const profileActor = ref(''), profileResult = ref(null), profileError = ref(''), profilePending = ref(false)
 const profileReady = computed(() => {
   const current = plan.value || durable.value
@@ -36,7 +37,7 @@ let lifetime = 0, reviewEpoch = 0, updatingCatalog = false
 const locked = computed(() => !props.connected || props.busy || pending.value)
 const canStart = computed(() => !locked.value && plan.value?.state === 'planned' && plan.value.authorization.model_calls_enabled && !!plan.value.authorization.ceiling_microusd && !(attempted.value && durable.value?.operation_id === plan.value.operation_id))
 const records = computed(() => [plan.value && { key: 'plan', value: plan.value }, durable.value && durable.value.operation_id !== plan.value?.operation_id && { key: 'durable', value: durable.value }].filter(Boolean))
-function changed() { clearProfile(); reviewEpoch++; if (plan.value) notice.value = 'changed'; plan.value = null; error.value = ''; emit('ready', null) }
+function changed() { clearProfile(); reviewEpoch++; if (plan.value) notice.value = 'changed'; plan.value = null; error.value = ''; suggestion.value = ''; emit('ready', null) }
 watch([selected, maximum, seed, rounds, requirement, twitter, reddit], changed, { deep: true, flush: 'sync' })
 watch(selectedExtras, () => { if (!updatingCatalog) changed() }, { deep: true, flush: 'sync' })
 watch(() => props.source, () => { selectedExtras.value = []; changed() }, { deep: true, flush: 'sync' })
@@ -62,7 +63,7 @@ function clear() {
   clearProfile()
   lifetime++; reviewEpoch++; plan.value = null; durable.value = null; attempted.value = false; pending.value = false
   selected.value = []; selectedExtras.value = []; maximum.value = '10'; seed.value = '0'; rounds.value = '10'; requirement.value = ''; twitter.value = true; reddit.value = false
-  error.value = ''; notice.value = ''
+  error.value = ''; notice.value = ''; suggestion.value = ''
   emit('ready', null); emit('cleared')
 }
 watch(() => props.resetVersion, clear, { flush: 'sync' })
@@ -70,12 +71,51 @@ watch(() => props.connected, connected => { if (!connected) clear() }, { flush: 
 watch(() => props.displayGraphId, clear, { flush: 'sync' })
 onBeforeUnmount(clear)
 async function announce() { await nextTick(); feedback.value?.focus() }
+const uncertainGoal = /[?？"'‘’“”「」『』`]|\b(?:no|not|never|cannot|without|except|avoid|exclude|skip|neither|nor|or|either|instead|rather|maybe|perhaps|if|whether|unless|tidak|jangan|tanpa|bukan|kecuali|elak(?:kan)?|atau|mungkin|jika)\b|[不別别無无]|禁止|避免|排除|或者|或是|是否/u
+const chosenPlatforms = /(?:(both|kedua-dua|同时|同時)\s*)?\b(twitter|reddit)\b(?:\s*(?:and|&|dan|和|与|與|及|、)\s*\b(twitter|reddit)\b)?(?:\s+(?:only|sahaja))?$/u
+const nonInstructionContext = /\b(?:examples?|samples?|hypothetical(?:ly)?|quot(?:e|es|ed|ing|ation|ations)|ignor(?:e|es|ed|ing)|(?:disregard|discard|reject)(?:s|ed|ing)?|vetoe?d|contoh|petikan|abaikan|tolak|ditolak)\b|例子|示例|範例|范例|举例|舉例|引用|忽略|忽視|忽视|拒绝|拒絕/u
+const platformDirectives = [
+  /^(?:please\s+)?(?:use|compare|platforms?\s*[:：])$/u,
+  /^(?:please\s+)?(?:run|simulate|prepare|test|model)(?:\s+(?:it|(?:(?:a|the|this)\s+)?(?:simulation|scenario|experiment)))?\s+(?:on|across|using)$/u,
+  /^(?:sila\s+)?(?:guna|gunakan|bandingkan|platform\s*[:：])$/u,
+  /^(?:sila\s+)?(?:jalankan|simulasikan|uji)(?:\s+(?:simulasi|senario)(?:\s+ini)?)?\s+di$/u,
+  /^(?:使用|比较|比較|平台\s*[:：])$/u,
+]
+
+function suggestedPlatforms(goal) {
+  const text = goal.trim().toLowerCase()
+  // A heading or prior sentence can mark the final directive as illustrative
+  // or rejected. Check the whole goal before taking a final clause.
+  if (uncertainGoal.test(text) || nonInstructionContext.test(text)) return null
+  // Other platform mentions also qualify the directive.
+  const mentions = text.match(/\b(?:twitter|reddit)\b/gu) || []
+  if (mentions.length < 1 || mentions.length > 2) return null
+  const clause = text.split(/[.!;。！；\n]+/u).map(part => part.trim()).filter(Boolean).at(-1)
+  const target = chosenPlatforms.exec(clause)
+  if (!target) return null
+  const [, both, first, second] = target
+  if ((both && !second) || first === second || mentions.length !== (second ? 2 : 1)) return null
+  const prefix = clause.slice(0, target.index).trim()
+  if (!platformDirectives.some(directive => directive.test(prefix))) return null
+  return new Set(second ? [first, second] : [first])
+}
+
+function suggest() {
+  if (locked.value || !props.source || !requirement.value.trim()) return
+  const platforms = suggestedPlatforms(requirement.value)
+  if (platforms) {
+    twitter.value = platforms.has('twitter')
+    reddit.value = platforms.has('reddit')
+  }
+  suggestion.value = platforms ? 'suggested' : 'suggestionUnclear'
+}
+
 function options() { return preparationOptions({ types: selected.value.length ? [...selected.value] : null, max_agents: preparationInteger(maximum.value, 100, 1), seed: preparationInteger(seed.value, 4294967295), platforms: [...(twitter.value ? ['twitter'] : []), ...(reddit.value ? ['reddit'] : [])], max_rounds: preparationInteger(rounds.value, 24, 1), simulation_requirement: requirement.value }) }
 async function review() {
   if (locked.value) return
   clearProfile()
   const life = lifetime, epoch = ++reviewEpoch
-  plan.value = null; error.value = ''; notice.value = ''; pending.value = true
+  plan.value = null; error.value = ''; notice.value = ''; suggestion.value = ''; pending.value = true
   emit('ready', null)
   try {
     const anchor = preparationSource(props.source), payload = { schema_version: 1, operation_id: newPreparationId(), source_revision: anchor.source_revision, options: options() }
@@ -151,11 +191,11 @@ async function inspectProfile(event) {
         <div class="options"><label for="preparation-maximum">{{ copy.maximum }} (1–100)<input id="preparation-maximum" v-model="maximum" inputmode="numeric" type="text" required maxlength="3"></label><label for="preparation-seed">{{ copy.seed }} (0–4294967295)<input id="preparation-seed" v-model="seed" inputmode="numeric" type="text" required maxlength="10"></label><label for="preparation-rounds">{{ copy.rounds }} (1–24)<input id="preparation-rounds" v-model="rounds" inputmode="numeric" type="text" required maxlength="2"></label></div>
         <fieldset class="platforms"><legend>{{ copy.platforms }}</legend><label><input v-model="twitter" type="checkbox">Twitter</label><label><input v-model="reddit" type="checkbox">Reddit</label></fieldset>
         <label for="preparation-requirement">{{ copy.requirement }}<textarea id="preparation-requirement" v-model="requirement" rows="3" required maxlength="16384" aria-describedby="preparation-assumptions"></textarea></label>
-        <div class="actions"><button class="primary review" type="submit">{{ copy.review }}</button></div>
+        <div class="actions"><button class="primary review" type="submit">{{ copy.review }}</button><button class="suggest" type="button" :disabled="!requirement.trim()" @click="suggest">{{ copy.suggest }}</button></div>
       </fieldset>
     </form>
     <p id="preparation-assumptions" class="limitations">{{ copy.assumptions }}</p><p class="limitations">{{ copy.snapshot }}</p><p class="limitations">{{ copy.reservation }}</p><p class="limitations">{{ copy.disconnected }}</p>
-    <p ref="feedback" class="feedback" role="status" aria-live="polite" aria-atomic="true" tabindex="-1"><span v-if="pending">{{ copy.pending }}</span><span v-else-if="error">{{ preparationError(copy, error) }}</span><span v-if="notice"> {{ copy[notice] }}</span><span v-if="!pending && !error && plan"> {{ copy.states[plan.state] }}</span></p>
+    <p ref="feedback" class="feedback" role="status" aria-live="polite" aria-atomic="true" tabindex="-1"><span v-if="pending">{{ copy.pending }}</span><span v-else-if="error">{{ preparationError(copy, error) }}</span><span v-if="suggestion && !pending && !error"> {{ copy[suggestion] }}</span><span v-if="notice"> {{ copy[notice] }}</span><span v-if="!pending && !error && plan"> {{ copy.states[plan.state] }}</span></p>
     <article v-for="record in records" :key="record.key" class="plan" :aria-label="record.key === 'durable' ? copy.recovered : copy.review">
       <h3>{{ record.key === 'durable' ? copy.recovered : copy.states[record.value.state] }}</h3>
       <details v-if="record.value.sources" class="frozen-sources"><summary>{{ copy.frozenSources }} ({{ record.value.sources.length }})</summary><ol><li v-for="item in record.value.sources" :key="item.source_revision"><strong>{{ item.source_name }}</strong><p class="mono">{{ item.source_revision }}<br>{{ item.source_sha256 }}</p></li></ol></details>
