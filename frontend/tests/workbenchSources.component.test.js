@@ -621,7 +621,7 @@ test('selected retained passage resets review and recovers one derived operation
     ineligibleStatus = 409
     savedPlanButton().click()
     await waitFor(() => callsFor('plan').length === planCount + 1 && !savedPlanButton().disabled &&
-      m.root.querySelector('.source-ingestion .feedback').textContent.includes(copyFor('en').ingestion.failed))
+      m.root.querySelector('.source-ingestion > p.feedback:not(#reviewed-ontology-status)').textContent.includes(copyFor('en').ingestion.failed))
     assert.equal(ineligible(), null)
     ineligibleStatus = 422
     savedPlanButton().click()
@@ -680,7 +680,7 @@ test('selected retained passage resets review and recovers one derived operation
     const recoveryCount = callsFor('operation').length
     status().click()
     await waitFor(() => callsFor('operation').length === recoveryCount + 1 && !status().disabled &&
-      m.root.querySelector('.source-ingestion .feedback').textContent.includes(copyFor('en').ingestion.failed))
+      m.root.querySelector('.source-ingestion > p.feedback:not(#reviewed-ontology-status)').textContent.includes(copyFor('en').ingestion.failed))
     assert.equal(m.root.querySelector('.source-ingestion .outcome'), null)
     returnReviewHash = false
     input(m, manual, savedSubmission.operation_id)
