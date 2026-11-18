@@ -1,6 +1,6 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
-import { preparationIdentity, preparationInteger, preparationOptions, preparationSource, newPreparationId, validatePreparationResult } from '../../api/simulationPreparation.js'
+import { configurationIdentity, preparationIdentity, preparationInteger, preparationOptions, preparationSource, newPreparationId, validatePreparationResult } from '../../api/simulationPreparation.js'
 import { populationTypeLabels } from '../../api/populationWorkbench.js'
 import { preparationCopyFor, preparationError } from '../../i18n/simulationPreparation.js'
 const props = defineProps({ methods: { type: Object, required: true }, connected: Boolean, busy: Boolean, resetVersion: { type: Number, default: 0 }, locale: { type: String, default: 'en' }, source: { type: Object, default: null }, sourceCatalog: { type: Array, default: null }, displayGraphId: { type: String, default: '' }, typeLabels: { type: Array, default: () => [] } })
@@ -18,10 +18,30 @@ const additionalSources = computed(() => {
 const plan = ref(null), durable = ref(null), pending = ref(false), attempted = ref(false), error = ref(''), notice = ref(''), feedback = ref(null)
 const suggestion = ref('')
 const profileActor = ref(''), profileResult = ref(null), profileError = ref(''), profilePending = ref(false)
-const profileReady = computed(() => {
+const inspectionReady = computed(() => {
   const current = plan.value || durable.value
-  return current?.state === 'ready' && current.receipt && props.methods.profiles ? current : null
+  return current?.state === 'ready' && current.receipt ? current : null
 })
+const profileReady = computed(() => props.methods.profiles ? inspectionReady.value : null)
+const configurationReady = computed(() => {
+  const ready = inspectionReady.value, source = props.source
+  return props.methods.configuration && ready && source && ready.source.source_revision === source.source_revision &&
+    ready.scope.project_id === source.project_id && ready.display_graph_id === props.displayGraphId ? ready : null
+})
+const configurationResult = ref(null), configurationError = ref(''), configurationPending = ref(false)
+const timeFields = ['total_simulation_hours', 'minutes_per_round', 'agents_per_hour_min', 'agents_per_hour_max']
+const activityPeriods = ['peak', 'off_peak', 'morning', 'work']
+const platformFields = ['viral_threshold', 'recency_weight', 'popularity_weight', 'relevance_weight', 'echo_chamber_strength']
+const platformName = platform => platform === 'twitter' ? 'Twitter' : 'Reddit'
+let configurationOwner = null
+function clearConfiguration() {
+  configurationOwner?.abort()
+  configurationOwner = null
+  configurationResult.value = null
+  configurationError.value = ''
+  configurationPending.value = false
+}
+watch(configurationReady, clearConfiguration, { flush: 'sync' })
 let profileOwner = null
 function clearProfile(clearActor = true) {
   profileOwner?.abort()
@@ -37,7 +57,7 @@ let lifetime = 0, reviewEpoch = 0, updatingCatalog = false
 const locked = computed(() => !props.connected || props.busy || pending.value)
 const canStart = computed(() => !locked.value && plan.value?.state === 'planned' && plan.value.authorization.model_calls_enabled && !!plan.value.authorization.ceiling_microusd && !(attempted.value && durable.value?.operation_id === plan.value.operation_id))
 const records = computed(() => [plan.value && { key: 'plan', value: plan.value }, durable.value && durable.value.operation_id !== plan.value?.operation_id && { key: 'durable', value: durable.value }].filter(Boolean))
-function changed() { clearProfile(); reviewEpoch++; if (plan.value) notice.value = 'changed'; plan.value = null; error.value = ''; suggestion.value = ''; emit('ready', null) }
+function changed() { clearProfile(); clearConfiguration(); reviewEpoch++; if (plan.value) notice.value = 'changed'; plan.value = null; error.value = ''; suggestion.value = ''; emit('ready', null) }
 watch([selected, maximum, seed, rounds, requirement, twitter, reddit], changed, { deep: true, flush: 'sync' })
 watch(selectedExtras, () => { if (!updatingCatalog) changed() }, { deep: true, flush: 'sync' })
 watch(() => props.source, () => { selectedExtras.value = []; changed() }, { deep: true, flush: 'sync' })
@@ -61,6 +81,7 @@ watch(labels, (current, previous) => {
 }, { flush: 'pre' })
 function clear() {
   clearProfile()
+  clearConfiguration()
   lifetime++; reviewEpoch++; plan.value = null; durable.value = null; attempted.value = false; pending.value = false
   selected.value = []; selectedExtras.value = []; maximum.value = '10'; seed.value = '0'; rounds.value = '10'; requirement.value = ''; twitter.value = true; reddit.value = false
   error.value = ''; notice.value = ''; suggestion.value = ''
@@ -114,6 +135,7 @@ function options() { return preparationOptions({ types: selected.value.length ? 
 async function review() {
   if (locked.value) return
   clearProfile()
+  clearConfiguration()
   const life = lifetime, epoch = ++reviewEpoch
   plan.value = null; error.value = ''; notice.value = ''; suggestion.value = ''; pending.value = true
   emit('ready', null)
@@ -135,6 +157,7 @@ async function review() {
 async function durableRequest(starting) {
   if (locked.value || starting && !canStart.value || !starting && !durable.value) return
   clearProfile()
+  clearConfiguration()
   const life = lifetime, known = JSON.parse(JSON.stringify(starting ? plan.value : durable.value)), payload = preparationIdentity(known)
   if (starting) { durable.value = known; attempted.value = true }
   pending.value = true; error.value = ''; notice.value = ''
@@ -154,7 +177,7 @@ async function durableRequest(starting) {
 }
 async function inspectProfile(event) {
   const ready = profileReady.value, actor = profileActor.value
-  if (locked.value || profilePending.value || !ready?.actors.some(item => item.source_entity_uuid === actor)) return
+  if (locked.value || profilePending.value || configurationPending.value || !ready?.actors.some(item => item.source_entity_uuid === actor)) return
   clearProfile(false)
   const trigger = event.currentTarget
   const feedback = trigger.closest('.prepared-profiles')?.querySelector('.feedback')
@@ -176,6 +199,32 @@ async function inspectProfile(event) {
       if (current() && (profileResult.value || profileError.value) &&
           (document.activeElement === trigger || document.activeElement === document.body)) feedback?.focus()
       if (profileOwner === owner) profileOwner = null
+    }
+  }
+}
+async function inspectConfiguration(event) {
+  const ready = configurationReady.value
+  if (locked.value || configurationPending.value || profilePending.value || !ready) return
+  clearConfiguration()
+  const trigger = event.currentTarget
+  const feedback = trigger.closest('.prepared-configuration')?.querySelector('.feedback')
+  const owner = new AbortController()
+  configurationOwner = owner
+  configurationPending.value = true
+  const current = () => props.connected && configurationOwner === owner && !owner.signal.aborted &&
+    configurationReady.value === ready
+  try {
+    const value = await props.methods.configuration(configurationIdentity(ready), ready, { signal: owner.signal })
+    if (current()) configurationResult.value = value
+  } catch (e) {
+    if (current() && e?.code !== 'cancelled') configurationError.value = e?.code || 'transport_failure'
+  } finally {
+    if (current()) {
+      configurationPending.value = false
+      await nextTick()
+      if (current() && (configurationResult.value || configurationError.value) &&
+          (document.activeElement === trigger || document.activeElement === document.body)) feedback?.focus()
+      if (configurationOwner === owner) configurationOwner = null
     }
   }
 }
@@ -205,6 +254,53 @@ async function inspectProfile(event) {
       <p v-if="record.value.error_code">{{ preparationError(copy, record.value.error_code) }}</p>
       <details><summary>{{ copy.actors }} ({{ record.value.actors.length }})</summary><ol><li v-for="actor in record.value.actors" :key="actor.source_entity_uuid"><strong>{{ actor.name }}</strong><p>{{ actor.labels.join(', ') }}</p><p class="mono">{{ actor.source_entity_uuid }}</p></li></ol></details>
       <template v-if="record.value.receipt"><p class="ready">{{ copy.ready }}</p><dl><dt>{{ copy.simulation }}</dt><dd class="mono">{{ record.value.receipt.simulation_id }}</dd><dt>{{ copy.artifact }}</dt><dd class="mono">{{ record.value.receipt.artifact_sha256 }}</dd></dl><h4>{{ copy.files }}</h4><ul class="manifest"><li v-for="file in record.value.receipt.files" :key="file.name"><strong>{{ file.name }}</strong> · {{ file.size }} {{ copy.bytes }}<p class="mono">{{ file.sha256 }}</p></li></ul></template>
+      <section v-if="record.value === configurationReady" class="prepared-configuration" aria-labelledby="prepared-configuration-title">
+        <h4 id="prepared-configuration-title">{{ copy.configuration.title }}</h4>
+        <div class="actions"><button class="inspect-configuration" type="button" :disabled="locked || configurationPending || profilePending" @click="inspectConfiguration">{{ copy.configuration.read }}</button></div>
+        <p class="feedback" role="status" aria-live="polite" aria-atomic="true" tabindex="-1">{{ configurationPending ? copy.pending : configurationError ? preparationError(copy, configurationError) : configurationResult ? copy.configuration.loaded : '' }}</p>
+        <div v-if="configurationResult" class="prepared-configuration-result">
+          <dl><dt>{{ copy.requirement }}</dt><dd class="configuration-goal">{{ configurationResult.goal }}</dd></dl>
+          <h5>{{ copy.configuration.effective }}</h5>
+          <dl class="effective-controls">
+            <dt>{{ copy.platforms }}</dt><dd>{{ configurationResult.effective_controls.platforms.map(platformName).join(', ') }}</dd>
+            <dt>{{ copy.seed }}</dt><dd>{{ configurationResult.effective_controls.seed }}</dd>
+            <dt>{{ copy.rounds }}</dt><dd>{{ configurationResult.effective_controls.max_rounds }}</dd>
+          </dl>
+          <h5>{{ copy.configuration.proposals }}</h5>
+          <h6>{{ copy.configuration.time }}</h6>
+          <dl v-if="configurationResult.time_activity" class="proposed-time-activity">
+            <template v-for="key in timeFields" :key="key">
+              <dt>{{ copy.configuration[key] }}</dt><dd>{{ configurationResult.time_activity[key] }}</dd>
+            </template>
+            <template v-for="period in activityPeriods" :key="period">
+              <dt>{{ copy.configuration[period] }} · {{ copy.configuration.hours }}</dt>
+              <dd>{{ configurationResult.time_activity[period + '_hours'].join(', ') || copy.configuration.none }}</dd>
+              <dt>{{ copy.configuration[period] }} · {{ copy.configuration.multiplier }}</dt>
+              <dd>{{ configurationResult.time_activity[period + '_activity_multiplier'] }}</dd>
+            </template>
+          </dl>
+          <p v-else>{{ copy.configuration.unavailable }}</p>
+          <h6>{{ copy.configuration.topics }}</h6>
+          <p v-if="configurationResult.hot_topics_omitted === null">{{ copy.configuration.unavailable }}</p>
+          <template v-else>
+            <ul v-if="configurationResult.hot_topics.length" class="proposed-hot-topics">
+              <li v-for="(topic, index) in configurationResult.hot_topics" :key="index">{{ topic }}</li>
+            </ul>
+            <p v-else-if="configurationResult.hot_topics_omitted === 0">{{ copy.configuration.none }}</p>
+            <p v-if="configurationResult.hot_topics_omitted > 0">{{ copy.configuration.omitted.replace('{count}', configurationResult.hot_topics_omitted) }}</p>
+          </template>
+          <h6>{{ copy.configuration.platformControls }}</h6>
+          <p v-if="configurationResult.platform_controls === null">{{ copy.configuration.unavailable }}</p>
+          <article v-for="control in configurationResult.platform_controls || []" :key="control.platform" class="proposed-platform-controls" :aria-label="platformName(control.platform)" :data-platform="control.platform">
+            <h6>{{ platformName(control.platform) }}</h6>
+            <dl>
+              <template v-for="key in platformFields" :key="key">
+                <dt>{{ copy.configuration[key] }}</dt><dd>{{ control[key] }}</dd>
+              </template>
+            </dl>
+          </article>
+        </div>
+      </section>
       <section v-if="record.value === profileReady" class="prepared-profiles" aria-labelledby="prepared-profiles-title">
         <h4 id="prepared-profiles-title">{{ copy.profiles.title }}</h4>
         <label for="prepared-profile-actor">{{ copy.profiles.actor }}
@@ -213,7 +309,7 @@ async function inspectProfile(event) {
             <option v-for="actor in profileReady.actors" :key="actor.source_entity_uuid" :value="actor.source_entity_uuid">{{ actor.name }} · {{ actor.labels.join(', ') }} · {{ actor.source_entity_uuid }}</option>
           </select>
         </label>
-        <div class="actions"><button class="inspect-profile" type="button" :disabled="locked || profilePending || !profileActor" @click="inspectProfile">{{ copy.profiles.read }}</button></div>
+        <div class="actions"><button class="inspect-profile" type="button" :disabled="locked || profilePending || configurationPending || !profileActor" @click="inspectProfile">{{ copy.profiles.read }}</button></div>
         <p class="feedback" role="status" aria-live="polite" aria-atomic="true" tabindex="-1">{{ profilePending ? copy.pending : profileError ? preparationError(copy, profileError) : profileResult ? copy.profiles.loaded : '' }}</p>
         <div v-if="profileResult" class="prepared-profile-result">
           <h5 class="profile-name">{{ profileResult.actor.name }}</h5>
@@ -237,5 +333,8 @@ async function inspectProfile(event) {
 <style scoped>
 .preparation-workbench{background:var(--surface,#fff);color:var(--ink,#172638);border:1px solid var(--border,#b9c4d2);border-radius:8px;padding:24px;margin-bottom:24px;min-width:0;overflow-wrap:anywhere;font:16px/1.5 system-ui,sans-serif}.preparation-workbench *{box-sizing:border-box}h2{font-size:1.25rem;margin:0 0 16px}h3{font-size:1.1rem}p{margin:8px 0}fieldset{border:0;padding:0;margin:16px 0;min-width:0}legend{color:var(--muted,#526174)}label{display:flex;flex-direction:column;gap:6px;font-weight:550;min-width:0}.options{display:grid;gap:12px}.type-choices,.platforms{display:flex;flex-wrap:wrap;gap:8px 16px}.type-choices label,.platforms label{flex-direction:row;align-items:center;min-height:44px}input,textarea{min-width:0;width:100%;border:1px solid var(--control-border,#7b8797);border-radius:5px;min-height:44px;padding:10px 12px;font:inherit;background:var(--surface,#fff);color:inherit}input[type=checkbox]{width:20px;min-height:20px}textarea{resize:vertical}button{min-height:44px;padding:10px 16px;border:1px solid var(--border,#b9c4d2);border-radius:5px;font:inherit;color:var(--primary,#174d96);background:var(--surface,#fff);cursor:pointer;max-width:100%;overflow-wrap:anywhere}.primary{color:white;background:var(--primary,#174d96);border-color:var(--primary,#174d96)}button:disabled{opacity:.65;cursor:default}button:hover:not(:disabled){filter:brightness(.92)}:is(button,input,textarea,summary,.feedback):focus-visible{outline:3px solid var(--primary,#174d96);outline-offset:3px}.actions{display:flex;flex-wrap:wrap;gap:12px;margin-top:16px}.limitations{color:var(--muted,#526174);font-size:.875rem}.source,.plan{border-top:1px solid var(--border,#b9c4d2);padding-top:16px;margin-top:16px}.feedback{border-left:3px solid var(--primary,#174d96);padding:8px 12px}.feedback:empty{display:none}.mono{font:.875rem/1.6 ui-monospace,Consolas,monospace}dl{display:grid;gap:4px 16px}dt{font-weight:550}dd{margin:0 0 8px;min-width:0}summary{min-height:44px;padding:10px 0;cursor:pointer}li{margin:12px 0}.ready{border-left:3px solid var(--primary,#174d96);padding:8px 12px}@media(min-width:768px){.options{grid-template-columns:repeat(3,minmax(0,1fr))}dl{grid-template-columns:minmax(140px,1fr) minmax(0,3fr)}}@media(max-width:480px){.preparation-workbench{padding:16px}}
 .source-choice{flex-direction:row;align-items:center;gap:12px;min-height:44px;margin:8px 0}.source-choice input{flex-shrink:0}.source-choice span{min-width:0}
-.prepared-profiles{border-top:1px solid var(--border,#b9c4d2);margin-top:16px;padding-top:16px}.prepared-profiles select{min-width:0;max-width:100%;width:100%;border:1px solid var(--control-border,#7b8797);border-radius:5px;min-height:44px;padding:8px 12px;font:inherit;background:var(--surface,#fff);color:inherit}.prepared-profiles select:focus-visible{outline:3px solid var(--primary,#174d96);outline-offset:3px}.profile-description,.profile-persona,.profile-summary{white-space:pre-wrap}
+.prepared-configuration,.prepared-profiles{border-top:1px solid var(--border,#b9c4d2);margin-top:16px;padding-top:16px}.prepared-profiles select{min-width:0;max-width:100%;width:100%;border:1px solid var(--control-border,#7b8797);border-radius:5px;min-height:44px;padding:8px 12px;font:inherit;background:var(--surface,#fff);color:inherit}.prepared-profiles select:focus-visible{outline:3px solid var(--primary,#174d96);outline-offset:3px}.profile-description,.profile-persona,.profile-summary{white-space:pre-wrap}
+.configuration-goal,.proposed-hot-topics li{white-space:pre-wrap}
+.prepared-configuration h5{font-size:1rem;margin:16px 0 8px}
+.prepared-configuration h6{font-size:.9375rem;margin:12px 0 4px}
 </style>
