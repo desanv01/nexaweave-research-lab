@@ -556,8 +556,18 @@ async def test_actual_report_followup_history_and_disabled_exports(factory, tmp_
                     await asyncio.to_thread(followups.start,dict(schema_version=1,turn_id=stale['turn_id'],plan_sha256=stale['plan_sha256']))
                 assert follow_log.read_bytes()==before_follow_calls
                 phases.end('followup-stale-start-refusal')
+
+            async def timed_recovery(phase, operation, body):
+                if browser_mode:
+                    return await asyncio.to_thread(operation, body)
+                phases.start(phase)
+                result = await asyncio.to_thread(operation, body)
+                phases.end(phase)
+                return result
+
             phases.start('followup-disabled-history-exports-recovery')
-            rows=[json.loads(line) for line in follow_log.read_text().splitlines()]
+            final_log=follow_log.read_bytes()
+            rows=[json.loads(line) for line in final_log.splitlines()]
             assert sum('call' in row for row in rows)==6 and sum(row.get('closed',False) for row in rows)==2
             follow_enabled[0]=False
             final_budget=native_host.budget.status('owner',prep.account_id)
@@ -567,11 +577,11 @@ async def test_actual_report_followup_history_and_disabled_exports(factory, tmp_
             else:
                 assert final_budget.accounted_ceiling_microusd==20
             assert final_budget.remaining_microusd==0 and final_budget.actual_usage_microusd is None
-            final_log=follow_log.read_bytes()
-            page=await asyncio.to_thread(followups.history,dict(schema_version=1,report_id=reference['report_id'],
+            page=await timed_recovery('followup-disabled-history',followups.history,dict(schema_version=1,report_id=reference['report_id'],
                 report_plan_sha256=reference['plan_sha256'],before_ordinal=None))
             assert page['total_completed']==2 and page['head_sha256']==head and [p['ordinal'] for p in page['pairs']]==[1,2]
-            for identity,result,answer in finished:
+            for ordinal, (identity,result,answer) in enumerate(finished,1):
+                recovery_phase = f'followup-disabled-turn-{ordinal}'
                 if browser:
                     recovered_browser = await asyncio.to_thread(browser.perform, 'followup-recover', {**identity, 'reload':True})
                     assert recovered_browser['receipt'] == result['receipt']
@@ -586,13 +596,13 @@ async def test_actual_report_followup_history_and_disabled_exports(factory, tmp_
                     for kind in ('answer', 'conversation'):
                         await asyncio.to_thread(browser.perform, 'followup-export', {**identity, 'kind':kind})
                 retained=followups.store.get('owner',identity['turn_id'],identity['plan_sha256'])
-                again=await asyncio.to_thread(followups.start,identity)
+                again=await timed_recovery(recovery_phase+'-retry',followups.start,identity)
                 assert again['receipt']==result['receipt']
-                reread=await asyncio.to_thread(followups.read,identity)
+                reread=await timed_recovery(recovery_phase+'-read',followups.read,identity)
                 assert reread['content']==answer and not reread['turn']['authorization']['model_calls_enabled']
                 for kind in ('answer','metadata','conversation','evidence','native_evidence','tools'):
                     body={**identity,'kind':kind}
-                    artifact_reply=await asyncio.to_thread(followups.download,body)
+                    artifact_reply=await timed_recovery(recovery_phase+'-export-'+kind,followups.download,body)
                     validate_turn_download(artifact_reply,body,result)
                     artifact=artifact_reply['artifact'];raw=base64.b64decode(artifact['content_base64'],validate=True)
                     assert len(raw)==artifact['size'] and hashlib.sha256(raw).hexdigest()==artifact['sha256']
