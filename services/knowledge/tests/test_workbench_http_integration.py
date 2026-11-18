@@ -450,14 +450,23 @@ async def _event_dispatch_failure(body, saved, output_path, writer, scope, episo
     return json.dumps(summary, sort_keys=True)
 
 
+def _record_status_selector(request):
+    return dict({key: value for key, value in request.items() if key != "expected_fingerprint"},
+                schema_version=3)
+
+
 async def _assert_event_status(send, request, scope, operation, row):
     status, body = await send("event-status", request)
     completed = row.state.value == "completed"
+    fields = dict(scope=scope.model_dump(mode="json"), operation_id=str(operation),
+                  state=row.state.value, completion_barrier_open=completed,
+                  attempt_id=str(row.current_attempt) if row.current_attempt is not None else None,
+                  receipt=row.receipt.json_value() if completed else None)
+    assert status == 200 and body == {"success": True, "data": dict(request, **fields)}
+    locator = _record_status_selector(request)
+    status, body = await send("event-status", locator)
     assert status == 200 and body == {
-        "success": True, "data": dict(request, scope=scope.model_dump(mode="json"),
-            operation_id=str(operation), state=row.state.value, completion_barrier_open=completed,
-            attempt_id=str(row.current_attempt) if row.current_attempt is not None else None,
-            receipt=row.receipt.json_value() if completed else None),
+        "success": True, "data": dict(locator, fingerprint=row.fingerprint, **fields),
     }
 
 
@@ -591,12 +600,19 @@ async def test_actual_protected_restored_event_dispatch_replay_and_lost_ack(reta
 
                 unreviewed = dict(locator, expected_fingerprint="0" * 64)
                 request = dict(locator, expected_fingerprint=fingerprint)
+                record_status = _record_status_selector(request)
                 assert (await send("dispatch-event", request, bearer=None))[0] == 401
                 assert (await send("dispatch-event", request, origin="http://evil.example"))[0] == 403
                 assert (await send("dispatch-event", request, graph=f["ids"][0]))[0] == 404
                 assert (await send("dispatch-event", request))[0] == 409
                 assert await send("event-status", request) == (
                     404, {"success": False, "error": {"code": "not_found"}})
+                assert await send("event-status", record_status) == (
+                    404, {"success": False, "error": {"code": "not_found"}})
+                assert (await send("event-status", dict(record_status, expected_fingerprint=fingerprint)))[0] == 400
+                assert (await send("event-status", dict(record_status, schema_version=3.0)))[0] == 400
+                assert (await send("stage-event", record_status))[0] == 400
+                assert (await send("dispatch-event", dict(record_status, expected_fingerprint=fingerprint)))[0] == 400
                 status, staged = await send("stage-event", locator)
                 assert status == 200 and staged["data"]["operation_id"] == str(operation)
                 pending = ledger.get(target_scope, operation)
@@ -608,12 +624,17 @@ async def test_actual_protected_restored_event_dispatch_replay_and_lost_ack(reta
                 assert (await send("event-status", request, graph=f["ids"][0]))[0] == 404
                 assert (await send("event-status", unreviewed))[0] == 409
                 assert (await send("event-status", dict(request, record_sha256="0" * 64)))[0] == 409
+                assert (await send("event-status", dict(record_status, record_sha256="0" * 64)))[0] == 409
+                assert (await send("event-status", record_status, bearer=None))[0] == 401
+                assert (await send("event-status", record_status, origin="http://evil.example"))[0] == 403
+                assert (await send("event-status", record_status, graph=f["ids"][0]))[0] == 404
                 await _assert_event_status(send, request, target_scope, operation, pending)
                 if lost_ack:
-                    (directory / "revoke-before-event-status").write_bytes(b"1")
-                    assert await send("event-status", request) == (
-                        410, {"success": False, "error": {"code": "tombstoned"}})
-                    assert {"event": "status_authority_revoked"} in _events(output_path)
+                    for selector in (request, record_status):
+                        (directory / "revoke-before-event-status").write_bytes(b"1")
+                        assert await send("event-status", selector) == (
+                            410, {"success": False, "error": {"code": "tombstoned"}})
+                    assert _events(output_path).count({"event": "status_authority_revoked"}) == 2
                     await _assert_event_status(send, request, target_scope, operation, pending)
                 assert ledger.get(target_scope, operation) == pending
                 assert not [event for event in _events(output_path) if event.get("event") == "spawn"]

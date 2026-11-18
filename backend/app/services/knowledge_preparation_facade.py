@@ -7,8 +7,8 @@ from .knowledge_transport import (KnowledgeProcessClient, KnowledgeTransportFail
                                   _json_object, _trusted_environment)
 from .preparation_client import (PreparationError, REQUEST_BYTES, RESULT_BYTES, ENVELOPE_OVERHEAD,
                                  encoded, validate_payload)
-from .prepared_profile_inspection import (PROFILE_ERRORS, inspect_prepared_profile, profile_request,
-                                          validate_profile_result, validate_profile_selector)
+from .prepared_profile_inspection import (PROFILE_ERRORS, READ_METHODS, inspect_prepared, profile_request,
+                                          read_request, read_result, read_selector)
 
 _ROOT = 'KNOWLEDGE_PREPARATION_ARTIFACT_ROOT'
 _CHILD_KEYS = ('KNOWLEDGE_PRINCIPAL', 'KNOWLEDGE_DISPLAY_GRAPH_ID', 'KNOWLEDGE_BOUND_SCOPE_JSON',
@@ -17,8 +17,8 @@ _CHILD_KEYS = ('KNOWLEDGE_PRINCIPAL', 'KNOWLEDGE_DISPLAY_GRAPH_ID', 'KNOWLEDGE_B
 
 
 class _ProfileProcessClient(KnowledgeProcessClient):
-    def __init__(self, python, scope, graph_id, environment):
-        self.scope, self.graph_id = scope, graph_id
+    def __init__(self, python, scope, graph_id, environment, *, method='profiles'):
+        self.scope, self.graph_id, self.method = scope, graph_id, method
         super().__init__(python, str(Path(__file__).with_name('prepared_profile_inspection_child.py')),
                          timeout_seconds=25, child_environment=environment)
 
@@ -30,7 +30,8 @@ class _ProfileProcessClient(KnowledgeProcessClient):
     def _validate_request(self, raw):
         if not 0 < len(raw) <= REQUEST_BYTES:
             raise PreparationError('invalid_request')
-        request = profile_request(raw, self.scope)
+        request = (profile_request(raw, self.scope) if self.method == 'profiles'
+                   else read_request(raw, self.scope, method=self.method))
         self._payload = request['payload']
         return request['request_id']
 
@@ -48,7 +49,7 @@ class _ProfileProcessClient(KnowledgeProcessClient):
             if reply['ok']:
                 if set(reply) != fields | {'result'}:
                     raise ValueError
-                validate_profile_result(reply['result'], self.graph_id, self.scope, self._payload)
+                read_result(self.method, reply['result'], self.graph_id, self.scope, self._payload)
             elif (set(reply) != fields | {'error'} or type(reply['error']) is not dict
                   or set(reply['error']) != {'code'} or type(reply['error']['code']) is not str
                   or reply['error']['code'] not in PROFILE_ERRORS):
@@ -83,13 +84,13 @@ class KnowledgePreparationFacade:
         self._profile_binding = _profile_binding(settings, artifact_root) if host is None else None
         self._calls = threading.BoundedSemaphore(4)
 
-    def _profiles(self, graph_id, payload):
+    def _inspect(self, method, graph_id, payload):
         python, raw_scope, environment = self._profile_binding
         scope = _json_object(raw_scope)
         request_id = str(uuid4())
         try:
-            client = _ProfileProcessClient(python, scope, graph_id, dict(environment))
-            request = encoded({'version': 1, 'request_id': request_id, 'method': 'profiles',
+            client = _ProfileProcessClient(python, scope, graph_id, dict(environment), method=method)
+            request = encoded({'version': 1, 'request_id': request_id, 'method': method,
                                'scope': scope, 'payload': payload})
             reply = client._validate_reply(client.call(request), request_id)
         except Exception:
@@ -101,10 +102,10 @@ class KnowledgePreparationFacade:
     def execute(self, method, graph_id, payload):
         if graph_id != self.settings.display_graph_id:
             raise PreparationError('not_found')
-        if self.host is None and (method != 'profiles' or self._profile_binding is None):
+        inspection = method in READ_METHODS
+        if self.host is None and (not inspection or self._profile_binding is None):
             raise PreparationError('preparation_unavailable')
-        payload = (validate_profile_selector(payload) if method == 'profiles'
-                   else validate_payload(method, payload))
+        payload = read_selector(method, payload) if inspection else validate_payload(method, payload)
         if self.host is not None and (self.host.principal != self.settings.principal
                 or self.host.display_graph_id != graph_id
                 or self.host.scope_dto != self.settings.scope):
@@ -112,10 +113,10 @@ class KnowledgePreparationFacade:
         if not self._calls.acquire(blocking=False):
             raise PreparationError('busy')
         try:
-            if method == 'profiles':
+            if inspection:
                 if self.host is not None:
-                    return inspect_prepared_profile(self.host, payload)
-                return self._profiles(graph_id, payload)
+                    return inspect_prepared(method, self.host, payload)
+                return self._inspect(method, graph_id, payload)
             return getattr(self.host, method)(payload)
         except PreparationError:
             raise

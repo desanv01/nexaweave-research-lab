@@ -1,7 +1,8 @@
 """Cold optional trusted composition and four-call admission, without SDK imports."""
 import threading
 from .native_observations_client import (NativeObservationsError, CODES, validate_payload,
-                                         validate_stage_payload, validate_dispatch_payload)
+                                         validate_stage_payload, validate_dispatch_payload,
+                                         validate_event_status_payload)
 
 TRANSLATIONS = {'native_run_denied': 'unauthorized', 'native_run_conflict': 'conflict',
     'native_run_busy': 'busy', 'native_run_uncertain': 'conflict',
@@ -27,7 +28,7 @@ class NativeObservationsFacade:
         return self._execute(graph_id, validate_dispatch_payload(payload), operation='dispatch_event')
 
     def event_status(self, graph_id, payload):
-        return self._execute(graph_id, validate_dispatch_payload(payload), operation='event_status')
+        return self._execute(graph_id, validate_event_status_payload(payload), operation='event_status')
 
     def _execute(self, graph_id, payload, *, operation='page'):
         if graph_id != self.settings.display_graph_id:

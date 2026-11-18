@@ -6,7 +6,7 @@ from .services.preparation_client import (PreparationError, REQUEST_BYTES, RESUL
     ENVELOPE_OVERHEAD, encoded, validate_payload, validate_result, CODES)
 from .services.knowledge_preparation_facade import KnowledgePreparationFacade
 from .services.knowledge_transport import _json_object
-from .services.prepared_profile_inspection import validate_profile_result, validate_profile_selector
+from .services.prepared_profile_inspection import READ_METHODS, read_result, read_selector
 
 STATUS = {'invalid_request': 400, 'not_found': 404, 'unauthorized': 401,
           'origin_denied': 403, 'conflict': 409, 'busy': 503, 'tombstoned': 410,
@@ -33,6 +33,7 @@ def register_preparation_routes(app, settings, *, preparation_facade=None):
 
     def run(method, graph_id):
         try:
+            inspection = method in READ_METHODS
             if graph_id != settings.display_graph_id:
                 raise PreparationError('not_found')
             if (settings.scope['layer'] != 'source' or settings.scope['run_id'] is not None
@@ -42,7 +43,7 @@ def register_preparation_routes(app, settings, *, preparation_facade=None):
                     or request.headers.get('Transfer-Encoding') or request.headers.get('Content-Encoding')
                     or request.content_length is None or not 0 < request.content_length <= REQUEST_BYTES):
                 raise PreparationError('invalid_request')
-            if method == 'profiles' and (
+            if inspection and (
                 request.query_string or 'Transfer-Encoding' in request.headers or 'Content-Encoding' in request.headers
                 or request.headers.getlist('Content-Length') != [str(request.content_length)]
             ):
@@ -51,12 +52,11 @@ def register_preparation_routes(app, settings, *, preparation_facade=None):
             if len(raw) != request.content_length or len(raw) > REQUEST_BYTES:
                 raise PreparationError('invalid_request')
             value = _json_object(raw)
-            if preparation_facade is None and method != 'profiles':
+            if preparation_facade is None and not inspection:
                 raise PreparationError('preparation_unavailable')
-            payload = (validate_profile_selector(value) if method == 'profiles'
-                       else validate_payload(method, value))
+            payload = read_selector(method, value) if inspection else validate_payload(method, value)
             result = facade.execute(method, graph_id, payload)
-            data = (validate_profile_result(result, graph_id, settings.scope, payload) if method == 'profiles'
+            data = (read_result(method, result, graph_id, settings.scope, payload) if inspection
                     else validate_result(result, graph_id, settings.scope, payload, method))
             body = encoded({'success': True, 'data': data})
             if len(body) > RESULT_BYTES + ENVELOPE_OVERHEAD:
@@ -69,7 +69,7 @@ def register_preparation_routes(app, settings, *, preparation_facade=None):
         except Exception:
             return failure('internal_error')
 
-    for method in ('plan', 'start', 'status', 'profiles'):
+    for method in ('plan', 'start', 'status', *READ_METHODS):
         app.add_url_rule('/api/preparation/<graph_id>/' + method,
                          'preparation_' + method,
                          lambda graph_id, method=method: run(method, graph_id), methods=['POST'])

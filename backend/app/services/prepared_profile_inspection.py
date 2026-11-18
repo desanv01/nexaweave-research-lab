@@ -1,4 +1,4 @@
-"""Receipt-bound inspection of a single actor in a trusted READY preparation."""
+"""Receipt-bound inspection of profiles and generated READY configuration."""
 import csv
 import hashlib
 import io
@@ -10,11 +10,11 @@ from uuid import UUID
 if __package__:
     from .knowledge_transport import _json_object
     from .preparation_client import (PreparationError, RESULT_BYTES, encoded, file_names,
-                                     sha, uuid_string, validate_payload, validate_receipt)
+                                     integer, sha, text, uuid_string, validate_payload, validate_receipt)
 else:
     from knowledge_transport import _json_object
     from preparation_client import (PreparationError, RESULT_BYTES, encoded, file_names,
-                                    sha, uuid_string, validate_payload, validate_receipt)
+                                    integer, sha, text, uuid_string, validate_payload, validate_receipt)
 
 _SELECTOR = 'source_entity_uuid'
 _TWITTER_FIELDS = ('user_id', 'name', 'username', 'user_char', 'description')
@@ -23,18 +23,24 @@ _PLATFORM_ORDERS = (['twitter'], ['reddit'], ['twitter', 'reddit'])
 _SUPPORT_FIELDS = {_SELECTOR, 'labels', 'summary', 'attributes', 'episode_ids', 'evidence_ids', 'facts'}
 PROFILE_ERRORS = frozenset(('invalid_request', 'not_found', 'unauthorized', 'conflict',
                             'tombstoned', 'result_too_large', 'preparation_unavailable', 'timeout'))
+READ_METHODS = ('profiles', 'configuration')
 
 
-def profile_request(raw, scope):
+def read_request(raw, scope, *, method=None):
     request = _json_object(raw)
     if (set(request) != {'version', 'request_id', 'method', 'scope', 'payload'}
             or type(request['version']) is not int or request['version'] != 1
-            or request['method'] != 'profiles' or request['scope'] != scope
+            or request['method'] not in READ_METHODS or (method is not None and request['method'] != method)
+            or request['scope'] != scope
             or type(request['scope']['schema_version']) is not int):
         raise PreparationError('invalid_request')
     uuid_string(request['request_id'])
-    request['payload'] = validate_profile_selector(request['payload'])
+    request['payload'] = read_selector(request['method'], request['payload'])
     return request
+
+
+def profile_request(raw, scope):
+    return read_request(raw, scope, method='profiles')
 
 
 class PreparationReadAuthority:
@@ -139,6 +145,12 @@ def validate_profile_selector(value):
         return {**reference, _SELECTOR: uuid_string(value[_SELECTOR])}
     except ValueError:
         raise PreparationError('invalid_request') from None
+
+
+def read_selector(method, value):
+    if method == 'profiles':
+        return validate_profile_selector(value)
+    return validate_payload('configuration', value)
 
 
 def validate_profile_result(value, graph_id, scope, payload):
@@ -319,3 +331,173 @@ def inspect_prepared_profile(host, payload, *, deadline=None):
         raise PreparationError('conflict')
     check()
     return result
+
+
+_TIME_LIMITS = {'total_simulation_hours': (1, 8760), 'minutes_per_round': (1, 1440),
+                'agents_per_hour_min': (1, 100), 'agents_per_hour_max': (1, 100)}
+_PERIODS = ('peak', 'off_peak', 'morning', 'work')
+_TIME_FIELDS = set(_TIME_LIMITS) | {p + suffix for p in _PERIODS for suffix in ('_hours', '_activity_multiplier')}
+_PLATFORM_WEIGHTS = ('recency_weight', 'popularity_weight', 'relevance_weight', 'echo_chamber_strength')
+_PLATFORM_FIELDS = {'platform', 'viral_threshold', *_PLATFORM_WEIGHTS}
+_TOPIC_LIMIT = 64
+
+
+def _bounded_number(value, upper):
+    if type(value) not in (int, float) or not 0 <= value <= upper:
+        raise ValueError
+
+
+def _validate_time_activity(time_activity):
+    if type(time_activity) is not dict or set(time_activity) != _TIME_FIELDS:
+        raise ValueError
+    for key, (low, high) in _TIME_LIMITS.items():
+        integer(time_activity[key], low, high)
+    if time_activity['agents_per_hour_min'] > time_activity['agents_per_hour_max']:
+        raise ValueError
+    for period in _PERIODS:
+        hours = time_activity[period + '_hours']
+        if type(hours) is not list or len(hours) > 24:
+            raise ValueError
+        for hour in hours:
+            integer(hour, 0, 23)
+        if len(hours) != len(set(hours)):
+            raise ValueError
+        _bounded_number(time_activity[period + '_activity_multiplier'], 10)
+
+
+def _validate_platform_controls(controls, platforms):
+    if type(controls) is not list or len(controls) != len(platforms):
+        raise ValueError
+    for platform, control in zip(platforms, controls):
+        if type(control) is not dict or set(control) != _PLATFORM_FIELDS or control['platform'] != platform:
+            raise ValueError
+        integer(control['viral_threshold'], 1, 1000000)
+        for key in _PLATFORM_WEIGHTS:
+            _bounded_number(control[key], 1)
+
+
+def validate_configuration_result(value, graph_id, scope, payload):
+    try:
+        keys = set(payload) | {'display_graph_id', 'scope', 'project_revision', 'goal', 'time_activity',
+                               'hot_topics', 'hot_topics_omitted', 'platform_controls', 'effective_controls'}
+        if (type(value) is not dict or set(value) != keys or value['display_graph_id'] != graph_id
+                or value['scope'] != scope or type(value['scope']['schema_version']) is not int
+                or any(type(value[k]) is not type(v) or value[k] != v
+                                                   for k, v in payload.items())):
+            raise ValueError
+        integer(value['project_revision'], 1, 2147483647)
+        text(value['goal'], 8192, 32768)
+        effective = value['effective_controls']
+        if (type(effective) is not dict or set(effective) != {'platforms', 'seed', 'max_rounds'}
+                or effective['platforms'] not in _PLATFORM_ORDERS):
+            raise ValueError
+        integer(effective['seed'], 0, 4294967295)
+        integer(effective['max_rounds'], 1, 24)
+        if value['time_activity'] is not None:
+            _validate_time_activity(value['time_activity'])
+        if value['platform_controls'] is not None:
+            _validate_platform_controls(value['platform_controls'], effective['platforms'])
+        topics, omitted = value['hot_topics'], value['hot_topics_omitted']
+        if type(topics) is not list or len(topics) > _TOPIC_LIMIT:
+            raise ValueError
+        for topic in topics:
+            text(topic, 256)
+        if omitted is None:
+            if topics:
+                raise ValueError
+        else:
+            integer(omitted, 0, _MAX_ARTIFACT - len(topics))
+        if len(encoded(value)) > RESULT_BYTES:
+            raise PreparationError('result_too_large')
+    except (KeyError, ValueError, TypeError, RecursionError):
+        raise PreparationError('invalid_reply') from None
+    return value
+
+
+def read_result(method, value, graph_id, scope, payload):
+    validator = validate_profile_result if method == 'profiles' else validate_configuration_result
+    return validator(value, graph_id, scope, payload)
+
+
+def _configuration_projection(raw, options, simulation_id, project_id, graph_id):
+    config = _json_object(raw)
+    if (config['simulation_id'] != simulation_id or config['project_id'] != project_id
+            or config['graph_id'] != graph_id or config['simulation_requirement'] != options['simulation_requirement']):
+        raise ValueError
+    platforms = options['platforms']
+    try:
+        controls = [{key: config[platform + '_config'][key] for key in _PLATFORM_FIELDS}
+                    for platform in platforms]
+        _validate_platform_controls(controls, platforms)
+    except (KeyError, ValueError, TypeError):
+        controls = None
+    try:
+        time_activity = {key: config['time_config'][key] for key in _TIME_FIELDS}
+        _validate_time_activity(time_activity)
+    except (KeyError, ValueError, TypeError):
+        time_activity = None
+    event_config = config.get('event_config')
+    source_topics = event_config.get('hot_topics') if type(event_config) is dict else None
+    topics, omitted = [], None
+    if type(source_topics) is list:
+        for topic in source_topics[:_TOPIC_LIMIT]:
+            try:
+                topics.append(text(topic, 256))
+            except ValueError:
+                continue
+        omitted = len(source_topics) - len(topics)
+    # NativeRunRequest takes these three values from the admitted plan, not
+    # from the generator's time, activity windows, topics or platform weights.
+    return {'goal': config['simulation_requirement'], 'time_activity': time_activity, 'hot_topics': topics,
+            'hot_topics_omitted': omitted, 'platform_controls': controls,
+            'effective_controls': {key: options[key] for key in ('platforms', 'seed', 'max_rounds')}}
+
+
+def inspect_prepared_configuration(host, payload, *, deadline=None):
+    from nexaweave_execution.native_owned_binding import _regular_bound_file
+
+    check = host._source_check(deadline)
+    check()
+    reference = {key: payload[key] for key in ('schema_version', 'operation_id', 'plan_sha256')}
+    row = host._row(reference)
+    if row.state != 'ready' or row.receipt is None:
+        raise PreparationError('conflict')
+    _reauthorize(host, row, check)
+    public = row.frozen['public']
+    if (payload['source_revision'] != public['source']['source_revision']
+            or payload['artifact_sha256'] != row.receipt['artifact_sha256']):
+        raise PreparationError('conflict')
+
+    identity = _root_identity(host.root)
+    try:
+        options = public['options']
+        if options['platforms'] not in _PLATFORM_ORDERS:
+            raise ValueError
+        validate_receipt(row.receipt, str(row.operation_id), options['platforms'])
+        simulation_id = row.receipt['simulation_id']
+        root = host.root / simulation_id
+        directory_identity = _root_identity(root)
+        pin = row.receipt['files'][1]
+        check()
+        raw = _regular_bound_file(root, 'simulation_config.json', min(pin['size'], _MAX_ARTIFACT))
+        if len(raw) != pin['size'] or hashlib.sha256(raw).hexdigest() != pin['sha256']:
+            raise ValueError
+        projection = _configuration_projection(raw, options, simulation_id, str(row.project_id), host.display_graph_id)
+    except (KeyError, ValueError, TypeError, OSError, RecursionError):
+        raise PreparationError('conflict') from None
+
+    check()
+    current = host._row(reference)
+    if current != row:
+        raise PreparationError('conflict')
+    _reauthorize(host, current, check)
+    if _root_identity(host.root) != identity or _root_identity(root) != directory_identity:
+        raise PreparationError('conflict')
+    check()
+    return {**payload, **projection, 'display_graph_id': host.display_graph_id, 'scope': public['scope'],
+            'project_revision': row.project_revision}
+
+
+def inspect_prepared(method, host, payload, *, deadline=None):
+    inspector = inspect_prepared_profile if method == 'profiles' else inspect_prepared_configuration
+    return inspector(host, payload, deadline=deadline)
