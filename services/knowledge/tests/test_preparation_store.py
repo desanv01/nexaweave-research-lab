@@ -108,7 +108,135 @@ def test_pg_v2_selected_sources_reload_generation_and_full_snapshot_tamper(facto
                 (Jsonb(reloaded.frozen), UUID(payload['operation_id'])))
 
 
-def test_pg_restart_duplicate_race_and_actual_inherited_publication(factory, tmp_path):
+def _expected_prepared_profile(host, ready, original, ordinal):
+    import csv
+    import io
+
+    actor = ready['actors'][ordinal]
+    selector = {**reference(ready), 'source_entity_uuid': actor['source_entity_uuid']}
+    twitter = list(csv.DictReader(io.StringIO(original['twitter_profiles.csv'].decode('utf-8'), newline='')))
+    reddit = json.loads(original['reddit_profiles.json'])
+    grounding = json.loads(original['source_grounding.json'])
+    assert len(ready['actors']) == len(twitter) == len(reddit)
+    return {'success': True, 'data': {
+        **selector, 'display_graph_id': host.display_graph_id, 'scope': host.scope_dto,
+        'project_revision': ready['project_revision'], 'artifact_sha256': ready['receipt']['artifact_sha256'],
+        'actor': {'ordinal': ordinal, 'name': actor['name'], 'labels': actor['labels']},
+        'generated_profiles': [
+            {'platform': 'twitter', 'handle': twitter[ordinal]['username'],
+             'description': twitter[ordinal]['description'], 'persona': twitter[ordinal]['user_char']},
+            {'platform': 'reddit', 'handle': reddit[ordinal]['username'],
+             'description': reddit[ordinal]['bio'], 'persona': reddit[ordinal]['persona']},
+        ],
+        'frozen_support': grounding[actor['source_entity_uuid']],
+    }}
+
+
+def _installed_profile_bootstrap(reader_python, tmp_path, *, distinct, expected_bootstrap):
+    import subprocess
+    import sys
+    from pathlib import Path
+    from tools.run_unit_tests import _unit_environment
+
+    assert reader_python.is_absolute() and reader_python.is_file()
+    probe = """
+import importlib.util, json, sys
+from pathlib import Path
+prefix = Path(sys.prefix).resolve()
+for name in ('psycopg', 'nexaweave_execution', 'nexaweave_storage', 'nexaweave_knowledge'):
+    origin = Path(importlib.util.find_spec(name).origin).resolve()
+    assert 'site-packages' in origin.parts and origin.is_relative_to(prefix)
+bootstrap = origin.with_name('read_bootstrap.py')
+assert bootstrap.is_file() and not bootstrap.is_symlink()
+print(json.dumps([str(prefix), str(bootstrap)]))
+"""
+    installed = subprocess.run([str(reader_python), '-I', '-B', '-c', probe],
+        cwd=tmp_path, env=_unit_environment(tmp_path), stdin=subprocess.DEVNULL,
+        capture_output=True, timeout=15, check=True)
+    assert not installed.stderr and 0 < len(installed.stdout) <= 4096
+    reader_prefix, bootstrap = json.loads(installed.stdout)
+    assert (Path(reader_prefix) != Path(sys.prefix).resolve()) == distinct
+    if expected_bootstrap:
+        assert Path(bootstrap) == Path(expected_bootstrap)
+    return bootstrap
+
+
+def assert_installed_prepared_profile(host, ready, original, source_revision, monkeypatch, tmp_path):
+    import os
+    from pathlib import Path
+    import sys
+    from app import create_app
+    from app.services.knowledge_transport import OwnedProcess
+    from app.services.preparation_client import ENVELOPE_OVERHEAD, RESULT_BYTES
+
+    settings = host.settings
+    reader_python = Path(os.environ['KNOWLEDGE_PYTHON'])
+    assert reader_python == Path(settings.python) and reader_python != Path(sys.executable).absolute()
+    assert settings.bootstrap == os.environ['KNOWLEDGE_BOOTSTRAP_SCRIPT']
+    bootstrap = _installed_profile_bootstrap(reader_python, tmp_path, distinct=True,
+                                            expected_bootstrap=settings.bootstrap)
+    assert settings.principal == host.principal == 'owner'
+    assert settings.scope == host.scope_dto
+    assert ready['state'] == 'ready'
+    row = host.store.get(settings.principal, ready['operation_id'], ready['plan_sha256'])
+    assert row.state == 'ready' and row.receipt == ready['receipt']
+    assert row.display_graph_id == settings.display_graph_id == host.display_graph_id
+    assert row.frozen['public']['source']['source_revision'] == ready['source']['source_revision'] == source_revision
+    assert row.frozen['public']['actors'] == ready['actors']
+    assert row.project_revision == ready['project_revision']
+
+    token = 'profile-fixture-owner-0123456789abcdef'
+    environment = dict(settings.child_environment, NEXAWEAVE_APP_MODE='research_local',
+                       NEXAWEAVE_ALLOWED_ORIGINS='http://localhost:3000', FLASK_HOST='127.0.0.1',
+                       KNOWLEDGE_PYTHON=str(reader_python), KNOWLEDGE_BOOTSTRAP_SCRIPT=bootstrap,
+                       KNOWLEDGE_READ_TOKEN=token, KNOWLEDGE_PREPARATION_ARTIFACT_ROOT=str(host.root.resolve()))
+    expected = _expected_prepared_profile(host, ready, original, 0)
+    selector = {**reference(ready), 'source_entity_uuid': ready['actors'][0]['source_entity_uuid']}
+    route = '/api/preparation/' + host.display_graph_id + '/profiles'
+    auth = {'Authorization': 'Bearer ' + token, 'Origin': 'http://localhost:3000'}
+
+    started = []
+    start = OwnedProcess.start
+    def observe_start(owner, popen, argv, **kwargs):
+        child = start(owner, popen, argv, **kwargs)
+        started.append((owner, child, tuple(argv), Path(kwargs['cwd']), set(kwargs['env'])))
+        return child
+
+    with monkeypatch.context() as configured:
+        for key, value in environment.items():
+            configured.setenv(key, value)
+        configured.delenv('MIROFISH_APP_MODE', raising=False)
+        configured.delenv('MIROFISH_ALLOWED_ORIGINS', raising=False)
+        configured.setattr(OwnedProcess, 'start', observe_start)
+        with create_app().test_client() as client:
+            assert not started
+            response = client.post(route, headers=auth, json=selector)
+            assert response.status_code == 200
+            assert 0 < len(response.data) <= RESULT_BYTES + ENVELOPE_OVERHEAD
+            assert response.headers['Cache-Control'] == 'no-store'
+            assert response.headers['X-Content-Type-Options'] == 'nosniff'
+            assert response.headers['Access-Control-Allow-Origin'] == auth['Origin']
+            assert response.json == expected
+    (owner, child, argv, cwd, keys), = started
+    assert Path(argv[0]) == reader_python and argv[1] == '-I' and set(argv[2:4]) == {'-B', '-u'}
+    assert len(argv) == 5 and Path(argv[4]).name == 'prepared_profile_inspection_child.py'
+    assert owner.closed and child.poll() == 0 and not cwd.exists()
+    assert not {'KNOWLEDGE_READ_TOKEN', 'KNOWLEDGE_NEO4J_PASSWORD', 'PYTHONPATH'} & keys
+
+
+def test_pg_restart_duplicate_race_and_actual_inherited_publication(factory, tmp_path, monkeypatch):
+    import builtins
+    import os
+    from pathlib import Path
+    import sys
+    from psycopg.conninfo import conninfo_to_dict
+    from app import create_app
+    from app.config import Config
+    from app.knowledge_read_app import create_read_app
+    from app.services.knowledge_preparation_facade import KnowledgePreparationFacade
+    from app.services.knowledge_read_facade import ReadHostSettings
+    from app.services.knowledge_transport import OwnedProcess
+
     host, scope, retained, chat, wires, transport = real_host(factory, tmp_path)
     payload = request(retained)
     planned = host.plan(payload)
@@ -134,6 +262,142 @@ def test_pg_restart_duplicate_race_and_actual_inherited_publication(factory, tmp
     with pytest.raises(PreparationAuthorityError):
         host.generate(wires[0])
     assert len(chat.calls) == 4
+
+    class FixtureConfig(Config):
+        DEBUG = False
+        NEXAWEAVE_ALLOWED_ORIGINS = ('http://localhost:3000',)
+
+    monkeypatch.delenv('FLASK_HOST', raising=False)
+    monkeypatch.delenv('NEXAWEAVE_ALLOWED_ORIGINS', raising=False)
+    facade = KnowledgePreparationFacade(host.settings, host=host)
+    with monkeypatch.context() as injected:
+        injected.setattr(ReadHostSettings, 'from_config', classmethod(lambda cls, config: host.settings))
+        injected_app = create_read_app(FixtureConfig, preparation_facade=facade, mode='research_local')
+    with injected_app.test_client() as client:
+        receipt = ready['receipt']
+        root = tmp_path / receipt['simulation_id']
+        original = {file['name']: (root / file['name']).read_bytes() for file in receipt['files']}
+        actor, = ready['actors']
+        assert actor['labels'] == ['Person']
+        selector = {**reference(ready), 'source_entity_uuid': actor['source_entity_uuid']}
+        route = '/api/preparation/' + host.display_graph_id + '/profiles'
+        auth = {'Authorization': 'Bearer ' + host.settings.token}
+        prior_calls = (len(chat.calls), transport.calls, len(wires))
+        assert client.post(route, json=selector).status_code == 401
+        response = client.post(route, headers=auth, json=selector)
+        assert response.status_code == 200
+        assert response.headers['Cache-Control'] == 'no-store'
+        expected = _expected_prepared_profile(host, ready, original, 0)
+        assert response.json == expected
+        foreign = client.post(route, headers=auth, json={**selector, 'source_entity_uuid': str(uuid4())})
+        assert foreign.status_code == 404
+        assert foreign.json == {'success': False, 'error': {'code': 'not_found'}}
+        stale = client.post(route, headers=auth, json={**selector, 'plan_sha256': '0' * 64})
+        assert stale.status_code == 409
+        assert stale.json == {'success': False, 'error': {'code': 'conflict'}}
+        assert client.post(route, headers=auth, json={**selector, 'platform': 'twitter'}).status_code == 400
+
+    configured_python = os.environ.get('KNOWLEDGE_PYTHON')
+    reader_python = Path(configured_python or sys.executable)
+    bootstrap = _installed_profile_bootstrap(reader_python, tmp_path, distinct=bool(configured_python),
+                                            expected_bootstrap=os.environ.get('KNOWLEDGE_BOOTSTRAP_SCRIPT'))
+
+    pg = conninfo_to_dict(os.environ['PROJECT_STORE_POSTGRES_TEST_DSN'])
+    token = 'profile-fixture-owner-0123456789abcdef'
+    settings = {
+        'NEXAWEAVE_APP_MODE': 'research_local', 'NEXAWEAVE_ALLOWED_ORIGINS': 'http://localhost:3000',
+        'FLASK_HOST': '127.0.0.1', 'KNOWLEDGE_PYTHON': str(reader_python),
+        'KNOWLEDGE_BOOTSTRAP_SCRIPT': bootstrap, 'KNOWLEDGE_READ_TOKEN': token,
+        'KNOWLEDGE_PRINCIPAL': 'owner', 'KNOWLEDGE_DISPLAY_GRAPH_ID': host.display_graph_id,
+        'KNOWLEDGE_BOUND_SCOPE_JSON': json.dumps(host.scope_dto),
+        'KNOWLEDGE_PG_HOST': pg['host'], 'KNOWLEDGE_PG_PORT': pg['port'],
+        'KNOWLEDGE_PG_DATABASE': pg['dbname'], 'KNOWLEDGE_PG_USER': pg['user'],
+        'KNOWLEDGE_PG_PASSWORD': pg['password'], 'KNOWLEDGE_NEO4J_URI': 'bolt://127.0.0.1:9',
+        'KNOWLEDGE_NEO4J_USER': 'neo4j', 'KNOWLEDGE_NEO4J_PASSWORD': 'unused-local-fixture',
+        'KNOWLEDGE_PREPARATION_ARTIFACT_ROOT': str(tmp_path.resolve()),
+    }
+    base = route.removesuffix('/profiles')
+    auth = {'Authorization': 'Bearer ' + token, 'Origin': 'http://localhost:3000'}
+    native_import = builtins.__import__
+    parent_dependencies = {'psycopg', 'nexaweave_knowledge', 'nexaweave_execution', 'nexaweave_storage'}
+    blocked_imports = []
+    def protected_import(name, *args, **kwargs):
+        if name.partition('.')[0] in parent_dependencies:
+            blocked_imports.append(name)
+            raise AssertionError('default profile route imported a split-reader dependency')
+        return native_import(name, *args, **kwargs)
+
+    started = []
+    start = OwnedProcess.start
+    def observe_start(owner, popen, argv, **kwargs):
+        child = start(owner, popen, argv, **kwargs)
+        started.append((owner, child, tuple(argv), Path(kwargs['cwd']), set(kwargs['env'])))
+        return child
+
+    with monkeypatch.context() as configured:
+        for key, value in settings.items():
+            configured.setenv(key, value)
+        configured.delenv('MIROFISH_APP_MODE', raising=False)
+        configured.delenv('MIROFISH_ALLOWED_ORIGINS', raising=False)
+        configured.setattr(builtins, '__import__', protected_import)
+        configured.setattr(OwnedProcess, 'start', observe_start)
+        with create_app().test_client() as client:
+            assert client.post(route, json=selector).status_code == 401
+            denied_origin = {**auth, 'Origin': 'http://denied.invalid'}
+            assert client.post(route, headers=denied_origin, json=selector).status_code == 403
+            assert client.post(route, headers=auth, json={**selector, 'platform': 'twitter'}).status_code == 400
+            for method, body in [('plan', payload), ('start', reference(ready)), ('status', reference(ready))]:
+                unavailable = client.post(base + '/' + method, headers=auth, json=body)
+                assert unavailable.status_code == 503
+            assert not started
+            response = client.post(route, headers=auth, json=selector)
+            assert response.status_code == 200 and response.json == expected
+            assert response.headers['Cache-Control'] == 'no-store'
+            assert response.headers['X-Content-Type-Options'] == 'nosniff'
+            assert response.headers['Access-Control-Allow-Origin'] == auth['Origin']
+            assert len(started) == 1
+            foreign = client.post(route, headers=auth, json={**selector, 'source_entity_uuid': str(uuid4())})
+            assert foreign.status_code == 404 and foreign.json == {'success': False, 'error': {'code': 'not_found'}}
+            stale = client.post(route, headers=auth, json={**selector, 'plan_sha256': '0' * 64})
+            assert stale.status_code == 409 and stale.json == {'success': False, 'error': {'code': 'conflict'}}
+            tampered = root / 'twitter_profiles.csv'
+            try:
+                tampered.write_bytes(original[tampered.name] + b'\n')
+                refused = client.post(route, headers=auth, json=selector)
+                assert refused.status_code == 409
+                assert refused.json == {'success': False, 'error': {'code': 'conflict'}}
+            finally:
+                tampered.write_bytes(original[tampered.name])
+            # Revoke only this fixture binding, keeping the owner READY row intact.
+            with configured.context() as fixture_store:
+                fixture_store.setattr(builtins, '__import__', native_import)
+                with factory() as conn:
+                    removed = conn.execute(
+                        'DELETE FROM mf_knowledge.scope_bindings '
+                        'WHERE principal=%s AND display_graph_id=%s AND group_id=%s',
+                        ('owner', host.display_graph_id, scope.group_id))
+                    assert removed.rowcount == 1
+            try:
+                closed = client.post(route, headers=auth, json=selector)
+                assert closed.status_code == 503
+                assert closed.json == {'success': False, 'error': {'code': 'preparation_unavailable'}}
+            finally:
+                with configured.context() as fixture_store:
+                    fixture_store.setattr(builtins, '__import__', native_import)
+                    assert host.bindings.bind('owner', host.display_graph_id, scope).scope == scope
+    assert not blocked_imports
+    assert len(started) == 5
+    for owner, child, argv, cwd, keys in started:
+        assert Path(argv[0]) == reader_python and argv[1] == '-I' and set(argv[2:4]) == {'-B', '-u'}
+        assert len(argv) == 5 and Path(argv[4]).name == 'prepared_profile_inspection_child.py'
+        assert owner.closed and child.poll() is not None and not cwd.exists()
+        assert os.name != 'nt' or owner.tree_empty
+        assert not {'KNOWLEDGE_READ_TOKEN', 'KNOWLEDGE_NEO4J_PASSWORD', 'PYTHONPATH'} & keys
+    assert (len(chat.calls), transport.calls, len(wires)) == prior_calls
+    assert {name: (root / name).read_bytes() for name in original} == original
+    with factory() as conn:
+        assert host.budget._row(conn, host.account_id, UUID(payload['operation_id'])) == settled
+    assert fresh.get('owner', selector['operation_id'], selector['plan_sha256']).receipt == receipt
 
 
 def test_shared_ingestion_preparation_cap_race(factory, tmp_path):

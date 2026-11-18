@@ -425,7 +425,7 @@ def factory():
     'ordinary', 'cooperative-heartbeat',
     pytest.param('caller-cancel', marks=pytest.mark.connected_report_caller_cancel),
 ])
-async def test_actual_native_receipt_to_inherited_report_preserves_inputs_and_disabled_reads(factory, tmp_path, monkeypatch, profile):
+async def test_actual_native_receipt_to_inherited_report_preserves_inputs_and_disabled_reads(factory, tmp_path, monkeypatch, profile, capsys):
     from test_connected_preparation_native_launch import RichConnectedChat
     from test_preparation_store import real_host, request, reference as prep_reference
     from test_native_launch_store import migrate_all, launch_host, declaration
@@ -498,7 +498,6 @@ async def test_actual_native_receipt_to_inherited_report_preserves_inputs_and_di
             # Main fixture replaces only the existing synthetic projection byte
             # transport with actual owned children. It does not claim graph quality.
             from dataclasses import replace
-            import sys
             from app.services.knowledge_read_facade import KnowledgeReadFacade
             facts = {}
             for kind in ('node', 'edge'):
@@ -602,6 +601,13 @@ async def test_actual_native_receipt_to_inherited_report_preserves_inputs_and_di
                     assert capacity.receipt.fingerprint == capacity.fingerprint
                     assert capacity.receipt.artifact_sha256 == ready['receipt']['artifact_sha256']
                     _assert_accounted(prep, 6)
+                    if profile == 'ordinary' and sys.platform == 'linux':
+                        from test_preparation_store import assert_installed_prepared_profile
+
+                        await asyncio.to_thread(assert_installed_prepared_profile, prep, ready,
+                            original_inputs, selected.revisions[0], monkeypatch, tmp_path)
+                        with capsys.disabled():
+                            print('NEXAWEAVE_W13_DISTINCT_PROFILE_READER_CLOSED', flush=True)
                 phases.start('native-plan-start')
                 if browser:
                     launch = await asyncio.to_thread(browser.perform, 'native-start', declaration(planned))
