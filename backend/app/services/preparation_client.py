@@ -73,7 +73,8 @@ def labels(value):
 
 
 def options(value):
-    if type(value) is not dict or set(value) != {'types', 'max_agents', 'seed', 'platforms', 'max_rounds', 'simulation_requirement'}:
+    bridge_key = 'twitter_to_reddit_seed_index'
+    if type(value) is not dict or set(value) - {bridge_key} != {'types', 'max_agents', 'seed', 'platforms', 'max_rounds', 'simulation_requirement'}:
         raise ValueError
     if value['types'] is not None:
         labels(value['types'])
@@ -82,6 +83,9 @@ def options(value):
     integer(value['max_rounds'], 1, 24)
     if type(value['platforms']) is not list or value['platforms'] not in [['twitter'], ['reddit'], ['twitter', 'reddit']]:
         raise ValueError
+    if bridge_key in value:
+        from nexaweave_execution.native_seed_contracts import seed_bridge_index
+        seed_bridge_index(value, value['platforms'])
     text(value['simulation_requirement'], 8192, 32768)
     return value
 
