@@ -78,7 +78,8 @@ const nativeMethods = Object.freeze({
 const preparationMethods = Object.freeze({
   plan: (payload, source) => operation(() => client.preparationPlan(payload, source), false, true),
   start: payload => operation(() => client.preparationStart(payload), false, true),
-  status: payload => operation(() => client.preparationStatus(payload), false, true)
+  status: payload => operation(() => client.preparationStatus(payload), false, true),
+  profiles: (payload, ready, options) => operation(() => client.preparationProfiles(payload, ready, options), false, true, '', false, true)
 })
 const ingestionMethods = Object.freeze({
   plan: (payload, inspected, saved) => operation(() => client.ingestionPlan(payload, inspected, saved?.scope, saved), false, true, 'plan'),
