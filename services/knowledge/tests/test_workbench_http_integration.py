@@ -67,10 +67,14 @@ def observe(frame,event,arg):
     if event=='return' and module=='app.services.knowledge_transport' and name=='_stop_owned':
         owner=frame.f_locals.get('owner');child=getattr(owner,'process',None)
         threads=frame.f_locals.get('threads',[])
-        emit({'event':'cleanup','closed':owner is not None and owner.closed
+        cleanup={'event':'cleanup','closed':owner is not None and owner.closed
               and (os.name!='nt' or (owner.tree_empty and owner.job is None))
               and child is not None and child.poll() is not None
-              and child.stdin.closed and child.stdout.closed and all(not t.is_alive() for t in threads)})
+              and child.stdin.closed and child.stdout.closed and all(not t.is_alive() for t in threads)}
+        exit_code=getattr(child,'returncode',None)
+        if os.environ.get('WORKBENCH_TEST_EVENT_LOST_ACK')=='0' and type(exit_code) is int and -(2**31)<=exit_code<2**32:
+            cleanup['exit_code']=exit_code
+        emit(cleanup)
 sys.setprofile(observe);threading.setprofile(observe)
 from app import create_app
 from werkzeug.serving import make_server
@@ -373,6 +377,58 @@ async def _invalid_event_writer(backend, directory, env, path, request, token):
     assert {"event": "shutdown", "loopback_blocked": 0} in events
 
 
+async def _event_dispatch_failure(body, saved, output_path, writer, scope, episode, operation):
+    """Report only fixed vocabulary, bounded counts, and exact marker flags."""
+    error = body.get("error") if isinstance(body, dict) else None
+    code = error.get("code") if isinstance(error, dict) else None
+    allowed_codes = ("invalid_request", "not_found", "unauthorized", "origin_denied", "conflict",
+                     "tombstoned", "busy", "result_too_large", "observations_unavailable",
+                     "evidence_invalid", "invalid_reply", "internal_error")
+    state = saved.state.value
+    summary = {
+        "reported_error": code if code in allowed_codes else "other",
+        "ledger_state": state if state in ("pending", "running", "completed", "uncertain",
+                                           "cancelled", "failed_no_effect") else "other",
+        "ledger_uncertainty": saved.error_code if saved.error_code in (None, "event_ack_uncertain") else "other",
+        "safe_spawn_count": None, "closed_cleanup_count": None, "graph_ack_count": None,
+        "marker_present": None, "marker_attempt_matches": None,
+    }
+    try:
+        with output_path.open("rb") as stream:
+            raw = stream.read(16385)
+        if len(raw) <= 16384:
+            lines = raw.splitlines()
+            if len(lines) <= 32:
+                events = [json.loads(line) for line in lines]
+                if all(isinstance(event, dict) for event in events):
+                    cleanups = [event for event in events if event.get("event") == "cleanup"]
+                    summary["safe_spawn_count"] = sum(event.get("event") == "spawn" and event.get("safe") is True
+                                                      for event in events)
+                    summary["closed_cleanup_count"] = sum(event.get("closed") is True for event in cleanups)
+                    summary["graph_ack_count"] = sum(event.get("event") == "graph_ack" for event in events)
+                    if len(cleanups) == 1:
+                        exit_code = cleanups[0].get("exit_code")
+                        if type(exit_code) is int and -(2**31) <= exit_code < 2**32:
+                            summary["child_exit_code"] = exit_code
+    except (OSError, ValueError, RecursionError):
+        pass
+
+    try:
+        records, _, _ = await asyncio.wait_for(writer.execute_query(
+            "MATCH (m:MiroFishIngest {uuid:$episode,group_id:$group,operation_id:$operation}) "
+            "WITH m LIMIT 2 RETURN count(m)>0 AS present, "
+            "count(m)=1 AND count(CASE WHEN m.attempt_id=$attempt THEN 1 END)=1 AS attempt_matches",
+            parameters_={"group": scope.group_id, "episode": episode, "operation": str(operation),
+                         "attempt": str(saved.current_attempt) if saved.current_attempt is not None else None}),
+            timeout=3)
+        if len(records) == 1:
+            summary["marker_present"] = records[0]["present"] is True
+            summary["marker_attempt_matches"] = records[0]["attempt_matches"] is True
+    except Exception:
+        pass  # Leave unread flags unknown and preserve the original assertion.
+    return json.dumps(summary, sort_keys=True)
+
+
 @pytest.mark.asyncio
 async def test_actual_protected_restored_event_dispatch_replay_and_lost_ack(retained_graph, tmp_path, monkeypatch):
     from hashlib import sha256
@@ -466,6 +522,10 @@ async def test_actual_protected_restored_event_dispatch_replay_and_lost_ack(reta
                     assert len(records) == 1 and records[0]["nodes"] == 0
                 status, dispatched = await send("dispatch-event", request)
                 saved = ledger.get(target_scope, operation)
+                if not lost_ack and (status != 200 or saved.state.value != "completed" or saved.current_attempt is None):
+                    failure = await _event_dispatch_failure(
+                        dispatched, saved, output_path, f["writer"], target_scope, episode, operation)
+                    pytest.fail(failure, pytrace=False)
                 assert saved.current_attempt is not None
                 if lost_ack:
                     assert status == 503 and saved.state.value == "uncertain" and saved.receipt is None
