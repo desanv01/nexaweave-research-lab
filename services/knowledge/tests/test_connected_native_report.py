@@ -548,6 +548,7 @@ async def test_actual_native_receipt_to_inherited_report_preserves_inputs_and_di
                     payload = dict(request(selected.records[0]), schema_version=2, source_revisions=selected.revisions[:])
                 payload['options'].update(types=['Person','Organization'], max_agents=2, max_rounds=1)
                 if browser:
+                    payload['options']['simulation_requirement'] += '。使用 Twitter 和 Reddit。'
                     planned = await asyncio.to_thread(browser.perform, 'preparation-plan', payload)
                 else:
                     planned = await asyncio.to_thread(prep.plan, payload)

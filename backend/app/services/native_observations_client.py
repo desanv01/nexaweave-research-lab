@@ -97,10 +97,20 @@ def validate_dispatch_payload(value):
         raise NativeObservationsError('invalid_request') from None
 
 
-def _event_result_identity(value, source_scope, payload, extra):
+def validate_event_status_payload(value):
+    if type(value) is dict and type(value.get('schema_version')) is int and value['schema_version'] == 3:
+        if set(value) != _STAGE_KEYS:
+            raise NativeObservationsError('invalid_request')
+        locator = validate_stage_payload(dict(value, schema_version=2))
+        return dict(locator, schema_version=3)
+    return validate_dispatch_payload(value)
+
+
+def _event_result_identity(value, source_scope, payload, extra, *, by_record=False):
     if type(value) is not dict or set(value) != set(payload) | {'scope', 'operation_id', 'state', 'receipt'} | extra:
         raise ValueError
-    if validate_dispatch_payload({key: value[key] for key in payload}) != payload:
+    validate_selector = validate_event_status_payload if by_record else validate_dispatch_payload
+    if validate_selector({key: value[key] for key in payload}) != payload:
         raise ValueError
     from nexaweave_knowledge.contracts import KnowledgeScope
     scope = KnowledgeScope.model_validate_json(encoded(stage_scope(source_scope, payload['launch_id'])))
@@ -109,8 +119,9 @@ def _event_result_identity(value, source_scope, payload, extra):
             or value['operation_id'] != str(operation)):
         raise ValueError
     evidence = uuid5(operation, 'mirofish:restored-twitter-action-evidence:v1')
+    fingerprint = sha(value['fingerprint']) if by_record else payload['expected_fingerprint']
     return {'group_id': scope.group_id, 'episode_id': str(scope.episode_uuid(operation)),
-            'fingerprint': payload['expected_fingerprint'], 'evidence_ids': [str(evidence)]}
+            'fingerprint': fingerprint, 'evidence_ids': [str(evidence)]}
 
 
 def validate_dispatch_result(value, source_scope, payload):
@@ -125,7 +136,11 @@ def validate_dispatch_result(value, source_scope, payload):
 
 def validate_event_status_result(value, source_scope, payload):
     try:
-        expected = _event_result_identity(value, source_scope, payload, {'attempt_id', 'completion_barrier_open'})
+        by_record = payload['schema_version'] == 3
+        extra = {'attempt_id', 'completion_barrier_open'}
+        if by_record:
+            extra.add('fingerprint')
+        expected = _event_result_identity(value, source_scope, payload, extra, by_record=by_record)
         state = value['state']
         if type(state) is not str or state not in {'pending', 'running', 'uncertain', 'completed'}:
             raise ValueError
