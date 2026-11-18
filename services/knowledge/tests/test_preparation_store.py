@@ -227,6 +227,7 @@ def assert_installed_prepared_profile(host, ready, original, source_revision, mo
 def test_pg_restart_duplicate_race_and_actual_inherited_publication(factory, tmp_path, monkeypatch):
     import builtins
     import os
+    import stat
     from pathlib import Path
     import sys
     from psycopg.conninfo import conninfo_to_dict
@@ -361,13 +362,21 @@ def test_pg_restart_duplicate_race_and_actual_inherited_publication(factory, tmp
             stale = client.post(route, headers=auth, json={**selector, 'plan_sha256': '0' * 64})
             assert stale.status_code == 409 and stale.json == {'success': False, 'error': {'code': 'conflict'}}
             tampered = root / 'twitter_profiles.csv'
+            sealed_mode = stat.S_IMODE(tampered.stat().st_mode)
+            editable_mode = sealed_mode | stat.S_IWUSR
             try:
+                tampered.chmod(editable_mode)
                 tampered.write_bytes(original[tampered.name] + b'\n')
+                tampered.chmod(sealed_mode)
                 refused = client.post(route, headers=auth, json=selector)
                 assert refused.status_code == 409
                 assert refused.json == {'success': False, 'error': {'code': 'conflict'}}
             finally:
-                tampered.write_bytes(original[tampered.name])
+                try:
+                    tampered.chmod(editable_mode)
+                    tampered.write_bytes(original[tampered.name])
+                finally:
+                    tampered.chmod(sealed_mode)
             # Revoke only this fixture binding, keeping the owner READY row intact.
             with configured.context() as fixture_store:
                 fixture_store.setattr(builtins, '__import__', native_import)
