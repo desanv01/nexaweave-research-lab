@@ -4,10 +4,13 @@ Requires the locked OASIS/CAMEL engine. No external model or embeddings are used
 """
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 import csv
 import json
 import random
 import sqlite3
+from threading import current_thread
 from types import SimpleNamespace
 from uuid import UUID
 
@@ -278,14 +281,45 @@ def test_connected_preparation_native_rounds_and_report_tool(tmp_path, monkeypat
                for name, content in original_bytes.items())
 
 
-def test_prepared_profiles_execute_native_rounds_and_interview(tmp_path, monkeypatch):
+def test_prepared_profiles_execute_native_rounds_and_interview(tmp_path, monkeypatch, caplog, capsys):
     monkeypatch.chdir(tmp_path)  # OASIS itself opens ./log on first import.
+    from camel.models import BaseModelBackend
+    from app.services.native_launch_models import BoundedNativeModelFactory, NativeModelBoundExceeded
+    from scripts.run_parallel_simulation import ParallelIPCHandler
+
     root = _prepared(tmp_path)
     model = _offline_model()
+    question = "PRIVATE_TRANSIENT_QUESTION_d946"
+    answer = "PRIVATE_TRANSIENT_ANSWER_fa71"
+    admissions = []
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("transient interview called executable model or trace code")
+
+    model._arun_transient_interview = forbidden
+
+    def backends(*, timeout_seconds, max_tokens, max_retries):
+        model._timeout = timeout_seconds
+        model._max_retries = max_retries
+        model.model_config_dict.update(max_tokens=max_tokens, stream=False)
+        return {"twitter": model, "reddit": model}
+
+    factory = BoundedNativeModelFactory(
+        ("twitter", "reddit"),
+        {"max_calls": 100, "max_input_bytes": 262144, "max_output_tokens": 512, "max_run_seconds": 120},
+        backends, transport_timeout_seconds=1, cooperative_transport=True,
+    )
+    for executable_opt_in in (True, forbidden):
+        with pytest.raises(NativeModelBoundExceeded, match="native_model_bound_exceeded"):
+            factory(audited_scripted_interview=executable_opt_in)
+    models = factory(audited_scripted_interview=answer)
     session = NativeSimulationSession(root, graph_id="graph-fixture",
                                       simulation_id="sim-fixture",
-                                      models={"twitter": model, "reddit": model},
-                                      seed=7, max_rounds=1)
+                                      models=models, seed=7, max_rounds=1)
+
+    def files():
+        return {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+
     with session:
         complete_agent = session._results["reddit"].agent_graph.get_agent(0)
         complete_info = complete_agent.user_info.profile["other_info"]
@@ -298,6 +332,63 @@ def test_prepared_profiles_execute_native_rounds_and_interview(tmp_path, monkeyp
                 assert connection.execute("SELECT COUNT(*) FROM post").fetchone()[0] > 0
             actions = (root / platform / "actions.jsonl").read_text(encoding="utf-8")
             assert '"event_type": "simulation_end"' in actions
+
+        owner = current_thread()
+        loop = session._runner.get_loop()
+        actor = session._results["twitter"].agent_graph.get_agent(0)
+        assert actor.social_agent_id == 0 and actor.model_backend.models[0] is models["twitter"]
+        memory = actor.memory._chat_history_block.storage.memory_list
+        prior_memory = deepcopy(memory)
+        prior_files = files()
+        boundary = models["twitter"]._audited_interview.boundary
+        calls_before, backend_calls = boundary.calls, model.calls
+        assert calls_before == backend_calls > 0
+        request = {"platform": "twitter", "agent_id": 0, "prompt": question}
+
+        admit = boundary.admit
+
+        def observe_admission(messages, response_format, tools):
+            assert response_format is None and tools is None
+            assert messages == [
+                {"role": "system", "content": (
+                    "Answer in plain text as Twitter actor 0, actor0. Persona: Synthetic profile"
+                )},
+                {"role": "user", "content": question},
+            ]
+            admit(messages, response_format, tools)
+            admissions.append((current_thread(), asyncio.get_running_loop()))
+
+        with monkeypatch.context() as patch:
+            patch.setattr(boundary, "admit", observe_admission)
+            patch.setattr(ParallelIPCHandler, "_interview_single_platform", forbidden)
+            patch.setattr(BaseModelBackend, "arun", forbidden)
+            patch.setattr(type(model.counter), "count_tokens_from_messages", forbidden)
+            with ThreadPoolExecutor(max_workers=1) as other_thread:
+                other = other_thread.submit(session.transient_interview, **request)
+                with pytest.raises(NeutralCapabilityError, match="invalid_request"):
+                    other.result(timeout=3)
+            with pytest.raises(NeutralCapabilityError, match="invalid_request"):
+                session.transient_interview(**dict(request, agent_id=99))
+            with monkeypatch.context() as limited:
+                limited.setattr(session, "_start_deadline", boundary.clock() + 2)
+                with pytest.raises(NeutralCapabilityError, match="interview_unavailable"):
+                    session.transient_interview(**request)
+            with monkeypatch.context() as exhausted:
+                exhausted.setattr(boundary, "calls", boundary.limits["max_calls"])
+                with pytest.raises(NeutralCapabilityError, match="interview_unavailable"):
+                    session.transient_interview(**request)
+            assert boundary.calls == calls_before and model.calls == backend_calls and not admissions
+            assert session.transient_interview(**request) == {
+                "platform": "twitter", "agent_id": 0, "response": answer,
+            }
+            with pytest.raises(NeutralCapabilityError, match="interview_unavailable"):
+                session.transient_interview(**request)
+        assert admissions == [(owner, loop)]
+        assert boundary.calls == calls_before + 1 and model.calls == backend_calls
+        assert models["twitter"]._audited_interview.response is None
+        assert actor.memory._chat_history_block.storage.memory_list == prior_memory
+        assert files() == prior_files
+
         result = session.interview(platform="twitter", agent_id=0,
                                    prompt="What did you observe?")
         assert result["response"] == "Synthetic native interview response"
@@ -336,7 +427,6 @@ def test_prepared_profiles_execute_native_rounds_and_interview(tmp_path, monkeyp
                 "SELECT COUNT(DISTINCT user_id) FROM trace WHERE action = 'interview'"
             ).fetchone()[0] == 2
         assert list((root / "ipc_responses").glob("*.json")) == []
-        from scripts.run_parallel_simulation import ParallelIPCHandler
         original_result = ParallelIPCHandler._get_interview_result
 
         def missing_second_response(self, agent_id, native_platform):
@@ -368,6 +458,14 @@ def test_prepared_profiles_execute_native_rounds_and_interview(tmp_path, monkeyp
             capability(simulation_id="sim-fixture", interview_requirement="topic",
                        simulation_requirement="x" * 4001)
         assert model.calls > 0
+    assert loop.is_closed() and session._closed and not session._results
+    with pytest.raises(NeutralCapabilityError, match="invalid_request"):
+        session.transient_interview(**request)
+    captured = capsys.readouterr()
+    closed_files = files().values()
+    for canary in (question, answer):
+        assert all(canary not in output for output in (caplog.text, captured.out, captured.err))
+        assert all(canary.encode("utf-8") not in raw for raw in closed_files)
     with pytest.raises(NeutralCapabilityError):
         session.interview(platform="twitter", agent_id=0, prompt="Closed?")
     with pytest.raises(NeutralCapabilityError):

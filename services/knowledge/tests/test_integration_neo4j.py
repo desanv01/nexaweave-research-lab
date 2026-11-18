@@ -145,6 +145,101 @@ async def test_real_graphiti_ingest_scope_provenance_and_duplicate(provider):
 
 
 @pytest.mark.asyncio
+async def test_real_graphiti_hybrid_ranking_fixed_queries(provider, monkeypatch):
+    """Real Graphiti/Neo4j ranking with synthetic models, not live-model relevance."""
+    keyword_query = "Mira"
+    paraphrase_query = "seaside laboratory employee"
+    relevant_text = "Mira Vale works for Harbor Labs"
+    distractor_text = "Lena Moss works for Summit Works"
+    top_k = 2
+    paraphrase_vector_enabled = True
+
+    async def ranking_embedding(self, input_data):
+        # Preserve the fixture's 1024 dimensions and create_batch delegation.
+        # Both employment edges are vector candidates, with strict cosine order:
+        # relevant=1.0, distractor=0.8. The foreign copy is equally convincing.
+        text = str(input_data)
+        if paraphrase_query in text:
+            prefix = [1.0, 0.0] if paraphrase_vector_enabled else [-1.0, 0.0]
+        elif relevant_text in text:
+            prefix = [1.0, 0.0]
+        elif distractor_text in text:
+            prefix = [0.8, 0.6]
+        else:
+            # In particular, the keyword query points away from both edges;
+            # its relevant edge must come from the real full-text search.
+            prefix = [-1.0, 0.0]
+        return prefix + [0.0] * 1022
+
+    async def seed(scope, source, ontology, expected_text):
+        result = await provider.ingest(scope, source, ontology)
+        edges = [fact for fact in result.facts if fact.kind == "edge"]
+        assert len(edges) == 1, f"seed={expected_text!r}; edges={edges!r}"
+        edge = edges[0]
+        assert edge.fact == expected_text, f"seed={expected_text!r}; edge={edge!r}"
+        assert edge.scope == scope
+        assert edge.episode_ids == (result.episode_id,)
+        assert edge.evidence_ids == source.evidence_ids
+        return edge
+
+    # Only this test specializes synthetic model input. Neither provider.search
+    # nor Graphiti search_, the hybrid recipe, or database results are replaced.
+    # Restore the embedder even on assertion failure; provider owns ordinary close.
+    with monkeypatch.context() as patch:
+        patch.setattr(FixtureEmbedder, "create", ranking_embedding)
+        scope, source, ontology = fixture_data()
+        _, distractor_source, distractor_ontology = fixture_data(
+            content=distractor_text + ".")
+        _, foreign_source, foreign_ontology = fixture_data()
+        foreign_scope = scope.model_copy(update={"graph_id": uuid4()})
+        relevant = await seed(scope, source, ontology, relevant_text)
+        distractor = await seed(scope, distractor_source, distractor_ontology, distractor_text)
+        foreign = await seed(foreign_scope, foreign_source, foreign_ontology, relevant_text)
+        assert len({relevant.provider_id, distractor.provider_id, foreign.provider_id}) == 3
+
+        # Explicit relevance judgments: Harbor Labs is the seaside laboratory;
+        # Summit Works is a plausible employment distractor, not the answer.
+        # The paraphrase shares no tokens with either fact or WORKS_FOR. With
+        # no vector signal it cannot retrieve the relevant edge lexically.
+        for label, text in (("keyword", keyword_query), ("paraphrase", paraphrase_query)):
+            result = await provider.search(scope, SearchQuery(text=text, top_k=top_k))
+            edges = [fact for fact in result.facts if fact.kind == "edge"]
+            # Filter only: never sort Graphiti's returned edge order by ID/score.
+            edge_ids = [edge.provider_id for edge in edges]
+            rank = edge_ids.index(relevant.provider_id) + 1 if relevant.provider_id in edge_ids else None
+            diagnostic = (
+                f"case={label}; query={text!r}; expected={relevant.provider_id} "
+                f"({relevant_text!r}); rank={rank}; top_k={top_k}; "
+                f"edge_order={[(edge.provider_id, edge.fact) for edge in edges]!r}"
+            )
+            assert len(edge_ids) == len(set(edge_ids)) <= top_k, diagnostic
+            assert foreign.provider_id not in {fact.provider_id for fact in result.facts}, diagnostic
+            assert all(fact.scope == scope for fact in result.facts), diagnostic
+            assert rank == 1, diagnostic
+            assert edges[0].evidence_ids == source.evidence_ids, diagnostic
+            assert edges[0].episode_ids == relevant.episode_ids, diagnostic
+            if label == "paraphrase":
+                # Rank 1 (reciprocal rank 1.0), ahead of a retrieved distractor;
+                # not merely membership in a top-k containing the whole corpus.
+                assert edge_ids == [relevant.provider_id, distractor.provider_id], diagnostic
+                assert edges[1].evidence_ids == distractor_source.evidence_ids, diagnostic
+                assert edges[1].episode_ids == distractor.episode_ids, diagnostic
+
+        # One bounded negative control: change ONLY the query embedding, leaving
+        # persisted facts/vectors and the real hybrid recipe untouched. A lexical
+        # shortcut must not make the paraphrase assertion pass without vectors.
+        paraphrase_vector_enabled = False
+        ablated = await provider.search(scope, SearchQuery(text=paraphrase_query, top_k=top_k))
+        ablated_edges = [fact for fact in ablated.facts if fact.kind == "edge"]
+        ablated_ids = [edge.provider_id for edge in ablated_edges]
+        assert relevant.provider_id not in ablated_ids, (
+            f"vector ablation; query={paraphrase_query!r}; expected absent="
+            f"{relevant.provider_id} ({relevant_text!r}); "
+            f"edge_order={[(edge.provider_id, edge.fact) for edge in ablated_edges]!r}"
+        )
+
+
+@pytest.mark.asyncio
 async def test_real_graphiti_entity_metadata_roundtrip(provider):
     scope, source, ontology = fixture_data()
     ingested = await provider.ingest(scope, source, ontology)
