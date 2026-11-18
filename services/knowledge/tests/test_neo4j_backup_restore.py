@@ -20,22 +20,26 @@ def time_left(fixture, maximum):
     return remaining
 
 
-async def ready(fixture, uri, password):
-    async with asyncio.timeout(time_left(fixture, 80)):
-        while True:
-            try:
-                async with AsyncGraphDatabase.driver(uri, auth=("neo4j", password),
-                        connection_timeout=2, max_transaction_retry_time=0,
-                        max_connection_pool_size=1) as driver:
-                    await driver.verify_connectivity()
-                return
-            except (ServiceUnavailable, SessionExpired):
-                await asyncio.sleep(.5)
+async def ready(fixture, role, uri, password):
+    try:
+        async with asyncio.timeout(time_left(fixture, 80)):
+            while True:
+                try:
+                    async with AsyncGraphDatabase.driver(uri, auth=("neo4j", password),
+                            connection_timeout=2, max_transaction_retry_time=0,
+                            max_connection_pool_size=1) as driver:
+                        await driver.verify_connectivity()
+                    return
+                except (ServiceUnavailable, SessionExpired):
+                    await asyncio.sleep(.5)
+    except Exception:
+        fixture.startup_evidence(role)
+        pytest.fail("community_bolt_readiness_failed:" + role, pytrace=False)
 
 
 @asynccontextmanager
-async def provider(fixture, uri, password, *, seed=False):
-    await ready(fixture, uri, password)
+async def provider(fixture, role, uri, password, *, seed=False):
+    await ready(fixture, role, uri, password)
     subject = GraphitiKnowledgeProvider(graphiti=CommunityGraphiti(
         uri=uri, user="neo4j", password=password,
         llm_client=FixtureLLM(), embedder=FixtureEmbedder(), cross_encoder=FixtureReranker(),
@@ -86,7 +90,7 @@ async def test_actual_community_offline_restore_preserves_graph_evidence_and_iso
     assert primary[1].evidence_ids != foreign[1].evidence_ids
 
     source_uri, source_password = fixture.start_database("source")
-    async with provider(fixture, source_uri, source_password, seed=True) as source:
+    async with provider(fixture, "source", source_uri, source_password, seed=True) as source:
         async with asyncio.timeout(time_left(fixture, 75)):
             for seed in (primary, foreign):
                 applied = await source.ingest(*seed)
@@ -101,7 +105,7 @@ async def test_actual_community_offline_restore_preserves_graph_evidence_and_iso
 
     restored_uri, restored_password = fixture.start_database("restored")
     assert restored_password != source_password
-    async with provider(fixture, restored_uri, restored_password) as restored:
+    async with provider(fixture, "restored", restored_uri, restored_password) as restored:
         async with asyncio.timeout(time_left(fixture, 45)):
             observed = (
                 await read_scope(restored, *primary, "Mira Vale works for Harbor Labs"),

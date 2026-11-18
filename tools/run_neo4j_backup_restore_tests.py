@@ -13,6 +13,7 @@ import re
 import selectors
 import shutil
 import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -31,6 +32,16 @@ LABEL = "org.nexaweave.fixture.neo4j-recovery"
 ROLE = LABEL + ".role"
 ARCHIVE_MAX = 64 * 1024 * 1024
 OUTPUT_MAX = 64 * 1024
+SERVER_LOG = {"max-size": "64k", "max-file": "1"}
+CONSOLE_MARKERS = {
+    "bolt_announced": b"bolt enabled on",
+    "server_started": b"started.",
+    "permission_denied": b"permission denied",
+    "address_in_use": b"address already in use",
+    "invalid_configuration": b"error validating",
+    "java_oom": b"outofmemoryerror",
+    "read_only_filesystem": b"read-only file system",
+}
 FIXTURE_SECONDS = 420
 CLEANUP_SECONDS = 60
 VOLUME_OPTIONS = {"type": "tmpfs", "device": "tmpfs", "o": "size=256m,uid=7474,gid=7474,mode=0700"}
@@ -59,11 +70,13 @@ def digest_file(path, limit):
     return count, digest.hexdigest()
 
 
-def command(argv, *, cwd, env, deadline, phase, stdin=None, archive=None):
+def command(argv, *, cwd, env, deadline, phase, stdin=None, archive=None, digest_only=False):
     """Bound both streams while Docker is active. Preserve safe failure fingerprints."""
     require(time.monotonic() < deadline, "command_deadline:" + phase)
     count = [0, 0]
     digest = [sha256(), sha256()]
+    previous = [b"", b""]
+    markers = set()
     stdout = bytearray()
     process = subprocess.Popen(argv, stdin=stdin if stdin is not None else subprocess.DEVNULL,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd, env=env,
@@ -85,16 +98,24 @@ def command(argv, *, cwd, env, deadline, phase, stdin=None, archive=None):
                     limit = ARCHIVE_MAX if channel == 0 and archive is not None else OUTPUT_MAX
                     require(count[channel] <= limit, "command_output_limit:" + phase)
                     digest[channel].update(block)
+                    if digest_only:
+                        window = previous[channel] + block.lower()
+                        markers.update(name for name, word in CONSOLE_MARKERS.items() if word in window)
+                        previous[channel] = window[-64:]
                     if channel == 0:
-                        if archive is None:
+                        if archive is None and not digest_only:
                             stdout.extend(block)
-                        else:
+                        elif archive is not None:
                             archive.write(block)
         status = process.wait(timeout=max(.01, deadline - time.monotonic()))
         require(status == 0, f"docker_command_failed:{phase}:{status}:"
                 f"{count[0]}:{digest[0].hexdigest()}:{count[1]}:{digest[1].hexdigest()}")
         if archive is not None:
             require(count[0] > 0, "empty_dump")
+        if digest_only:
+            streams = {name: {"bytes": count[i], "sha256": digest[i].hexdigest()}
+                       for i, name in enumerate(("stdout", "stderr"))}
+            return {"streams": streams, "markers": sorted(markers)}
         return bytes(stdout)
     except subprocess.TimeoutExpired:
         raise RecoveryError("command_deadline:" + phase) from None
@@ -120,6 +141,7 @@ class RecoveryFixture:
         self.resource_ids = {}
         self.intent = []
         self.archive_record = None
+        self.bolt_ports = {}
         cfg = directory / "docker-config"
         cfg.mkdir(mode=0o700)
         self.argv = [str(args.docker), "--config", str(cfg), "--host", f"unix://{args.socket}"]
@@ -131,11 +153,11 @@ class RecoveryFixture:
     def name(self, role):
         return f"nexaweave-recovery-{self.nonce}-{role}"
 
-    def docker(self, *args, phase, seconds=10, stdin=None, archive=None):
+    def docker(self, *args, phase, seconds=10, stdin=None, archive=None, digest_only=False):
         deadline = self.cleanup_deadline or self.deadline
         return command([*self.argv, *args], cwd=self.directory, env=self.env,
                        deadline=min(deadline, time.monotonic() + seconds), phase=phase,
-                       stdin=stdin, archive=archive)
+                       stdin=stdin, archive=archive, digest_only=digest_only)
 
     def verify_engine(self):
         fields = "{{json .ID}} {{json .OSType}} {{json .MemoryLimit}} {{json .SwapLimit}} {{json .PidsLimit}} {{json .CPUCfsQuota}}"
@@ -160,19 +182,23 @@ class RecoveryFixture:
         return self.docker(kind, "ls", *flags, "--filter", selection, "--format", field,
                            phase="list_" + role).decode("ascii").splitlines()
 
-    def inspect_owned(self, kind, role):
+    def inspect_owned(self, kind, role, *, seconds=10):
         name = self.name(role)
         immutable = self.resource_ids.get((kind, role), name)
         view = json.loads(self.docker(kind, "inspect", "--format", "{{json .}}", immutable,
-                                      phase="inspect_" + role))
+                                      phase="inspect_" + role, seconds=seconds))
         if kind == "container":
             labels = view["Config"]["Labels"]
             require(view["Name"] == "/" + name and view["Image"] == self.image
                     and ID.fullmatch(view["Id"]) and view["Id"] == immutable,
                     "unowned_container")
             attach = view["HostConfig"]
+            log = attach["LogConfig"]
+            expected_log = {"Type": "json-file", "Config": SERVER_LOG} if role in self.passwords else {
+                "Type": "none", "Config": {}}
             require(not attach["Privileged"] and not attach.get("Binds")
-                    and not attach.get("VolumesFrom") and attach["LogConfig"]["Type"] == "none",
+                    and not attach.get("VolumesFrom") and log["Type"] == expected_log["Type"]
+                    and (log.get("Config") or {}) == expected_log["Config"],
                     "unsafe_container_custody")
             memory = (32 if role.endswith("-holder") else 768) * 1024 * 1024
             require(attach["Memory"] == attach["MemorySwap"] == memory
@@ -215,7 +241,9 @@ class RecoveryFixture:
     def make_container(self, role, data, *args, network="none", memory=768, extra=()):
         volume_id = self.name(data)
         self.inspect_owned("volume", data)
-        return self.create("container", role, "--pull=never", "--init", "--no-healthcheck", "--log-driver=none",
+        logging = (("--log-driver=json-file", *(f"--log-opt={key}={value}" for key, value in SERVER_LOG.items()))
+                   if role in self.passwords else ("--log-driver=none",))
+        return self.create("container", role, "--pull=never", "--init", "--no-healthcheck", *logging,
             "--network", network, "--memory", f"{memory}m", "--memory-swap", f"{memory}m",
             "--cpus", "1.5", "--pids-limit", "128", "--security-opt", "no-new-privileges",
             "--mount", f"type=volume,source={volume_id},destination=/data,volume-nocopy",
@@ -265,16 +293,94 @@ class RecoveryFixture:
                    "--env", "NEO4J_server_memory_heap_initial__size=128m",
                    "--env", "NEO4J_server_memory_heap_max__size=256m",
                    "--env", "NEO4J_server_memory_pagecache_size=64m"))
-        self.docker("container", "start", identity, phase="start_" + role, seconds=30)
-        view = self.inspect_owned("container", role)
-        bindings = {key: val for key, val in view["NetworkSettings"]["Ports"].items() if val}
+        try:
+            self.docker("container", "start", identity, phase="start_" + role, seconds=30)
+            view = self.inspect_owned("container", role)
+            port = self.published_bolt_port(view)
+            self.bolt_ports[role] = port
+        except (OSError, ValueError, KeyError, TypeError, RecoveryError, subprocess.SubprocessError):
+            self.startup_evidence(role)
+            raise
+        return f"bolt://127.0.0.1:{port}", secret
+
+    @staticmethod
+    def published_bolt_port(view):
+        bindings = {key: val for key, val in (view["NetworkSettings"]["Ports"] or {}).items() if val}
         require(set(bindings) == {"7687/tcp"} and len(bindings["7687/tcp"]) == 1,
                 "unexpected_published_ports")
         port = bindings["7687/tcp"][0]
         require(port["HostIp"] == "127.0.0.1" and port["HostPort"].isascii()
                 and port["HostPort"].isdecimal() and 1024 <= int(port["HostPort"]) <= 65535,
                 "non_loopback_bolt_publication")
-        return f"bolt://127.0.0.1:{port['HostPort']}", secret
+        return int(port["HostPort"])
+
+    def startup_evidence(self, role):
+        """Sample the owned daemon, its local Bolt socket, and the published route."""
+        evidence = {"role": role, "status": "owned_state_unavailable", "running": None,
+                    "oom_killed": None, "exit_code": None, "container_bolt": "unavailable",
+                    "published_route": "unavailable", "host_tcp": "unavailable", "console": "unavailable"}
+        diagnostic_error = (OSError, ValueError, KeyError, TypeError, RecoveryError, subprocess.SubprocessError)
+        try:
+            view = self.inspect_owned("container", role, seconds=2)
+            state = view["State"]
+            running, oom, code = state["Running"], state["OOMKilled"], state["ExitCode"]
+            require(type(running) is bool and type(oom) is bool, "invalid_startup_state")
+            evidence.update(running=running, oom_killed=oom,
+                            exit_code=code if type(code) is int and 0 <= code <= 255 else None)
+            identity = self.resource_ids["container", role]
+            if oom:
+                evidence["status"] = "container_oom"
+            elif not running:
+                evidence["status"] = "container_exited_or_not_started"
+            else:
+                self.probe_startup_routes(role, view, identity, evidence)
+            try:
+                evidence["console"] = self.docker("container", "logs", "--tail", "100", identity,
+                                                  phase="startup_console_" + role, seconds=3, digest_only=True)
+            except diagnostic_error:
+                pass
+        except diagnostic_error:
+            pass
+        print("NEXAWEAVE_COMMUNITY_NEO4J_STARTUP " + json.dumps(evidence, sort_keys=True),
+              file=sys.stderr, flush=True)
+
+    def probe_startup_routes(self, role, view, identity, evidence):
+        evidence["status"] = "container_bolt_probe_unavailable"
+        # The pinned image uses Bash. The fixed probe opens only its loopback
+        # socket and does not send credentials or execute a database command.
+        probe = 'if (exec 3<>/dev/tcp/127.0.0.1/7687) 2>/dev/null; then printf open; else printf refused; fi'
+        try:
+            result = self.docker("container", "exec", identity, "/bin/bash", "-c", probe,
+                                 phase="startup_internal_bolt_" + role, seconds=3)
+            if result in (b"open", b"refused"):
+                evidence["container_bolt"] = result.decode("ascii")
+        except (OSError, ValueError, RecoveryError, subprocess.SubprocessError):
+            pass
+        try:
+            port = self.published_bolt_port(view)
+            previous = self.bolt_ports.get(role)
+            if previous is not None and previous != port:
+                evidence["published_route"] = "changed"
+            else:
+                evidence["published_route"] = "loopback_bound"
+                remaining = min(.5, self.deadline - time.monotonic())
+                if remaining > 0:
+                    try:
+                        with socket.create_connection(("127.0.0.1", port), timeout=remaining):
+                            evidence["host_tcp"] = "open"
+                    except OSError:
+                        evidence["host_tcp"] = "unreachable"
+        except (ValueError, KeyError, TypeError, RecoveryError):
+            evidence["published_route"] = "invalid_or_absent"
+        if evidence["container_bolt"] == "refused":
+            evidence["status"] = "running_without_local_bolt"
+        elif evidence["container_bolt"] == "open":
+            if evidence["published_route"] != "loopback_bound" or evidence["host_tcp"] == "unreachable":
+                evidence["status"] = "published_host_route_problem"
+            elif evidence["host_tcp"] == "open":
+                evidence["status"] = "host_tcp_open_bolt_session_failed"
+            else:
+                evidence["status"] = "host_tcp_probe_unavailable"
 
     def stop_database(self, role):
         self.inspect_owned("container", role)
