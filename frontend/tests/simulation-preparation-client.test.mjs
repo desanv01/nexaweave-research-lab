@@ -269,22 +269,55 @@ test('ready receipt requires exact enabled filenames, native manifest hash and i
   for (const mutate of [v => v.receipt.files.reverse(), v => v.receipt.files.pop(), v => v.receipt.files[0].size = 0, v => v.receipt.files[0].size = 2097153, v => v.receipt.files[0].name = '../state.json', v => v.receipt.artifact_sha256 = hash, v => v.receipt.simulation_id = 'sim_' + 'f'.repeat(32), v => v.progress.completed = 99, v => v.model_calls_started = false, v => v.project_revision++, v => v.actors[0].name = 'other', v => v.projection_sha256 = 'f'.repeat(64)]) { const v = readyFixture(); mutate(v); await assert.rejects(validatePreparationResult(v, { graph: 'graph_1', payload: p, known }), code('invalid_reply')) }
 })
 test('private transport has only explicit POST routes, preserves flags and fences lost Start before recovery', async () => {
-  const calls = [], known = fixture()
+  const calls = [], known = fixture(), completed = readyFixture()
+  const reference = preparationIdentity(known)
+  const selector = { ...reference, source_entity_uuid: known.actors[0].source_entity_uuid }
+  const profiles = { ...selector, display_graph_id: completed.display_graph_id, scope: completed.scope,
+    project_revision: completed.project_revision, artifact_sha256: completed.receipt.artifact_sha256,
+    actor: { ordinal: 0, name: completed.actors[0].name, labels: completed.actors[0].labels },
+    generated_profiles: completed.options.platforms.map(platform => ({
+      platform, handle: 'actor', description: '<b>Grounded profile</b>', persona: '中文😀'
+    })),
+    frozen_support: { source_entity_uuid: selector.source_entity_uuid, labels: ['Entity', 'Person'],
+      summary: 'A retained summary.', attributes: { observation: ['a', 0, null] },
+      episode_ids: [uid(11)], evidence_ids: [uid(12)],
+      facts: [{ edge_uuid: uid(13), fact: 'A retained relationship.', episode_ids: [uid(11)], evidence_ids: [uid(12)] }] } }
+  let profileResult = profiles
+  let hold = false, release
   const client = createWorkbenchClient({ fetchImpl: async (url, options) => {
     calls.push({ url, options })
     if (url.includes('/data/')) return envelope(graph)
     if (url.endsWith('/plan')) return envelope(known)
     if (url.endsWith('/start')) throw new Error('provider private-token raw detail')
-    return envelope(readyFixture())
+    if (url.endsWith('/profiles')) return hold ? new Promise(resolve => { release = resolve }) : envelope(profileResult)
+    return envelope(completed)
   } })
   await client.connect(credentials); assert.equal(calls.length, 1)
   await client.preparationPlan(payload, source); const p = preparationIdentity(known)
+  await assert.rejects(client.preparationProfiles(selector, completed), code('invalid_request'))
   await assert.rejects(client.preparationStart(p), code('transport_failure'))
   await assert.rejects(client.preparationStart(p), code('conflict'))
-  assert.equal((await client.preparationStatus(p)).state, 'ready'); assert.equal(calls.length, 4)
-  assert.deepEqual(calls.slice(1).map(c => new URL(c.url).pathname), ['/api/preparation/graph_1/plan', '/api/preparation/graph_1/start', '/api/preparation/graph_1/status'])
+  const ready = await client.preparationStatus(p)
+  assert.equal(ready.state, 'ready'); assert.equal(calls.length, 4)
+  await assert.rejects(client.preparationProfiles({ ...selector, source_entity_uuid: uid(99) }, ready), code('invalid_request'))
+  await assert.rejects(client.preparationProfiles(selector, { ...ready, project_revision: 2 }), code('invalid_request'))
+  assert.equal(calls.length, 4)
+  assert.deepEqual(await client.preparationProfiles(selector, ready), profiles)
+  assert.deepEqual(calls.slice(1).map(c => new URL(c.url).pathname), ['/api/preparation/graph_1/plan', '/api/preparation/graph_1/start', '/api/preparation/graph_1/status', '/api/preparation/graph_1/profiles'])
   for (const { options } of calls.slice(1)) { assert.equal(options.method, 'POST'); assert.equal(options.redirect, 'error'); assert.equal(options.credentials, 'omit'); assert.equal(options.cache, 'no-store'); assert.equal(options.referrerPolicy, 'no-referrer'); assert.equal(options.headers.Authorization, 'Bearer private-token'); assert.ok(options.signal.aborted) }
   assert.deepEqual(JSON.parse(calls[2].options.body), JSON.parse(calls[3].options.body))
+  assert.deepEqual(JSON.parse(calls[4].options.body), selector)
+  profileResult = { ...profiles, actor: { ...profiles.actor, ordinal: 1 } }
+  await assert.rejects(client.preparationProfiles(selector, ready), code('invalid_reply'))
+  hold = true
+  const selection = new AbortController()
+  const stale = client.preparationProfiles(selector, ready, { signal: selection.signal })
+  const rejected = assert.rejects(stale, code('cancelled'))
+  assert.equal(typeof release, 'function')
+  selection.abort()
+  release(envelope(profiles))
+  await rejected
+  assert.deepEqual(await client.preparationStatus(p), ready)
   client.disconnect(); await assert.rejects(client.preparationStatus(p), code('disconnected'))
 })
 test('malformed 401 clears authorization before body validation; fixed errors contain no raw details', async () => {

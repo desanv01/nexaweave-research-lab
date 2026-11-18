@@ -5,9 +5,11 @@ import asyncio
 import base64
 import hashlib
 import http.client
+from io import BytesIO
 import json
 import os
 from pathlib import Path
+from unittest.mock import patch
 import queue
 import secrets
 import signal
@@ -20,13 +22,14 @@ import time
 from app.utils.owned_process import OwnedProcess
 
 ROOT = Path(__file__).resolve().parents[3]
-STAGES = ('connect', 'preparation-plan', 'preparation-start', 'preparation-ready',
+ONTOLOGY = ('ontology-review', 'ontology-plan', 'ontology-execute', 'ontology-recover')
+STAGES = ('connect', *ONTOLOGY, 'preparation-plan', 'preparation-start', 'preparation-ready',
           'native-start', 'native-ready', 'report-start', 'report-read',
           'pdf-read-after-restart', 'close')
-SECONDS = (60, 60, 60, 60, 60, 180, 180, 120, 60, 15)
+SECONDS = (60, 60, 60, 120, 60, 60, 60, 60, 60, 180, 180, 120, 60, 15)
 WIRE_BYTES = 7200
 FAILURE_PHASES = frozenset(('browser-launch', 'page-load', 'graph-connect',
-    'source-catalog', 'source-inspect', 'pdf-metadata', 'pdf-download', 'protocol', 'close'))
+    'source-catalog', 'source-inspect', 'pdf-metadata', 'pdf-download', 'protocol', 'close', *ONTOLOGY))
 LAUNCH_ERRORS = frozenset(('launch-timeout', 'executable-missing', 'permission-refused',
     'sandbox-refused', 'browser-closed', 'context-create-failed', 'page-create-failed', 'launch-unknown',
     'namespace-refused', 'runtime-library-missing', 'crashpad-database-missing',
@@ -123,6 +126,20 @@ class ResearchBrowserSession:
         self.references = {}
         self.catalog = []
         self.last_proof = {}
+        self.ontology_posts = {}
+        self.ontology_loaded = self.ontology_saved = self.ontology_plan = None
+        endpoint = f'http://127.0.0.1:{selected.model_port}/v1'
+        self.execution = dict(self.settings.child_environment,
+            KNOWLEDGE_INGESTION_ENABLED='true', KNOWLEDGE_MODEL_CALLS_AUTHORIZED='true',
+            KNOWLEDGE_INGESTION_ACCOUNT_ID=str(prep.account_id), KNOWLEDGE_INGESTION_CEILING_MICROUSD='1',
+            KNOWLEDGE_OPERATING_PROFILE='local_only',
+            KNOWLEDGE_LLM_BASE_URL=endpoint, KNOWLEDGE_LLM_MODEL='fixture-generation',
+            KNOWLEDGE_LLM_API_KEY='explicit-local-dummy',
+            KNOWLEDGE_EMBEDDING_BASE_URL=endpoint, KNOWLEDGE_EMBEDDING_MODEL='fixture-embedding',
+            KNOWLEDGE_EMBEDDING_API_KEY='explicit-local-dummy',
+            KNOWLEDGE_EMBEDDING_DIMENSION='1024', KNOWLEDGE_STRUCTURED_OUTPUT_MODE='json_schema',
+            KNOWLEDGE_CALL_TIMEOUT_SECONDS='5', KNOWLEDGE_MAX_TOKENS='512',
+            KNOWLEDGE_MAX_COROUTINES='1', KNOWLEDGE_TOTAL_LLM_CALL_BUDGET='32')
 
     def _remaining(self, maximum):
         remaining = min(maximum, self.deadline - time.monotonic())
@@ -133,6 +150,47 @@ class ResearchBrowserSession:
         with self.lock:
             if code not in self.failures and len(self.failures) < 16:
                 self.failures.append(code)
+
+    def _guard_ontology(self, request):
+        from app.services.knowledge_source_client import validate_ontology_payload
+        from app.services.knowledge_ingestion_client import validate_payload
+
+        stage, path = self.active, request.path
+        status = path.startswith('/api/source/ingestion/operation/')
+        post = request.method == 'POST'
+        guarded = post and path.startswith(('/api/source/ontology/', '/api/source/ingestion/'))
+        if not guarded and not (status and request.method == 'GET'):
+            require(stage not in ONTOLOGY or not (post and path.startswith('/api/')))
+            return
+        require(stage in ONTOLOGY and path == self._route(stage)
+                and (post == (stage != 'ontology-recover'))
+                and not request.query_string and request.host == f'127.0.0.1:{self.port}'
+                and request.headers.getlist('Origin') == ['http://127.0.0.1:4317']
+                and request.headers.getlist('Authorization') == ['Bearer ' + self.token])
+        if not post:
+            return
+        require(request.mimetype == 'application/json' and request.content_length is not None
+                and 0 < request.content_length <= 262144
+                and not request.headers.get('Transfer-Encoding') and not request.headers.get('Content-Encoding'))
+        raw = request.stream.read(request.content_length + 1)
+        require(len(raw) == request.content_length)
+        request.stream = BytesIO(raw)
+        body = json.loads(raw, object_pairs_hook=pairs)
+        with self.lock:
+            require(stage == self.active and stage not in self.ontology_posts)
+            if stage == 'ontology-review':
+                validate_ontology_payload('ontology_save', body)
+                require(self.ontology_loaded is not None
+                        and body['expected_revision'] == self.ontology_loaded['project_revision'])
+            else:
+                method = 'plan' if stage == 'ontology-plan' else 'execute'
+                validate_payload(method, body)
+                require(body['schema_version'] == 4 and body['source_revision'] == self.selected.revisions[0]
+                        and body['project_revision'] == self.ontology_saved['project_revision'])
+                if method == 'execute':
+                    require(body == dict(self.ontology_posts['ontology-plan'], **{
+                        key: self.ontology_plan[key] for key in ('fingerprint', 'execution_fingerprint')}))
+            self.ontology_posts[stage] = body
 
     def _app(self):
         from app import Config, create_app
@@ -159,10 +217,7 @@ class ResearchBrowserSession:
             os.environ.update(values)
             app = create_app(BrowserConfig, read_facade=self.prep.reader,
                 source_facade=KnowledgeSourceFacade(self.settings),
-                ingestion_facade=KnowledgeIngestionFacade(self.settings, environment={
-                    'KNOWLEDGE_INGESTION_ENABLED': 'false', 'KNOWLEDGE_MODEL_CALLS_AUTHORIZED': 'false',
-                    'KNOWLEDGE_INGESTION_ACCOUNT_ID': str(self.prep.account_id),
-                    'KNOWLEDGE_INGESTION_CEILING_MICROUSD': '1'}),
+                ingestion_facade=KnowledgeIngestionFacade(self.settings, environment=self.execution),
                 preparation_facade=KnowledgePreparationFacade(self.settings, host=self.prep),
                 native_launch_facade=NativeLaunchFacade(self.settings, host=self.native_host),
                 native_observations_facade=NativeObservationsFacade(self.settings,
@@ -180,6 +235,11 @@ class ResearchBrowserSession:
             g.research_browser_request = True
             with self.requests_condition:
                 self.requests.add(threading.get_ident())
+            try:
+                self._guard_ontology(request)
+            except Exception:
+                self._failure('research_browser_ontology_request_refused')
+                return {'success': False, 'error': {'code': 'conflict'}}, 409
 
         @app.teardown_request
         def left(_error):
@@ -218,6 +278,7 @@ class ResearchBrowserSession:
                     or path.startswith(('/api/source/retain', '/api/source/ingestion/execute')))
                 if mutation:
                     allowed = {
+                        'ontology-execute': (self._route('ontology-execute'),),
                         'preparation-plan': ('/api/preparation/' + self.prep.display_graph_id + '/plan',),
                         'preparation-start': ('/api/preparation/' + self.prep.display_graph_id + '/start',),
                         'native-start': tuple('/api/native-launch/' + kind + '/' + self.prep.display_graph_id
@@ -244,6 +305,8 @@ class ResearchBrowserSession:
                             and self.event_bytes + len(raw) <= 2097152,
                             'research_browser_witness_bound')
                     self.events.append((self.active, path, value['data']))
+                    if request.method == 'GET' and path == self._route('ontology-review'):
+                        self.ontology_loaded = value['data']
                     self.event_bytes += len(raw)
             except Exception:
                 self._failure('research_browser_witness_refused')
@@ -272,9 +335,12 @@ class ResearchBrowserSession:
         self.server = self.server_thread = None
 
     def restart(self):
-        require(self.step == 8, 'research_browser_restart_stage')
+        require(self.step < len(STAGES) and STAGES[self.step] in {
+            'ontology-recover', 'pdf-read-after-restart'}, 'research_browser_restart_stage')
+        port = self.port
         self._stop_http()
         self._start_http()  # Same port/token/facades/hosts and real stores.
+        require(self.port == port, 'research_browser_restart_port_changed')
 
     def _environment(self, directory):
         keep = ('PATH', 'SYSTEMROOT', 'WINDIR', 'LANG', 'LC_ALL', 'TZ')
@@ -427,6 +493,11 @@ class ResearchBrowserSession:
     def _route(self, stage):
         graph = self.prep.display_graph_id
         return {
+            'ontology-review': '/api/source/ontology/' + graph,
+            'ontology-plan': '/api/source/ingestion/plan/' + graph,
+            'ontology-execute': '/api/source/ingestion/execute/' + graph,
+            'ontology-recover': '/api/source/ingestion/operation/' + graph + '/' +
+                (self.ontology_plan or {}).get('operation_id', ''),
             'preparation-plan': '/api/preparation/' + graph + '/plan',
             'preparation-start': '/api/preparation/' + graph + '/start',
             'preparation-ready': '/api/preparation/' + graph + '/status',
@@ -447,6 +518,12 @@ class ResearchBrowserSession:
             expected = dict(launch_id=data['request']['run_id'], launch_sha256=data['launch_sha256'])
             if stage == 'native-ready':
                 expected['evidence_sha256'] = data['receipt']['evidence_sha256']
+        elif stage in ONTOLOGY:
+            expected = dict(source_revision=self.selected.revisions[0])
+            key = 'project_revision' if stage == 'ontology-review' else 'operation_id'
+            expected[key] = data[key]
+            if stage == 'ontology-plan':
+                expected['project_revision'] = data['project_revision']
         elif stage.startswith('report-'):
             report = data['report'] if stage == 'report-read' else data
             expected = {key: report[key] for key in ('report_id', 'plan_sha256')}
@@ -458,8 +535,51 @@ class ResearchBrowserSession:
                 'research_browser_reference_mismatch')
         self.references[stage] = expected
 
+    def _ontology_result(self, stage, request, candidates):
+        result = candidates[-1]
+        if stage == 'ontology-review':
+            body = self.ontology_posts[stage]
+            require(len(candidates) >= 2 and candidates[-2] == result == self.ontology_loaded
+                    and result['project_revision'] == body['expected_revision'] + 1
+                    and result['ontology'] == body['ontology'] and result['scope'] == self.prep.scope_dto)
+            self.ontology_saved = result
+        elif stage == 'ontology-plan':
+            body = self.ontology_posts[stage]
+            require(len(candidates) == 1 and body == dict(request, schema_version=4,
+                                                           operation_id=result['operation_id'])
+                    and result['schema_version'] == 4 and result['project_revision'] == request['project_revision']
+                    and result['source_revision'] == request['source_revision']
+                    and result['fingerprint'] != result['execution_fingerprint']
+                    and result['model_calls_made'] is result['graph_ingestion_executed']
+                    is result['spending_authorized'] is False)
+            self.ontology_plan = result
+        else:
+            require(len(candidates) == 1 and result['schema_version'] == 1
+                    and result['operation_id'] == request['operation_id']
+                    and result['fingerprint'] == self.ontology_plan['execution_fingerprint']
+                    and result['state'] == 'completed' and result['budget_state'] == 'settled')
+            if stage == 'ontology-execute':
+                require(stage in self.ontology_posts)
+                self.ontology_completed = result
+            else:
+                require(result == self.ontology_completed)
+
     def perform(self, stage, request=None):
+        if stage == 'ontology-execute':
+            with patch.dict(os.environ, self.execution):
+                return self._perform(stage, request)
+        return self._perform(stage, request)
+
+    def _perform(self, stage, request):
         require(self.step < len(STAGES) and STAGES[self.step] == stage, 'research_browser_stage_order')
+        if stage in ONTOLOGY:
+            keys = {'source_revision'}
+            if stage == 'ontology-plan':
+                keys.add('project_revision')
+            elif stage != 'ontology-review':
+                keys.add('operation_id')
+            require(type(request) is dict and set(request) == keys
+                    and request['source_revision'] == self.selected.revisions[0])
         timeout = self._remaining(SECONDS[self.step])
         end = time.monotonic() + timeout
         with self.lock:
@@ -521,6 +641,8 @@ class ResearchBrowserSession:
             require(candidates, 'research_browser_http_witness_missing')
             result = candidates[-1]
             self._reference(stage, result, reply)
+            if stage in ONTOLOGY:
+                self._ontology_result(stage, request, candidates)
             if stage in {'preparation-start', 'native-start', 'report-start'}:
                 require(reply['proof'].get('dispatches') == 1, 'research_browser_dispatch_count')
             if 'source_revisions' in reply['proof']:
@@ -715,7 +837,7 @@ class ResearchBrowserSession:
             except Exception:
                 # Startup may precede Chrome creation; stage error is still primary.
                 pass
-        if self.driver and self.step == 9:
+        if self.driver and self.step == STAGES.index('close'):
             try:
                 self.perform('close')
                 require(self.driver['process'].wait(timeout=3) == 0)

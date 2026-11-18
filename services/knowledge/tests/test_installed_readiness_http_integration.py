@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import secrets
 import subprocess
+import sys
 import time
 from uuid import uuid4
 
@@ -17,12 +18,10 @@ import psycopg
 from psycopg.conninfo import conninfo_to_dict
 import pytest
 
-from nexaweave_execution.native_run_store import migrate_native_runs
 from nexaweave_knowledge.bindings import ScopeBindingStore
 from nexaweave_knowledge.contracts import KnowledgeScope, Layer
-from nexaweave_knowledge.operations import migrate as migrate_knowledge
 from nexaweave_storage import ProjectStore, SourceStore
-from nexaweave_storage.store import migrate as migrate_app
+from nexaweave_storage.validation import canonical_payload
 from test_project_store import snapshot
 from tools.run_installed_readiness_tests import (
     MIGRATIONS, PG_DATABASE, PG_HOST, PG_PORT, PG_USER, ROOT, owned_process,
@@ -39,6 +38,8 @@ import builtins
 import json
 import os
 from pathlib import Path
+from contextlib import redirect_stdout
+import runpy
 import subprocess
 import sys
 import threading
@@ -62,11 +63,12 @@ def imports(name, *args, **kwargs):
 
 builtins.__import__ = imports
 lock = threading.Lock()
+events = sys.stdout
 
 
 def emit(event):
     with lock:
-        print(json.dumps(event, separators=(",", ":")), flush=True)
+        print(json.dumps(event, separators=(",", ":")), file=events, flush=True)
 
 
 python = Path(os.environ["KNOWLEDGE_PYTHON"])
@@ -107,25 +109,43 @@ def observe(frame, event, _result):
 
 sys.setprofile(observe)
 threading.setprofile(observe)
-from run import Config, app_mode, create_app
-from werkzeug.serving import make_server
+from werkzeug import serving
 
-if app_mode(Config, Config) != "research_local" or Config.validate_readonly():
-    raise RuntimeError("protected backend startup validation failed")
-server = make_server("127.0.0.1", 0, create_app(), threaded=True)
-emit({"event": "ready", "port": server.server_port})
+make_server = serving.make_server
+server = None
+shutdown_thread = None
 
 
-def stop():
-    sys.stdin.buffer.read(1)
-    server.shutdown()
+def owned_listener(host, port, *args, **kwargs):
+    global server, shutdown_thread
+    if server is not None or host != "127.0.0.1" or port != 0:
+        raise RuntimeError("protected listener admission mismatch")
+    server = make_server(host, port, *args, **kwargs)
+    if server.server_address != ("127.0.0.1", server.server_port) or server.server_port <= 0:
+        raise RuntimeError("protected listener identity mismatch")
+
+    def stop():
+        sys.stdin.buffer.read(1)
+        server.shutdown()
+
+    shutdown_thread = threading.Thread(target=stop, daemon=True)
+    shutdown_thread.start()
+    emit({"event": "ready", "port": server.server_port})
+    return server
 
 
-threading.Thread(target=stop, daemon=True).start()
+serving.make_server = owned_listener
 try:
-    server.serve_forever(poll_interval=0.1)
+    with redirect_stdout(sys.stderr):
+        runpy.run_path(str(root / "backend/run.py"), run_name="__main__")
+    if server is None or shutdown_thread is None:
+        raise RuntimeError("launcher returned without an owned listener")
+    shutdown_thread.join(timeout=2)
+    if shutdown_thread.is_alive():
+        raise RuntimeError("launcher shutdown did not close")
 finally:
-    server.server_close()
+    if server is not None:
+        server.server_close()
     sys.setprofile(None)
     threading.setprofile(None)
     emit({"event": "shutdown", "loopback_blocked": guard.blocked_attempts})
@@ -133,16 +153,23 @@ finally:
 '''
 
 _CATALOGS = (
-    ("mf_app", "nexaweave_storage", "sql_sha256", "catalog_sha256"),
-    ("mf_knowledge", "nexaweave_knowledge", "checksum", "schema_checksum"),
-    ("mf_native_execution", "nexaweave_execution", "sql_sha256", "catalog_sha256"),
+    ("mf_app", "nexaweave_storage", "sql_sha256", "catalog_sha256", MIGRATIONS["nexaweave_storage"]),
+    ("mf_knowledge", "nexaweave_knowledge", "checksum", "schema_checksum", MIGRATIONS["nexaweave_knowledge"]),
+    ("mf_execution", "nexaweave_execution", "checksum", "schema_checksum", ("0001_budget_admission.sql",)),
+    ("mf_preparation", "nexaweave_execution", "checksum", "schema_checksum", ("preparations_0001.sql",)),
+    ("mf_native_execution", "nexaweave_execution", "sql_sha256", "catalog_sha256",
+     ("native_runs_0001.sql", "native_runs_0002.sql")),
+    ("mf_native_launch", "nexaweave_execution", "checksum", "schema_checksum",
+     ("native_launch_0001.sql", "native_launch_0002.sql")),
+    ("mf_report", "nexaweave_execution", "checksum", "schema_checksum", ("report_0001.sql",)),
+    ("mf_followup", "nexaweave_execution", "checksum", "schema_checksum", ("followup_0001.sql",)),
 )
 
 
 def _migration_receipts(connect):
     receipts = {}
     with connect() as connection:
-        for schema, package, sql_digest, catalog_digest in _CATALOGS:
+        for schema, package, sql_digest, catalog_digest, migrations in _CATALOGS:
             rows = connection.execute(
                 f"SELECT version,{sql_digest},{catalog_digest} "
                 f"FROM {schema}.schema_migrations ORDER BY version"
@@ -150,7 +177,7 @@ def _migration_receipts(connect):
             resources = files(package).joinpath("migrations")
             expected = [
                 (version, hashlib.sha256(resources.joinpath(name).read_text("utf-8").encode("utf-8")).hexdigest())
-                for version, name in enumerate(MIGRATIONS[package], 1)
+                for version, name in enumerate(migrations, 1)
             ]
             assert [(version, sql.strip()) for version, sql, _ in rows] == expected
             assert all(re.fullmatch(r"[0-9a-f]{64}", catalog.strip()) for _, _, catalog in rows)
@@ -158,14 +185,19 @@ def _migration_receipts(connect):
     return receipts
 
 
-def _install(connect):
-    # Drivers own their locks and migration transactions, with one supervising
-    # caller-owned connection. The native driver requires app revision authority.
-    with connect() as connection:
-        migrate_app(connection)
-        assert connection.execute("SELECT to_regclass('mf_app.project_revisions') IS NOT NULL").fetchone() == (True,)
-        migrate_knowledge(connection)
-        migrate_native_runs(connection)
+def _operator(directory, dsn, module, *args, refused=False):
+    env = _unit_environment(directory)
+    env["NEXAWEAVE_APPSTORE_DSN"] = dsn
+    command = [sys.executable, "-I", "-B", "-m", module, *args]
+    with owned_process(command, cwd=directory, env=env, stdin=subprocess.DEVNULL,
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
+        output, errors = process.communicate(timeout=45)
+        assert process.returncode == (2 if refused else 0)
+    if refused:
+        assert not output and errors.startswith(b"operator_bootstrap_refused")
+        return None
+    assert not errors and len(output) <= 4096
+    return json.loads(output) if output else None
 
 
 def _events(path):
@@ -204,7 +236,9 @@ def _host(directory, scope, display, pg):
         SOURCE_HTTP_TEST_ROOT=str(ROOT),
         NEXAWEAVE_APP_MODE="research_local",
         PYTHON_DOTENV_DISABLED="1",
+        FLASK_SKIP_DOTENV="1",
         FLASK_HOST="127.0.0.1",
+        FLASK_PORT="0",
         FLASK_DEBUG="0",
         NEXAWEAVE_ALLOWED_ORIGINS="http://localhost:3000",
         KNOWLEDGE_READ_TOKEN=token,
@@ -301,17 +335,43 @@ def test_clean_installed_migrations_and_owned_metadata_restart(tmp_path):
         assert connection.execute(
             "SELECT NOT EXISTS (SELECT 1 FROM pg_namespace WHERE left(nspname,3)='mf_')"
         ).fetchone() == (True,), "fixture already contains application schemas"
-    _install(connect)
+    bootstrap = "nexaweave_execution.operator_bootstrap"
+    authority = ("--database", PG_DATABASE, "--owner-role", PG_USER)
+    _operator(tmp_path, dsn, bootstrap, "migrate", "--database", "wrong_fixture",
+              "--owner-role", PG_USER, refused=True)
+    with connect() as connection:
+        assert connection.execute(
+            "SELECT NOT EXISTS (SELECT 1 FROM pg_namespace WHERE left(nspname,3)='mf_')"
+        ).fetchone() == (True,)
+    installed = _operator(tmp_path, dsn, bootstrap, "migrate", *authority)
+    assert installed == {"schema_version": 1, "status": "ready", "catalogs": [catalog[0] for catalog in _CATALOGS]}
     receipts = _migration_receipts(connect)
-    _install(connect)
+    assert _operator(tmp_path, dsn, bootstrap, "migrate", *authority) == installed
     assert _migration_receipts(connect) == receipts
 
     workspace, project, graph, source_revision = uuid4(), uuid4(), uuid4(), uuid4()
     projects, bindings, sources = ProjectStore(connect), ScopeBindingStore(connect), SourceStore(connect)
-    before = projects.create("owner", workspace, project, "proj_1", snapshot())
+    project_input = tmp_path / "project.json"
+    initial, evidence, digest = canonical_payload(snapshot(), [], "proj_1")
+    project_input.write_text(json.dumps({
+        "schema_version": 1, "principal": "owner", "workspace_id": str(workspace),
+        "project_id": str(project), "display_id": "proj_1", "revision": 1,
+        "snapshot": initial, "evidence": list(evidence), "digest": digest, "binary_migration": False,
+    }, ensure_ascii=False), encoding="utf-8")
+    project_args = ("--principal", "owner", "--workspace-id", str(workspace), "--project-id", str(project))
+    _operator(tmp_path, dsn, "nexaweave_storage", "import-project", *project_args,
+              "--display-id", "proj_1", "--input", str(project_input))
+    before = projects.get("owner", project)
+    assert before.revision == 1 and before.workspace_id == workspace
     scope = KnowledgeScope(workspace_id=workspace, project_id=project, graph_id=graph, layer=Layer.source)
     display = "source_" + graph.hex
-    bindings.bind("owner", display, scope)
+    bind_args = (*authority, *project_args, "--graph-id", str(graph), "--display-graph-id", display)
+    _operator(tmp_path, dsn, bootstrap, "bind-source", *bind_args, "--workspace-id", str(uuid4()), refused=True)
+    state = _operator(tmp_path, dsn, bootstrap, "bind-source", *bind_args)
+    assert state == {"schema_version": 1, "status": "bound", "principal": "owner",
+                     "display_graph_id": display, "scope": scope.model_dump(mode="json")}
+    assert _operator(tmp_path, dsn, bootstrap, "bind-source", *bind_args) == state
+    _operator(tmp_path, dsn, bootstrap, "bind-source", *bind_args, "--graph-id", str(uuid4()), refused=True)
     binding = bindings.resolve("owner", display)
     text, name = "Owned readiness 猫", "W8.1 fixture"
     retained = sources.ingest_text("owner", project, source_revision, name, text, [

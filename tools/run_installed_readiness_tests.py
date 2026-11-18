@@ -26,12 +26,29 @@ MIGRATIONS = {
         "0004_source_binaries.sql",
     ),
     "nexaweave_knowledge": ("0001_knowledge_operations.sql", "0002_scope_bindings.sql"),
-    "nexaweave_execution": ("native_runs_0001.sql", "native_runs_0002.sql"),
+    "nexaweave_execution": (
+        "0001_budget_admission.sql", "preparations_0001.sql",
+        "native_runs_0001.sql", "native_runs_0002.sql",
+        "native_launch_0001.sql", "native_launch_0002.sql", "report_0001.sql", "followup_0001.sql",
+    ),
 }
 DRIVERS = {
-    "nexaweave_storage": ("store.py", 13387, "786a1f8161c3f75d38e6ea8156525af4c18452dfedcf8c6b5273306cdb606ec1"),
-    "nexaweave_knowledge": ("operations.py", 27448, "fc82dcd6cb8b5353228b74e95cc68dcdc8fe5c33f13590d5610a8bdba53419f4"),
-    "nexaweave_execution": ("native_run_store.py", 23088, "c135398234904947818a7c6709f68c8e24ed2b6dac40cbe36a6828a21828f9f7"),
+    "nexaweave_storage": (
+        ("store.py", 13387, "786a1f8161c3f75d38e6ea8156525af4c18452dfedcf8c6b5273306cdb606ec1"),
+        ("__main__.py", 11434, "dd37e2c317fa3ea865707a979382cc8a2a68e5f908ee4e2654591f63f318a3a0"),
+    ),
+    "nexaweave_knowledge": (
+        ("operations.py", 35987, "58a5d0285deac764e6abfb4f2e3baaca6387b93c73897d7422d9ecb4ece9867d"),
+        ("bindings.py", 6586, "ec2a023aa08815eec80e23f756e5436d7fa16f5debc03e481f5644f3629c90f1"),
+    ),
+    "nexaweave_execution": (
+        ("budget.py", 27827, "6d613d17b5cfce7323e3d015b2b82550273addc008884ceb9b3d611178d0ed7e"),
+        ("preparation_store.py", 11472, "3490f6e485d68e62e83db95d671c6853b97716983085f463e77488fe68c1ad0c"),
+        ("native_run_store.py", 23088, "c135398234904947818a7c6709f68c8e24ed2b6dac40cbe36a6828a21828f9f7"),
+        ("native_launch_store.py", 23334, "0aa0321e3b2b23da0c8eee47aa959dccb51d08d7b3e41f9fed9b41616550b839"),
+        ("report_store.py", 22419, "46ab0e298dd8d47a9e223d5135e86197c8db72d3e2404f6545ffbd4bc36fab46"),
+        ("followup_store.py", 30580, "d78548efd8b08bc95c3003b8fc2c42ea7ab358526f21d3f433e6a06c814b0aac"),
+    ),
 }
 STARTUP = (
     ("backend/run.py", 1681, "cc39a7ead1df509de326128801d475d2d70eb00722d94c5a2895df0496d87b26"),
@@ -62,7 +79,7 @@ def _installed_bootstrap():
     files = {path.as_posix() for path in distribution.files or ()}
     prefix = Path(sys.prefix).resolve()
     roots = {}
-    for package, (driver, size, digest) in DRIVERS.items():
+    for package, drivers in DRIVERS.items():
         spec = importlib.util.find_spec(package)
         if spec is None or spec.origin is None:
             raise ValueError("knowledge package not installed")
@@ -75,12 +92,16 @@ def _installed_bootstrap():
             raise ValueError("unexpected knowledge installation")
         roots[package] = origin.parent
         source = ROOT / "services/knowledge/src" / package
-        _verify_pin(source / driver, size, digest)
-        _verify_pin(origin.parent / driver, size, digest)
         names = [f"migrations/{name}" for name in MIGRATIONS[package]]
+        for driver, size, digest in drivers:
+            _verify_pin(source / driver, size, digest)
+            _verify_pin(origin.parent / driver, size, digest)
+            names.append(driver)
         if package == "nexaweave_knowledge":
             names.extend(("read_bootstrap.py", "source_bootstrap.py"))
-        for name in (driver, *names):
+        if package == "nexaweave_execution":
+            names.append("operator_bootstrap.py")
+        for name in names:
             relative = f"{package}/{name}"
             installed = origin.parent / name
             if (relative not in files or installed.resolve(strict=True) != installed
