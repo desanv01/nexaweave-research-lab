@@ -73,7 +73,8 @@ def labels(value):
 
 
 def options(value):
-    if type(value) is not dict or set(value) != {'types', 'max_agents', 'seed', 'platforms', 'max_rounds', 'simulation_requirement'}:
+    bridge_key = 'twitter_to_reddit_seed_index'
+    if type(value) is not dict or set(value) - {bridge_key} != {'types', 'max_agents', 'seed', 'platforms', 'max_rounds', 'simulation_requirement'}:
         raise ValueError
     if value['types'] is not None:
         labels(value['types'])
@@ -82,6 +83,9 @@ def options(value):
     integer(value['max_rounds'], 1, 24)
     if type(value['platforms']) is not list or value['platforms'] not in [['twitter'], ['reddit'], ['twitter', 'reddit']]:
         raise ValueError
+    if bridge_key in value:
+        from nexaweave_execution.native_seed_contracts import seed_bridge_index
+        seed_bridge_index(value, value['platforms'])
     text(value['simulation_requirement'], 8192, 32768)
     return value
 
@@ -89,9 +93,11 @@ def options(value):
 def validate_payload(method, value):
     try:
         keys = {'schema_version', 'operation_id'} | ({'source_revision', 'options'} if method == 'plan' else {'plan_sha256'})
+        if method == 'configuration':
+            keys |= {'source_revision', 'artifact_sha256'}
         if method == 'plan' and type(value) is dict and value.get('schema_version') == 2:
             keys.add('source_revisions')
-        if method not in {'plan', 'start', 'status'} or type(value) is not dict or set(value) != keys:
+        if method not in {'plan', 'start', 'status', 'configuration'} or type(value) is not dict or set(value) != keys:
             raise ValueError
         integer(value['schema_version'], 1, 2 if method == 'plan' else 1)
         uuid_string(value['operation_id'])
@@ -103,6 +109,9 @@ def validate_payload(method, value):
                 source_revisions(value['source_revisions'], value['source_revision'])
         else:
             sha(value['plan_sha256'])
+            if method == 'configuration':
+                uuid_string(value['source_revision'])
+                sha(value['artifact_sha256'])
         if len(encoded(value)) > REQUEST_BYTES:
             raise ValueError
     except (ValueError, TypeError, KeyError, UnicodeError, RecursionError):

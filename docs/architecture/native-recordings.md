@@ -70,7 +70,11 @@ No installation, DB server, model credential or provider call is required.
 Each JSON line requests version 1, operation `playback` or `metrics`, enabled
 platform `twitter` or `reddit`, and integer `limit` from 1 to 100. Playback may
 include a null or opaque `cursor`. Metrics requires a null/absent cursor; its
-limit bounds each final-table preview. Extra fields, bool integers, duplicate
+limit bounds each final-table preview. Metrics alone may opt in with
+`"include_round_action_counts": true`; when present, only the literal JSON boolean
+`true` is accepted. The field is rejected on playback. Omission preserves the
+previous metrics response and skips joint-projection work, including for ordinary
+experiment-comparison metrics requests. Extra fields, bool integers, duplicate
 keys, nonfinite values and arbitrary selectors fail with fixed public errors.
 Frames cap at 8192 bytes; a process serves at most 1000 frames and terminates on
 oversized/incomplete frames. Responses cap at 2 MiB. Errors contain fixed codes,
@@ -87,7 +91,19 @@ not authorization tokens. Exhaustion is explicit; no cross-platform merge order
 is invented. Responses are detached copies of pinned data.
 
 Metrics count logged actions by type, agent and round, with duplicates retained.
-They report bounded previews and complete row counts for present allowlisted
+For example, a request
+`{"version":1,"operation":"metrics","platform":"twitter","limit":2,"include_round_action_counts":true}`
+also returns `"logged_round_action_counts": {"0": {"CREATE_POST": 2}}` when two
+CREATE_POST actions were logged at round zero. This sparse map uses decimal round
+strings and exact action-type strings; rounds/types with no actions are omitted,
+and a log with no actions returns `{}`. Each record without an `event_type` key
+counts once, including repeated and unsuccessful actions; simulation lifecycle
+and round-boundary records never count. Counts use only the requested platform's
+admitted records and retain the response's recording revision and trusted anchors.
+The opt-in does not change preview limits or historical-state coverage. Its full
+response must fit the existing bounds or fail with `limit_exceeded`, without
+partial results or silently truncated counts.
+Metrics report bounded previews and complete row counts for present allowlisted
 native post/follow/like/dislike/comment/mute/trace tables. Missing tables and
 truncated previews are explicit. Final rows may include interviews performed
 after the last simulation log event. Initial manual action logs can duplicate

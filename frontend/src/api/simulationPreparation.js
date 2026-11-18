@@ -52,6 +52,67 @@ export function preparationPayload(v, planning = false) {
   } catch { bad('invalid_request') }
 }
 export function preparationIdentity(plan) { return { schema_version: 1, operation_id: plan.operation_id, plan_sha256: plan.plan_sha256 } }
+const configurationSelectorFields = 'schema_version operation_id plan_sha256 source_revision artifact_sha256'
+export function configurationIdentity(ready) {
+  return { ...preparationIdentity(ready), source_revision: ready.source.source_revision, artifact_sha256: ready.receipt.artifact_sha256 }
+}
+export function configurationPayload(value) {
+  try {
+    fields(value, configurationSelectorFields)
+    if (value.schema_version !== 1) bad()
+    uuid(value.operation_id); uuid(value.source_revision); hash(value.plan_sha256); hash(value.artifact_sha256)
+    return JSON.stringify(value)
+  } catch { bad('invalid_request') }
+}
+const timeLimits = { total_simulation_hours: 8760, minutes_per_round: 1440, agents_per_hour_min: 100, agents_per_hour_max: 100 }
+const periods = ['peak', 'off_peak', 'morning', 'work']
+const weights = ['recency_weight', 'popularity_weight', 'relevance_weight', 'echo_chamber_strength']
+function boundedNumber(value, max) {
+  if (!Number.isFinite(value) || value < 0 || value > max) bad()
+}
+function validateTimeActivity(value) {
+  fields(value, [...Object.keys(timeLimits), ...periods.flatMap(period => [period + '_hours', period + '_activity_multiplier'])].join(' '))
+  for (const [key, max] of Object.entries(timeLimits)) int(value[key], max, 1)
+  if (value.agents_per_hour_min > value.agents_per_hour_max) bad()
+  for (const period of periods) {
+    const hours = value[period + '_hours']
+    list(hours, 24, hour => int(hour, 23))
+    if (new Set(hours).size !== hours.length) bad()
+    boundedNumber(value[period + '_activity_multiplier'], 10)
+  }
+}
+export function validateConfigurationResult(value, graph, ready, selector) {
+  fields(value, configurationSelectorFields + ' display_graph_id scope project_revision goal time_activity hot_topics hot_topics_omitted platform_controls effective_controls')
+  fields(value.scope, 'schema_version workspace_id project_id graph_id run_id branch_id layer')
+  if (ready.state !== 'ready' || graph !== ready.display_graph_id || value.display_graph_id !== graph ||
+      Object.keys(value.scope).some(key => value.scope[key] !== ready.scope[key]) ||
+      value.project_revision !== ready.project_revision ||
+      value.goal !== ready.options.simulation_requirement) bad()
+  int(value.project_revision, 2147483647, 1)
+  const identity = configurationIdentity(ready)
+  for (const key of Object.keys(identity)) {
+    if (selector[key] !== identity[key] || value[key] !== identity[key]) bad()
+  }
+  const effective = value.effective_controls
+  fields(effective, 'platforms seed max_rounds')
+  if (!equal(effective.platforms, ready.options.platforms) ||
+      effective.seed !== ready.options.seed || effective.max_rounds !== ready.options.max_rounds) bad()
+  if (value.time_activity !== null) validateTimeActivity(value.time_activity)
+  if (value.platform_controls !== null) {
+    list(value.platform_controls, effective.platforms.length, (control, index) => {
+      fields(control, 'platform viral_threshold ' + weights.join(' '))
+      if (control.platform !== effective.platforms[index]) bad()
+      int(control.viral_threshold, 1000000, 1)
+      for (const key of weights) boundedNumber(control[key], 1)
+    }, effective.platforms.length)
+  }
+  list(value.hot_topics, 64, topic => nonblank(topic, 256))
+  if (value.hot_topics_omitted === null) {
+    if (value.hot_topics.length) bad()
+  } else int(value.hot_topics_omitted, 2097152 - value.hot_topics.length)
+  if (enc.encode(JSON.stringify(value)).length > 262144) bad()
+  return value
+}
 export function newPreparationId() { if (!globalThis.crypto?.randomUUID) bad('invalid_request'); return globalThis.crypto.randomUUID() }
 export function preparationInteger(v, max, min = 0) {
   if (typeof v !== 'string' || !/^(0|[1-9][0-9]*)$/.test(v)) bad('invalid_request')

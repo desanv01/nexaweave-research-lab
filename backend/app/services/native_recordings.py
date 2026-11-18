@@ -989,20 +989,25 @@ class NativeRecording:
                           total_events=len(self._events[p]), exhausted=end == len(self._events[p]),
                           next_cursor=None if end == len(self._events[p]) else self._cursor(p, end))
         else:
-            result.update(self._metrics(p, request["limit"]))
+            result.update(self._metrics(p, request["limit"],
+                include_round_action_counts=request.get("include_round_action_counts", False)))
         # Return a detached JSON tree, never references to internal event objects.
         data = canonical(result)
         if len(data) > RESPONSE_LIMIT:
             raise RecordingError("limit_exceeded")
         return strict_json(data, RESPONSE_LIMIT)
 
-    def _metrics(self, platform, limit):
+    def _metrics(self, platform, limit, *, include_round_action_counts=False):
         actions, agents, rounds = Counter(), Counter(), Counter()
+        round_actions = {} if include_round_action_counts else None
         for event in self._events[platform]:
             if "event_type" not in event:
                 actions[event["action_type"]] += 1
                 agents[str(event["agent_id"])] += 1
                 rounds[str(event["round"])] += 1
+                if round_actions is not None:
+                    counts = round_actions.setdefault(str(event["round"]), {})
+                    counts[event["action_type"]] = counts.get(event["action_type"], 0) + 1
         final = {}
         connection = None
         try:
@@ -1033,12 +1038,15 @@ class NativeRecording:
         finally:
             if connection is not None:
                 connection.close()
-        return {"logged_action_counts": dict(actions), "logged_agent_counts": dict(agents),
-                "logged_round_counts": dict(rounds), "final_native_tables": final,
-                "coverage": {"sequence": "file_order_per_platform",
-                    "counts": "logged_actions_including_possible_initial_trace_duplicates",
-                    "final_state": "captured_native_rows_only",
-                    "post_log_interviews_may_exist_in_trace": True,
-                    "exact_event_to_native_row_links": False,
-                    "historical_per_round_graph_state": False,
-                    "causal_or_truth_conclusions": False}}
+        result = {"logged_action_counts": dict(actions), "logged_agent_counts": dict(agents),
+                  "logged_round_counts": dict(rounds), "final_native_tables": final,
+                  "coverage": {"sequence": "file_order_per_platform",
+                      "counts": "logged_actions_including_possible_initial_trace_duplicates",
+                      "final_state": "captured_native_rows_only",
+                      "post_log_interviews_may_exist_in_trace": True,
+                      "exact_event_to_native_row_links": False,
+                      "historical_per_round_graph_state": False,
+                      "causal_or_truth_conclusions": False}}
+        if round_actions is not None:
+            result["logged_round_action_counts"] = round_actions
+        return result

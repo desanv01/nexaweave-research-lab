@@ -3,10 +3,13 @@ import { chromium } from 'playwright-core'
 import { createHash } from 'node:crypto'
 import { lstat, realpath, readdir, mkdtemp, mkdir, rm, open } from 'node:fs/promises'
 import path from 'node:path'
+import { installBodyObserver, ontologyStages } from './research-browser-ontology.mjs'
+import { inspectPreparedProfiles } from './research-browser-prepared-profiles.mjs'
+import { inspectReadyConfiguration } from './research-browser-ready-configuration.mjs'
 
 const WIRE = 7200
 const FRONTEND = 'http://127.0.0.1:4317'
-const STAGES = ['connect', 'preparation-plan', 'preparation-start', 'preparation-ready', 'native-start', 'native-ready', 'report-start', 'report-read', 'pdf-read-after-restart', 'close']
+const STAGES = ['connect', 'ontology-review', 'ontology-plan', 'ontology-execute', 'ontology-recover', 'preparation-plan', 'preparation-start', 'preparation-ready', 'native-start', 'native-ready', 'report-start', 'report-read', 'pdf-read-after-restart', 'close']
 const UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/
 const HASH = /^[0-9a-f]{64}$/
 const decoder = new TextDecoder('utf-8', { fatal: true })
@@ -229,75 +232,10 @@ async function settled(target = page) {
   }, null, { timeout: 15000 })
   clock()
 }
-function installBodyObserver() {
-  const fetch = globalThis.fetch, getReader = ReadableStream.prototype.getReader
-  const read = ReadableStreamDefaultReader.prototype.read, then = Promise.prototype.then
-  const streams = new WeakMap(), readers = new WeakMap()
-  let active = null
-  const refused = record => { if (record === active) { record.failed = true; record.bytes = null } }
-  const watch = (promise, record, observe) => {
-    Reflect.apply(then, promise, [value => {
-      if (record !== active || record.failed) return
-      try { observe(value) } catch { refused(record) }
-    }, () => refused(record)])
-  }
-  globalThis.fetch = function (...args) {
-    const promise = Reflect.apply(fetch, this, args), record = active
-    if (record && args[0] === record.url) {
-      if (args[1]?.method !== record.method || record.seen++) refused(record)
-      else watch(promise, record, response => {
-        const length = response.headers.get('content-length')
-        if (response.url !== record.url || response.status !== 200 || response.redirected
-          || response.type !== 'cors' || !/^\d+$/.test(length || '')
-          || !Number.isSafeInteger(Number(length)) || Number(length) < 1 || Number(length) > record.cap
-          || response.headers.get('content-encoding')
-          || !/^application\/json(?:\s*;|$)/i.test(response.headers.get('content-type') || '')) throw Error()
-        record.length = Number(length); record.bytes = new Uint8Array(record.length)
-        streams.set(response.body, record)
-      })
-    }
-    return promise
-  }
-  ReadableStream.prototype.getReader = function (...args) {
-    const reader = Reflect.apply(getReader, this, args), record = streams.get(this)
-    if (record === active) readers.set(reader, record)
-    return reader
-  }
-  ReadableStreamDefaultReader.prototype.read = function (...args) {
-    const promise = Reflect.apply(read, this, args), record = readers.get(this)
-    if (record && record === active) watch(promise, record, chunk => {
-      if (record.done) throw Error()
-      if (chunk.done) {
-        if (record.size !== record.length) throw Error()
-        record.done = true
-      } else {
-        if (!(chunk.value instanceof Uint8Array) || chunk.value.byteLength > record.length - record.size) throw Error()
-        record.bytes.set(chunk.value, record.size); record.size += chunk.value.byteLength
-      }
-    })
-    return promise
-  }
-  globalThis.__researchBody = {
-    arm(value) {
-      if (active || !Number.isSafeInteger(value.id) || value.cap < 1 || value.cap > 4195328) throw Error()
-      active = { ...value, seen: 0, size: 0, offset: 0, done: false, failed: false, bytes: null }
-      const record = active
-      record.timer = setTimeout(() => refused(record), value.end - Date.now())
-    },
-    state(id) { return active?.id === id ? { done: active.done, failed: active.failed, length: active.length } : { failed: true } },
-    slice({ id, offset }) {
-      if (active?.id !== id || active.failed || !active.done || offset !== active.offset) throw Error()
-      const bytes = Array.from(active.bytes.subarray(offset, offset + 1024))
-      active.offset += bytes.length
-      return { id, offset, bytes }
-    },
-    clear() { if (active) { clearTimeout(active.timer); active.bytes = null } active = null },
-  }
-}
 let exchangeId = 0, cleanupError = null
 async function exchange(target, route, method, action, cap, status = 200) {
   clock()
-  const end = Date.now() + 15000, id = ++exchangeId
+  const end = Math.min(Date.now() + 15000, deadline), id = ++exchangeId
   const remaining = () => {
     const value = end - Date.now()
     if (value <= 0) throw new Error('research_browser_deadline')
@@ -523,8 +461,8 @@ async function readPdf() {
   requireTrue(proof.size === pdf.size && proof.sha256 === pdf.sha256)
   return proof
 }
-async function connect(command) {
-  await prepareBrowser(command); await connectForm(page)
+async function inspectSelectedSource() {
+  const prior = orderedSources ? sourceProof() : null
   phase = 'source-catalog'
   const catalog = await exchange(page, sourceRoute('library'), 'GET', () => page.locator('.source-library > .source-actions button').first().click(), 4195328)
   requireTrue(Array.isArray(catalog.value.sources) && catalog.value.sources.length >= 4 && catalog.value.sources.length <= 20 && catalog.value.has_more === false)
@@ -539,6 +477,7 @@ async function connect(command) {
   const selectedSources = catalog.value.sources.filter(s => sources.some(expected => expected.source_revision === s.source_revision))
   requireTrue(selectedSources.length === 4 && sources.every(expected => selectedSources.some(s => s.source_revision === expected.source_revision)))
   orderedSources = [selectedSources.find(s => s.source_revision === pdf.source_revision), ...selectedSources.filter(s => s.source_revision !== pdf.source_revision)]
+  if (prior) requireTrue(same(sourceProof(), prior))
   phase = 'source-inspect'
   const item = page.locator('.source-list > li').filter({ hasText: pdf.source_revision })
   await item.waitFor({ state: 'visible', timeout: 15000 })
@@ -547,6 +486,9 @@ async function connect(command) {
   const inspected = await exchange(page, sourceRoute('item', pdf.source_revision), 'GET', () => item.locator('button').first().click(), 4195328)
   requireTrue(inspected.value.source.source_revision === pdf.source_revision && inspected.value.source.text_sha256 === orderedSources[0].text_sha256)
   await enabled(page.locator('.preparation-workbench .review'))
+}
+async function connect(command) {
+  await prepareBrowser(command); await connectForm(page); await inspectSelectedSource()
   const original = await readPdf()
   return { reference: { display_graph_id: connection.graph_id, project_id: orderedSources[0].project_id, source_revisions: sourceProof().source_revisions }, proof: { ...sourceProof(), token_cleared: true, pdf: original } }
 }
@@ -580,9 +522,15 @@ async function preparationPlan(command) {
   await scope.locator('#preparation-maximum').fill(String(options.max_agents))
   await scope.locator('#preparation-seed').fill(String(options.seed))
   await scope.locator('#preparation-rounds').fill(String(options.max_rounds))
-  await scope.getByLabel('Twitter', { exact: true }).setChecked(options.platforms.includes('twitter'))
-  await scope.getByLabel('Reddit', { exact: true }).setChecked(options.platforms.includes('reddit'))
+  requireTrue(same(options.platforms, ['twitter', 'reddit']))
+  const twitter = scope.getByLabel('Twitter', { exact: true })
+  const reddit = scope.getByLabel('Reddit', { exact: true })
+  await twitter.check(); await reddit.uncheck()
+  requireTrue(await twitter.isChecked() && !await reddit.isChecked())
   await scope.locator('#preparation-requirement').fill(options.simulation_requirement)
+  await scope.locator('.suggest').click()
+  requireTrue(await twitter.isChecked() && await reddit.isChecked())
+  requireTrue(await scope.locator('.plan').count() === 0)
   const observed = await exchange(page, prepRoute('plan'), 'POST', () => scope.locator('.review').click(), 263168)
   requireTrue(observed.request.schema_version === 2 && observed.request.source_revision === pdf.source_revision && same(observed.request.source_revisions, request.source_revisions) && same(observed.request.options, options))
   requireTrue(observed.value.state === 'planned'); boundPreparation(observed.value)
@@ -602,6 +550,11 @@ async function preparationReady(command) {
   const observed = await exchange(page, prepRoute('status'), 'POST', () => page.locator('.preparation-workbench .refresh').click(), 263168)
   boundPreparation(observed.value); requireTrue(observed.value.state === 'ready' && observed.value.receipt)
   preparation = observed.value; digest(preparation.receipt.artifact_sha256)
+  const route = prepRoute('profiles')
+  await inspectPreparedProfiles({ page, preparation, route, url: connection.api_origin + route, exchange, enabled, requireTrue, same, sha })
+  const configRoute = prepRoute('configuration')
+  await inspectReadyConfiguration({ page, preparation, route: configRoute, url: connection.api_origin + configRoute,
+    graph: connection.graph_id, project: orderedSources[0].project_id, exchange, enabled, requireTrue, keys, same, sha })
   await enabled(page.locator('.native-launch .review'))
   return { reference: { ...prepReference(preparation), simulation_id: preparation.receipt.simulation_id, artifact_sha256: preparation.receipt.artifact_sha256 }, proof: sourceProof() }
 }
@@ -758,7 +711,54 @@ async function cleanup() {
   })()
   return closing
 }
-const handlers = { connect, 'preparation-plan': preparationPlan, 'preparation-start': preparationStart, 'preparation-ready': preparationReady, 'native-start': nativeStart, 'native-ready': nativeReady, 'report-start': reportStart, 'report-read': reportRead, 'pdf-read-after-restart': pdfAfterRestart, close: async command => { commandRequest(command); return cleanup() } }
+const ONTOLOGY_EVENT_LIMIT = 64
+const ONTOLOGY_STAGE_BYTES = 2 * 1024 * 1024
+const runOntologyStage = handler => async command => {
+  const binding = { page, origin: connection.api_origin, graph: connection.graph_id, source: orderedSources[0] }
+  const requests = new Map()
+  let requestEvents = 0, responses = 0, bytes = 0, overLimit = false
+  const onRequest = request => {
+    if (!request.url().startsWith(binding.origin + '/api/')) return
+    if (++requestEvents > ONTOLOGY_EVENT_LIMIT) {
+      overLimit = true
+      return
+    }
+    const key = request.method() + ' ' + new URL(request.url()).pathname
+    requests.set(key, (requests.get(key) || 0) + 1)
+  }
+  const onResponse = response => {
+    if (!response.url().startsWith(binding.origin + '/api/')) return
+    responses++
+    const size = response.headers()['content-length']
+    if (/^\d+$/.test(size || '')) bytes += Number(size)
+    if (responses > ONTOLOGY_EVENT_LIMIT || bytes > ONTOLOGY_STAGE_BYTES) overLimit = true
+  }
+  const count = (method, path) => requests.get(method + ' ' + path) || 0
+  const timeout = () => {
+    requireTrue(!overLimit)
+    clock()
+    return Math.max(1, Math.min(15000, deadline - Date.now()))
+  }
+  binding.page.on('request', onRequest)
+  binding.page.on('response', onResponse)
+  try {
+    const request = commandRequest(command, true)
+    requireTrue(request.source_revision === binding.source.source_revision)
+    const result = await handler({ ...binding, request, count, timeout })
+    timeout()
+    return result
+  } finally {
+    binding.page.off('response', onResponse)
+    binding.page.off('request', onRequest)
+  }
+}
+const ontology = ontologyStages({
+  run: runOntologyStage, exchange,
+  reconnect: () => connectForm(page),
+  restoreSource: inspectSelectedSource,
+  requireTrue, same, keys, uuid, digest, integer,
+})
+const handlers = { connect, ...ontology, 'preparation-plan': preparationPlan, 'preparation-start': preparationStart, 'preparation-ready': preparationReady, 'native-start': nativeStart, 'native-ready': nativeReady, 'report-start': reportStart, 'report-read': reportRead, 'pdf-read-after-restart': pdfAfterRestart, close: async command => { commandRequest(command); return cleanup() } }
 try {
   for await (const command of commands()) {
     stage = STAGES[index] || 'protocol'; phase = stage === 'close' ? 'close' : 'protocol'
