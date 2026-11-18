@@ -18,13 +18,13 @@ import threading
 import time
 from types import SimpleNamespace
 from uuid import UUID
-from nexaweave_execution.preparation_contracts import (validate_source_snapshots,
-    document_envelope, validate_preparation_sources)
+from nexaweave_execution.preparation_contracts import validate_source_snapshots, document_envelope
 from nexaweave_execution.native_seed_contracts import (SEED_BRIDGE_INDEX, seed_bridge_index,
     validate_native_seed_plan)
 
 from .preparation_client import (PreparationError, canonical, digest, encoded, file_names,
     labels, text, uuid_string, validate_payload, validate_receipt, validate_result)
+from .prepared_profile_inspection import PreparationReadAuthority
 
 
 class BoundedChat:
@@ -121,7 +121,7 @@ def validate_graph(graph, graph_id):
         raise PreparationError('invalid_reply') from None
 
 
-class DurablePreparationHost:
+class DurablePreparationHost(PreparationReadAuthority):
     def __init__(self, *, settings, connection_factory, read_facade, artifact_root,
                  account_id=None, ceiling_microusd=None, authorize=None,
                  chat_client_factory=None, model_name=None, base_url=None,
@@ -206,87 +206,12 @@ class DurablePreparationHost:
             enabled = False
         return {'model_calls_enabled': bool(enabled), 'ceiling_microusd': str(self.ceiling) if type(self.ceiling) is int and 1 <= self.ceiling <= 2**63-1 else None}
 
-    def _owned(self, source_revision, *, expected_revision=None):
-        from nexaweave_knowledge.operations import Tombstoned, NotFound, StorageError
-        from nexaweave_storage.store import NotFound as AppNotFound, StorageError as AppError
-        try:
-            binding = self.bindings.resolve(self.principal, self.display_graph_id)
-            scope = binding.scope
-            if scope.model_dump(mode='json') != self.scope_dto or binding.principal != self.principal or binding.display_graph_id != self.display_graph_id:
-                raise PreparationError('conflict')
-            project = self.projects.get(self.principal, scope.project_id)
-            if project.workspace_id != scope.workspace_id or project.principal != self.principal or project.project_id != scope.project_id:
-                raise PreparationError('unauthorized')
-            if expected_revision is not None and project.revision != expected_revision:
-                raise PreparationError('conflict')
-            retained = self.sources.get_source(self.principal, scope.project_id, UUID(source_revision))
-            if retained.project_id != scope.project_id or str(retained.source_revision) != source_revision or not retained.passages or retained.codepoint_length > 32768:
-                raise PreparationError('invalid_request')
-            return scope, project, retained
-        except Tombstoned:
-            raise PreparationError('tombstoned') from None
-        except (NotFound, AppNotFound):
-            raise PreparationError('not_found') from None
-        except (StorageError, AppError):
-            raise PreparationError('preparation_unavailable') from None
-
     def _dto(self, row, method, payload):
         data = json.loads(encoded(row.frozen['public']))
         data.update(state=row.state, progress={'stage': row.stage, 'completed': row.completed, 'total': 100},
                     error_code=row.error_code, authorization=self.authorization(), receipt=row.receipt,
                     graph_snapshot_atomic=False, model_calls_started=row.model_calls_started, simulation_executed=False)
         return validate_result(data, self.display_graph_id, self.scope_dto, payload, method)
-
-    @staticmethod
-    def _source_check(deadline=None):
-        until = time.monotonic() + 15
-        if deadline is not None:
-            until = min(until, deadline)
-        def check():
-            if time.monotonic() >= until:
-                raise PreparationError('timeout')
-        return check
-
-    @staticmethod
-    def _source_snapshot(retained, check):
-        check()
-        if len(retained.text) > 32768 or not 1 <= len(retained.passages) <= 100:
-            raise PreparationError('result_too_large')
-        passages = []
-        for p in retained.passages:
-            check()
-            passages.append(dict(evidence_id=str(p.evidence_id), start=p.start, end=p.end,
-                page=p.page, excerpt=p.excerpt, excerpt_sha256=p.excerpt_sha256))
-        snapshot = dict(source_revision=str(retained.source_revision), source_name=retained.name,
-            source_sha256=retained.text_sha256, text=retained.text, passages=passages)
-        check()
-        return json.loads(encoded(snapshot))
-
-    def _owned_row(self, row, *, expected_revision=None, deadline=None, check=None):
-        """Reauthorize all frozen documents; status may use current project revision."""
-        if row.frozen['public']['schema_version'] == 1:
-            return self._owned(row.frozen['public']['source']['source_revision'], expected_revision=expected_revision)
-        check = check or self._source_check(deadline)
-        try:
-            validate_preparation_sources(row.frozen, check)
-            initial_scope = initial_project = anchor = None
-            for source in row.frozen['sources']:
-                check()
-                scope, project, retained = self._owned(source['source_revision'], expected_revision=expected_revision)
-                check()
-                if (scope.model_dump(mode='json') != row.frozen['public']['scope']
-                        or str(project.project_id) != row.frozen['public']['scope']['project_id']
-                        or self._source_snapshot(retained, check) != source):
-                    raise PreparationError('conflict')
-                if initial_scope is None:
-                    initial_scope, initial_project, anchor = scope, project, retained
-                    current_revision = project.revision
-                elif scope != initial_scope or project.revision != current_revision or project != initial_project:
-                    raise PreparationError('conflict')
-            check()
-            return initial_scope, initial_project, anchor
-        except (ValueError, TypeError, KeyError, UnicodeError, AttributeError):
-            raise PreparationError('conflict') from None
 
     def _plan_sources(self, payload):
         from nexaweave_execution.preparation_contracts import PreparationAuthorityError
@@ -362,12 +287,6 @@ class DurablePreparationHost:
         result = self._dto(row, 'plan', payload)
         self._owned_row(row, expected_revision=project_revision, check=check)
         return result
-
-    def _row(self, payload):
-        row = self.store.get(self.principal, payload['operation_id'], payload.get('plan_sha256'))
-        if row.display_graph_id != self.display_graph_id or row.frozen['public']['scope'] != self.scope_dto:
-            raise PreparationError('not_found')
-        return row
 
     def plan(self, payload):
         from nexaweave_execution.preparation_contracts import PreparationAuthorityError

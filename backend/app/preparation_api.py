@@ -1,11 +1,12 @@
 """Protected bounded preparation routes registered only in research_local."""
-import threading
+import os
 from flask import Response, request
 from werkzeug.exceptions import BadRequest
 from .services.preparation_client import (PreparationError, REQUEST_BYTES, RESULT_BYTES,
     ENVELOPE_OVERHEAD, encoded, validate_payload, validate_result, CODES)
 from .services.knowledge_preparation_facade import KnowledgePreparationFacade
 from .services.knowledge_transport import _json_object
+from .services.prepared_profile_inspection import validate_profile_result, validate_profile_selector
 
 STATUS = {'invalid_request': 400, 'not_found': 404, 'unauthorized': 401,
           'origin_denied': 403, 'conflict': 409, 'busy': 503, 'tombstoned': 410,
@@ -14,14 +15,9 @@ STATUS = {'invalid_request': 400, 'not_found': 404, 'unauthorized': 401,
 
 
 def register_preparation_routes(app, settings, *, preparation_facade=None):
-    facade, lock = preparation_facade, threading.Lock()
-
-    def reader():
-        nonlocal facade
-        with lock:
-            if facade is None:
-                facade = KnowledgePreparationFacade(settings)
-            return facade
+    facade = preparation_facade
+    if facade is None:
+        facade = KnowledgePreparationFacade(settings, artifact_root=os.environ.get('KNOWLEDGE_PREPARATION_ARTIFACT_ROOT'))
 
     @app.after_request
     def preparation_headers(response):
@@ -46,12 +42,22 @@ def register_preparation_routes(app, settings, *, preparation_facade=None):
                     or request.headers.get('Transfer-Encoding') or request.headers.get('Content-Encoding')
                     or request.content_length is None or not 0 < request.content_length <= REQUEST_BYTES):
                 raise PreparationError('invalid_request')
+            if method == 'profiles' and (
+                request.query_string or 'Transfer-Encoding' in request.headers or 'Content-Encoding' in request.headers
+                or request.headers.getlist('Content-Length') != [str(request.content_length)]
+            ):
+                raise PreparationError('invalid_request')
             raw = request.stream.read(REQUEST_BYTES + 1)
             if len(raw) != request.content_length or len(raw) > REQUEST_BYTES:
                 raise PreparationError('invalid_request')
-            payload = validate_payload(method, _json_object(raw))
-            result = reader().execute(method, graph_id, payload)
-            data = validate_result(result, graph_id, settings.scope, payload, method)
+            value = _json_object(raw)
+            if preparation_facade is None and method != 'profiles':
+                raise PreparationError('preparation_unavailable')
+            payload = (validate_profile_selector(value) if method == 'profiles'
+                       else validate_payload(method, value))
+            result = facade.execute(method, graph_id, payload)
+            data = (validate_profile_result(result, graph_id, settings.scope, payload) if method == 'profiles'
+                    else validate_result(result, graph_id, settings.scope, payload, method))
             body = encoded({'success': True, 'data': data})
             if len(body) > RESULT_BYTES + ENVELOPE_OVERHEAD:
                 raise PreparationError('result_too_large')
@@ -63,7 +69,7 @@ def register_preparation_routes(app, settings, *, preparation_facade=None):
         except Exception:
             return failure('internal_error')
 
-    for method in ('plan', 'start', 'status'):
+    for method in ('plan', 'start', 'status', 'profiles'):
         app.add_url_rule('/api/preparation/<graph_id>/' + method,
                          'preparation_' + method,
                          lambda graph_id, method=method: run(method, graph_id), methods=['POST'])
