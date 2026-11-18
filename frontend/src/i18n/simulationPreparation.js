@@ -1,5 +1,6 @@
 export const preparationCopy = {
   en: {
+    suggest: 'Suggest platforms', suggested: 'Suggested platforms are selected. You can change the settings before review.', suggestionUnclear: 'Platform choices are unchanged. Select the platforms you want to use.',
     profiles: { title: 'Saved actor profiles', actor: 'Actor', choose: 'Select an actor', read: 'Read saved profiles',
       loaded: 'Saved profiles loaded.', handle: 'Handle', description: 'Description', persona: 'Persona', support: 'Retained evidence' },
     additionalSources: 'Additional retained documents', noAdditionalSources: 'Load the source library to choose other documents from this project.', frozenSources: 'Documents frozen in this preparation', sourcesHint: 'The inspected source stays first. Select other documents explicitly; their order follows the library. Each must have evidence linked to a selected actor or its relationships. The complete source set must fit the existing text and scenario context limits; oversized sets are refused.',
@@ -8,6 +9,7 @@ export const preparationCopy = {
     errors: { invalid_request: 'Check the selected source and preparation options.', not_found: 'This owned operation or source was not found.', unauthorized: 'Authorization expired. Reconnect.', origin_denied: 'The protected connection was denied.', conflict: 'The plan or project revision changed, or Start was already attempted.', busy: 'The preparation service is busy.', tombstoned: 'This source binding is no longer available.', empty_selection: 'No eligible actors match these types.', result_too_large: 'The bounded preparation result is too large.', preparation_unavailable: 'Trusted preparation is unavailable on this host.', model_calls_disabled: 'Trusted model calls are disabled.', budget_denied: 'The shared spending cap denied the reservation.', preparation_failed: 'Preparation failed; no ready publication is authorized.', preparation_cancelled: 'Durable preparation was cancelled.', preparation_uncertain: 'The outcome is uncertain. Refresh; do not restart.', timeout: 'The request timed out. Refresh a started operation.', transport_failure: 'The reply was lost. Refresh a started operation.', invalid_reply: 'The reply did not match the complete preparation contract.', internal_error: 'The preparation service could not complete this request.' }
   },
   zh: {
+    suggest: '建议平台', suggested: '已选中建议的平台。您可以在审阅前修改设置。', suggestionUnclear: '平台选择保持原样。请选择要使用的平台。',
     profiles: { title: '已保存的角色档案', actor: '角色', choose: '选择角色', read: '读取已保存的档案',
       loaded: '已加载保存的档案。', handle: '帐号', description: '描述', persona: '人设', support: '保留的证据' },
     additionalSources: '其他保留文档', noAdditionalSources: '加载来源库以选择此项目的其他文档。', frozenSources: '此准备任务冻结的文档', sourcesHint: '已查看的来源固定在首位。请明确选择其他文档，顺序以来源库为准。每份文档的证据须关联已选角色或其关系。完整来源集须符合现有文本及情景上下文限制，超限将被拒绝。',
@@ -16,6 +18,7 @@ export const preparationCopy = {
     errors: { invalid_request: '请检查来源和准备选项。', not_found: '未找到属于此项目的操作或来源。', unauthorized: '授权已过期，请重新连接。', origin_denied: '受保护连接被拒绝。', conflict: '计划或项目版本已更改，或已尝试启动。', busy: '准备服务正忙。', tombstoned: '此来源绑定已不可用。', empty_selection: '没有符合所选类型的角色。', result_too_large: '准备结果超出限制。', preparation_unavailable: '此主机的可信准备服务不可用。', model_calls_disabled: '可信模型调用已禁用。', budget_denied: '共享支出上限拒绝了预留。', preparation_failed: '准备失败，没有已授权的就绪发布。', preparation_cancelled: '持久准备任务已取消。', preparation_uncertain: '结果不确定，请刷新，不要重新启动。', timeout: '请求超时，请刷新已启动操作。', transport_failure: '回复丢失，请刷新已启动操作。', invalid_reply: '回复不符合完整准备协议。', internal_error: '准备服务无法完成此请求。' }
   },
   ms: {
+    suggest: 'Cadangkan platform', suggested: 'Platform yang dicadangkan telah dipilih. Anda boleh mengubah tetapan sebelum menyemak.', suggestionUnclear: 'Pilihan platform kekal sama. Pilih platform yang ingin anda gunakan.',
     profiles: { title: 'Profil pelaku tersimpan', actor: 'Pelaku', choose: 'Pilih pelaku', read: 'Baca profil tersimpan',
       loaded: 'Profil tersimpan dimuatkan.', handle: 'Nama pengguna', description: 'Penerangan', persona: 'Persona', support: 'Bukti tersimpan' },
     additionalSources: 'Dokumen tersimpan tambahan', noAdditionalSources: 'Muatkan pustaka sumber untuk memilih dokumen lain daripada projek ini.', frozenSources: 'Dokumen dibekukan dalam penyediaan ini', sourcesHint: 'Sumber yang diperiksa kekal pertama. Pilih dokumen lain secara jelas; susunannya mengikut pustaka. Setiap dokumen mesti mempunyai bukti berkaitan pelaku dipilih atau hubungannya. Set lengkap mesti mematuhi had teks dan konteks senario sedia ada; set berlebihan ditolak.',
