@@ -211,33 +211,29 @@ def freeze_context(observations, read_facade, payload, *, deadline=None, tick=No
             raise ReportError('conflict')
     if tick is not None:
         tick()
-    scope, project, retained = observations.launch.preparation._owned(prep.frozen['public']['source']['source_revision'],
-                                                                expected_revision=prep.project_revision)
-    retained_sources = [retained]
+    preparation = observations.launch.preparation
+    anchor_revision = prep.frozen['public']['source']['source_revision']
     if multiple:
         tick()
-        if (payload['source_revisions'][0] != prep.frozen['public']['source']['source_revision']
-                or project.revision != prep.project_revision):
+        revisions = payload['source_revisions']
+        if revisions[0] != anchor_revision:
             raise ReportError('conflict')
-        project = deepcopy(project)
-        scope = deepcopy(scope)
-        retained_sources = [deepcopy(retained)]
-        selected_text, selected_passages = len(retained.text), len(retained.passages)
-        if selected_text > 32768 or selected_passages > 100:
-            raise ReportError('result_too_large')
-        for revision in payload['source_revisions'][1:]:
-            tick()
-            selected_scope, selected_project, selected = observations.launch.preparation._owned(
-                revision, expected_revision=prep.project_revision)
-            tick()
-            if selected_scope != scope or selected_project != project:
-                raise ReportError('conflict')
+        selected_text = selected_passages = 0
+
+        def limit_sources(_scope, _project, _index, selected):
+            nonlocal selected_text, selected_passages
             selected_text += len(selected.text)
             selected_passages += len(selected.passages)
             if selected_text > 32768 or selected_passages > 100:
                 raise ReportError('result_too_large')
-            retained_sources.append(deepcopy(selected))
+
+        scope, project, retained_sources = preparation._owned_sources(revisions,
+            expected_revision=prep.project_revision, check=tick, validate_record=limit_sources)
+        scope, project, retained_sources = deepcopy((scope, project, retained_sources))
+        retained = retained_sources[0]
         tick()
+    else:
+        scope, project, retained = preparation._owned(anchor_revision, expected_revision=prep.project_revision)
     from .durable_preparation_host import validate_graph
     def projected():
         if deadline is None:
@@ -348,17 +344,16 @@ def freeze_context(observations, read_facade, payload, *, deadline=None, tick=No
         if tick is not None:
             tick()
         if multiple:
-            for revision, selected in zip(payload['source_revisions'], retained_sources):
-                tick()
-                scope_after, project_after, retained_after = observations.launch.preparation._owned(
-                    revision, expected_revision=prep.project_revision)
-                tick()
-                if scope_after != scope or project_after != project or retained_after != selected:
+            def compare_sources(scope_after, project_after, index, selected):
+                if scope_after != scope or project_after != project or selected != retained_sources[index]:
                     raise ReportError('conflict')
+
+            _, _, sources_after = preparation._owned_sources(revisions,
+                expected_revision=prep.project_revision, check=tick, validate_record=compare_sources)
+            retained_after = sources_after[0]
             tick()
-            retained_after = retained
         else:
-            _, _, retained_after = observations.launch.preparation._owned(binding['source']['source_revision'], expected_revision=prep.project_revision)
+            _, _, retained_after = preparation._owned(anchor_revision, expected_revision=prep.project_revision)
         if (after != row or current != prep or native_after != native or final_launch != launch
                 or retained_after != retained or observations._artifacts(current, root) != current.receipt
                 or projected() != graph):

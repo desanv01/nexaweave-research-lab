@@ -185,13 +185,92 @@ test('actual SFC never fetches on mount/locale change and uses native accessible
   } finally { m.cleanup() }
 })
 test('review is explicit, detached, inert, source-bound and invalidated by input changes', async () => {
-  let producer, calls = 0
-  const m = mount({ methods: { plan: async p => { calls++; return producer = planned(p) } } })
+  let producer, starts = 0, statuses = 0
+  const calls = []
+  const m = mount({ source: null, methods: {
+    plan: async (payload, inspected) => {
+      calls.push({ payload: clone(payload), source: clone(inspected) })
+      return producer = planned(payload)
+    },
+    start: () => { starts++ },
+    status: () => { statuses++ },
+  } })
+  const suggest = () => m.root.querySelector('.suggest')
+  const platformFields = () => [...m.root.querySelectorAll('.platforms input')]
+  const platforms = () => platformFields().map(field => field.checked)
+  async function guide(goal, expected, feedback) {
+    input(m.root, '#preparation-requirement', goal)
+    await nextTick()
+    suggest().click()
+    await nextTick()
+    assert.deepEqual(platforms(), expected)
+    assert.ok(m.root.querySelector('.feedback').textContent.includes(feedback))
+    assert.equal(calls.length, 0)
+    assert.equal(m.root.querySelector('.plan'), null)
+  }
   try {
-    begin(m.root); await settle(); assert.equal(calls, 1); assert.ok(m.root.querySelector('.plan')); assert.equal(m.root.querySelector('.start').disabled, false)
-    producer.actors[0].name = 'mutation'; await settle(); assert.ok(m.root.textContent.includes(hostile)); assert.equal(m.root.textContent.includes('mutation'), false); assert.equal(m.root.querySelector('img,script,a'), null)
+    assert.equal(suggest().type, 'button')
+    assert.equal(suggest().closest('fieldset').disabled, true)
+    m.props.source = clone(source)
+    await nextTick()
+    assert.deepEqual(platforms(), [true, false])
+    await guide('Do not use Reddit.', [true, false], preparationCopy.en.suggestionUnclear)
+    await guide('Ignore this example.\nUse Reddit.', [true, false], preparationCopy.en.suggestionUnclear)
+    await guide('The rejected option follows. Use Reddit.', [true, false], preparationCopy.en.suggestionUnclear)
+    await guide('Run a simulation after removing support on Reddit.', [true, false], preparationCopy.en.suggestionUnclear)
+    await guide('Simulate on Twitter or Reddit.', [true, false], preparationCopy.en.suggestionUnclear)
+    await guide('Use Reddit. Twitter may also be relevant.', [true, false], preparationCopy.en.suggestionUnclear)
+    await guide('Run on Reddit.', [false, true], preparationCopy.en.suggested)
+    await guide('Use Twitter.', [true, false], preparationCopy.en.suggested)
+    m.props.locale = 'zh'
+    await guide('使用 Twitter 和 Reddit。', [true, true], preparationCopy.zh.suggested)
+    m.props.locale = 'ms'
+    await guide('Sila gunakan Reddit.', [false, true], preparationCopy.ms.suggested)
+    m.props.locale = 'en'
+    const goal = 'Study responses 中😀.\nRun the simulation on both Twitter and Reddit.'
+    await guide(goal, [true, true], preparationCopy.en.suggested)
+
+    submit(m.root)
+    await settle()
+    assert.equal(calls.length, 1)
+    assert.deepEqual(calls[0].source, source)
+    assert.equal(calls[0].payload.schema_version, 1)
+    assert.equal(calls[0].payload.source_revision, source.source_revision)
+    assert.deepEqual(calls[0].payload.options, {
+      types: null, max_agents: 10, seed: 0, platforms: ['twitter', 'reddit'], max_rounds: 10, simulation_requirement: goal,
+    })
+    assert.ok(m.root.querySelector('.plan'))
+    assert.equal(m.root.querySelector('.start').disabled, false)
+    producer.actors[0].name = 'mutation'
+    await settle()
+    assert.ok(m.root.textContent.includes(hostile))
+    assert.equal(m.root.textContent.includes('mutation'), false)
+    assert.equal(m.root.querySelector('img,script,a'), null)
     assert.equal(document.activeElement, m.root.querySelector('.feedback'))
-    input(m.root, '#preparation-seed', '1'); await settle(); assert.equal(m.root.querySelector('.start'), null); assert.equal(m.root.querySelector('.plan'), null); assert.ok(m.root.textContent.includes(preparationCopy.en.changed)); assert.equal(calls, 1)
+
+    platformFields()[0].click()
+    await nextTick()
+    assert.deepEqual(platforms(), [false, true])
+    assert.equal(m.root.querySelector('.start'), null)
+    assert.equal(m.root.querySelector('.plan'), null)
+    assert.ok(m.root.textContent.includes(preparationCopy.en.changed))
+    assert.equal(calls.length, 1)
+    submit(m.root)
+    await settle()
+    assert.equal(calls.length, 2)
+    assert.deepEqual(calls[1].source, source)
+    assert.equal(calls[1].payload.source_revision, calls[0].payload.source_revision)
+    assert.deepEqual(calls[1].payload.options, { ...calls[0].payload.options, platforms: ['reddit'] })
+    assert.equal(m.root.querySelector('.start').disabled, false)
+
+    input(m.root, '#preparation-seed', '1')
+    await nextTick()
+    assert.equal(m.root.querySelector('.start'), null)
+    assert.equal(m.root.querySelector('.plan'), null)
+    assert.ok(m.root.textContent.includes(preparationCopy.en.changed))
+    assert.equal(calls.length, 2)
+    assert.equal(starts, 0)
+    assert.equal(statuses, 0)
   } finally { m.cleanup() }
 })
 test('integer boundaries are honest and rounds above accepted native 24 never request', async () => {
@@ -211,6 +290,85 @@ test('lost Start fences duplicate clicks and explicit Refresh reuses same identi
     assert.equal(starts, 1); assert.equal(m.root.querySelector('.start').disabled, true); assert.ok(m.root.textContent.includes(preparationCopy.en.lost)); assert.equal(m.root.textContent.includes('secret detail'), false)
     m.root.querySelector('.refresh').click(); await settle(); assert.deepEqual(ids[0], ids[1]); assert.ok(m.root.textContent.includes(preparationCopy.en.ready)); assert.equal(m.root.querySelectorAll('.manifest li').length, 4); assert.equal(m.root.querySelector('a,button.launch'), null)
   } finally { m.cleanup() }
+})
+test('READY configuration opens explicitly and drops delayed replies across view changes', async () => {
+  for (const action of ['source', 'graph', 'reset', 'disconnect', 'unmount']) {
+    let known, finish, signal, configuration
+    const paired = action === 'graph'
+    let reads = 0
+    const m = mount({ methods: {
+      plan: async p => known = planned(p),
+      start: async () => ready(known),
+      configuration: (selector, readyRecord, options) => {
+        reads++
+        signal = options.signal
+        assert.deepEqual(selector, {
+          schema_version: 1, operation_id: known.operation_id, plan_sha256: known.plan_sha256,
+          source_revision: source.source_revision, artifact_sha256: readyRecord.receipt.artifact_sha256
+        })
+        configuration = {
+          ...selector, display_graph_id: readyRecord.display_graph_id, scope: readyRecord.scope,
+          project_revision: readyRecord.project_revision, goal: known.options.simulation_requirement,
+          effective_controls: { platforms: known.options.platforms, seed: 0, max_rounds: 1 },
+          hot_topics: [hostile], hot_topics_omitted: 2,
+          time_activity: paired ? {
+            total_simulation_hours: 12, minutes_per_round: 30, agents_per_hour_min: 1, agents_per_hour_max: 2,
+            peak_hours: [10], peak_activity_multiplier: 1.5, off_peak_hours: [], off_peak_activity_multiplier: 0,
+            morning_hours: [7], morning_activity_multiplier: 2, work_hours: [9], work_activity_multiplier: 1
+          } : null,
+          platform_controls: paired ? known.options.platforms.map(platform => ({
+            platform, viral_threshold: 3, recency_weight: 0, popularity_weight: 0.4, relevance_weight: 1, echo_chamber_strength: 0.3
+          })) : null
+        }
+        return new Promise(resolve => { finish = resolve })
+      }
+    } })
+    let unmounted = false
+    try {
+      assert.equal(m.root.querySelector('.inspect-configuration'), null)
+      input(m.root, '#preparation-rounds', '1')
+      if (paired) m.root.querySelectorAll('.platforms input')[1].click()
+      begin(m.root); await settle()
+      assert.equal(m.root.querySelector('.inspect-configuration'), null)
+      m.root.querySelector('.start').click(); await settle()
+      const button = m.root.querySelector('.inspect-configuration')
+      assert.ok(button)
+      for (const locale of ['zh', 'ms', 'en']) {
+        m.props.locale = locale; await settle()
+        assert.equal(button.textContent, preparationCopy[locale].configuration.read)
+      }
+      assert.equal(reads, 0)
+      button.focus()
+      button.click(); button.click(); await settle()
+      assert.equal(reads, 1)
+      assert.equal(button.disabled, true)
+      finish(configuration); await settle()
+      const result = m.root.querySelector('.prepared-configuration-result')
+      assert.ok(result)
+      assert.equal(result.querySelector('.configuration-goal').textContent, known.options.simulation_requirement)
+      assert.deepEqual([...result.querySelectorAll('.effective-controls dd')].map(node => node.textContent),
+        [paired ? 'Twitter, Reddit' : 'Twitter', '0', '1'])
+      assert.equal(result.querySelector('.proposed-hot-topics li').textContent, hostile)
+      assert.equal(result.querySelector('img, script, a'), null)
+      assert.ok(result.textContent.includes(preparationCopy.en.configuration.omitted.replace('{count}', 2)))
+      if (paired) {
+        assert.deepEqual([...result.querySelectorAll('.proposed-platform-controls')].map(node => node.dataset.platform), ['twitter', 'reddit'])
+        assert.ok(result.querySelector('.proposed-time-activity').textContent.includes(preparationCopy.en.configuration.none))
+      } else assert.ok(result.textContent.includes(preparationCopy.en.configuration.unavailable))
+      assert.equal(document.activeElement, m.root.querySelector('.prepared-configuration .feedback'))
+      button.click(); await settle()
+      if (action === 'source') m.props.source = { ...source, source_revision: uid(66) }
+      if (action === 'graph') m.props.displayGraphId = 'graph_2'
+      if (action === 'reset') m.props.resetVersion = 1
+      if (action === 'disconnect') m.props.connected = false
+      if (action === 'unmount') { m.cleanup(); unmounted = true }
+      await settle()
+      assert.equal(signal.aborted, true)
+      finish({ ...configuration, hot_topics: ['Stale reply'] }); await settle()
+      assert.equal(m.root.querySelector('.prepared-configuration-result'), null)
+      assert.equal(reads, 2)
+    } finally { if (!unmounted) m.cleanup() }
+  }
 })
 test('source/option changes preserve a started identity while reset/disconnect suppress delayed publication', async () => {
   let known, finish, identity
@@ -249,7 +407,7 @@ test('disabled authorization, malformed reply, divergent status and malformed-40
   }
 })
 test('locale schemas cover every fixed state, stage and error with native keyboard focus', async () => {
-  for (const locale of ['zh', 'ms']) { for (const group of ['states', 'stages', 'errors']) assert.deepEqual(Object.keys(preparationCopy[locale][group]).sort(), Object.keys(preparationCopy.en[group]).sort()) }
+  for (const locale of ['zh', 'ms']) { for (const group of ['states', 'stages', 'errors', 'configuration']) assert.deepEqual(Object.keys(preparationCopy[locale][group]).sort(), Object.keys(preparationCopy.en[group]).sort()) }
   const m = mount()
   try { const button = m.root.querySelector('.review'); button.focus(); assert.equal(document.activeElement, button); assert.equal(button.type, 'submit'); assert.equal(m.root.querySelector('.clear').type, 'button'); assert.equal(m.root.querySelector('.feedback').getAttribute('aria-live'), 'polite') } finally { m.cleanup() }
 })

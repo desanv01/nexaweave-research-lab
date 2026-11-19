@@ -18,6 +18,7 @@ from ..config import Config
 from ..services.ontology_generator import OntologyGenerator
 from ..services.graph_builder import BatchSubmission, GraphBuilderService
 from ..services.text_processor import TextProcessor
+from ..utils import parser_process
 from ..utils.file_parser import (
     InvalidSourceError, MalformedDocumentError, ParseLimitError, ParseLimits,
     UnsupportedDocumentError,
@@ -337,6 +338,9 @@ def _phase_remaining(deadline):
     return remaining
 
 
+_SCANNED_PDF_UPLOAD_MAX_BYTES = 2 * 1024 * 1024
+
+
 def _save_and_extract_ontology_sources(project, uploads, policy, deadline):
     limits = ParseLimits(
         max_file_bytes=policy.max_file_bytes,
@@ -371,6 +375,22 @@ def _save_and_extract_ontology_sources(project, uploads, policy, deadline):
             limits=limits,
             timeout_seconds=min(policy.child_seconds, remaining),
         )
+        if (Config.SCANNED_PDF_OCR_ENABLED and len(uploads) == 1 and not text.strip()
+                and file_info["size"] <= _SCANNED_PDF_UPLOAD_MAX_BYTES
+                and os.path.splitext(file_info["original_filename"])[1].lower() == ".pdf"):
+            remaining = _phase_remaining(deadline)
+            recognize = getattr(parser_process, "extract_scanned_pdf_text_isolated", None)
+            if not callable(recognize):
+                raise ParserFailedError()
+            try:
+                text = recognize(
+                    file_info["path"], limits=limits,
+                    timeout_seconds=min(policy.child_seconds, remaining),
+                )
+            except (MalformedDocumentError, UnsupportedDocumentError):
+                # The ordinary parser already admitted this blank PDF. An
+                # unsupported OCR shape follows the existing no-text response.
+                pass
         text = TextProcessor.preprocess_text(text)
         part = f"\n\n=== {file_info['original_filename']} ===\n{text}"
         if total_chars + len(part) > policy.max_aggregate_chars:

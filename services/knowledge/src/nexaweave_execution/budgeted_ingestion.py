@@ -2,15 +2,17 @@
 from __future__ import annotations
 
 import asyncio
-from uuid import UUID
+from uuid import UUID, uuid4
+
+from psycopg.types.json import Jsonb
 
 from nexaweave_knowledge.contracts import OntologySpec
 from nexaweave_knowledge.ingestion import KnowledgeIngestionCoordinator
-from nexaweave_knowledge.operations import CompletionReceipt, _receipt
+from nexaweave_knowledge.operations import CompletionReceipt, OperationState, Conflict, InvalidTransition, _receipt
 from nexaweave_knowledge.source_bridge import IngestionPlan, SourceIngestionBridge
 
-from .budget import (BudgetBusy, BudgetLedger, BudgetUncertain, ReservationState,
-                     _money)
+from .budget import (BudgetBusy, BudgetConflict, BudgetDenied, BudgetLedger,
+                     BudgetUncertain, ReservationState, _money, _transaction)
 
 
 class BudgetedIngestion:
@@ -106,8 +108,90 @@ class BudgetedIngestion:
                     done.exception()
             cleanup.add_done_callback(cleanup_finished)
             raise
+        return await self._finish(principal, account_id, plan, reservation, source_revision, operation_id, ontology, selector)
+
+    def _admit_saved(self, principal, account_id, ceiling, plan, authorize_admission):
+        scope, operation = plan.scope, plan.source.operation_id
+        fingerprint, evidence = plan.request_fingerprint, plan.source.evidence_ids
+        with _transaction(self._ledger._connect) as conn:
+            self._coordinator._ledger._scope(conn, scope)
+            authorize_admission(conn)
+            account = self._ledger._account(conn, principal, account_id, lock=True)
+            if account[2] != scope.project_id:
+                raise BudgetDenied()
+            prior = self._ledger._row(conn, account_id, operation)
+            if prior is not None:
+                if (prior.fingerprint != fingerprint or prior.ceiling_microusd != ceiling
+                        or prior.scope_group_id != scope.group_id or prior.episode_id != scope.episode_uuid(operation)
+                        or prior.evidence_ids != evidence):
+                    raise BudgetConflict()
+                if prior.state == ReservationState.settled:
+                    record = self._coordinator._ledger._operation(conn, scope, operation)
+                    if (record.state != OperationState.completed or prior.receipt is None
+                            or record.fingerprint != fingerprint or record.receipt != prior.receipt):
+                        raise BudgetUncertain()
+                    return prior
+                if prior.state == ReservationState.uncertain:
+                    raise BudgetUncertain()
+                if prior.state == ReservationState.released:
+                    raise InvalidTransition("reservation released")
+                if prior.state != ReservationState.reserved:
+                    raise BudgetBusy()
+            else:
+                accounted, reserved, _ = self._ledger._totals(conn, account_id)
+                if ceiling > account[3] - accounted - reserved:
+                    raise BudgetDenied()
+            conn.execute(
+                "INSERT INTO mf_knowledge.operations(group_id,operation_id,fingerprint,state) "
+                "VALUES (%s,%s,%s,'pending') ON CONFLICT (group_id,operation_id) DO NOTHING",
+                (scope.group_id, operation, fingerprint))
+            record = self._coordinator._ledger._operation(conn, scope, operation)
+            if record.fingerprint != fingerprint:
+                raise Conflict("knowledge operation fingerprint conflict")
+            if record.state == OperationState.uncertain:
+                raise BudgetUncertain()
+            if record.state == OperationState.cancelled:
+                raise InvalidTransition("operation cancelled")
+            if record.state not in (OperationState.pending, OperationState.failed_no_effect):
+                raise BudgetBusy()
+            if prior is None:
+                conn.execute(
+                    "INSERT INTO mf_execution.reservations(account_id,operation_id,fingerprint,ceiling_microusd,"
+                    "state,attempt_id,scope_group_id,episode_id,evidence_ids) VALUES (%s,%s,%s,%s,'started',%s,%s,%s,%s)",
+                    (account_id, operation, fingerprint, ceiling, uuid4(), scope.group_id,
+                     scope.episode_uuid(operation), Jsonb([str(value) for value in evidence])))
+            else:
+                conn.execute(
+                    "UPDATE mf_execution.reservations SET state='started',updated_at=now() "
+                    "WHERE account_id=%s AND operation_id=%s", (account_id, operation))
+            return self._ledger._row(conn, account_id, operation)
+
+    async def ingest_saved(self, plan, *, account_id, ceiling_microusd, authorize_admission):
+        principal, operation = plan.principal, plan.source.operation_id
+        admission = asyncio.create_task(asyncio.to_thread(
+            self._admit_saved, principal, account_id, _money(ceiling_microusd), plan, authorize_admission))
         try:
-            receipt = await self._bridge.dispatch(principal, display_graph_id,
+            reservation = await asyncio.shield(admission)
+        except asyncio.CancelledError:
+            async def after_admission():
+                try:
+                    started = await admission
+                except Exception:
+                    return
+                if started.state == ReservationState.started:
+                    await self._mark_uncertain(principal, account_id, operation, started.attempt_id, "dispatch_cancelled")
+            task = asyncio.create_task(after_admission())
+            self._cleanup_tasks.add(task)
+            task.add_done_callback(self._cleanup_tasks.discard)
+            raise
+        if reservation.state == ReservationState.settled:
+            return _receipt(reservation.receipt, plan.scope, operation, plan.request_fingerprint)
+        return await self._finish(principal, account_id, plan, reservation, plan.source.source_revision,
+                                  operation, plan.ontology, {})
+
+    async def _finish(self, principal, account_id, plan, reservation, source_revision, operation_id, ontology, selector):
+        try:
+            receipt = await self._bridge.dispatch(principal, plan.display_graph_id,
                                                   source_revision, operation_id, ontology,
                                                   self._coordinator,
                                                   authorize_model_call=lambda fresh: self._same_plan(plan, fresh),

@@ -1,8 +1,10 @@
 """Source tests for ontology upload admission and bounded persistence."""
 
 import io
+import os
 import threading
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -13,7 +15,7 @@ from app import create_app
 from app.api import graph as graph_api
 from app.models import project as project_module
 from app.models.project import ProjectManager, ProjectStatus
-from app.utils.file_parser import MalformedDocumentError, ParseLimitError
+from app.utils.file_parser import MalformedDocumentError, ParseLimitError, UnsupportedDocumentError
 from app.utils.llm_client import LLMResponseError
 from app.utils.parser_process import (
     ParserFailedError, ParserProtocolError, ParserTimeoutError,
@@ -90,18 +92,113 @@ def test_valid_unicode_single_and_multiple_use_real_isolated_parser(route):
     assert project.total_text_length == len(ProjectManager.get_extracted_text(project.project_id))
 
 
-def test_real_tiny_pdf_uses_isolated_parser(route):
+def _scanned_upload_pdf(samples):
+    # Build the fixed raw-grayscale profile without importing the private OCR fixture.
+    content = b"q 432 0 0 216 0 0 cm /Im0 Do Q\n"
+    objects = (
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Count 1 /Kids [3 0 R] >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 432 216]"
+        b" /Resources << /XObject << /Im0 4 0 R >> >> /Contents 5 0 R >>",
+        (b"<< /Type /XObject /Subtype /Image /Width 1200 /Height 600"
+         b" /ColorSpace /DeviceGray /BitsPerComponent 8 /Length %d >>\nstream\n"
+         % len(samples)) + samples + b"\nendstream",
+        b"<< /Length %d >>\nstream\n" % len(content) + content + b"\nendstream",
+    )
+    pdf = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+    offsets = []
+    for number, body in enumerate(objects, 1):
+        offsets.append(len(pdf))
+        pdf.extend(f"{number} 0 obj\n".encode("ascii") + body + b"\nendobj\n")
+    xref = len(pdf)
+    pdf.extend(b"xref\n0 6\n0000000000 65535 f \n")
+    for offset in offsets:
+        pdf.extend(f"{offset:010d} 00000 n \n".encode("ascii"))
+    pdf.extend(f"trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode("ascii"))
+    return bytes(pdf)
+
+
+def test_real_tiny_pdf_uses_isolated_parser(route, monkeypatch):
     import fitz
 
     client, _root, calls = route
-    pdf = fitz.open()
-    page = pdf.new_page()
-    page.insert_text((72, 72), "pdf evidence")
-    payload = pdf.tobytes()
-    pdf.close()
+    recovered_text = "PUBLIC LIBRARY NOTICE\nMEETING AT 10 AM"
+    attempts = []
+    native_recognize = None
+    if os.environ.get("NEXAWEAVE_TEST_SCANNED_OCR") == "1":
+        assert os.name == "nt", "qualified scanned OCR requires the Windows Job profile"
+        native_recognize = getattr(graph_api.parser_process, "extract_scanned_pdf_text_isolated", None)
+        assert callable(native_recognize), "qualified scanned OCR requires the staged parser"
+
+    def recognize(file_path, *, limits, timeout_seconds):
+        assert 0 < timeout_seconds <= graph_api.UPLOAD_POLICY.child_seconds
+        assert Path(file_path).stat().st_size <= limits.max_file_bytes
+        attempts.append(Path(file_path))
+        if native_recognize is not None:
+            return native_recognize(file_path, limits=limits, timeout_seconds=timeout_seconds)
+        return recovered_text
+
+    # Hosted checks use the counted stub. The qualified opt-in forwards the
+    # positive scan to the same callable used by the upload route.
+    monkeypatch.setattr(graph_api.parser_process, "extract_scanned_pdf_text_isolated", recognize, raising=False)
+    monkeypatch.setattr(graph_api.Config, "SCANNED_PDF_OCR_ENABLED", True)
+    with fitz.open() as pdf:
+        page = pdf.new_page()
+        page.insert_text((72, 72), "pdf evidence")
+        payload = pdf.tobytes()
     response = _post(client, files=[(io.BytesIO(payload), "evidence.pdf")])
     assert response.status_code == 200
     assert "pdf evidence" in calls["kwargs"]["document_texts"][0]
+    assert attempts == []
+
+    with fitz.open() as pdf:
+        page = pdf.new_page(width=432, height=216)
+        for y, line in zip((80, 135), recovered_text.splitlines(), strict=True):
+            page.insert_text((36, y), line, fontsize=24)
+        image = page.get_pixmap(dpi=200, colorspace=fitz.csGRAY, alpha=False)
+        assert (image.width, image.height, image.n) == (1200, 600, 1)
+        scanned = _scanned_upload_pdf(image.samples)
+
+    def post_scan():
+        return _post(client, files=[(io.BytesIO(scanned), "notice.pdf")])
+
+    monkeypatch.setattr(graph_api.Config, "SCANNED_PDF_OCR_ENABLED", False)
+    response = post_scan()
+    assert response.status_code == 422 and response.json["error_code"] == "no_extractable_text"
+    assert attempts == [] and calls["constructed"] == calls["generated"] == 1
+
+    monkeypatch.setattr(graph_api.Config, "SCANNED_PDF_OCR_ENABLED", True)
+    response = post_scan()
+    assert response.status_code == 200
+    assert calls["constructed"] == calls["generated"] == 2
+    extracted, = calls["kwargs"]["document_texts"]
+    if native_recognize is None:
+        assert extracted == recovered_text
+    else:
+        recognized_lines = [" ".join(line.split()) for line in extracted.splitlines() if line.strip()]
+        assert recognized_lines == recovered_text.splitlines()
+    saved_upload, = attempts
+    assert saved_upload.read_bytes() == scanned
+    project = _saved_project(response)
+    assert project.status == ProjectStatus.ONTOLOGY_GENERATED
+    combined = f"\n\n=== notice.pdf ===\n{extracted}"
+    assert ProjectManager.get_extracted_text(project.project_id) == combined
+    assert project.total_text_length == response.json["data"]["total_text_length"] == len(combined)
+
+    def unsupported(*_args, **_kwargs):
+        raise UnsupportedDocumentError()
+
+    monkeypatch.setattr(graph_api.parser_process, "extract_scanned_pdf_text_isolated", unsupported)
+    response = post_scan()
+    assert response.status_code == 422 and response.json["error_code"] == "no_extractable_text"
+
+    monkeypatch.delattr(graph_api.parser_process, "extract_scanned_pdf_text_isolated")
+    response = post_scan()
+    assert response.status_code == 503 and response.json["error_code"] == "parser_unavailable"
+    failed = _saved_project(response)
+    assert failed.status == ProjectStatus.FAILED
+    assert ProjectManager.get_extracted_text(failed.project_id) is None
+    assert calls["constructed"] == calls["generated"] == 2
 
 
 def test_docx_upload_uses_actual_parser_before_offline_generator(route):
