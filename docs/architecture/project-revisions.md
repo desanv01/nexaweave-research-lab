@@ -22,6 +22,15 @@ python -m nexaweave_storage import-project --principal OWNER --workspace-id UUID
 python -m nexaweave_storage export-project --principal OWNER --workspace-id UUID --project-id UUID --display-id proj_1 --revision 1 --output new-export.json
 ```
 
-Import accepts a bounded regular JSON file containing either a legacy snapshot v1 or a versioned export envelope. Versioned import accepts **revision 1 only**, requires exact identity arguments and a matching digest, and does not reconstruct multi-revision histories. Export defaults to the current revision, may select a history revision explicitly, writes to stdout by default, or creates a new output file exclusively. An export of revision 2 or later is not currently importable. The envelope declares `binary_migration: false`. Commands do not follow paths embedded in JSON and never alter original metadata files.
+Import accepts a bounded regular JSON file containing either a legacy snapshot v1 or a versioned export envelope. Versioned import accepts **revision 1 only** and requires exact identity arguments and a matching digest. Export defaults to the current revision, accepts an explicit revision number, and writes to stdout or exclusively creates a new output file. The default export uses the checksummed versioned envelope, which declares `binary_migration: false`.
+
+Use `export-project --legacy-snapshot` for the flat metadata object read by MiroFish. It uses the same principal, workspace, project, and display binding as the default export. It preserves the selected revision's historical field names, retained `files` entries, inert file paths, and inert provider references. The flat file contains only the snapshot. Its `project_id` is the legacy display ID, and the evidence manifest, revision number, and checksum are envelope fields.
+
+```text
+python -m nexaweave_storage export-project --principal OWNER --workspace-id WORKSPACE_UUID --project-id PROJECT_UUID --display-id proj_1 --revision 2 --legacy-snapshot --output legacy-project.json
+python -m nexaweave_storage import-project --principal DEST_OWNER --workspace-id DEST_WORKSPACE_UUID --project-id DEST_PROJECT_UUID --display-id proj_1 --input legacy-project.json
+```
+
+To round-trip flat metadata, use `import-project` with the matching display ID and the authorized destination identity. A fresh destination receives the selected metadata as revision 1 with an empty evidence manifest. These commands leave the source metadata intact and treat embedded paths as inert values.
 
 This slice does not include binary upload migration, source-span extraction, organization roles, app route cutover, backup tooling, or production migration. Its tests use a disposable loopback PostgreSQL database; no live provider is involved.
