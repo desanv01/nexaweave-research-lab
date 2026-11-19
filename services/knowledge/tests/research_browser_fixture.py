@@ -21,6 +21,7 @@ import time
 
 from app.utils.owned_process import OwnedProcess
 from research_browser_stages import FAILURE_PHASES, LAUNCH_ERRORS, ONTOLOGY, browser_stages
+from research_browser_intake import bind_intake, connect_sources, guard_intake, intake_mutation_allowed
 
 ROOT = Path(__file__).resolve().parents[3]
 WIRE_BYTES = 7200
@@ -233,6 +234,11 @@ class ResearchBrowserSession:
             except Exception:
                 self._failure('research_browser_ontology_request_refused')
                 return {'success': False, 'error': {'code': 'conflict'}}, 409
+            try:
+                guard_intake(self, request, pairs, WIRE_BYTES)
+            except Exception:
+                self._failure('research_browser_intake_request_refused')
+                return {'success': False, 'error': {'code': 'conflict'}}, 409
 
         @app.teardown_request
         def left(_error):
@@ -280,7 +286,8 @@ class ResearchBrowserSession:
                                               for kind in ('plan', 'start'))}
                     with self.lock:
                         self.mutations[path] = self.mutations.get(path, 0) + 1
-                        valid = path in allowed.get(self.active, ()) and self.mutations[path] == 1
+                        valid = (path in allowed.get(self.active, ()) and self.mutations[path] == 1
+                                 or intake_mutation_allowed(self, path, response))
                     if not valid:
                         self._failure('research_browser_duplicate_or_unexpected_mutation')
                 if response.status_code != 200:
@@ -584,10 +591,7 @@ class ResearchBrowserSession:
         if stage == 'connect':
             command.update(connection=dict(api_origin=f'http://127.0.0.1:{self.port}',
                 graph_id=self.prep.display_graph_id, token=self.token),
-                sources=[dict(source_revision=source['source_revision'], source_name=source['source_name'])
-                         for source in self.selected.snapshots],
-                profile_root=str(self.profile_root), pdf=dict(source_revision=self.selected.revisions[0],
-                    size=len(self.selected.pdf), sha256=hashlib.sha256(self.selected.pdf).hexdigest()))
+                profile_root=str(self.profile_root), **connect_sources(self.selected))
         self._send(command, max(.001, end - time.monotonic()))
         try:
             reply = self.replies.get(timeout=max(.001, end - time.monotonic()))
@@ -603,6 +607,7 @@ class ResearchBrowserSession:
             origin_events = list(self.origin_events)
         self.last_proof = reply['proof']
         if stage == 'connect':
+            bind_intake(self, events, reply['proof'])
             graph = self.prep.display_graph_id
             require(reply['reference'].get('display_graph_id') == graph
                     and reply['reference'].get('project_id') == self.prep.scope_dto['project_id'])
@@ -684,6 +689,8 @@ class ResearchBrowserSession:
                     'pdf-read-after-restart', 'OPTIONS', 'http://localhost:4317',
                     '/api/graph/data/' + self.prep.display_graph_id, 403)],
                     'research_browser_origin_witness_missing')
+                if self.selected.intake is not None:
+                    require(reply['proof'].get('dossier_support_review') is True)
                 self.verify_restart()
         self.step += 1
         return result

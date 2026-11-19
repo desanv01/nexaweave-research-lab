@@ -7,6 +7,7 @@ import { installBodyObserver, ontologyStages } from './research-browser-ontology
 import { inspectPreparedProfiles } from './research-browser-prepared-profiles.mjs'
 import { browserMode, inspectReadyConfiguration, suggestPlatforms } from './research-browser-ready-configuration.mjs'
 import { inspectDossierSupport } from './research-browser-support-review.mjs'
+import { checkConnectSources, retainBrowserFiles } from './research-browser-intake.mjs'
 
 const WIRE = 7200
 const FRONTEND = 'http://127.0.0.1:4317'
@@ -334,18 +335,14 @@ function boundReport(value) {
   if (report) requireTrue(same(reportReference(value), reportReference(report)))
 }
 async function prepareBrowser(command) {
-  keys(command, ['stage', 'connection', 'sources', 'profile_root', 'pdf'])
+  keys(command, ['stage', 'connection', 'profile_root'], ['sources', 'pdf', 'intake'])
   keys(command.connection, ['api_origin', 'graph_id', 'token'])
   requireTrue(/^http:\/\/127\.0\.0\.1:[1-9][0-9]{0,4}$/.test(command.connection.api_origin))
   requireTrue(new URL(command.connection.api_origin).port && Number(new URL(command.connection.api_origin).port) <= 65535)
   requireTrue(/^[A-Za-z0-9_-]{1,128}$/.test(command.connection.graph_id))
   text(command.connection.token, 505)
   requireTrue(command.connection.token.trim() === command.connection.token && /^[\x21-\x7e]+$/.test(command.connection.token))
-  requireTrue(Array.isArray(command.sources) && command.sources.length === 4)
-  for (const item of command.sources) { keys(item, ['source_revision', 'source_name']); uuid(item.source_revision); text(item.source_name, 1024) }
-  requireTrue(new Set(command.sources.map(s => s.source_revision)).size === 4)
-  keys(command.pdf, ['source_revision', 'size', 'sha256']); uuid(command.pdf.source_revision); integer(command.pdf.size, 2097152, 1); digest(command.pdf.sha256)
-  requireTrue(command.sources.some(s => s.source_revision === command.pdf.source_revision))
+  checkConnectSources(command, twitterOnly, { keys, integer, digest, uuid, text, requireTrue })
   requireTrue(process.platform === 'linux' && process.versions.node === '24.14.1' && !process.env.DEBUG && !process.env.PWDEBUG && !process.env.NODE_OPTIONS)
   for (const selector of ['NEXAWEAVE_RESEARCH_BROWSER_NODE', 'NEXAWEAVE_RESEARCH_BROWSER_CHROME']) {
     requireTrue(typeof process.env[selector] === 'string' && path.isAbsolute(process.env[selector]))
@@ -489,9 +486,15 @@ async function inspectSelectedSource() {
   await enabled(page.locator('.preparation-workbench .review'))
 }
 async function connect(command) {
-  await prepareBrowser(command); await connectForm(page); await inspectSelectedSource()
+  await prepareBrowser(command); await connectForm(page)
+  let intakeProof = {}
+  if (command.intake) {
+    const intake = await retainBrowserFiles(command, { page, exchange, sourceRoute, enabled, physical, sha, uuid, digest, requireTrue })
+    sources = intake.sources; pdf = intake.pdf; intakeProof = { intake_receipts: intake.receipts }
+  }
+  await inspectSelectedSource()
   const original = await readPdf()
-  return { reference: { display_graph_id: connection.graph_id, project_id: orderedSources[0].project_id, source_revisions: sourceProof().source_revisions }, proof: { ...sourceProof(), token_cleared: true, pdf: original } }
+  return { reference: { display_graph_id: connection.graph_id, project_id: orderedSources[0].project_id, source_revisions: sourceProof().source_revisions }, proof: { ...sourceProof(), ...intakeProof, token_cleared: true, pdf: original } }
 }
 function commandRequest(command, required = false) {
   keys(command, ['stage'], ['request'])
