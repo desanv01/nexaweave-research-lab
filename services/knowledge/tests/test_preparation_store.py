@@ -69,10 +69,18 @@ def reference(dto):
     return {'schema_version': 1, 'operation_id': dto['operation_id'], 'plan_sha256': dto['plan_sha256']}
 
 
-def test_pg_v2_selected_sources_reload_generation_and_full_snapshot_tamper(factory, tmp_path):
+def test_pg_v2_selected_sources_reload_generation_and_full_snapshot_tamper(factory, tmp_path, capsys):
     from nexaweave_storage import SourceStore
     from nexaweave_execution.preparation_contracts import document_envelope
-    host, scope, first, chat, wires, transport = real_host(factory, tmp_path)
+    physical_opens = 0
+
+    def counted_factory():
+        nonlocal physical_opens
+        connection = factory()
+        physical_opens += 1
+        return connection
+
+    host, scope, first, chat, wires, transport = real_host(counted_factory, tmp_path)
     text = 'Second owned DOCX 雪 😀'
     second = SourceStore(factory).ingest_text('owner', scope.project_id, uuid4(), 'second document', text,
         [{'evidence_id': str(uuid4()), 'start': 0, 'end': len(text)}])
@@ -90,6 +98,22 @@ def test_pg_v2_selected_sources_reload_generation_and_full_snapshot_tamper(facto
     assert reloaded.frozen['source_text'] == document_envelope(reloaded.frozen['sources'])
     assert [s['source_revision'] for s in reloaded.frozen['public']['sources']] == payload['source_revisions']
     assert host.plan(payload)['plan_sha256'] == planned['plan_sha256']
+
+    revisions = tuple(payload['source_revisions'])
+    project_revision = planned['project_revision']
+    before_singletons = physical_opens
+    singletons = tuple(host._owned(revision, expected_revision=project_revision) for revision in revisions)
+    singleton_opens = physical_opens - before_singletons
+
+    before_batch = physical_opens
+    batch_scope, batch_project, batch_records = host._owned_sources(revisions, expected_revision=project_revision)
+    batched_opens = physical_opens - before_batch
+    assert batch_scope == scope and batch_project.revision == project_revision
+    assert all((owned_scope, project) == (batch_scope, batch_project)
+               for owned_scope, project, _ in singletons)
+    assert batch_records == tuple(record for _, _, record in singletons) == (first, second)
+    assert (singleton_opens, batched_opens) == (6, 5)
+
     host.start(reference(planned)); host.generate(wires[0])
     assert PreparationStore(factory).get('owner', payload['operation_id']).state == 'ready'
     config = [call['messages'][-1]['content'] for call in chat.calls
@@ -106,6 +130,10 @@ def test_pg_v2_selected_sources_reload_generation_and_full_snapshot_tamper(facto
             from psycopg.types.json import Jsonb
             conn.execute('UPDATE mf_preparation.plans SET frozen=%s WHERE operation_id=%s',
                 (Jsonb(reloaded.frozen), UUID(payload['operation_id'])))
+    with capsys.disabled():
+        print('NEXAWEAVE_W84_SOURCE_SET_OPENS ' + json.dumps(dict(
+            source_count=len(revisions), singleton_opens=singleton_opens, batched_opens=batched_opens),
+            sort_keys=True), flush=True)
 
 
 def _expected_prepared_profile(host, ready, original, ordinal):
