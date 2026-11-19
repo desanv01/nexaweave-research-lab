@@ -35,7 +35,8 @@ def create_knowledge_report_agent(facade, graph_id: str, simulation_id: str,
                        llm_client=model_client, zep_tools=tools, neutral_mode=True)
 
 
-def create_connected_report_agent(context, *, requirement, output_language, model_client):
+def create_connected_report_agent(context, *, requirement, output_language, model_client,
+                                  include_claim_review=False):
     """Child-only construction; every dependency is frozen or explicitly injected."""
     from .connected_report_context import validate_context
     from .connected_report_tools import lexical_selector
@@ -44,6 +45,10 @@ def create_connected_report_agent(context, *, requirement, output_language, mode
     tools = KnowledgeReportTools(graph_id=binding['display_graph_id'],
         simulation_id=binding['preparation']['simulation_id'], graph=context['graph'], scope=binding['scope'],
         llm_client=model_client, search_selector=lexical_selector(context), interview_capability=None)
-    return ReportAgent(binding['display_graph_id'], binding['preparation']['simulation_id'], requirement,
+    agent = ReportAgent(binding['display_graph_id'], binding['preparation']['simulation_id'], requirement,
         llm_client=model_client, zep_tools=tools, neutral_mode=True,
         connected_context=context, output_language=output_language)
+    if include_claim_review:
+        from .report_claim_passages import CLAIM_INSTRUCTIONS
+        agent.connected_instruction += CLAIM_INSTRUCTIONS
+    return agent
