@@ -1,18 +1,23 @@
 """Authenticated route and cold-factory qualification source (pure)."""
 import builtins
+from copy import deepcopy
+from hashlib import sha256
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
+from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 
 from app import create_app
+from app.services.knowledge_evidence_facade import KnowledgeEvidenceFacade
 from app.services.knowledge_read_facade import ReadHostSettings
 from app.services.knowledge_reader import KnowledgeReadError
 from app.services.knowledge_transport import KnowledgeBusy
-from test_knowledge_read_app import read_app
+from test_knowledge_read_app import read_app, scope
 
 
 @pytest.fixture
@@ -86,6 +91,113 @@ def test_media_length_selectors_and_safe_errors(evidence_app):
         facade.failure = failure
         result = client.post(url, json=req(), headers=headers)
         assert result.status_code == status and result.json == {"success": False, "error": {"code": code}}
+
+
+    _assert_two_hop_boundary(token)
+
+
+def _assert_two_hop_boundary(token):
+    headers = {"Authorization": "Bearer " + token}
+    route = "/api/graph/two-hop/display-1"
+    payload = {"schema_version": 2, "operation": "two_hop", "display_graph_id": "display-1",
+               "source_node_id": str(uuid4()), "target_node_id": str(uuid4())}
+    settings = SimpleNamespace(display_graph_id="display-1", scope=scope())
+    wire_calls = []
+    source, middle, target = payload["source_node_id"], str(uuid4()), payload["target_node_id"]
+    source_text = "A猫B"
+    source_bytes = source_text.encode("utf-8")
+    source_hash = sha256(source_bytes).hexdigest()
+    source_recorded_at = "2026-01-01T00:00:00Z"
+    project_id, revision = settings.scope["project_id"], str(uuid4())
+
+    def cited_edge(start_node, end_node, start, end):
+        excerpt = source_text[start:end]
+        evidence_id = str(uuid4())
+        citation = {
+            "evidence_id": evidence_id, "project_id": project_id, "source_revision": revision,
+            "source_name": "retained fixture", "source_sha256": source_hash,
+            "source_byte_length": len(source_bytes), "source_codepoint_length": len(source_text),
+            "source_recorded_at": source_recorded_at, "start": start, "end": end,
+            "offset_unit": "unicode_codepoint", "excerpt": excerpt,
+            "excerpt_sha256": sha256(excerpt.encode("utf-8")).hexdigest(), "declared_page": None,
+        }
+        return {
+            "provider_id": str(uuid4()), "name": "RELATES_TO", "fact": excerpt,
+            "source_node_id": start_node, "target_node_id": end_node, "episode_ids": [str(uuid4())],
+            "evidence_ids": [evidence_id], "valid_at": source_recorded_at, "invalid_at": None,
+            "expired_at": None, "created_at": source_recorded_at, "citations": [citation],
+        }
+
+    data = {
+        "schema_version": 2, "operation": "two_hop", "source_node_id": source,
+        "target_node_id": target, "path_status": "found",
+        "path": {"intermediate_node_id": middle,
+                 "hops": [cited_edge(source, middle, 0, 2), cited_edge(middle, target, 2, 3)]},
+        "scope_coverage": {"scope": settings.scope, "display_graph_id": "display-1", "pages": 1,
+                           "scanned": 2, "eligible": 2, "excluded": 0, "unknown": 0,
+                           "returned": 2, "truncated": False},
+        "passage_coverage": [{"project_id": project_id, "source_revision": revision,
+                              "source_sha256": source_hash, "retained_codepoints": 3,
+                              "retrieved_codepoints": 3, "retrieved_passage_fraction": 1.0}],
+        "historical": False, "historical_semantics": "retained_edges_not_bitemporal_reconstruction",
+        "rank_basis": "directed_path_edge_id_order",
+    }
+
+    class ReplyClient:
+        def call(self, raw):
+            frame = json.loads(raw)
+            wire_calls.append(frame)
+            return json.dumps({"version": 1, "request_id": frame["request_id"], "ok": True,
+                               "result": data}).encode()
+
+    facade = KnowledgeEvidenceFacade(settings, client_factory=ReplyClient)
+    caller = create_app(evidence_facade=facade).test_client()
+    assert caller.post(route, json=payload).status_code == 401
+    assert caller.post(route, json=payload, headers={**headers, "Origin": "http://evil.example"}).status_code == 403
+    assert caller.post(route.replace("display-1", "foreign"), json=payload, headers=headers).status_code == 404
+    assert caller.get(route, headers=headers).status_code == 405
+    preflight = caller.options(route, headers={"Origin": "http://localhost:3000",
+        "Access-Control-Request-Method": "POST", "Access-Control-Request-Headers": "Authorization, Content-Type"})
+    assert preflight.status_code == 204 and preflight.headers["Access-Control-Allow-Methods"] == "POST, OPTIONS"
+    for invalid in (dict(payload, schema_version=1), dict(payload, display_graph_id="foreign"),
+                    dict(payload, scope=settings.scope), dict(payload, target_node_id=payload["source_node_id"])):
+        assert caller.post(route, json=invalid, headers=headers).status_code == 400
+    assert caller.post("/api/graph/research/display-1", json=payload, headers=headers).status_code == 400
+    assert wire_calls == []
+
+    allowed = caller.post(route, json=payload, headers={**headers, "Origin": "http://localhost:3000"})
+    assert allowed.status_code == 200 and allowed.json == {"success": True, "data": data}
+    assert allowed.headers["Access-Control-Allow-Origin"] == "http://localhost:3000"
+    frame, = wire_calls
+    assert frame == {"version": 1, "request_id": frame["request_id"], "method": "two_hop",
+                     "scope": settings.scope, "payload": payload}
+    correct = deepcopy(data)
+
+    def assert_bad_reply():
+        before = len(wire_calls)
+        rejected = caller.post(route, json=payload, headers=headers)
+        assert rejected.status_code == 502
+        assert rejected.json == {"success": False, "error": {"code": "invalid_reply"}}
+        assert len(wire_calls) == before + 1
+        data.update(deepcopy(correct))
+
+    for field in ("source_node_id", "target_node_id"):
+        data[field] = str(uuid4())
+        assert_bad_reply()
+    for field, wrong in (("display_graph_id", "foreign"), ("scope", {}), ("returned", True)):
+        data["scope_coverage"][field] = wrong
+        assert_bad_reply()
+    del data["scope_coverage"]["pages"]
+    assert_bad_reply()
+    # Keep the direction and all identifiers correct while corrupting citations.
+    del data["path"]["hops"][0]["citations"]
+    assert_bad_reply()
+    data["path"]["hops"][1]["citations"][0]["excerpt_sha256"] = "0" * 64
+    assert_bad_reply()
+    data["path"]["hops"][1]["evidence_ids"] = [str(uuid4())]
+    assert_bad_reply()
+    data["passage_coverage"][0]["retrieved_passage_fraction"] = 1.1
+    assert_bad_reply()
 
 
 def test_graph_health_keeps_evidence_construction_lazy(read_app, monkeypatch):

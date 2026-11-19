@@ -224,6 +224,10 @@ def create_read_app(config_class, *, facade=None, evidence_facade=None, source_f
     def evidence_dossier(graph_id):
         return evidence_call("dossier", graph_id)
 
+    @app.post("/api/graph/two-hop/<graph_id>")
+    def evidence_two_hop(graph_id):
+        return evidence_call("two_hop", graph_id)
+
     @app.get("/api/graph/data/<graph_id>")
     def graph_data(graph_id):
         if graph_id != settings.display_graph_id:

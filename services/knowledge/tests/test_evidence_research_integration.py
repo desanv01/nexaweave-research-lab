@@ -37,6 +37,10 @@ from tools.run_unit_tests import LoopbackOnlySockets
 guard = LoopbackOnlySockets()
 guard.install()
 observed = set()
+profile = sys.argv[-1]
+framed = profile in {'evidence', 'evidence_denied'}
+module_name = ('nexaweave_knowledge.evidence_bootstrap' if framed
+               else 'nexaweave_knowledge.research_cli')
 class MinimalFixtureNotification(logging.Filter):
     def filter(self, record):
         # Match the installed driver's typed notification argument, never text
@@ -99,6 +103,8 @@ def observe(frame, event, arg):
         'send', '_send',
     }:
         observed.add('model_or_search')
+    if name in {'connect', 'driver', 'execute_query'} and defining_module.startswith(('neo4j.', 'psycopg.')):
+        observed.add('external_read')
     if name == 'close' and defining_module == 'neo4j._async.driver':
         observed.add('driver_close')
     if name == 'close' and defining_module == 'psycopg.connection':
@@ -110,13 +116,13 @@ try:
     if sys.flags.isolated:
         from importlib.util import find_spec
         from pathlib import Path
-        origin = Path(find_spec('nexaweave_knowledge.research_cli').origin).resolve(strict=True)
+        origin = Path(find_spec(module_name).origin).resolve(strict=True)
         prefix = Path(sys.prefix).resolve()
         if not origin.is_relative_to(prefix) or 'site-packages' not in origin.relative_to(prefix).parts:
             raise SystemExit(97)
-    sys.argv = ['nexaweave_knowledge.research_cli']
+    sys.argv = [module_name]
     try:
-        runpy.run_module('nexaweave_knowledge.research_cli', run_name='__main__')
+        runpy.run_module(module_name, run_name='__main__')
     except SystemExit as exit:
         status = exit.code
 finally:
@@ -128,6 +134,9 @@ if guard.blocked_attempts:
     status = 91
 elif 'model_or_search' in observed:
     status = 92
+elif profile == 'evidence_denied':
+    if observed & {'external_read', 'driver_close', 'pg_close'}:
+        status = 98
 elif status == 0:
     missing = {'driver_close', 'pg_close'} - observed
     if missing == {'driver_close', 'pg_close'}:
@@ -374,7 +383,7 @@ async def test_real_foreign_active_uncertain_and_tombstoned_denials_before_drive
 
 
 @pytest.mark.asyncio
-async def test_real_subprocess_json_cli_history_and_denied_display(retained_graph, tmp_path):
+async def test_real_subprocess_json_cli_history_and_denied_display(retained_graph, tmp_path, capsys):
     from tools.run_unit_tests import _unit_environment
 
     f = retained_graph
@@ -399,14 +408,16 @@ async def test_real_subprocess_json_cli_history_and_denied_display(retained_grap
         KNOWLEDGE_NEO4J_PASSWORD=os.environ['KNOWLEDGE_TEST_PASSWORD'],
     )
 
-    async def invoke(request, expected_status, *, installed=False):
+    async def invoke(request, expected_status, *, installed=False, profile="research_cli"):
         raw = json.dumps(request, ensure_ascii=False, allow_nan=False).encode('utf-8')
+        if profile != "research_cli":
+            raw = len(raw).to_bytes(4, 'big') + raw
         command = [sys.executable, '-c', _CLI_CHILD]
         if installed:
             # The isolated child can import the socket guard from ROOT, but
             # ignores the source checkout in PYTHONPATH.
             isolated = 'import sys; sys.path.append(sys.argv[1])\n' + _CLI_CHILD
-            command = [sys.executable, '-I', '-c', isolated, str(root)]
+            command = [sys.executable, '-I', '-c', isolated, str(root), profile]
         try:
             completed = await asyncio.to_thread(
                 subprocess.run, command,
@@ -424,6 +435,7 @@ async def test_real_subprocess_json_cli_history_and_denied_display(retained_grap
                 91: 'guard_violation', 92: 'model_or_search_observed',
                 93: 'driver_close_missing', 94: 'pg_close_missing',
                 95: 'driver_and_pg_close_missing', 96: 'cli_exit_missing', 97: 'installed_cli_required',
+                98: 'denied_child_external_read',
             }.get(completed.returncode, 'exit_status')
             stderr_category = 'empty'
             if completed.stderr:
@@ -437,12 +449,41 @@ async def test_real_subprocess_json_cli_history_and_denied_display(retained_grap
                 f'research_cli_child_{category}: expected_exit={expected_status} '
                 f'actual_exit={completed.returncode} stderr={stderr_category}',
                 pytrace=False)
-        if not 0 < len(completed.stdout) <= 2 * 1024 * 1024 or completed.stdout.count(b'\n') != 1:
+        output = completed.stdout
+        if profile != "research_cli":
+            declared = int.from_bytes(output[:4], 'big')
+            output = output[4:]
+            if not 0 < declared <= 2 * 1024 * 1024 + 1024 or len(output) != declared:
+                pytest.fail('evidence_child_frame_invalid', pytrace=False)
+        elif not 0 < len(output) <= 2 * 1024 * 1024 or output.count(b'\n') != 1:
             pytest.fail('research_cli_output_invalid', pytrace=False)
         try:
-            return json.loads(completed.stdout.decode('utf-8'))
+            return json.loads(output.decode('utf-8'))
         except (ValueError, UnicodeError):
             pytest.fail('research_cli_output_invalid', pytrace=False)
+
+    async def evidence_call(payload, *, error=False, changes=None):
+        identity = str(uuid4())
+        envelope = {"version": 1, "request_id": identity, "method": "two_hop",
+                    "scope": f['source'].model_dump(mode='json'), "payload": payload}
+        if changes is not None:
+            envelope.update(changes)
+        reply = await invoke(envelope, 0, installed=True,
+                             profile="evidence_denied" if error else "evidence")
+        assert reply["version"] == 1 and reply["request_id"] == identity
+        if error:
+            assert reply == {"version": 1, "request_id": identity, "ok": False,
+                             "error": {"code": "invalid_request"}}
+            return None
+        assert set(reply) == {"version", "request_id", "ok", "result"} and reply["ok"] is True
+        data = reply["result"]
+        assert data["schema_version"] == 2 and data["operation"] == "two_hop"
+        assert (data["source_node_id"], data["target_node_id"]) == (
+            payload["source_node_id"], payload["target_node_id"],
+        )
+        assert data["scope_coverage"]["display_graph_id"] == payload["display_graph_id"]
+        assert data["scope_coverage"]["scope"] == f['source'].model_dump(mode='json')
+        return data
 
     request = dict(display_graph_ids=list(f['ids']), text='Alice 猫', top_k=10,
                    valid_at=f['stamp'].isoformat(), recorded_before=f['stamp'].isoformat())
@@ -516,7 +557,8 @@ async def test_real_subprocess_json_cli_history_and_denied_display(retained_grap
         'source_node_id': source_node, 'target_node_id': target_node,
         'valid_at': f['stamp'].isoformat(),
     }
-    two_hop = await invoke(path_request, 0, installed=True)
+    two_hop = await evidence_call(path_request)
+    assert await invoke(path_request, 0, installed=True) == two_hop
     assert two_hop['schema_version'] == 2 and two_hop['operation'] == 'two_hop'
     assert two_hop['source_node_id'] == source_node and two_hop['target_node_id'] == target_node
     assert two_hop['path_status'] == 'found' and two_hop['historical'] is True
@@ -546,14 +588,51 @@ async def test_real_subprocess_json_cli_history_and_denied_display(retained_grap
         'returned': 2, 'truncated': False,
     }
     assert two_hop['passage_coverage'] == result['passage_coverage']
-    reversed_path = await invoke(dict(path_request, source_node_id=target_node,
-                                      target_node_id=source_node), 0, installed=True)
+    reversed_path = await evidence_call(dict(path_request, source_node_id=target_node,
+                                             target_node_id=source_node))
     assert reversed_path['path_status'] == 'no_path_in_scan' and reversed_path['path'] is None
     assert reversed_path['scope_coverage']['returned'] == 0 and reversed_path['passage_coverage'] == []
-    crossed = await invoke(dict(path_request, display_graph_id=f['ids'][1]), 1, installed=True)
-    assert crossed == {'error': 'research_unavailable'}
+    # A fully cited continuation exists out of scope from the trusted midpoint.
+    # Following it would turn this authorized scan's empty result into a path.
+    foreign_node = f['nodes'][1][1]
+    foreign_edge, foreign_episode = str(uuid4()), str(uuid4())
+    written, _, _ = await f['writer'].execute_query(
+        'MATCH (b:Entity {uuid:$middle,group_id:$trusted}), '
+        '(c:Entity {uuid:$target,group_id:$foreign}) '
+        'CREATE (e:Episodic {uuid:$episode,group_id:$foreign,created_at:datetime($stamp)}), '
+        "(o:MiroFishIngest {uuid:$episode,group_id:$foreign,status:'complete',evidence_ids:$evidence}), "
+        "(b)-[edge:RELATES_TO {uuid:$edge,group_id:$foreign,name:'LOCATED_IN', "
+        "fact:'The organization is based at the foreign laboratory',episodes:[$episode],"
+        'created_at:datetime($stamp),valid_at:datetime($stamp)}]->(c) '
+        'RETURN edge.uuid AS edge',
+        parameters_={'middle': middle_node, 'target': foreign_node, 'trusted': f['source'].group_id,
+                     'foreign': f['simulation'].group_id, 'edge': foreign_edge, 'episode': foreign_episode,
+                     'evidence': [str(original[0].evidence_id)], 'stamp': f['stamp'].isoformat()},
+    )
+    assert [row['edge'] for row in written] == [foreign_edge]
+    foreign_endpoint = await evidence_call(dict(path_request, target_node_id=foreign_node))
+    assert foreign_endpoint['path_status'] == 'no_path_in_scan' and foreign_endpoint['path'] is None
+    assert foreign_endpoint['scope_coverage']['returned'] == 0 and foreign_endpoint['passage_coverage'] == []
+    await evidence_call(path_request, error=True, changes={"method": "research"})
+    await evidence_call(path_request, error=True, changes={"scope": None})
+    await evidence_call(path_request, error=True,
+                        changes={"scope": f['simulation'].model_dump(mode='json')})
+    await evidence_call(dict(path_request, display_graph_id=f['ids'][1]), error=True)
+
+    # Keep the directed topology through the dangling-evidence candidate.
+    await f['writer'].execute_query(
+        'MATCH ()-[edge:RELATES_TO]->() '
+        'WHERE edge.group_id = $group_id AND edge.uuid IN $cited_edges DELETE edge',
+        parameters_={'group_id': f['source'].group_id, 'cited_edges': second_ids},
+    )
+    unavailable = await evidence_call(path_request)
+    assert unavailable['path_status'] == 'selected_path_evidence_unavailable'
+    assert unavailable['path'] is None and unavailable['scope_coverage']['returned'] == 0
+    assert unavailable['passage_coverage'] == []
     # Normal child exit observed driver/PG close. This additional admission
     # smoke check is not proof of exclusive lock release (read locks are shared).
     ledger = Ledger(f['factory'])
     with ledger.read_scope(f['source']), ledger.read_scope(f['simulation']):
         pass
+    with capsys.disabled():
+        print("\nNEXAWEAVE_W24_PROTECTED_TWO_HOP_OK", flush=True)

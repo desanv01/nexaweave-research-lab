@@ -2,17 +2,19 @@
 from datetime import datetime
 import json
 from pathlib import Path
+from uuid import UUID
 
 from .knowledge_reader import _DISPLAY_ID, _scope
 from .knowledge_transport import (KnowledgeProcessClient, KnowledgeInvalidRequest,
     KnowledgeTransportFailure, _json_object, _uuid, _ROOT_FIELDS)
 
-REQUEST_LIMITS = {"research": 16384, "dossier": 32768}
-RESULT_LIMITS = {"research": 2 * 1024 * 1024, "dossier": 4 * 1024 * 1024}
+REQUEST_LIMITS = {"research": 16384, "dossier": 32768, "two_hop": 16384}
+RESULT_LIMITS = {"research": 2 * 1024 * 1024, "dossier": 4 * 1024 * 1024,
+    "two_hop": 2 * 1024 * 1024}
 ENVELOPE_OVERHEAD = 1024
 ERROR_CODES = frozenset({"invalid_request", "invalid_configuration", "research_unavailable",
     "research_deadline", "research_busy", "dossier_unavailable", "dossier_deadline",
-    "dossier_busy", "result_too_large"})
+    "dossier_busy", "result_too_large", "invalid_reply"})
 
 
 def _text(value, maximum):
@@ -21,11 +23,36 @@ def _text(value, maximum):
     value.encode("utf-8")
 
 
+def _validate_two_hop(value, anchor):
+    required = {"schema_version", "operation", "display_graph_id", "source_node_id", "target_node_id"}
+    if (not required <= set(value) <= required | {"valid_at", "recorded_before"}
+            or type(value["schema_version"]) is not int or value["schema_version"] != 2
+            or value["operation"] != "two_hop" or value["display_graph_id"] != anchor):
+        raise ValueError
+    source, target = value["source_node_id"], value["target_node_id"]
+    if source == target or any(type(node) is not str or len(node) != 36
+                               or str(UUID(node)) != node for node in (source, target)):
+        raise ValueError
+    for key in ("valid_at", "recorded_before"):
+        stamp = value.get(key)
+        if stamp is not None:
+            if type(stamp) is not str or len(stamp) > 64:
+                raise ValueError
+            parsed = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+            if parsed.tzinfo is None or parsed.utcoffset() is None:
+                raise ValueError
+    if len(json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode()) > REQUEST_LIMITS["two_hop"]:
+        raise ValueError
+    return value
+
+
 def validate_payload(method, value, anchor):
     """Validate public request shape before any child is admitted or spawned."""
     try:
         if type(method) is not str or method not in REQUEST_LIMITS or type(value) is not dict:
             raise ValueError
+        if method == "two_hop":
+            return _validate_two_hop(value, anchor)
         common = {"schema_version", "display_graph_ids", "valid_at", "recorded_before"}
         allowed = common | ({"text", "top_k"} if method == "research" else {"title", "sections"})
         if not set(value) <= allowed:
