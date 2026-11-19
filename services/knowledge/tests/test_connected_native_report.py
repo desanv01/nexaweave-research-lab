@@ -87,19 +87,26 @@ class FixturePhases:
 class ScriptedReportTransportFactory:
     log_path: str
     record_entry: bool = False
+    claim_fixture: tuple | None = None
 
     def __call__(self, *, max_retries, timeout):
         assert type(max_retries) is int and max_retries == 0 and 0 < timeout <= 15
-        return ScriptedReportTransport(self.log_path, record_entry=self.record_entry)
+        return ScriptedReportTransport(self.log_path, record_entry=self.record_entry,
+                                       claim_fixture=self.claim_fixture)
+
+
+_VISIBLE_MARKDOWN = '\n\n``<!--` ``\n\n<https://x.test>\n\n<a@x.test>'
 
 
 class ScriptedReportTransport:
     """Actual inherited ReportAgent consumes these raw cooperative SDK replies."""
     max_retries = 0
 
-    def __init__(self, log_path, *, record_entry=False):
+    def __init__(self, log_path, *, record_entry=False, claim_fixture=None):
         self.path, self.count, self.prose_count = Path(log_path), 0, 0
         self.record_entry = record_entry
+        self.claim_fixture = claim_fixture
+        self.previous_messages = set()
         self.chat = SimpleNamespace(completions=self)
 
     def create(self, **kwargs):
@@ -112,6 +119,11 @@ class ScriptedReportTransport:
         self.count += 1
         assert self.count <= 64
         all_text = '\n'.join(message['content'] for message in kwargs['messages'])
+        if self.claim_fixture:
+            evidence_id, supported, wrong_actor, facts = self.claim_fixture
+            received = {m['content'] for m in kwargs['messages'] if m['role'] != 'assistant'}
+            new_messages = received - self.previous_messages
+            self.previous_messages = received
         refs = re.findall(r'source:[0-9a-f-]{36}|native:(?:twitter|reddit):[0-9]+:[0-9a-f]{64}', all_text)
         sources = [value for value in refs if value.startswith('source:')]
         natives = [value for value in refs if value.startswith('native:')]
@@ -125,6 +137,8 @@ class ScriptedReportTransport:
             if slot == 0:
                 content = '<tool_call>{"name":"quick_search","parameters":{"query":"source"}}</tool_call>'
             elif slot == 1:
+                if self.claim_fixture:
+                    assert any(fact in reply for reply in new_messages for fact in facts)
                 content = '<tool_call>{"name":"panorama_search","parameters":{"query":"source"}}</tool_call>'
             elif slot == 2:
                 match = re.fullmatch(r'native:([^:]+):([0-9]+):([0-9a-f]{64})', natives[0])
@@ -135,6 +149,14 @@ class ScriptedReportTransport:
                     + ']]. The selected native log record is observed execution evidence [[' + natives[0]
                     + ']]. This narrative is interpretation, not a real-world prediction or billed-cost statement. '
                     'Literal hostile text <img src=x onerror=alert(1)> <script>inert</script> 猫 😀 stays quoted.')
+                if self.claim_fixture:
+                    assert any('[Recorded native observations;' in reply and natives[0] in reply
+                               for reply in new_messages)
+                    content += _VISIBLE_MARKDOWN + ''.join(f'\n\n- Claim: {claim} [[source:{evidence_id}]]'
+                                       for claim in (supported, wrong_actor))
+                    cite = f'[[source:{evidence_id}]]'
+                    content += (f'\n\n<!--\n- Claim: Hidden comment. {cite}\n-->\n\n'
+                                f'~~~~\n~~~\n~~~~\u00a0\n- Claim: Hidden fence. {cite}\n~~~~')
         with self.path.open('a', encoding='utf-8', newline='\n') as output:
             output.write(json.dumps(dict(call=self.count, response_format=kwargs.get('response_format'),
                 timeout=kwargs['timeout'], max_tokens=tokens, stream=False, reference_keys=refs), ensure_ascii=True)+'\n')
@@ -144,6 +166,52 @@ class ScriptedReportTransport:
     def close(self):
         with self.path.open('a', encoding='utf-8', newline='\n') as output:
             output.write(json.dumps(dict(closed=True, calls=self.count))+'\n')
+
+
+def _claim_inputs(record, graph):
+    passage = record.passages[0]
+    word = re.search(r'[^\W\d_]+', passage.excerpt).group()
+    actor = 'Fixture Stranger Orion'
+    assert actor not in passage.excerpt
+    facts = tuple(edge['fact'] for edge in graph['edges'] if edge['fact'])
+    assert facts
+    return passage, (str(passage.evidence_id), f'The passage contains “{word}”.',
+                     f'{actor} is the actor described in the passage.', facts)
+
+
+def _assert_claim_review(markdown, fixture, record, passage, scope, graph):
+    evidence_id, supported, wrong_actor, _ = fixture
+    original, heading, review = markdown.partition('\n\n## Source claim review\n\n')
+    assert heading and 'Semantic support: not_reviewed.' in review
+    assert _VISIBLE_MARKDOWN in original.replace('\r\n', '\n')
+    for claim in ('Hidden comment.', 'Hidden fence.'):
+        assert f'- Claim: {claim} [[source:{evidence_id}]]' in original
+    _, fence, rows = review.partition('```jsonl\n')
+    assert fence
+    rows, fence, _ = rows.partition('```\n')
+    assert fence
+    provider_sources = sorted(
+        ({'kind': kind, 'provider_id': item['uuid']} for kind in ('node', 'edge')
+         for item in graph[kind + 's'] if evidence_id in item['evidence_ids']),
+        key=lambda entry: (entry['kind'], entry['provider_id']))
+    assert provider_sources
+    actual = {}
+    for line in rows.split('\n'):
+        if not line:
+            continue
+        row = json.loads(line)
+        claim = row['claim']
+        assert original.split('\n')[row['report_line'] - 1].rstrip('\r') == f'- Claim: {claim} [[source:{evidence_id}]]'
+        assert (row['project_id'], row['evidence_id'], row['source_revision'], row['source_name'],
+                row['source_sha256']) == (str(scope.project_id), evidence_id, str(record.source_revision),
+                                          record.name, record.text_sha256)
+        assert (row['page'], row['start'], row['end'], row['excerpt'], row['excerpt_sha256']) == (
+            passage.page, passage.start, passage.end, record.text[passage.start:passage.end],
+            hashlib.sha256(passage.excerpt.encode('utf-8')).hexdigest())
+        assert row['provider_sources'] == provider_sources
+        assert row['reference_integrity'] == 'resolved'
+        actual[claim] = row['semantic_support_status']
+    assert actual == {supported: 'not_reviewed', wrong_actor: 'not_reviewed'}
 
 
 def _assert_four_format_restart(factory, directory, prep, scope, selected):
@@ -445,12 +513,14 @@ async def test_actual_native_receipt_to_inherited_report_preserves_inputs_and_di
             settings = replace(prep.settings, python=str(Path(sys.executable).resolve()),
                                bootstrap=str(bootstrap), child_environment={})
             report_reader = KnowledgeReadFacade(settings)
+        def scripted(claims=None):
+            return BoundedReportModelFactory(
+                ScriptedReportTransportFactory(str(report_log), caller_cancel, claims), 'scripted-report', limits)
+
         reports = DurableReportHost(settings=prep.settings, connection_factory=factory, read_facade=report_reader,
             native_launch_host=native_host, artifact_root=tmp_path/'reports', account_id=prep.account_id,
             ceiling_microusd=4, authorize=lambda: report_enabled[0], model_label='scripted offline inherited report',
-            limits=limits, model_factory=BoundedReportModelFactory(
-                ScriptedReportTransportFactory(str(report_log), record_entry=caller_cancel),
-                'scripted-report', limits), scheduler=lambda _: None)
+            limits=limits, model_factory=scripted(), scheduler=lambda _: None)
         report_temporal = TemporalReportHost(client=temporal, task_queue='mf-report-body-'+uuid4().hex,
             trusted_host=reports, allow_dispatch=lambda: report_enabled[0])
         if slow_authorization:
@@ -576,6 +646,11 @@ async def test_actual_native_receipt_to_inherited_report_preserves_inputs_and_di
                 phases.end('native-result')
                 original_outputs = {name:(input_root/name).read_bytes() for platform in ('twitter','reddit')
                     for name in (platform+'_simulation.db', platform+'/actions.jsonl')}
+                claims = None
+                if selected is not None:
+                    record = selected.records[0]
+                    passage, claims = _claim_inputs(record, selected.graph)
+                    reports.model_factory = scripted(claims)
                 phases.start('report-plan-start')
                 declared = dict(schema_version=1, report_id=str(uuid4()), launch_id=str(native_row.run_id),
                     launch_sha256=launch['launch_sha256'], requirement='Distinguish retained source and actual observed records.',
@@ -665,6 +740,13 @@ async def test_actual_native_receipt_to_inherited_report_preserves_inputs_and_di
                     validate_download(downloaded,body,completed)
                     artifact=downloaded['artifact'];raw=base64.b64decode(artifact['content_base64'],validate=True)
                     assert len(raw)==artifact['size'] and hashlib.sha256(raw).hexdigest()==artifact['sha256']
+                    if claims and kind == 'report':
+                        assert raw == read['content'].encode('utf-8')
+                        _assert_claim_review(read['content'], claims, record, passage, source_scope, selected.graph)
+                        from app.services.report_claim_passages import claim_review_block
+                        assert not claim_review_block(read['content'] + '\n<!--', row.frozen['context'], 65536)
+                    if claims and kind == 'metadata':
+                        assert json.loads(raw)['markdown_content'] == read['content']
                     if selected is not None and kind == 'native_evidence':
                         evidence = json.loads(raw)
                         assert evidence['schema_version'] == 2
