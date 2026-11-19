@@ -4,8 +4,50 @@ import threading
 from flask import Response, jsonify, request
 
 from .services.native_experiment_http_client import (MAX_REQUEST, MAX_RESULT, OVERHEAD,
-    encoded, payload, catalog, comparison, _json_object)
+    encoded, digest, payload, catalog, comparison, _json_object)
 from .services.native_experiment_http_facade import ExperimentSettings, NativeExperimentFacade
+
+
+_REPORT_MEDIA_TYPE = 'application/vnd.nexaweave.comparison-report+json'
+_REPORT_FILENAME = 'nexaweave-comparison-report.json'
+_PLATFORMS = ('twitter', 'reddit')
+_REPORT_MEMBER_FIELDS = ('member_id', 'member_label', 'case_label', 'run_id',
+    'disposition', 'project_revision', 'request_fingerprint', 'record_digest')
+
+
+def _comparison_report(comp, cat):
+    """Project the validated comparison and its catalog platform admissions."""
+    members = {member['member_id']: member for member in comp['members']}
+    admitted = {member['member_id']: member['platforms'] for member in cat['members']}
+    identities = []
+    for member in members.values():
+        identity = {key: member[key] for key in _REPORT_MEMBER_FIELDS}
+        recording = member['recording']
+        identity['recording_revision'] = None if recording is None else recording['recording_revision']
+        identities.append(identity)
+    pairs = []
+    for pair in comp['comparability_matrix']:
+        left_id, right_id = pair['left_member_id'], pair['right_member_id']
+        left = members[left_id]['metrics'] or {}
+        right = members[right_id]['metrics'] or {}
+        differences = []
+        for platform in _PLATFORMS:
+            if platform not in admitted[left_id] or platform not in admitted[right_id]:
+                continue
+            left_total = left[platform]['logged_action_total'] if platform in left else None
+            right_total = right[platform]['logged_action_total'] if platform in right else None
+            differences.append({
+                'platform': platform,
+                'left_logged_action_total': left_total,
+                'right_logged_action_total': right_total,
+                'right_minus_left': None if left_total is None or right_total is None else right_total - left_total,
+            })
+        pairs.append({**pair, 'platform_differences': differences})
+    report = {key: comp[key] for key in ('title', 'project_id', 'project_revision',
+        'cohort_manifest_digest', 'native_result_digest', 'public_projection_digest', 'coverage')}
+    report.update(version=1, members=identities, pairs=pairs)
+    report['report_digest'] = digest(report)
+    return report
 
 
 def register_experiment_routes(app, settings, *, experiment_facade=None):
@@ -61,6 +103,13 @@ def register_experiment_routes(app, settings, *, experiment_facade=None):
                 raise ValueError
             cat = catalog(result['catalog'], settings.scope['project_id'])
             public = cat if method == 'catalog' else comparison(result['comparison'], cat, value)
+            if method == 'compare' and request.headers.getlist('Accept') == [_REPORT_MEDIA_TYPE]:
+                raw = encoded(_comparison_report(public, cat))
+                if len(raw) > MAX_RESULT:
+                    raise ValueError
+                return Response(raw, content_type=_REPORT_MEDIA_TYPE, headers={
+                    'Content-Disposition': f'attachment; filename="{_REPORT_FILENAME}"',
+                })
             raw = b'{"success":true,"data":'+encoded(public)+b'}'
             if len(raw) > MAX_RESULT+OVERHEAD:
                 raise ValueError

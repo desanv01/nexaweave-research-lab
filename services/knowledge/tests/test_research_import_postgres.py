@@ -1,13 +1,16 @@
 """Actual disposable PG and fresh -I installed CLI sources. Main executes only."""
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 import hashlib
 import json
 import os
 import subprocess
 import sys
+import time
 from uuid import uuid4
 
 import psycopg
+from psycopg.conninfo import make_conninfo
 from psycopg.types.json import Jsonb
 import pytest
 
@@ -15,13 +18,14 @@ from nexaweave_storage import Conflict, NotFound, ProjectStore, SourceStore, Sto
 from nexaweave_storage.research_bundle import canonical, decode, export_bundle
 from nexaweave_storage.research_import import ResearchImportStore, remap_id
 from test_project_store import snapshot
+from test_research_bundle_postgres import _CHILD as _BUNDLE_CHILD
 from test_source_store_postgres import factory
 
 pytestmark = pytest.mark.postgres
 OWNER = "import-local-owner"
 
 
-def fixture_bundle(factory):
+def _fixture_origin(factory):
     project, source, passage = uuid4(), uuid4(), uuid4()
     store = ProjectStore(factory)
     snap = snapshot()
@@ -32,7 +36,13 @@ def fixture_bundle(factory):
           "object_key": "inert/private.bin", "byte_length": 17}])
     retained = SourceStore(factory).ingest_text("origin-owner", project, source, "Unicode origin",
         "\ufeffA😀\r\n猫e\u0301", [{"evidence_id": str(passage), "start": 2, "end": 6, "page": 9}])
-    raw = export_bundle(store, SourceStore(factory), "origin-owner", str(project), 1, [str(source)])
+    return first, retained
+
+
+def fixture_bundle(factory):
+    first, retained = _fixture_origin(factory)
+    raw = export_bundle(ProjectStore(factory), SourceStore(factory), "origin-owner",
+                        str(first.project_id), 1, [str(retained.source_revision)])
     return raw, hashlib.sha256(raw).hexdigest(), first, retained
 
 
@@ -291,6 +301,8 @@ real_connect = psycopg.connect
 connections = []
 def connect(*a, **k):
     conn = real_connect(*a, **k)
+    if globals().get('START_REPEATABLE_READ'):
+        conn.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
     connections.append(conn)
     return conn
 psycopg.connect = connect
@@ -305,13 +317,7 @@ raise SystemExit(status)
 '''
 
 
-def test_fresh_noneditable_cli_file_to_owned_pg_digest_repeat_denial_and_tamper(factory, tmp_path):
-    raw, digest, _, retained = fixture_bundle(factory)
-    project, _, current = target(factory)
-    path = tmp_path / "PRIVATE-import.json"
-    path.write_bytes(raw)
-    wrapper = tmp_path / "import-child.py"
-    wrapper.write_text(_CHILD, encoding="utf-8")
+def _cli_environment():
     env = dict(os.environ)
     for key in list(env):
         upper = key.upper()
@@ -320,6 +326,17 @@ def test_fresh_noneditable_cli_file_to_owned_pg_digest_repeat_denial_and_tamper(
                 or upper in {"NEXAWEAVE_APPSTORE_DSN", "PROJECT_STORE_POSTGRES_TEST_DSN", "PYTHONPATH",
                              "LLM_BASE_URL", "OPENAI_BASE_URL", "DEEPSEEK_BASE_URL"}): env.pop(key, None)
     env["NEXAWEAVE_APPSTORE_DSN"] = os.environ["PROJECT_STORE_POSTGRES_TEST_DSN"]
+    return env
+
+
+def test_fresh_noneditable_cli_file_to_owned_pg_digest_repeat_denial_and_tamper(factory, tmp_path):
+    raw, digest, _, retained = fixture_bundle(factory)
+    project, _, current = target(factory)
+    path = tmp_path / "PRIVATE-import.json"
+    path.write_bytes(raw)
+    wrapper = tmp_path / "import-child.py"
+    wrapper.write_text(_CHILD, encoding="utf-8")
+    env = _cli_environment()
     data = {"operation": "import", "principal": OWNER, "target_project_id": str(project),
             "expected_revision": 2, "input": str(path), "expected_sha256": digest}
     def run(value, environment=None):
@@ -348,3 +365,133 @@ def test_fresh_noneditable_cli_file_to_owned_pg_digest_repeat_denial_and_tamper(
     result = run(data)
     assert result.returncode == 2 and json.loads(result.stdout)["error"] == "invalid_import"
     assert counts(factory, project) == (1, 1, 1) and ProjectStore(factory).get(OWNER, project) == current
+
+
+def test_fresh_noneditable_v2_owned_evidence_to_new_target(factory, tmp_path):
+    origin, retained = _fixture_origin(factory)
+    passage = retained.passages[0]
+    project, first, current = target(factory)
+    assert current.workspace_id != origin.workspace_id
+    assert counts(factory, project) == (0, 0, 0)
+    env = _cli_environment()
+    without_dsn = {key: value for key, value in env.items() if key != "NEXAWEAVE_APPSTORE_DSN"}
+    installed = """
+from importlib.util import find_spec
+from pathlib import Path
+import sys
+installed_root = Path(find_spec('nexaweave_storage').origin).resolve()
+assert installed_root.is_relative_to(Path(sys.prefix).resolve()) and 'site-packages' in installed_root.parts
+"""
+    export_child = tmp_path / "export-child.py"
+    export_child.write_text(installed + "INSPECT = False\n" + _BUNDLE_CHILD, encoding="utf-8")
+    inspect_child = tmp_path / "inspect-child.py"
+    inspect_child.write_text(installed + "INSPECT = True\n" + _BUNDLE_CHILD, encoding="utf-8")
+    import_child = tmp_path / "import-child.py"
+    import_child.write_text(installed + "START_REPEATABLE_READ = True\n" + _CHILD, encoding="utf-8")
+
+    def run(wrapper, data, environment):
+        result = subprocess.run(
+            [sys.executable, "-I", "-u", str(wrapper)], input=canonical(data),
+            capture_output=True, cwd=tmp_path, env=environment, timeout=30, check=False,
+        )
+        assert result.stderr == b""
+        return result.returncode, json.loads(result.stdout)
+
+    path = tmp_path / "portable-v2.json"
+    status, exported = run(export_child, {
+        "operation": "export", "schema_version": 2, "principal": "origin-owner",
+        "project_id": str(origin.project_id), "revision": origin.revision,
+        "source_revisions": [str(retained.source_revision)], "output": str(path),
+    }, env)
+    assert status == 0 and exported["ok"] is True
+    raw = path.read_bytes()
+    digest = hashlib.sha256(raw).hexdigest()
+    bundle = decode(raw)
+    assert bundle["payload"]["evidence_link"] == {
+        "source_revision": str(retained.source_revision), "evidence_id": str(passage.evidence_id),
+        "text_sha256": retained.text_sha256, "excerpt_sha256": passage.excerpt_sha256,
+    }
+    assert exported["result"]["schema_version"] == 2 and exported["result"]["artifact_sha256"] == digest
+    assert run(inspect_child, {
+        "operation": "inspect", "input": str(path), "expected_sha256": digest,
+    }, without_dsn) == (0, exported)
+
+    request = {"operation": "import", "principal": OWNER, "target_project_id": str(project),
+               "expected_revision": current.revision, "input": str(path), "expected_sha256": digest}
+    status, imported = run(import_child, request, env)
+    assert status == 0 and imported["ok"] is True
+    assert imported["result"]["artifact_sha256"] == digest
+    assert run(import_child, request, env) == (0, imported)
+    assert counts(factory, project) == (1, 1, 1)
+
+    sources = SourceStore(factory)
+    revision = remap_id(project, "source", digest, retained.source_revision)
+    evidence = remap_id(project, "passage", digest, passage.evidence_id)
+    restored = sources.get_source(OWNER, project, revision)
+    resolved = sources.resolve_evidence(OWNER, project, evidence)
+    assert restored.text.encode("utf-8") == retained.text.encode("utf-8")
+    assert restored.text_sha256 == retained.text_sha256
+    assert resolved.source_revision == revision and resolved.evidence_id == evidence
+    assert resolved.excerpt.encode("utf-8") == passage.excerpt.encode("utf-8")
+    assert (resolved.start, resolved.end, resolved.declared_page, resolved.excerpt_sha256) == (2, 6, 9, passage.excerpt_sha256)
+    with factory() as connection:
+        provenance, receipt_hash = connection.execute(
+            "SELECT provenance,provenance_sha256 FROM mf_app.research_imports "
+            "WHERE target_project_id=%s AND artifact_sha256=%s", (project, digest),
+        ).fetchone()
+    assert receipt_hash == imported["result"]["provenance_sha256"]
+    assert provenance["origin_project"] == bundle["payload"]["project"]
+    linked_source, = provenance["sources"]
+    linked_passage, = linked_source["passages"]
+    assert linked_source["source_revision"] == str(retained.source_revision)
+    assert linked_source["imported_source_revision"] == str(revision)
+    assert linked_passage["evidence_id"] == str(passage.evidence_id)
+    assert linked_passage["imported_evidence_id"] == str(evidence)
+
+    bundle["payload"]["evidence_link"]["evidence_id"] = str(uuid4())
+    bundle["payload_sha256"] = hashlib.sha256(canonical(bundle["payload"])).hexdigest()
+    invalid = canonical(bundle)
+    invalid_path = tmp_path / "mismatched-link.json"
+    invalid_path.write_bytes(invalid)
+    assert run(import_child, dict(request, input=str(invalid_path),
+                                 expected_sha256=hashlib.sha256(invalid).hexdigest()), without_dsn) == (
+        2, {"ok": False, "error": "invalid_import"},
+    )
+
+    busy_project, busy_first, busy_current = target(factory)
+    application = "w73-" + busy_project.hex
+    competitor_env = dict(env, NEXAWEAVE_APPSTORE_DSN=make_conninfo(
+        env["NEXAWEAVE_APPSTORE_DSN"], application_name=application,
+    ))
+    busy_request = dict(request, target_project_id=str(busy_project), expected_revision=busy_current.revision)
+    with ThreadPoolExecutor(max_workers=1) as executor, factory() as writer, factory() as monitor:
+        monitor.autocommit = True
+
+        @contextmanager
+        def held_writer():
+            yield writer
+
+        with writer.transaction():
+            competing = SourceStore(held_writer).ingest_text(OWNER, busy_project, uuid4(), "competing", "先")
+            waiting = executor.submit(run, import_child, busy_request, competitor_env)
+            deadline = time.monotonic() + 8
+            while time.monotonic() < deadline and not waiting.done():
+                blocked = monitor.execute(
+                    "SELECT EXISTS(SELECT 1 FROM pg_stat_activity "
+                    "WHERE application_name=%s AND %s=ANY(pg_blocking_pids(pid)))",
+                    (application, writer.info.backend_pid),
+                ).fetchone()[0]
+                if blocked:
+                    break
+                time.sleep(0.02)
+            else:
+                pytest.fail("v2 import never waited on the competing source transaction")
+        assert waiting.result(timeout=30) == (2, {"ok": False, "error": "conflict"})
+
+    assert counts(factory, busy_project) == (1, 0, 0)
+    assert sources.get_source(OWNER, busy_project, competing.source_revision) == competing
+    assert sources.get_source("origin-owner", origin.project_id, retained.source_revision) == retained
+    projects = ProjectStore(factory)
+    assert projects.history("origin-owner", origin.project_id) == [origin]
+    assert projects.history(OWNER, project) == [first, current]
+    assert projects.history(OWNER, busy_project) == [busy_first, busy_current]

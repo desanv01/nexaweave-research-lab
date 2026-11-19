@@ -8,6 +8,7 @@ from pathlib import Path
 
 
 _VERSION = 1
+_OCR_VERSION = 2
 _MAX_REQUEST_BYTES = 16 * 1024
 _LIMIT_FIELDS = frozenset(
     {
@@ -71,7 +72,8 @@ def _request():
         raise _ProtocolFailure() from None
     if type(value) is not dict or set(value) != {"version", "file_path", "limits"}:
         raise _ProtocolFailure()
-    if type(value["version"]) is not int or value["version"] != _VERSION:
+    version = value["version"]
+    if type(version) is not int or version not in (_VERSION, _OCR_VERSION):
         raise _ProtocolFailure()
     path = value["file_path"]
     if type(path) is not str or not path or "\x00" in path or not os.path.isabs(path):
@@ -81,28 +83,35 @@ def _request():
         raise _ProtocolFailure()
     if any(type(item) is not int or item <= 0 for item in fields.values()):
         raise _ProtocolFailure()
-    return path, fields
+    return version, path, fields
 
 
 def _run():
     try:
-        path, fields = _request()
+        version, path, fields = _request()
     except _ProtocolFailure:
         return {"version": _VERSION, "error": "parser_protocol_error"}
     try:
         parser = _load_file_parser()
         limits = parser.ParseLimits(**fields)
-        text = parser.FileParser.extract_text(path, limits=limits)
+        if version == _OCR_VERSION:
+            text = parser.FileParser._extract_scanned_pdf_text(path, limits=limits)
+        else:
+            text = parser.FileParser.extract_text(path, limits=limits)
         if type(text) is not str or len(text) > limits.max_text_chars:
-            return {"version": _VERSION, "error": "parser_protocol_error"}
-        return {"version": _VERSION, "text": text}
+            return {"version": version, "error": "parser_protocol_error"}
+        if version == _OCR_VERSION and (
+            not text.strip() or len(text.encode("utf-8")) > parser._SCANNED_OCR_MAX_TEXT_BYTES
+        ):
+            return {"version": version, "error": "parser_protocol_error"}
+        return {"version": version, "text": text}
     except FileNotFoundError:
-        return {"version": _VERSION, "error": "missing_file"}
+        return {"version": version, "error": "missing_file"}
     except Exception as error:
         code = getattr(error, "code", None)
         if type(code) is str and code in _ALLOWED_PARSE_ERRORS:
-            return {"version": _VERSION, "error": code}
-        return {"version": _VERSION, "error": "parser_failed"}
+            return {"version": version, "error": code}
+        return {"version": version, "error": "parser_failed"}
 
 
 def main():

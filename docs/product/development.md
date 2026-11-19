@@ -19,6 +19,99 @@ The installed distribution is `nexaweave-knowledge`; its canonical modules are `
 
 The manifest command checks archived source bytes and exceptions. The unit launcher uses dummy provider keys, disables .env loading, and blocks non-loopback connections in its guarded test processes while allowing local fixtures. Installing dependencies may contact a package registry. A passing run does not establish native engine, provider, browser or deployment qualification. Main owns execution and interpretation of project acceptance checks.
 
+## Local operator bootstrap and protected startup (W8.1)
+
+Use the locked backend and separate knowledge environments with Python 3.12.13
+and uv 0.11.25. Install the knowledge package non-editably in its own
+environment. Set `KNOWLEDGE_PYTHON` and `BACKEND_PYTHON` to the absolute
+interpreter paths for the two environments on your platform.
+
+```sh
+uv sync --locked --project backend --python 3.12.13
+uv sync --locked --project services/knowledge --python 3.12.13 --extra source-pdf
+uv pip install --python "$KNOWLEDGE_PYTHON" --no-deps --reinstall services/knowledge
+```
+
+Prepare an empty, explicitly owned PostgreSQL database on
+`127.0.0.1` or `::1`. The login role must own the database. Supply
+`NEXAWEAVE_APPSTORE_DSN` privately with the explicit host, port, database, role,
+and password. Clear ambient `PG*` variables before running the commands. Set
+the example shell variables below to the same approved database and principal,
+the initial project and workspace UUIDs, and a distinct source graph UUID and
+display graph ID.
+
+```sh
+"$KNOWLEDGE_PYTHON" -I -m nexaweave_execution.operator_bootstrap migrate \
+  --database "$DB_NAME" --owner-role "$DB_OWNER"
+"$KNOWLEDGE_PYTHON" -I -m nexaweave_storage import-project \
+  --principal "$PRINCIPAL" --workspace-id "$WORKSPACE_ID" --project-id "$PROJECT_ID" \
+  --display-id "$PROJECT_DISPLAY_ID" --input "$PROJECT_SNAPSHOT_FILE"
+"$KNOWLEDGE_PYTHON" -I -m nexaweave_execution.operator_bootstrap bind-source \
+  --database "$DB_NAME" --owner-role "$DB_OWNER" \
+  --principal "$PRINCIPAL" --workspace-id "$WORKSPACE_ID" --project-id "$PROJECT_ID" \
+  --graph-id "$GRAPH_ID" --display-graph-id "$DISPLAY_GRAPH_ID"
+```
+
+Migration reports `status: ready` and all eight verified catalogs. Each driver
+owns its transaction. If a later catalog refuses, earlier committed catalogs
+remain available for the same checked migration command to verify on retry.
+Import creates the project from a valid legacy snapshot or a matching
+revision-one export. Binding reports `status: bound` and the canonical source
+scope. An identical binding returns the same result on repeat. A conflicting
+or tombstoned binding refuses. Keep the project display ID separate from the
+graph display ID.
+
+Export the protected launcher settings below so the backend process and its
+children inherit them. Disable both dotenv loaders before starting:
+
+```sh
+export PYTHON_DOTENV_DISABLED=1
+export FLASK_SKIP_DOTENV=1
+```
+
+For the protected launcher, set `NEXAWEAVE_APP_MODE=research_local`,
+`FLASK_DEBUG=0`, `FLASK_HOST=127.0.0.1`, and the explicitly allowed origins in
+`NEXAWEAVE_ALLOWED_ORIGINS`. Set `KNOWLEDGE_BOOTSTRAP_SCRIPT` to the installed
+`nexaweave_knowledge/read_bootstrap.py` in the knowledge interpreter's
+`site-packages`. Supply `KNOWLEDGE_READ_TOKEN` privately and set
+`KNOWLEDGE_PRINCIPAL`, `KNOWLEDGE_DISPLAY_GRAPH_ID`, and
+`KNOWLEDGE_BOUND_SCOPE_JSON` from the binding receipt. Point
+`KNOWLEDGE_PG_HOST`, `KNOWLEDGE_PG_PORT`, `KNOWLEDGE_PG_DATABASE`,
+`KNOWLEDGE_PG_USER`, and `KNOWLEDGE_PG_PASSWORD` at the same owned store.
+Supply explicit `KNOWLEDGE_NEO4J_URI`, `KNOWLEDGE_NEO4J_USER`, and
+`KNOWLEDGE_NEO4J_PASSWORD` for the owned Neo4j service. Start with
+`"$BACKEND_PYTHON" backend/run.py`. The protected default listener is
+`127.0.0.1:5001`. Check `/health` for `research_local` and an authenticated
+`/api/source/library/<display_graph_id>` for the owner's source metadata.
+
+The guarded readiness case uses one disposable PostgreSQL fixture and the real
+launcher with a fixture-owned loopback readiness and shutdown hook. It checks
+catalog receipts, owner metadata across restart, and owned cleanup. Full
+Neo4j connectivity, Temporal workers, provider access, and the complete
+research journey have separate prerequisites and acceptance checks.
+
+## Opt-in scanned PDF uploads on Windows (W7.2)
+
+The ontology upload route uses ordinary text extraction by default. To enable
+OCR, set `NEXAWEAVE_SCANNED_PDF_OCR_ENABLED=1` in the backend process
+environment before startup. The supported profile requires:
+
+- Windows with a qualified child-process owner that enforces the 256 MiB
+  Windows Job commit limit. Use the pinned `PyMuPDF==1.26.7` package with its
+  OCR support available.
+- The preprovisioned English `eng.traineddata` asset in the `ocr_tessdata`
+  directory alongside the installed parser module. The parser requires an
+  ordinary, single-linked file of 4,113,088 bytes and verifies its pinned SHA-256
+  before recognition.
+
+The route tries OCR only for a single PDF of at most 2 MiB when ordinary
+extraction finds no text. The scan must match the bounded, single-page raw
+grayscale profile with a 1200 × 600 image. Text PDFs keep the ordinary path.
+After ordinary extraction admits a blank PDF, the route returns
+`422 no_extractable_text` when OCR is disabled or the OCR worker reports an
+unsupported scan. It returns `503 parser_unavailable` if OCR is attempted and
+the pinned package, English asset, or enforced process profile is unavailable.
+
 ## Opt-in PostgreSQL logical restore exercise (W8.2)
 
 Main/Codex alone qualifies and runs this selected exercise; authoring is not a
@@ -141,5 +234,7 @@ The build checks the Vue artifact; it does not exercise a browser journey. If ru
 ## Model and runtime boundaries
 
 Graphiti and self-hosted Neo4j Community form the knowledge direction. PostgreSQL and Temporal provide durable authority and orchestration. Generation is configurable for official DeepSeek deepseek-flash, with embeddings separately configured. Paid calls require actual local credentials and a concrete total spending cap. There is no qualified fully local, no-egress profile, full release sequence or public app deployment yet.
+
+The Workbench UI locale controls interface strings. The connected report and follow-up output-language choice independently sends `en` (English), `zh` (Chinese), or `ms` (Malay) in the request. The backend uses that choice to instruct the model which language to write in. The scripted follow-up test checks that English and Malay instructions produce distinct answers in the protected Read response. This verifies the request-to-answer path with a scripted model. Live-model prose can vary.
 
 For scoped work and review expectations, see [contributing](../../CONTRIBUTING.md). The older [import-stage development notes](../development.md) remain a historical source record, not the current status page.

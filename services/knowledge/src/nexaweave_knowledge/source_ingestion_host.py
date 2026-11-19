@@ -1,8 +1,12 @@
 """Owned retained source workflow. Graphiti is imported only after budget start."""
 import asyncio
+import hashlib
+import json
 import os
+import re
 from dataclasses import dataclass
 from urllib.parse import urlsplit
+from uuid import NAMESPACE_URL, uuid5
 
 from .contracts import OntologySpec
 from .source_library import SourceSettings, SourceLibrary, SourceError, encoded, uuid_value, scope_value
@@ -18,7 +22,8 @@ from nexaweave_storage import NotFound as SourceNotFound, Conflict as SourceConf
 MAX_BYTES = 256 * 1024
 ENVELOPE_OVERHEAD = 1024
 ERROR_CODES = {"invalid_request", "not_found", "source_denied", "tombstoned", "conflict",
-    "busy", "cancelled", "uncertain", "model_calls_disabled", "budget_denied", "source_unavailable", "result_too_large"}
+    "busy", "cancelled", "uncertain", "model_calls_disabled", "budget_denied",
+    "source_unavailable", "result_too_large", "ontology_ineligible"}
 
 
 def validate_payload(method, value):
@@ -29,8 +34,19 @@ def validate_payload(method, value):
             raise ValueError
         return uuid_value(value["operation_id"]), None, None
     version = value.get("schema_version")
-    if method not in {"plan", "execute"} or type(version) is not int or version not in (1, 2):
+    if method not in {"plan", "execute"} or type(version) is not int or version not in (1, 2, 3, 4):
         raise ValueError
+    if version in (3, 4):
+        if version == 3 and method != "plan":
+            raise ValueError
+        fields = {"schema_version", "source_revision", "operation_id", "project_revision"}
+        hashes = {"fingerprint", "execution_fingerprint"} if method == "execute" else set()
+        if (set(value) != fields | hashes
+                or any(type(value[key]) is not str or not re.fullmatch(r"[0-9a-f]{64}", value[key]) for key in hashes)
+                or type(value["project_revision"]) is not int
+                or not 1 <= value["project_revision"] <= 2_147_483_647):
+            raise ValueError
+        return uuid_value(value["operation_id"]), uuid_value(value["source_revision"]), value["project_revision"]
     identity_key = "operation_id" if version == 1 else "evidence_id"
     if set(value) != {"schema_version", "source_revision", identity_key, "ontology"}:
         raise ValueError
@@ -257,11 +273,14 @@ class SourceIngestionHost:
             "graph_ingestion_executed": state == "completed", "model_calls_made": None,
             "actual_usage_microusd": None}
 
-    async def _ingest(self, revision, operation, ontology, **selector):
+    async def _ingest(self, revision, operation, ontology, *, saved_plan=None, authorize_admission=None, **selector):
         lazy = LazyGraphitiProvider(self.settings, factory=self.provider_factory)
         coordinator = KnowledgeIngestionCoordinator(self.ledger, lazy, timeout_seconds=60)
         budgeted = BudgetedIngestion(self.bridge, self.budget, coordinator)
         try:
+            if saved_plan is not None:
+                return await budgeted.ingest_saved(saved_plan, account_id=self.settings.account_id,
+                    ceiling_microusd=self.settings.ceiling_microusd, authorize_admission=authorize_admission)
             receipt = await budgeted.ingest(self.settings.source.principal, self.settings.source.display_graph_id,
                 revision, operation, ontology, account_id=self.settings.account_id,
                 ceiling_microusd=self.settings.ceiling_microusd, **selector)
@@ -274,14 +293,98 @@ class SourceIngestionHost:
                 await asyncio.gather(*tasks, return_exceptions=True)
             await lazy.close()
 
+    def _plan_saved_ontology(self, scope, operation, revision, project_revision, version):
+        from .reviewed_ontology import ReviewedOntologyHost, validate_reviewed_ontology
+        from nexaweave_storage.store import _SELECT, _JOIN, _record
+
+        settings = self.settings.source
+        reviewed_host = ReviewedOntologyHost(
+            principal=settings.principal, display_graph_id=settings.display_graph_id,
+            scope=scope, connection_factory=self.connect,
+        )
+        saved = reviewed_host.load()
+        if saved.revision != project_revision:
+            raise SourceError("conflict")
+
+        try:
+            reviewed = validate_reviewed_ontology(saved.snapshot["ontology"])
+        except ValueError:
+            raise SourceError("conflict") from None
+
+        identity = json.dumps(
+            {"scope": scope.model_dump(mode="json"), "project_revision": project_revision, "ontology": reviewed},
+            ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False,
+        )
+        ontology_id = uuid5(NAMESPACE_URL, f"mirofish:saved-ontology:v{version}:" + identity)
+        schema = {"schema_version": 1, "revision": str(ontology_id), **reviewed}
+        inline = {"schema_version": 1, "operation_id": str(operation),
+                  "source_revision": str(revision), "ontology": schema}
+        try:
+            if version == 3:
+                _, _, ontology = validate_payload("plan", inline)
+            else:
+                execution_schema = {**schema, "saved_ontology": "project_revision_v4"}
+                if len(encoded({**inline, "ontology": execution_schema})) > MAX_BYTES:
+                    raise ValueError
+                ontology = OntologySpec.model_validate_json(encoded(execution_schema))
+                if ontology.model_dump(mode="json") != execution_schema:
+                    raise ValueError
+        except ValueError:
+            if version == 4 and reviewed_host.load() == saved:
+                raise SourceError("ontology_ineligible") from None
+            raise SourceError("conflict") from None
+
+        plan = self.bridge.plan(settings.principal, settings.display_graph_id, revision, operation, ontology)
+        if plan.scope != scope:
+            raise SourceError("source_denied")
+        if reviewed_host.load() != saved:
+            raise SourceError("conflict")
+        review_hash = plan.request_fingerprint
+        if version == 4:
+            review_request = {"scope": scope.model_dump(mode="json"),
+                              "source": plan.source.model_dump(mode="json"), "ontology": schema}
+            review_canonical = json.dumps(review_request, ensure_ascii=False, sort_keys=True,
+                                          separators=(",", ":"), allow_nan=False).encode("utf-8")
+            review_hash = hashlib.sha256(review_canonical).hexdigest()
+        fingerprint = hashlib.sha256(
+            f"mirofish:source-ingestion:saved-ontology-plan:v{version}\0".encode("ascii")
+            + identity.encode("utf-8") + b"\0" + review_hash.encode("ascii"),
+        ).hexdigest()
+        result = plan_result(plan)
+        result.update(schema_version=version, project_revision=project_revision, fingerprint=fingerprint)
+        if version == 4:
+            result["execution_fingerprint"] = plan.request_fingerprint
+
+        def authorize_admission(conn):
+            reviewed_host._authorize_revision_write(conn)
+            row = conn.execute("SELECT " + _SELECT + _JOIN +
+                "WHERE p.principal=%s AND p.project_id=%s AND p.workspace_id=%s "
+                "AND p.current_revision=%s AND r.revision=p.current_revision FOR SHARE OF p,r",
+                (settings.principal, scope.project_id, scope.workspace_id, project_revision)).fetchone()
+            if row is None or _record(row) != saved:
+                raise SourceError("conflict")
+
+        return plan, result, authorize_admission
+
     def execute(self, method, payload):
         operation, revision, ontology, *evidence = validate_payload(method, payload)
         selector = {"evidence_id": evidence[0]} if evidence else {}
         scope = self.authority.authorize()
         if method == "status":
             return self.status(operation)
-        plan = self.bridge.plan(self.settings.source.principal, self.settings.source.display_graph_id,
-                                revision, operation, ontology, **selector)
+        saved_execution = {}
+        version = payload.get("schema_version")
+        if version in (3, 4):
+            plan, draft, authorize_admission = self._plan_saved_ontology(scope, operation, revision, ontology, version)
+            if method == "plan":
+                return draft
+            if any(payload[key] != draft[key] for key in ("fingerprint", "execution_fingerprint")):
+                raise SourceError("conflict")
+            ontology = plan.ontology
+            saved_execution = {"saved_plan": plan, "authorize_admission": authorize_admission}
+        else:
+            plan = self.bridge.plan(self.settings.source.principal, self.settings.source.display_graph_id,
+                                    revision, operation, ontology, **selector)
         if plan.scope != scope:
             raise SourceError("source_denied")
         if evidence:
@@ -322,7 +425,7 @@ class SourceIngestionHost:
             if saved["state"] != "completed" or saved["receipt"] is None:
                 raise SourceError("uncertain")
             return _with_window(saved, plan)
-        receipt = asyncio.run(self._ingest(revision, operation, ontology, **selector))
+        receipt = asyncio.run(self._ingest(revision, operation, ontology, **selector, **saved_execution))
         valid = _receipt(receipt, plan.scope, operation, plan.request_fingerprint)
         if valid.evidence_ids != plan.source.evidence_ids:
             raise SourceError("uncertain")

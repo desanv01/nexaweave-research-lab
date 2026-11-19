@@ -16,7 +16,7 @@ WINDOWS_GROUPS={
     'test_windows_knowledge_descendant_cleanup_and_lock_reuse':5,
     'test_windows_knowledge_startup_failure_is_owned_and_reusable':2,
     'test_windows_descendant_parser_cleanup_and_repeated_reuse':5,
-    'test_windows_parser_startup_failure_has_no_child_code_or_retry':2,
+    'test_windows_parser_startup_failure_has_no_child_code_or_retry':3,
 }
 
 def child():

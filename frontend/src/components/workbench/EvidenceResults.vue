@@ -1,9 +1,12 @@
 <script setup>
 import { computed, nextTick, ref, watch } from 'vue'
 import { copyFor } from '../../i18n/workbench.js'
+import { temporalClaimCopy } from '../../i18n/temporalClaims.js'
 import DossierExport from './DossierExport.vue'
 const props = defineProps({ result: Object, locale: { type: String, default: 'en' } })
 const copy = computed(() => copyFor(props.locale))
+const timeCopy = computed(() => temporalClaimCopy(props.locale))
+const claimTimes = ['created_at', 'valid_at', 'invalid_at', 'expired_at']
 const selected = ref(null), inspector = ref(null), page = ref(0), passagePage = ref(0)
 let opener = null
 watch(() => props.result, () => { selected.value = null; opener = null; page.value = 0; passagePage.value = 0 })
@@ -16,6 +19,7 @@ const rows = computed(() => {
 })
 const visibleRows = computed(() => rows.value.slice(page.value * 10, (page.value + 1) * 10))
 const traces = computed(() => !props.result ? [] : isDossier.value ? props.result.research_trace : [props.result])
+const historical = computed(() => traces.value.some(trace => trace.historical === true))
 const passages = computed(() => !props.result ? [] : isDossier.value ? props.result.summary.passage_coverage : props.result.passage_coverage)
 const counts = computed(() => isDossier.value ? [props.result.summary.reference_links, props.result.summary.resolved_references, props.result.summary.unavailable_references] : [props.result.linked_citations, props.result.resolved_citations, props.result.unavailable_citations])
 const refMap = computed(() => new Map((props.result?.references || []).map(r => [r.key, r])))
@@ -34,10 +38,19 @@ function close() { selected.value = null; opener?.focus(); opener = null }
         <DossierExport v-if="isDossier" :result="result" :locale="locale" />
         <ol v-if="isDossier"><li v-for="section in result.sections" :key="section.ordinal"><h3>{{ section.heading }}</h3><p>{{ copy.returned }}: {{ section.source_claim_keys.length + section.simulation_observation_keys.length + section.other_claim_keys.length }}</p></li></ol>
         <dl class="counts"><div v-for="(label, i) in [copy.linked, copy.resolved, copy.missing]" :key="label"><dt>{{ label }}</dt><dd>{{ counts[i] }}</dd></div></dl>
+        <p v-if="historical" class="historical-result subtle">{{ timeCopy.history }}</p>
         <p v-if="!rows.length" class="empty">{{ copy.empty }}</p>
         <article v-for="row in visibleRows" :key="`${row.section.ordinal}-${row.fact.key || row.fact.provider_id}`" class="claim">
           <h3>{{ row.section.heading ? `${row.section.ordinal}. ${row.section.heading} · ` : '' }}{{ copy[row.label] }}</h3>
           <p class="claim-text">{{ row.fact.text || row.fact.fact }}</p><p class="subtle">{{ copy.support }}</p>
+          <dl v-if="claimTimes.some(key => row.fact[key])" class="claim-times">
+            <template v-for="key in claimTimes" :key="key">
+              <template v-if="row.fact[key]">
+                <dt>{{ timeCopy[key] }}</dt>
+                <dd><time class="mono" :datetime="row.fact[key]">{{ row.fact[key] }}</time></dd>
+              </template>
+            </template>
+          </dl>
           <details><summary>{{ copy.identity }}</summary><p class="mono">{{ row.fact.key || row.fact.provider_id }}</p><p class="mono">{{ JSON.stringify(row.fact.scope) }}</p></details>
           <p v-if="!row.fact.evidence_ids.length" class="subtle">{{ copy.noLinks }}</p>
           <div v-else class="references"><button v-for="reference in references(row.fact)" :key="reference.key" type="button" @click="select(reference, $event)" :aria-expanded="selected?.key === reference.key" aria-controls="passage-inspector">{{ reference.citation ? copy.inspect : copy.unavailable }} · {{ reference.evidence_id }}</button></div>
