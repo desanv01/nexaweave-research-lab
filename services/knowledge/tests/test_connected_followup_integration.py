@@ -1,6 +1,7 @@
 """Main actual inherited source/native/report/followup journey; scripted offline transport."""
 import asyncio
 import base64
+from contextlib import contextmanager
 from dataclasses import dataclass
 import hashlib
 import json
@@ -9,6 +10,7 @@ import os
 from pathlib import Path
 import re
 import sys
+from threading import local
 import time
 from types import SimpleNamespace
 from uuid import uuid4
@@ -183,6 +185,103 @@ class ScriptedFollowupTransport:
         with self.path.open('a',encoding='utf-8',newline='\n') as output:
             output.write(json.dumps(dict(closed=True,calls=self.count))+'\n')
 
+class WindowsRecoveryConnections:
+    """Reuse authentication within one synchronous recovery call on its worker thread."""
+
+    def __init__(self, factory):
+        from psycopg.pq import TransactionStatus
+
+        self.factory = factory
+        self.thread = local()
+        self.status = TransactionStatus
+
+    def __call__(self):
+        lease = getattr(self.thread, 'lease', None)
+        return self.factory() if lease is None else self._borrow(lease)
+
+    def _open(self, lease):
+        connection = self.factory()
+        lease.opens += 1
+        return connection
+
+    @staticmethod
+    def _close(lease, connection):
+        if not connection.closed:
+            connection.close()
+        if not connection.closed:
+            raise RuntimeError('windows_recovery_pg_close_incomplete')
+        lease.closes += 1
+
+    def _require_idle(self, connection):
+        if (connection.closed or connection.broken or connection.autocommit
+                or connection.isolation_level is not None or connection.read_only is not None
+                or connection.deferrable is not None
+                or connection.info.transaction_status != self.status.IDLE):
+            raise RuntimeError('windows_recovery_pg_lease_not_idle')
+
+    @contextmanager
+    def _borrow(self, lease):
+        if getattr(self.thread, 'lease', None) is not lease or not lease.usable:
+            raise RuntimeError('windows_recovery_pg_lease_outside_owner')
+        lease.acquisitions += 1
+        if lease.in_use:
+            # A nested store must keep its original, separate transaction and locks.
+            nested = self._open(lease)
+            lease.nested += 1
+            try:
+                with nested as connection:
+                    yield connection
+            finally:
+                self._close(lease, nested)
+            return
+        if lease.connection is None:
+            lease.connection = self._open(lease)
+        connection = lease.connection
+        self._require_idle(connection)
+        lease.in_use = True
+        try:
+            # Yield the real connection. Store transaction contexts remain top-level.
+            yield connection
+        except BaseException as error:
+            try:
+                if not connection.closed and connection.info.transaction_status in (
+                        self.status.INTRANS, self.status.INERROR):
+                    connection.rollback()
+                self._require_idle(connection)
+            except Exception as cleanup_error:
+                lease.usable = False
+                error.add_note(f'windows_recovery_pg_rollback_failed: {type(cleanup_error).__name__}')
+            raise
+        else:
+            try:
+                if not connection.closed and connection.info.transaction_status == self.status.INTRANS:
+                    connection.commit()
+                self._require_idle(connection)
+            except Exception:
+                lease.usable = False
+                raise
+        finally:
+            lease.in_use = False
+
+    def run(self, operation, payload):
+        if getattr(self.thread, 'lease', None) is not None:
+            raise RuntimeError('windows_recovery_pg_nested_operation')
+        lease = SimpleNamespace(connection=None, in_use=False, usable=True, acquisitions=0,
+                                opens=0, nested=0, closes=0)
+        self.thread.lease = lease
+        try:
+            result = operation(payload)
+        finally:
+            try:
+                if lease.connection is not None:
+                    self._close(lease, lease.connection)
+            finally:
+                del self.thread.lease
+        assert lease.usable and not lease.in_use
+        assert 0 < lease.opens == lease.closes == 1 + lease.nested <= lease.acquisitions
+        return result, (lease.acquisitions, lease.opens, lease.nested, lease.closes)
+
+
 @pytest.fixture(scope='module')
 def factory():
     from test_native_launch_store import factory as actual_factory
@@ -193,6 +292,9 @@ def factory():
 async def test_actual_report_followup_history_and_disabled_exports(factory, tmp_path, monkeypatch):
     global _followup_browser_completed
     browser_mode = _followup_browser_journey is True
+    recovery_connections = WindowsRecoveryConnections(factory) if sys.platform == 'win32' and not browser_mode else None
+    if recovery_connections is not None:
+        factory = recovery_connections
     _followup_browser_completed = False
     browser = None
     deadline = float(os.environ['NEXAWEAVE_FOLLOWUP_BROWSER_DEADLINE']) if browser_mode else None
@@ -556,6 +658,15 @@ async def test_actual_report_followup_history_and_disabled_exports(factory, tmp_
                     await asyncio.to_thread(followups.start,dict(schema_version=1,turn_id=stale['turn_id'],plan_sha256=stale['plan_sha256']))
                 assert follow_log.read_bytes()==before_follow_calls
                 phases.end('followup-stale-start-refusal')
+            recovery_counts = []
+
+            async def recover(operation, body):
+                if recovery_connections is None:
+                    return await asyncio.to_thread(operation, body)
+                result, counts = await asyncio.to_thread(recovery_connections.run, operation, body)
+                recovery_counts.append(counts)
+                return result
+
             phases.start('followup-disabled-history-exports-recovery')
             rows=[json.loads(line) for line in follow_log.read_text().splitlines()]
             assert sum('call' in row for row in rows)==6 and sum(row.get('closed',False) for row in rows)==2
@@ -568,7 +679,7 @@ async def test_actual_report_followup_history_and_disabled_exports(factory, tmp_
                 assert final_budget.accounted_ceiling_microusd==20
             assert final_budget.remaining_microusd==0 and final_budget.actual_usage_microusd is None
             final_log=follow_log.read_bytes()
-            page=await asyncio.to_thread(followups.history,dict(schema_version=1,report_id=reference['report_id'],
+            page=await recover(followups.history,dict(schema_version=1,report_id=reference['report_id'],
                 report_plan_sha256=reference['plan_sha256'],before_ordinal=None))
             assert page['total_completed']==2 and page['head_sha256']==head and [p['ordinal'] for p in page['pairs']]==[1,2]
             for identity,result,answer in finished:
@@ -586,13 +697,13 @@ async def test_actual_report_followup_history_and_disabled_exports(factory, tmp_
                     for kind in ('answer', 'conversation'):
                         await asyncio.to_thread(browser.perform, 'followup-export', {**identity, 'kind':kind})
                 retained=followups.store.get('owner',identity['turn_id'],identity['plan_sha256'])
-                again=await asyncio.to_thread(followups.start,identity)
+                again=await recover(followups.start,identity)
                 assert again['receipt']==result['receipt']
-                reread=await asyncio.to_thread(followups.read,identity)
+                reread=await recover(followups.read,identity)
                 assert reread['content']==answer and not reread['turn']['authorization']['model_calls_enabled']
                 for kind in ('answer','metadata','conversation','evidence','native_evidence','tools'):
                     body={**identity,'kind':kind}
-                    artifact_reply=await asyncio.to_thread(followups.download,body)
+                    artifact_reply=await recover(followups.download,body)
                     validate_turn_download(artifact_reply,body,result)
                     artifact=artifact_reply['artifact'];raw=base64.b64decode(artifact['content_base64'],validate=True)
                     assert len(raw)==artifact['size'] and hashlib.sha256(raw).hexdigest()==artifact['sha256']
@@ -609,6 +720,12 @@ async def test_actual_report_followup_history_and_disabled_exports(factory, tmp_
             assert all((input_root/name).read_bytes()==raw for name,raw in {**original_inputs,**original_outputs}.items())
             assert report_log.read_bytes()==before_calls
             phases.end('followup-disabled-history-exports-recovery')
+            if recovery_connections is not None:
+                assert len(recovery_counts) == 17
+                acquisitions, opens, nested, closes = map(sum, zip(*recovery_counts, strict=True))
+                assert opens == closes == len(recovery_counts) + nested and opens < acquisitions
+                phases.emit(f'windows-recovery-pg-calls-17-acquisitions-{acquisitions}'
+                            f'-opens-{opens}-nested-{nested}-closed-{closes}', 'end', time.monotonic())
 
             phases.start('foreign-report-read-refusal')
             foreign=dict(reference,report_id=str(uuid4()))
