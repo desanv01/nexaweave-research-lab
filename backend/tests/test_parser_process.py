@@ -1,8 +1,10 @@
 """Source tests for the one-shot parser process. Main executes these."""
 
 import codecs
+import hashlib
 import json
 import os
+import shutil
 import sys
 import threading
 from pathlib import Path
@@ -20,6 +22,7 @@ from app.utils.parser_process import (
     ParserFailedError,
     ParserProtocolError,
     ParserTimeoutError,
+    extract_scanned_pdf_text_isolated,
     extract_text_isolated,
 )
 
@@ -45,6 +48,20 @@ def owned_processes(monkeypatch):
     return launched
 
 
+@pytest.fixture
+def parser_owners(monkeypatch):
+    owners = []
+    real_owner = parser_process.OwnedProcess
+
+    def capture():
+        owner = real_owner()
+        owners.append(owner)
+        return owner
+
+    monkeypatch.setattr(parser_process, "OwnedProcess", capture)
+    return owners
+
+
 def _assert_owned_cleanup(owned_processes):
     assert owned_processes
     assert all(process.poll() is not None for process in owned_processes)
@@ -52,6 +69,13 @@ def _assert_owned_cleanup(owned_processes):
         thread for thread in threading.enumerate()
         if thread.name.startswith("nexaweave-parser-")
     ]
+
+
+def _assert_closed_windows_owner(owner):
+    assert owner.tree_empty and owner.closed and owner.job is None
+    assert owner.process.stdin.closed and owner.process.stdout.closed
+    assert owner.process._handle.closed
+    assert not Path(owner._directory_name).exists()
 
 
 @pytest.mark.parametrize("cleanup_error", [OSError, parser_process.OwnedProcessError])
@@ -156,9 +180,9 @@ def test_windows_descendant_parser_cleanup_and_repeated_reuse(
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows preownership failure of actual suspended process")
-@pytest.mark.parametrize("seam", ["assign", "resume"])
+@pytest.mark.parametrize("seam", ["assign", "resume", "verify_commit_limit"])
 def test_windows_parser_startup_failure_has_no_child_code_or_retry(
-    tmp_path, monkeypatch, owned_processes, seam
+    tmp_path, monkeypatch, owned_processes, parser_owners, seam
 ):
     from app.utils import owned_process
     marker = tmp_path / "must not execute.txt"
@@ -168,9 +192,38 @@ def test_windows_parser_startup_failure_has_no_child_code_or_retry(
     def fail(self, process):
         raise owned_process.OwnedProcessError()
 
-    monkeypatch.setattr(owned_process._WindowsJob, seam, fail)
-    with pytest.raises(ParserFailedError):
-        extract_text_isolated(tmp_path / "source.txt", timeout_seconds=1)
+    job_type = owned_process._WindowsJob
+    if seam == "verify_commit_limit":
+        assignments, verified = [], []
+        real_assign, real_verify = job_type.assign, job_type.verify_commit_limit
+
+        def assign(job, process):
+            real_assign(job, process)
+            assignments.append((job, process))
+
+        def refuse_mismatched_limit(job, expected_bytes):
+            assert assignments == [(job, owned_processes[0])]
+            assert job.active_count() == 1 and owned_processes[0].poll() is None
+            assert expected_bytes == 268435456
+            verified.append(expected_bytes)
+            real_verify(job, expected_bytes - 4096)
+
+        def forbid_resume(*_args):
+            pytest.fail("a refused memory profile reached resume")
+
+        monkeypatch.setattr(job_type, "assign", assign)
+        monkeypatch.setattr(job_type, seam, refuse_mismatched_limit)
+        monkeypatch.setattr(job_type, "resume", forbid_resume)
+        with pytest.raises(ParserFailedError, match=r"^parser_failed$"):
+            extract_scanned_pdf_text_isolated(tmp_path / "source.pdf", timeout_seconds=1)
+        assert verified == [268435456] and assignments[0][0].handle is None
+        assert len(parser_owners) == 1 and not parser_owners[0].started
+        assert parser_owners[0].terminal_job_memory is None
+        _assert_closed_windows_owner(parser_owners[0])
+    else:
+        monkeypatch.setattr(job_type, seam, fail)
+        with pytest.raises(ParserFailedError):
+            extract_text_isolated(tmp_path / "source.txt", timeout_seconds=1)
     assert not marker.exists() and len(owned_processes) == 1
     assert owned_processes[0]._handle.closed
     _assert_owned_cleanup(owned_processes)
@@ -204,6 +257,75 @@ def test_real_fixed_docx_child_unicode_tables_and_safe_failures(tmp_path, owned_
         extract_text_isolated(source)
     assert "private" not in str(caught.value)
     _assert_owned_cleanup(owned_processes)
+
+
+def test_scanned_ocr_profile_refusal_and_qualified_success(
+    tmp_path, monkeypatch, owned_processes, parser_owners
+):
+    import fitz
+    from test_file_parser_bounds import _scanned_pdf_fixture
+
+    with fitz.open() as staging:
+        page = staging.new_page(width=432, height=216)
+        page.insert_text((36, 80), "PUBLIC LIBRARY NOTICE", fontsize=24)
+        page.insert_text((36, 135), "MEETING AT 10 AM", fontsize=24)
+        pixmap = page.get_pixmap(dpi=200, colorspace=fitz.csGRAY, alpha=False)
+        assert (pixmap.width, pixmap.height, pixmap.n) == (1200, 600, 1)
+        samples = pixmap.samples
+    pdf = _scanned_pdf_fixture(samples, b"q 432 0 0 216 0 0 cm /Im0 Do Q\n")
+    source = tmp_path / "image-only.pdf"
+    source.write_bytes(pdf)
+    original_sha256 = hashlib.sha256(pdf).hexdigest()
+    limits = ParseLimits(max_file_bytes=len(pdf), max_pdf_pages=1, max_text_chars=128)
+
+    scratch = tmp_path / "child scratch"
+    scratch.mkdir()
+    monkeypatch.setattr(parser_process.tempfile, "tempdir", str(scratch))
+    assert extract_text_isolated(source, limits=limits) == ""
+    assert parser_owners[0].terminal_job_memory is None
+    expected_children = 1
+
+    if os.name == "nt":
+        # Exercise the real missing-data response under the Windows memory profile.
+        unprovisioned = tmp_path / "unprovisioned"
+        unprovisioned.mkdir()
+        installed_worker = parser_process._WORKER_SCRIPT
+        for name in ("parser_worker.py", "file_parser.py"):
+            shutil.copyfile(installed_worker.with_name(name), unprovisioned / name)
+        with monkeypatch.context() as isolated_installation:
+            isolated_installation.setattr(
+                parser_process, "_WORKER_SCRIPT", unprovisioned / "parser_worker.py",
+            )
+            with pytest.raises(ParserFailedError, match=r"^parser_failed$"):
+                extract_scanned_pdf_text_isolated(source, limits=limits)
+        expected_children += 1
+        assert parser_owners[-1].started
+    else:
+        with pytest.raises(ParserFailedError, match=r"^parser_failed$"):
+            extract_scanned_pdf_text_isolated(source, limits=limits)
+        assert parser_owners[-1].process is None and parser_owners[-1].closed
+
+    # Only the separately admitted, provisioned native lane enables OCR.
+    # Once enabled, missing English data or unusable OCR output fails the case.
+    if os.environ.get("NEXAWEAVE_TEST_SCANNED_OCR") == "1":
+        assert os.name == "nt", "qualified scanned OCR requires the Windows Job profile"
+        text = extract_scanned_pdf_text_isolated(source, limits=limits)
+        assert [" ".join(line.split()) for line in text.splitlines() if line.strip()] == [
+            "PUBLIC LIBRARY NOTICE", "MEETING AT 10 AM",
+        ]
+        limit, process_peak, job_peak = parser_owners[-1].terminal_job_memory
+        assert limit == 268435456 and 0 < process_peak <= job_peak <= limit
+        expected_children += 1
+
+    assert hashlib.sha256(source.read_bytes()).hexdigest() == original_sha256
+    assert len(owned_processes) == expected_children
+    assert all(process.returncode == 0 for process in owned_processes)
+    if os.name == "nt":
+        assert [owner.process for owner in parser_owners] == owned_processes
+        for owner in parser_owners:
+            _assert_closed_windows_owner(owner)
+    _assert_owned_cleanup(owned_processes)
+    assert not list(scratch.iterdir())
 
 
 def test_real_pdf_malformed_encrypted_and_limits(tmp_path):
