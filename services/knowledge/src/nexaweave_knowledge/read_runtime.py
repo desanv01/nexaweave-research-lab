@@ -73,7 +73,11 @@ class ReadSettings:
 
     @classmethod
     def from_environment(cls):
-        env = os.environ
+        return cls.from_mapping(os.environ)
+
+    @classmethod
+    def from_mapping(cls, env):
+        """Validate a captured settings mapping without opening any connections."""
         try:
             principal = env["KNOWLEDGE_PRINCIPAL"]
             display = env["KNOWLEDGE_DISPLAY_GRAPH_ID"]
@@ -89,14 +93,18 @@ class ReadSettings:
             pg_password = _secret(env["KNOWLEDGE_PG_PASSWORD"])
             neo4j_uri = _text(env["KNOWLEDGE_NEO4J_URI"], maximum=512)
             parsed = urlsplit(neo4j_uri)
-            if (parsed.scheme not in {"bolt", "neo4j"} or not parsed.hostname or parsed.username
-                    or parsed.password or parsed.path or parsed.query or parsed.fragment):
+            if (parsed.scheme not in {"bolt", "neo4j"} or not parsed.hostname
+                    or parsed.username is not None or parsed.password is not None or parsed.path
+                    or "?" in neo4j_uri or "#" in neo4j_uri or parsed.netloc.endswith(":")):
+                raise ValueError
+            port = parsed.port
+            if port is not None and not 1 <= port <= 65535:
                 raise ValueError
             neo4j_user = _text(env["KNOWLEDGE_NEO4J_USER"], maximum=128)
             neo4j_password = _secret(env["KNOWLEDGE_NEO4J_PASSWORD"])
             return cls(principal, display, scope, pg_host, pg_port, pg_database, pg_user,
                        pg_password, neo4j_uri, neo4j_user, neo4j_password)
-        except (KeyError, ValueError, TypeError):
+        except (KeyError, ValueError, TypeError, RecursionError):
             raise ValueError("invalid knowledge read configuration") from None
 
     def connection(self):

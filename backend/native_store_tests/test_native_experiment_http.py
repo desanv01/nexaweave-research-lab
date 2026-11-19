@@ -5,6 +5,8 @@ Main supplies the installed child interpreter and separate socket proof.
 """
 from dataclasses import replace
 import hashlib
+from itertools import combinations
+import json
 import os
 from pathlib import Path
 from uuid import uuid4
@@ -46,7 +48,8 @@ def protected_fixture(experiment_python, connection_factory, cohort_fixture, tmp
     extras = []
     for index, state in enumerate(('declared', 'uncertain', 'cancelled')):
         request = replace(base.members[0].request, run_id=uuid4(),
-            simulation_id='http-'+state+'-'+uuid4().hex, seed=(-(2**63), 2**63-1, 2**53+1)[index])
+            simulation_id='http-'+state+'-'+uuid4().hex, seed=(-(2**63), 2**63-1, 2**53+1)[index],
+            platforms=('twitter',) if state == 'declared' else base.members[0].request.platforms)
         store.register(request)
         if state == 'declared':
             store.request_cancel('owner', request.run_id)
@@ -105,8 +108,18 @@ def test_actual_catalog_selected_comparison_no_writes(connection_factory, protec
     from nexaweave_execution.native_run_store import NativeRunStore
     settings, facade, cohort, runs, manifest, raw = protected_fixture
     before_files = [hashes(root) for _, root, _ in runs]
+    recording_roots = [Path(member.recording.bundle) for member in cohort.members if member.recording is not None]
+    before_recordings = [hashes(root) for root in recording_roots]
     store = NativeRunStore(connection_factory)
     before_records = [store.get('owner', m.request.run_id) for m in cohort.members]
+    evaluations = []
+    real_execute = facade.execute
+
+    def observe_execute(method, request):
+        evaluations.append(method)
+        return real_execute(method, request)
+
+    monkeypatch.setattr(facade, 'execute', observe_execute)
     client = lean_client(monkeypatch, settings, facade)
     auth = {'Authorization': 'Bearer '+settings.token}
     response = client.get('/api/experiments/catalog', headers=auth)
@@ -118,6 +131,8 @@ def test_actual_catalog_selected_comparison_no_writes(connection_factory, protec
     value = {'version': 1, 'title': 'Actual offline observations 猫', 'member_ids': selected}
     response = client.post('/api/experiments/compare', headers=auth, json=value)
     assert response.status_code == 200
+    assert response.mimetype == 'application/json'
+    assert 'Content-Disposition' not in response.headers
     comp = comparison(response.json['data'], cat, value)
     assert comp['accounting'] == dict(successful=2, failed=1, pending=1, cancelled=1, uncertain=1)
     assert comp['cancellation_intent'] == {'cancel_requested_count': 2, 'overlaps_disposition_accounting': True}
@@ -127,11 +142,79 @@ def test_actual_catalog_selected_comparison_no_writes(connection_factory, protec
         for p in ('twitter', 'reddit'):
             assert m['metrics'][p]['logged_action_total'] == source[2][p]['total']
             assert m['metrics'][p]['logged_action_by_type'] == source[2][p]['actions']
+
+    media_type = 'application/vnd.nexaweave.comparison-report+json'
+    denied = client.post('/api/experiments/compare', headers={'Accept': media_type}, json=value)
+    assert denied.status_code == 401
+    assert denied.json == {'success': False, 'error': {'code': 'unauthorized'}}
+    assert 'Content-Disposition' not in denied.headers
+    assert evaluations == ['catalog', 'compare']
+    attachment = client.post('/api/experiments/compare', headers={**auth, 'Accept': media_type}, json=value)
+    assert evaluations == ['catalog', 'compare', 'compare']
+    assert attachment.status_code == 200 and attachment.mimetype == media_type
+    assert attachment.headers['Content-Disposition'] == 'attachment; filename="nexaweave-comparison-report.json"'
+    assert len(attachment.data) <= 512 * 1024
+    for observed in (response, denied, attachment):
+        assert observed.headers['Cache-Control'] == 'no-store'
+        assert observed.headers['X-Content-Type-Options'] == 'nosniff'
+    report = json.loads(attachment.data)
+    report_digest = report.pop('report_digest')
+    digest_input = json.dumps(report, ensure_ascii=True, allow_nan=False, sort_keys=True, separators=(',', ':'))
+    assert report_digest == hashlib.sha256(digest_input.encode('ascii')).hexdigest()
+
+    original = {member['member_id']: member for member in comp['members']}
+    cohort_members = {member.member_id: member for member in cohort.members}
+    expected_members = []
+    for member_id in selected:
+        member = cohort_members[member_id]
+        expected_members.append({
+            'member_id': member_id, 'member_label': member.member_label, 'case_label': member.case_label,
+            'run_id': str(member.request.run_id), 'disposition': original[member_id]['disposition'],
+            'project_revision': member.request.project_revision, 'request_fingerprint': member.request.fingerprint,
+            'record_digest': original[member_id]['record_digest'],
+            'recording_revision': member.recording.revision if member.recording is not None else None,
+        })
+    # The existing real-run fixture counts actions directly from each platform log.
+    counts = {member.member_id: observed for member, _, observed in runs if observed is not None}
+    fields = {(pair['left_member_id'], pair['right_member_id']): pair['fields']
+              for pair in comp['comparability_matrix']}
+    expected_pairs = []
+    for left, right in combinations(selected, 2):
+        common = set(cohort_members[left].request.platforms) & set(cohort_members[right].request.platforms)
+        differences = []
+        for platform in ('twitter', 'reddit'):
+            if platform not in common:
+                continue
+            l_total = counts[left][platform]['total'] if left in counts else None
+            r_total = counts[right][platform]['total'] if right in counts else None
+            differences.append({
+                'platform': platform, 'left_logged_action_total': l_total, 'right_logged_action_total': r_total,
+                'right_minus_left': None if None in (l_total, r_total) else r_total - l_total,
+            })
+        expected_pairs.append({'left_member_id': left, 'right_member_id': right,
+                               'fields': fields[left, right], 'platform_differences': differences})
+    assert report == {
+        'version': 1, 'title': value['title'], 'project_id': settings.scope['project_id'],
+        'project_revision': cohort.members[0].request.project_revision,
+        'cohort_manifest_digest': hashlib.sha256(raw).hexdigest(),
+        'native_result_digest': comp['native_result_digest'],
+        'public_projection_digest': comp['public_projection_digest'], 'coverage': comp['coverage'],
+        'members': expected_members, 'pairs': expected_pairs,
+    }
+    pending_id = 'http-declared'
+    pending_pairs = [pair for pair in report['pairs']
+                     if pending_id in (pair['left_member_id'], pair['right_member_id'])]
+    assert len(pending_pairs) == len(selected) - 1
+    for pair in pending_pairs:
+        row, = pair['platform_differences']
+        assert row['platform'] == 'twitter'
+        side = 'left' if pair['left_member_id'] == pending_id else 'right'
+        assert row[f'{side}_logged_action_total'] is None
+        assert row['right_minus_left'] is None
     assert [hashes(root) for _, root, _ in runs] == before_files
+    assert [hashes(root) for root in recording_roots] == before_recordings
     assert [store.get('owner', m.request.run_id) for m in cohort.members] == before_records
     assert manifest.read_bytes() == raw
-    assert response.headers['Cache-Control'] == 'no-store'
-    assert response.headers['X-Content-Type-Options'] == 'nosniff'
 
 
 @pytest.mark.parametrize('kind', ['changed', 'missing', 'foreign', 'absent_run', 'conflict', 'stale_revision', 'pg'])

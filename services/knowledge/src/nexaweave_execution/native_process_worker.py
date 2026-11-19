@@ -7,8 +7,11 @@ import ipaddress
 import json
 import os
 import socket
+from time import monotonic
 from uuid import UUID
 
+from .native_interview_protocol import (FRAME_BYTES, MAX_ANSWER_BYTES, OWNER_WINDOW_SECONDS,
+    base_fields, command as interview_command, frame, private_text, timestamp, unframe, validate_frame)
 from .native_run_contracts import NativeRunRequest
 
 MAX_MESSAGE = 4096
@@ -104,8 +107,43 @@ def _deny_external_sockets() -> None:
     socket.getaddrinfo = getaddrinfo
 
 
+def _serve_interview(control, private_pipe, request, attempt, instance, factory, session):
+    model = session.model_for('twitter')
+    boundary = model._audited_interview.boundary
+    deadline = min(session._start_deadline - 3, boundary.deadline - 3,
+                   monotonic() + OWNER_WINDOW_SECONDS)
+    if boundary.calls >= boundary.limits['max_calls'] or deadline <= monotonic():
+        return
+    base = base_fields(request, attempt, instance)
+    control.send_bytes(encode_message({'kind': 'interview_ready', **base, 'deadline': deadline}))
+    if not private_pipe.poll(max(0, deadline - monotonic())):
+        return
+    wire = validate_frame(unframe(private_pipe.recv_bytes(FRAME_BYTES)), 'interview', base, {'command', 'deadline'})
+    payload = interview_command(wire['command'])
+    expires = timestamp(wire['deadline'])
+    if payload['launch_id'] != base['run_id'] or expires > deadline:
+        raise ValueError
+    reply = {'kind': 'interview_reply', **base,
+             'command_id': payload['command_id'], 'agent_id': payload['agent_id'], 'response': None}
+    try:
+        factory.validate(request)
+        if monotonic() >= expires or boundary.calls >= boundary.limits['max_calls']:
+            raise ValueError
+        before = boundary.calls
+        response = session.transient_interview(platform='twitter', agent_id=payload['agent_id'],
+                                               prompt=payload['prompt'])
+        if (boundary.calls != before + 1 or response['platform'] != 'twitter'
+                or response['agent_id'] != payload['agent_id'] or monotonic() >= expires):
+            raise ValueError
+        answer = private_text(response['response'], MAX_ANSWER_BYTES, MAX_ANSWER_BYTES)
+        raw = frame({**reply, 'response': answer})
+    except Exception:
+        raw = frame(reply)
+    private_pipe.send_bytes(raw)
+
+
 def child_main(connection, request_bytes: bytes, attempt_text: str,
-               instance_text: str, factory, go_timeout: float) -> None:
+               instance_text: str, factory, go_timeout: float, private_pipe=None) -> None:
     """Validate, announce ready, await one go, then own session through close."""
     try:
         scrub_child_environment()
@@ -135,6 +173,8 @@ def child_main(connection, request_bytes: bytes, attempt_text: str,
             session = factory.create_session(request)
             factory.validate(request)
             session.start()
+            if private_pipe is not None:
+                _serve_interview(connection, private_pipe, request, attempt, instance, factory, session)
             outcome = "completed"
         except Exception:
             outcome = "failed"
@@ -157,4 +197,8 @@ def child_main(connection, request_bytes: bytes, attempt_text: str,
         # exception text, model output, or a path through the control channel.
         pass
     finally:
-        connection.close()
+        try:
+            if private_pipe is not None:
+                private_pipe.close()
+        finally:
+            connection.close()

@@ -8,8 +8,13 @@ from __future__ import annotations
 import math
 import threading
 from dataclasses import dataclass
+from time import monotonic
+from typing import Callable
+from uuid import UUID
 
-from .native_run_contracts import (InvalidNativeRun, NativeRunDenied, NativeRunError,
+from .native_interview_protocol import CALL_SECONDS, InterviewUnavailable
+
+from .native_run_contracts import (InvalidNativeRun, NativeChildIdentity, NativeRunDenied, NativeRunError,
     NativeRunReceipt, NativeRunRequest, NativeRunUncertain, RunState)
 from .native_run_coordinator import NativeRunCoordinator
 from .native_run_store import NativeRunRecord
@@ -47,6 +52,25 @@ class SupervisorStatus:
     thread_alive: bool
     receipt: NativeRunReceipt | None
     error_code: str | None
+
+
+@dataclass(repr=False)
+class _InterviewSlot:
+    command: dict | None
+    admit: object
+    expires: float
+    done: threading.Event
+    result: tuple[UUID, NativeChildIdentity, str] | None = None
+
+
+@dataclass(frozen=True, repr=False)
+class _InterviewCompletion:
+    receipt: NativeRunReceipt
+    child: NativeChildIdentity
+    owner_id: UUID
+    response: str
+    expires: float
+    confirm: Callable[[], None]
 
 
 def _seconds(value: object, *, maximum: float = 300.0) -> float:
@@ -100,6 +124,9 @@ class NativeRunSupervisor:
         self._phase = "new"
         self._record: NativeRunRecord | None = None
         self._error_code: str | None = None
+        self._interview_slot = None
+        self._interview_spent = False
+        self._interview_fenced = False
 
     def _publish(self, *, phase: str | None = None,
                  record: NativeRunRecord | None = None, error_code: str | None = None) -> None:
@@ -171,6 +198,99 @@ class NativeRunSupervisor:
         self.coordinator.store.request_cancel(self.request.principal,
                                               self.request.run_id)
 
+    def fence_interview(self) -> None:
+        """Prevent private dispatch or release without doing any I/O."""
+        with self._condition:
+            self._interview_fenced = True
+            slot, self._interview_slot = self._interview_slot, None
+            if slot is not None:
+                slot.command = slot.result = None
+                slot.done.set()
+
+    @property
+    def interview_ready(self):
+        with self._condition:
+            return (self._phase == RunState.running.value and not self._interview_spent
+                    and not self._interview_fenced
+                    and not self._close_requested and not self._cancel_requested
+                    and getattr(self.coordinator.driver, 'interview_ready', False) is True)
+
+    def interview(self, command, admit):
+        expires = monotonic() + min(CALL_SECONDS, self.call_budget_seconds)
+        slot = _InterviewSlot(command, admit, expires, threading.Event())
+        with self._condition:
+            if (self._phase != RunState.running.value or self._interview_spent or self._interview_fenced
+                    or self._close_requested or self._cancel_requested
+                    or self._thread is None
+                    or getattr(self.coordinator.driver, 'interview_ready', False) is not True):
+                raise InterviewUnavailable()
+            self._interview_spent = True
+            self._interview_slot = slot
+            owner = self._thread
+        self._wake.set()
+        try:
+            if not slot.done.wait(max(0, expires - monotonic())):
+                raise InterviewUnavailable()
+            with self._condition:
+                if self._interview_slot is not slot or slot.result is None:
+                    raise InterviewUnavailable()
+                expires = slot.expires
+            owner.join(max(0, expires - monotonic()))
+            with self._condition:
+                if self._interview_slot is not slot or slot.result is None:
+                    raise InterviewUnavailable()
+                attempt, child, answer = slot.result
+                record = self._record
+                if (record is None or record.attempt_id != attempt or record.child != child
+                        or record.receipt is None or record.owner_id != self.coordinator.owner_id):
+                    raise InterviewUnavailable()
+                self._confirm_interview(record, owner, expires)
+                return _InterviewCompletion(record.receipt, child, record.owner_id, answer, expires,
+                    lambda: self._confirm_interview(record, owner, expires))
+        finally:
+            with self._condition:
+                if self._interview_slot is slot:
+                    self._interview_slot = None
+                slot.command = slot.result = None
+
+    def _confirm_interview(self, record, owner, expires) -> None:
+        with self._condition:
+            if (self._interview_fenced or monotonic() >= expires or owner.is_alive()
+                    or not self._cleanup_done or self._cleanup_pending or self._error_code is not None
+                    or self._record is not record or record.state != RunState.completed
+                    or record.cancel_requested or record.receipt.outcome != 'completed'):
+                raise InterviewUnavailable()
+
+    def _serve_interview(self, record):
+        with self._condition:
+            slot = self._interview_slot
+            if slot is None or slot.command is None:
+                return
+            command, slot.command = slot.command, None
+        try:
+            if record.cancel_requested or monotonic() >= slot.expires:
+                raise InterviewUnavailable()
+            driver = self.coordinator.driver
+
+            def send(current, command, expires):
+                with self._condition:
+                    if (self._interview_slot is not slot or self._interview_fenced
+                            or self._close_requested or self._cancel_requested):
+                        raise InterviewUnavailable()
+                    return driver.send_interview(current, command, expires)
+
+            expires = slot.admit(record, self.coordinator.owner_id, send, command, slot.expires)
+            with self._condition:
+                if self._interview_slot is not slot:
+                    return
+                slot.expires = expires
+            answer = driver.finish_interview(record, expires)
+            with self._condition:
+                if self._interview_slot is slot and monotonic() < expires:
+                    slot.result = (record.attempt_id, record.child, answer)
+        except Exception:
+            slot.done.set()
+
     def _run(self) -> None:
         # Registration lets a prelaunch stop persist without claiming a launch.
         record = self.coordinator.store.register(self.request)
@@ -204,6 +324,7 @@ class NativeRunSupervisor:
             if record.state != RunState.running:
                 self._outcome.set()
                 return
+            self._serve_interview(record)
             self._wake.wait(self.poll_seconds)
             self._wake.clear()
 
@@ -226,6 +347,7 @@ class NativeRunSupervisor:
                     self._cleanup_pending = False
                     self._condition.notify_all()
                 return interrupt
+            self.fence_interview()
             with self._condition:
                 self._cleanup_pending = True
                 self._condition.notify_all()
@@ -260,7 +382,12 @@ class NativeRunSupervisor:
             self._started.set()
             self._outcome.set()
         finally:
-            cleanup_interrupt = self._cleanup_loop()
+            try:
+                cleanup_interrupt = self._cleanup_loop()
+            finally:
+                with self._condition:
+                    if self._interview_slot is not None:
+                        self._interview_slot.done.set()
             if interrupt is None:
                 interrupt = cleanup_interrupt
         if interrupt is not None:
@@ -305,6 +432,7 @@ class NativeRunSupervisor:
 
     def request_cancel(self) -> SupervisorStatus:
         with self._condition:
+            self.fence_interview()
             self._cancel_requested = True
             active = self._start_spent and self._thread is not None
         self._wake.set()
@@ -322,6 +450,8 @@ class NativeRunSupervisor:
     def close(self, wait_seconds: float = 5.0) -> bool:
         wait_seconds = _seconds(wait_seconds)
         with self._condition:
+            if self._record is None or self._record.state != RunState.completed:
+                self.fence_interview()
             self._close_requested = True
             self._cancel_requested = True
             if self._thread is None:
