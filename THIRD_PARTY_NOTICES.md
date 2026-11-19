@@ -6,7 +6,7 @@ This is an initial source-level inventory, not a complete release SBOM or legal 
 | --- | --- | --- |
 | [MiroFish](https://github.com/666ghj/MiroFish) | All 128 archived source files imported from `MiroFish-main.zip`; snapshot commit unknown | Imported [GNU AGPL v3 license](LICENSE) and existing file notices retained. ZIP hash and mapping in [archive manifest](docs/upstream/archive-manifest.json). |
 | [OASIS / CAMEL](https://github.com/camel-ai/oasis) | Declared in the inherited backend dependency set; engine behavior retained as a target | Consult exact dependency releases and notices before distribution; no relicensing implied. |
-| [Graphiti](https://github.com/getzep/graphiti) | Approved target; no code imported in U00 | Apache-2.0 for the target project; exact version and notices to be recorded at integration. |
+| [Graphiti](https://github.com/getzep/graphiti) | Locked knowledge-service dependency `graphiti-core==0.30.2`. Wheel `graphiti_core-0.30.2-py3-none-any.whl` with SHA-256 `97674a49514130db175faecf23221ce9338240be3cbe13a7e23e5a5033892b9f`. | Wheel metadata declares Apache-2.0. [License text shipped in the wheel](docs/licenses/graphiti-core-0.30.2-LICENSE.txt). |
 | [Neo4j Community](https://neo4j.com/open-source-project/) | Approved self-hosted database target; no binary bundled in U00 | GPLv3 Community terms; packaging and version to be reviewed. |
 | [PyMuPDF / MuPDF](https://pymupdf.readthedocs.io/en/latest/about.html) | Declared in inherited backend dependencies | AGPL/commercial terms apply according to distribution/use. |
 | Zep Cloud | Legacy integration remains in imported source and lockfile; not a target runtime prerequisite | Provider client and service terms require review if redistributed/used. |

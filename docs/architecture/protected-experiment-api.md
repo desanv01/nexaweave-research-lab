@@ -76,6 +76,30 @@ validated member observations. Rehashing a corrupt aggregate does not bypass
 validation. The private reply includes a catalog beside comparison for exact
 cohort joining; HTTP returns only the requested public projection.
 
+### Recorded comparison attachment
+
+`POST /api/experiments/compare` can return a version 1 JSON attachment with
+the same request body. Send the exact `Accept: application/vnd.nexaweave.comparison-report+json`
+header to opt in. Other Accept values still return the ordinary JSON envelope.
+The server evaluates the protected comparison once, validates it in full, and
+projects the attachment from that result. The response uses the requested media
+type and the fixed filename `nexaweave-comparison-report.json`, with the same
+`no-store` and `nosniff` policy. Invalid results and attachments over 512 KiB
+return the existing `experiment_unavailable`/503 error.
+
+The attachment carries the project ID and revision, cohort manifest digest,
+original native and public comparison digests, and inherited coverage. Its
+ordered `members` bind each member and run to the request fingerprint, run
+record digest, and exact recording revision when available. The `pairs` use
+the verified comparison matrix order and retain its input fields. Within each
+pair, `platform_differences` lists the platforms admitted for both members in
+the validated catalog, in Twitter then Reddit order. The list is empty if the
+pair has no shared platforms. Each row includes the left and right recorded
+logged-action totals and their `right_minus_left` difference. An unavailable
+total is null and makes the difference null.
+An observed zero is retained. `report_digest` is SHA-256 over canonical
+ASCII JSON with sorted keys and compact separators, excluding the digest field.
+
 Retained limitations: non-atomic cohort observations; descriptive completed
 available observations only; labels do not prove controlled intervention;
 digests are not signatures or semantic-equivalence proof; possible initial log

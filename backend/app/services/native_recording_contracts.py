@@ -122,7 +122,8 @@ def request_from_wire(raw):
         if type(request) is not dict:
             raise RecordingError()
         required = {"version", "operation", "platform", "limit"}
-        if (not required <= set(request) or set(request) - required - {"cursor"}
+        optional = {"cursor", "include_round_action_counts"}
+        if (not required <= set(request) or set(request) - required - optional
                 or type(request["version"]) is not int or request["version"] != 1
                 or type(request["operation"]) is not str
                 or request["operation"] not in ("playback", "metrics")
@@ -133,7 +134,10 @@ def request_from_wire(raw):
                 or (request.get("cursor") is not None and
                     (type(request["cursor"]) is not str
                      or not 1 <= len(request["cursor"]) <= 512))
-                or (request["operation"] == "metrics" and request.get("cursor") is not None)):
+                or (request["operation"] == "metrics" and request.get("cursor") is not None)
+                or ("include_round_action_counts" in request and
+                    (request["operation"] != "metrics"
+                     or request["include_round_action_counts"] is not True))):
             raise RecordingError()
         return request
     except RecordingError:

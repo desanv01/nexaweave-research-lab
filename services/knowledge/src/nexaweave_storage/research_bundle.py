@@ -1,4 +1,4 @@
-"""Version 1 retained-source data artifacts; inspection never dispatches metadata."""
+"""Versioned retained-source data artifacts; inspection never dispatches metadata."""
 from __future__ import annotations
 
 import hashlib
@@ -109,12 +109,25 @@ def decode(raw):
         raise BundleError() from None
 
 
+def _evidence_link(project, source):
+    revision = source["source_revision"]
+    references = {item["evidence_id"] for item in project["evidence"]
+                  if item["source_revision"] == revision}
+    linked = [passage for passage in source["passages"] if passage["evidence_id"] in references]
+    if len(linked) != 1:
+        raise BundleError()
+    passage = linked[0]
+    return {"source_revision": revision, "evidence_id": passage["evidence_id"],
+            "text_sha256": source["text_sha256"], "excerpt_sha256": passage["excerpt_sha256"]}
+
+
 def _validate(value):
     _fields(value, "schema_version kind payload payload_sha256")
-    if type(value["schema_version"]) is not int or value["schema_version"] != 1 or value["kind"] != "mirofish_retained_sources":
+    version = value["schema_version"]
+    if type(version) is not int or version not in (1, 2) or value["kind"] != "mirofish_retained_sources":
         raise BundleError()
     payload = value["payload"]
-    _fields(payload, "scope project sources")
+    _fields(payload, "scope project sources evidence_link" if version == 2 else "scope project sources")
     if payload["scope"] != "selected_sources_only":
         raise BundleError()
     project = payload["project"]
@@ -126,7 +139,7 @@ def _validate(value):
     if project["digest"] != digest:
         raise BundleError()
     sources = payload["sources"]
-    if type(sources) is not list or not 1 <= len(sources) <= 16:
+    if type(sources) is not list or not 1 <= len(sources) <= (1 if version == 2 else 16):
         raise BundleError()
     seen_sources, seen_evidence = set(), set()
     # Project evidence is inert reference metadata, validated independently by
@@ -177,8 +190,10 @@ def _validate(value):
                 raise BundleError()
             _digest(passage["excerpt_sha256"], excerpt_bytes)
             passage_count += 1
+    if version == 2 and payload["evidence_link"] != _evidence_link(project, sources[0]):
+        raise BundleError()
     _digest(value["payload_sha256"], canonical(payload))
-    return {"schema_version": 1, "scope": payload["scope"],
+    return {"schema_version": version, "scope": payload["scope"],
             "project_id": project_id, "project_revision": project["revision"],
             "source_count": len(sources), "passage_count": passage_count,
             "text_byte_length": total, "payload_sha256": value["payload_sha256"],
@@ -198,13 +213,15 @@ def inspect_bundle(raw, expected_sha256=None):
         raise BundleError() from None
 
 
-def export_bundle(project_store, source_store, principal, project_id, revision, source_revisions):
+def export_bundle(project_store, source_store, principal, project_id, revision, source_revisions, *, schema_version=1):
     """Stores resolve persisted ownership for every read before any file creation."""
     try:
         principal = principal_id(principal)
         project_id = _uuid(project_id)
         _int(revision, 1, 2_147_483_647)
-        if type(source_revisions) is not list or not 1 <= len(source_revisions) <= 16:
+        if type(schema_version) is not int or schema_version not in (1, 2):
+            raise BundleError("invalid_request")
+        if type(source_revisions) is not list or not 1 <= len(source_revisions) <= (1 if schema_version == 2 else 16):
             raise BundleError("invalid_request")
         selected = [_uuid(item) for item in source_revisions]
         if len(set(selected)) != len(selected):
@@ -237,7 +254,9 @@ def export_bundle(project_store, source_store, principal, project_id, revision, 
             "display_id": project.display_id, "revision": project.revision,
             "snapshot": project.snapshot, "evidence": list(project.evidence), "digest": project.digest},
             "sources": sources}
-        raw = canonical({"schema_version": 1, "kind": "mirofish_retained_sources", "payload": payload,
+        if schema_version == 2:
+            payload["evidence_link"] = _evidence_link(payload["project"], sources[0])
+        raw = canonical({"schema_version": schema_version, "kind": "mirofish_retained_sources", "payload": payload,
                          "payload_sha256": hashlib.sha256(canonical(payload)).hexdigest()})
         inspect_bundle(raw)
         return raw

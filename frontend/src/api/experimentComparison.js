@@ -1,5 +1,10 @@
 // Admission of the server-validated public projection, not a native comparator.
 // Seeds never pass through Number; fingerprints are provenance, not signatures.
+import { sha256 } from './sourceLibrary.js'
+
+export const comparisonReportMedia = 'application/vnd.nexaweave.comparison-report+json'
+export const comparisonReportBytes = 524288
+export const comparisonReportFilename = 'nexaweave-comparison-report.json'
 const encoder = new TextEncoder()
 const id = /^[A-Za-z0-9_.:-]{1,128}$/
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
@@ -150,4 +155,50 @@ export function validateExperimentComparison(value, catalog, payload) {
   }
   pattern(value.native_result_digest, digest); pattern(value.public_projection_digest, digest)
   return value
+}
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) return '[' + value.map(canonicalJson).join(',') + ']'
+  if (object(value)) return '{' + Object.keys(value).sort().map(key =>
+    canonicalJson(key) + ':' + canonicalJson(value[key])).join(',') + '}'
+  // Python ensure_ascii=True escapes both UTF-16 units of a non-BMP character.
+  return JSON.stringify(value).replace(/[\u007f-\uffff]/g, unit =>
+    '\\u' + unit.charCodeAt(0).toString(16).padStart(4, '0'))
+}
+
+function projection(value, fields) {
+  return Object.fromEntries(fields.map(field => [field, value[field]]))
+}
+
+export async function validateComparisonReport(report, body, result, catalog, payload) {
+  const comparison = validateExperimentComparison(result, catalog, payload)
+  const declared = new Map(catalog.members.map(member => [member.member_id, member.platforms]))
+  const members = new Map(comparison.members.map(member => [member.member_id, member]))
+  const expected = {
+    ...projection(comparison, ['title', 'project_id', 'project_revision', 'cohort_manifest_digest',
+      'native_result_digest', 'public_projection_digest', 'coverage']),
+    version: 1,
+    members: comparison.members.map(member => ({
+      ...projection(member, ['member_id', 'member_label', 'case_label', 'run_id', 'disposition',
+        'project_revision', 'request_fingerprint', 'record_digest']),
+      recording_revision: member.recording?.recording_revision ?? null
+    })),
+    pairs: comparison.comparability_matrix.map(pair => {
+      const left = members.get(pair.left_member_id), right = members.get(pair.right_member_id)
+      const common = ['twitter', 'reddit'].filter(platform =>
+        declared.get(left.member_id).includes(platform) && declared.get(right.member_id).includes(platform))
+      return { ...pair, platform_differences: common.map(platform => {
+        const l = left.metrics?.[platform]?.logged_action_total ?? null
+        const r = right.metrics?.[platform]?.logged_action_total ?? null
+        return { platform, left_logged_action_total: l, right_logged_action_total: r,
+          right_minus_left: l === null || r === null ? null : r - l }
+      }) }
+    })
+  }
+  keys(report, [...Object.keys(expected), 'report_digest'])
+  const { report_digest, ...fields } = report
+  pattern(report_digest, digest)
+  if (!equal(fields, expected)) reject()
+  const verifiedDigest = await sha256(encoder.encode(canonicalJson(expected)))
+  if (report_digest !== verifiedDigest || body !== canonicalJson({ ...expected, report_digest: verifiedDigest })) reject()
 }
