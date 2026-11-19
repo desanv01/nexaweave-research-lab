@@ -29,14 +29,26 @@ function ascii(v) {
 }
 const digest = v => createHash('sha256').update(ascii(v), 'ascii').digest('hex')
 const pick = (v, keys) => Object.fromEntries(keys.split(' ').map(k => [k, v[k]]))
-function ready() {
+function ready(checkpointed = false) {
   const files = ['state.json', 'simulation_config.json', 'source_grounding.json', 'twitter_profiles.csv', 'reddit_profiles.json'].map(name => ({ name, sha256: hash, size: 123 }))
   const v = { schema_version: 1, display_graph_id: 'graph_1', scope: { schema_version: 1, workspace_id: uid(1), project_id: uid(2), graph_id: uid(3), run_id: null, branch_id: null, layer: 'source' }, project_revision: 1, operation_id: uid(9), source: { source_revision: uid(5), source_name: hostile, source_sha256: hash }, options: { types: null, max_agents: 10, seed: 0, platforms: ['twitter', 'reddit'], max_rounds: 24, simulation_requirement: hostile }, actors: [{ source_entity_uuid: uid(7), name: hostile, labels: ['Person'] }], projection_sha256: hash, plan_sha256: null, state: 'ready', progress: { stage: 'ready', completed: 100, total: 100 }, error_code: null, authorization: { model_calls_enabled: true, ceiling_microusd: '12345' }, receipt: { simulation_id: 'sim_' + uid(9).replaceAll('-', ''), artifact_sha256: digest({ schema_version: 1, files }), files }, graph_snapshot_atomic: false, model_calls_started: true, simulation_executed: false }
+  if (checkpointed) {
+    files.pop()
+    Object.assign(v.options, { platforms: ['twitter'], max_rounds: 1 })
+    v.receipt.artifact_sha256 = digest({ schema_version: 1, files })
+  }
   v.plan_sha256 = digest(pick(v, 'schema_version display_graph_id scope project_revision operation_id source options actors projection_sha256')); return v
 }
 function planned(payload, p) {
   const v = { schema_version: 1, display_graph_id: 'graph_1', scope: clone(p.scope), preparation: { ...payload.preparation, simulation_id: p.receipt.simulation_id, artifact_sha256: p.receipt.artifact_sha256 }, request: { schema_version: 1, principal: 'local-research', project_id: p.scope.project_id, project_revision: p.project_revision, simulation_id: p.receipt.simulation_id, run_id: payload.launch_id, artifact_sha256: p.receipt.artifact_sha256, runtime_sha256: hash, platforms: clone(p.options.platforms), seed: p.options.seed, max_rounds: p.options.max_rounds }, limits: { max_calls: 20, max_input_bytes: 2097152, max_output_tokens: 4096, max_run_seconds: 600 }, ceiling_microusd: '12345', model_label: hostile, launch_sha256: null, state: 'planned', error_code: null, authorization: { model_calls_enabled: true }, workflow: null, receipt: null, cancel_requested: false, cleanup: { known: false, pending: null, owner_thread_alive: null } }
-  v.launch_sha256 = digest(pick(v, 'schema_version display_graph_id scope preparation request limits ceiling_microusd model_label')); return v
+  if (payload.schema_version === 2) {
+    v.schema_version = 2; v.checkpoint = clone(payload.checkpoint)
+    if (v.checkpoint.mode === 'continue') {
+      const { source_run_id, checkpoint_sha256 } = v.checkpoint
+      Object.assign(v.request, { schema_version: 2, source_run_id, checkpoint_sha256 })
+    }
+  }
+  v.launch_sha256 = digest(pick(v, 'schema_version display_graph_id scope preparation request limits ceiling_microusd model_label' + (v.schema_version === 2 ? ' checkpoint' : ''))); return v
 }
 function observed(known, state = 'running') {
   const v = clone(known); v.state = state
@@ -324,6 +336,78 @@ test('Inspect emits only a detached completed receipt selection and makes no pag
     m.props.ready.source.source_name = 'later mutation'; await settle(); assert.equal(selected.preparation.source.source_name, originalSource); assert.ok(clears >= 1)
     selected.launch.model_label = 'consumer mutation'; await settle(); assert.equal(m.root.textContent.includes('consumer mutation'), false)
     m.root.querySelector('.clear').click(); await settle(); assert.ok(clears >= 2); assert.equal(m.root.querySelector('.inspect'), null)
+  } finally { m.cleanup() }
+})
+test('mounted capture lineage requires explicit continuation and only its completed output can be inspected', async () => {
+  const calls = [], reviewed = new Map(), inspected = []
+  const p = ready(true), lineage = 'c'.repeat(64), output = 'd'.repeat(64)
+  const m = mount({ ready: p, onInspect: value => inspected.push(value), methods: {
+    plan: async (payload, preparation) => {
+      calls.push(['plan', payload])
+      const value = planned(payload, preparation); reviewed.set(payload.launch_id, value)
+      return value
+    },
+    start: async ref => { calls.push(['start', ref]); return observed(reviewed.get(ref.launch_id)) },
+    status: async ref => {
+      calls.push(['status', ref])
+      const value = observed(reviewed.get(ref.launch_id), 'completed')
+      const capture = value.checkpoint.mode === 'capture'
+      value.receipt.evidence_sha256 = capture ? lineage : output
+      value.receipt.attempt_id = capture ? uid(12) : uid(22)
+      value.receipt.instance_id = capture ? uid(13) : uid(23)
+      return value
+    },
+  } })
+  async function click(selector) { m.root.querySelector(selector).click(); await settle() }
+  try {
+    await settle(); assert.equal(calls.length, 0)
+    await click('.review-capture')
+    const capture = calls[0][1]
+    assert.equal(capture.schema_version, 2)
+    assert.deepEqual(capture.checkpoint, { mode: 'capture' })
+    assert.equal(calls.length, 1); assert.equal(m.root.querySelector('.review-continuation'), null)
+    await click('.start')
+    assert.equal(m.root.querySelector('.start').disabled, true)
+    await click('.start')
+    await click('#native-refresh-' + capture.launch_id)
+    assert.equal(m.root.querySelector('.inspect'), null)
+    assert.ok(m.root.textContent.includes(nativeLaunchCopy.en.lineage))
+    await click('.review-continuation')
+    const continued = calls[3][1]
+    assert.equal(continued.schema_version, 2); assert.notEqual(continued.launch_id, capture.launch_id)
+    assert.deepEqual(continued.preparation, capture.preparation)
+    assert.deepEqual(continued.checkpoint, { mode: 'continue', source_run_id: capture.launch_id, checkpoint_sha256: lineage })
+    assert.deepEqual(calls.map(call => call[0]), ['plan', 'start', 'status', 'plan'])
+    await click('.start')
+    assert.equal(m.root.querySelector('.start').disabled, true)
+    await click('.start')
+    await click('#native-refresh-' + continued.launch_id)
+    assert.equal(m.root.querySelector('.use-report'), null)
+    await click('.inspect')
+    assert.equal(inspected.length, 1); assert.equal(calls.length, 6)
+    assert.equal(inspected[0].launch.receipt.evidence_sha256, output)
+    assert.equal(inspected[0].launch.checkpoint.checkpoint_sha256, lineage)
+    assert.equal(inspected[0].launch.receipt.run_id, continued.launch_id)
+    assert.equal(inspected[0].launch.receipt.attempt_id, uid(22))
+    assert.equal(inspected[0].launch.receipt.instance_id, uid(23))
+    assert.equal(inspected[0].launch.receipt.request_fingerprint, digest(inspected[0].launch.request))
+    const selector = plan => ({ schema_version: 2, launch_id: plan.launch_id,
+      launch_sha256: reviewed.get(plan.launch_id).launch_sha256 })
+    assert.deepEqual(calls, [['plan', capture], ['start', selector(capture)], ['status', selector(capture)],
+      ['plan', continued], ['start', selector(continued)], ['status', selector(continued)]])
+    assert.ok(m.root.textContent.includes(nativeLaunchCopy.en.restoredEvidence))
+    const malformed = ready(true)
+    delete malformed.options.platforms
+    m.props.ready = malformed
+    await settle()
+    assert.equal(m.root.querySelector('.review-capture'), null)
+    assert.equal(m.root.querySelector('.review-continuation'), null)
+    assert.equal(m.root.querySelector('.review').disabled, false)
+    assert.equal(calls.length, 6)
+    m.props.ready = ready()
+    await settle()
+    assert.equal(m.root.querySelector('.review-capture'), null)
+    assert.equal(m.root.querySelector('.review-continuation'), null)
   } finally { m.cleanup() }
 })
 test('failed, cancelled and uncertain native outcomes never expose completed observation selection', async () => {

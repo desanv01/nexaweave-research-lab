@@ -1,5 +1,12 @@
 export const nativeLaunchCopy = {
   en: {
+    reviewCapture: 'Review one-round Twitter capture',
+    reviewContinuation: 'Review continuation from this capture',
+    captureMode: 'Twitter checkpoint capture',
+    continueMode: 'Twitter checkpoint continuation',
+    captureRun: 'Capture run',
+    lineage: 'Capture lineage SHA-256',
+    restoredEvidence: 'Restored observation evidence SHA-256',
     useReport: 'Use for report',
     cancelUnconfirmed: 'Cancellation is unconfirmed. The last verified status is shown. Refresh this run to check before requesting cancellation again.',
     inspect: 'Inspect recorded events',
@@ -8,6 +15,13 @@ export const nativeLaunchCopy = {
     errors: { invalid_request: 'Check the READY preparation binding.', not_found: 'This owned launch was not found.', unauthorized: 'Authorization expired. Reconnect.', origin_denied: 'The protected connection was denied.', conflict: 'The binding changed or Start was already attempted.', busy: 'The native service is busy.', tombstoned: 'The source binding is no longer available.', result_too_large: 'The bounded reply is too large.', model_calls_disabled: 'Trusted model calls are disabled.', budget_denied: 'The shared spending cap denied admission.', native_launch_unavailable: 'Trusted native launch is unavailable.', native_launch_uncertain: 'Launch is uncertain. Refresh; do not restart.', native_launch_failed: 'Native launch failed. Refresh this same run.', invalid_reply: 'The reply did not match the complete native launch contract.', internal_error: 'The native service could not complete this request.', timeout: 'The request timed out. Refresh this same run.', transport_failure: 'The reply was lost. Refresh this same run.' }
   },
   zh: {
+    reviewCapture: '审阅单轮 Twitter 检查点捕获',
+    reviewContinuation: '审阅从此检查点继续运行',
+    captureMode: 'Twitter 检查点捕获',
+    continueMode: 'Twitter 检查点续跑',
+    captureRun: '捕获运行',
+    lineage: '捕获谱系 SHA-256',
+    restoredEvidence: '恢复后观测证据 SHA-256',
     useReport: '用于报告',
     cancelUnconfirmed: '取消请求尚未确认。当前显示上次核实的状态。请刷新此运行，再决定是否重新请求取消。',
     inspect: '查看记录事件',
@@ -16,6 +30,13 @@ export const nativeLaunchCopy = {
     errors: { invalid_request: '请检查就绪准备绑定。', not_found: '未找到拥有的启动。', unauthorized: '授权已过期，请重新连接。', origin_denied: '受保护连接被拒绝。', conflict: '绑定已更改或已尝试启动。', busy: '原生服务正忙。', tombstoned: '来源绑定已不可用。', result_too_large: '回复超出限制。', model_calls_disabled: '可信模型调用已禁用。', budget_denied: '共享支出上限拒绝准入。', native_launch_unavailable: '可信原生启动不可用。', native_launch_uncertain: '启动结果不确定，请刷新，不要重新启动。', native_launch_failed: '原生启动失败，请刷新同一运行。', invalid_reply: '回复不符合完整原生启动协议。', internal_error: '原生服务无法完成请求。', timeout: '请求超时，请刷新同一运行。', transport_failure: '回复丢失，请刷新同一运行。' }
   },
   ms: {
+    reviewCapture: 'Semak tangkapan Twitter satu pusingan',
+    reviewContinuation: 'Semak sambungan daripada tangkapan ini',
+    captureMode: 'Tangkapan titik semak Twitter',
+    continueMode: 'Sambungan titik semak Twitter',
+    captureRun: 'Larian tangkapan',
+    lineage: 'SHA-256 susur galur tangkapan',
+    restoredEvidence: 'SHA-256 bukti pemerhatian dipulihkan',
     useReport: 'Gunakan untuk laporan',
     cancelUnconfirmed: 'Permintaan pembatalan belum disahkan. Status terakhir yang disahkan dipaparkan. Segarkan larian ini sebelum meminta pembatalan sekali lagi.',
     inspect: 'Periksa peristiwa direkodkan',

@@ -264,7 +264,7 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
         if (!known && nativePlans.size >= 100) fail('busy')
         nativeContext = { preparation: JSON.parse(JSON.stringify(ready)), known: known?.plan }
       } else {
-        if (!known || known.plan.launch_sha256 !== payload.launch_sha256) fail('invalid_request')
+        if (!known || known.plan.schema_version !== payload.schema_version || known.plan.launch_sha256 !== payload.launch_sha256) fail('invalid_request')
         nativeContext = { preparation: known.preparation, known: known.plan }
       }
       if (method === 'nativeLaunchStart' && (nativeStarted.has(payload.launch_id) || nativeContext.known.state !== 'planned')) fail('conflict')

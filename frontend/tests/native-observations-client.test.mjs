@@ -17,13 +17,29 @@ const digest = v => createHash('sha256').update(ascii(v), 'ascii').digest('hex')
 const bytesHash = raw => createHash('sha256').update(raw, 'utf8').digest('hex')
 const pick = (v, keys) => Object.fromEntries(keys.split(' ').map(k => [k, v[k]]))
 const lines = ['{"event_type":"seed","n":1.0,"large":9007199254740993,"minus":-0,"exp":1e+2}', '{"action_type":"POST","success":true,"text":"中😀 <script>private</script>"}', '{"event_type":"action","action_type":"POST","success":false}', '{"unknown":[1,{"ok":true}]}']
-function fixture() {
+function fixture(restored = false) {
   const files = ['state.json', 'simulation_config.json', 'source_grounding.json', 'twitter_profiles.csv', 'reddit_profiles.json'].map(name => ({ name, sha256: hash, size: 123 }))
   const preparation = { schema_version: 1, display_graph_id: 'graph_1', scope: { schema_version: 1, workspace_id: uid(1), project_id: uid(2), graph_id: uid(3), run_id: null, branch_id: null, layer: 'source' }, project_revision: 1, operation_id: uid(9), source: { source_revision: uid(5), source_name: '中😀 <script>source</script>', source_sha256: hash }, options: { types: null, max_agents: 10, seed: 0, platforms: ['twitter', 'reddit'], max_rounds: 24, simulation_requirement: 'Study 中😀' }, actors: [{ source_entity_uuid: uid(7), name: '中😀', labels: ['Person'] }], projection_sha256: hash, plan_sha256: null, state: 'ready', progress: { stage: 'ready', completed: 100, total: 100 }, error_code: null, authorization: { model_calls_enabled: true, ceiling_microusd: '12345' }, receipt: { simulation_id: 'sim_' + uid(9).replaceAll('-', ''), artifact_sha256: digest({ schema_version: 1, files }), files }, graph_snapshot_atomic: false, model_calls_started: true, simulation_executed: false }
+  if (restored) {
+    files.pop()
+    Object.assign(preparation.options, { platforms: ['twitter'], max_rounds: 1 })
+    preparation.receipt.artifact_sha256 = digest({ schema_version: 1, files })
+  }
   preparation.plan_sha256 = digest(pick(preparation, 'schema_version display_graph_id scope project_revision operation_id source options actors projection_sha256'))
   const manifest = { schema_version: 1, files: ['twitter', 'reddit'].flatMap(p => [{ name: p + '_simulation.db', sha256: bytesHash('db-' + p), size: 9 }, { name: p + '/actions.jsonl', sha256: bytesHash(lines.join('\n') + '\n'), size: Buffer.byteLength(lines.join('\n') + '\n') }]) }
+  if (restored) {
+    manifest.files.splice(2)
+    manifest.files[0].name = 'native.sqlite3'
+    manifest.files[1].name = 'actions.jsonl'
+  }
   const launch = { schema_version: 1, display_graph_id: 'graph_1', scope: clone(preparation.scope), preparation: { operation_id: preparation.operation_id, plan_sha256: preparation.plan_sha256, simulation_id: preparation.receipt.simulation_id, artifact_sha256: preparation.receipt.artifact_sha256 }, request: { schema_version: 1, principal: 'local-research', project_id: uid(2), project_revision: 1, simulation_id: preparation.receipt.simulation_id, run_id: uid(10), artifact_sha256: preparation.receipt.artifact_sha256, runtime_sha256: hash, platforms: ['twitter', 'reddit'], seed: 0, max_rounds: 24 }, limits: { max_calls: 20, max_input_bytes: 2097152, max_output_tokens: 4096, max_run_seconds: 600 }, ceiling_microusd: '12345', model_label: 'scripted 中😀', launch_sha256: null, state: 'completed', error_code: null, authorization: { model_calls_enabled: false }, workflow: null, receipt: null, cancel_requested: false, cleanup: { known: true, pending: false, owner_thread_alive: false } }
-  launch.launch_sha256 = digest(pick(launch, 'schema_version display_graph_id scope preparation request limits ceiling_microusd model_label'))
+  if (restored) {
+    launch.schema_version = 2
+    const source_run_id = uid(20), checkpoint_sha256 = 'c'.repeat(64)
+    launch.checkpoint = { mode: 'continue', source_run_id, checkpoint_sha256 }
+    Object.assign(launch.request, { schema_version: 2, source_run_id, checkpoint_sha256, platforms: ['twitter'], max_rounds: 1 })
+  }
+  launch.launch_sha256 = digest(pick(launch, 'schema_version display_graph_id scope preparation request limits ceiling_microusd model_label' + (restored ? ' checkpoint' : '')))
   launch.workflow = { workflow_id: 'mf-native-v1-' + uid(10).replaceAll('-', '') + '-' + digest(launch.request), temporal_run_id: uid(11), native_run_id: uid(10) }
   launch.receipt = { run_id: uid(10), attempt_id: uid(12), instance_id: uid(13), request_fingerprint: digest(launch.request), outcome: 'completed', evidence_sha256: digest(manifest) }
   return { selection: { launch, preparation }, manifest }
@@ -31,7 +47,7 @@ function fixture() {
 const payload = (offset = 0, limit = 20, platform = 'twitter') => ({ schema_version: 1, launch_id: uid(10), launch_sha256: fixture().selection.launch.launch_sha256, platform, offset, limit })
 function page(p = payload(), f = fixture()) {
   const records = lines.slice(p.offset, p.offset + p.limit).map((raw_json, i) => ({ index: p.offset + i, raw_json, record_sha256: bytesHash(raw_json) }))
-  return { schema_version: 1, launch: clone(f.selection.launch), manifest: clone(f.manifest), platform: p.platform, offset: p.offset, limit: p.limit, total_records: 4, next_offset: p.offset + records.length < 4 ? p.offset + records.length : null, counts: { event_records: 2, action_records: 2, successful_action_records: 1, failed_action_records: 1 }, records }
+  return { schema_version: f.selection.launch.schema_version, launch: clone(f.selection.launch), manifest: clone(f.manifest), platform: p.platform, offset: p.offset, limit: p.limit, total_records: 4, next_offset: p.offset + records.length < 4 ? p.offset + records.length : null, counts: { event_records: 2, action_records: 2, successful_action_records: 1, failed_action_records: 1 }, records }
 }
 const ctx = (p = payload(), f = fixture()) => ({ graph: 'graph_1', payload: p, selection: f.selection })
 const code = c => e => e.code === c
@@ -42,6 +58,42 @@ const graph = { graph_id: 'graph_1', nodes: [], edges: [], node_count: 0, edge_c
 test('request contains only exact receipt identity and finite page coordinates', () => {
   assert.deepEqual(JSON.parse(nativeObservationsPayload(payload())), payload())
   for (const mutate of [v => v.path = 'private', v => v.principal = 'other', v => v.schema_version = true, v => v.offset = true, v => v.offset = -1, v => v.offset = 10001, v => v.offset = 0.5, v => v.limit = 0, v => v.limit = 21, v => v.limit = false, v => v.platform = 'both', v => v.launch_id = '../x', v => v.launch_sha256 = 'A'.repeat(64)]) { const p = payload(); mutate(p); assert.throws(() => nativeObservationsPayload(p), code('invalid_request')) }
+})
+test('protected v2 page follows the completed continuation receipt and rejects capture lineage', async () => {
+  const f = fixture(true), launch = f.selection.launch
+  const request = { ...payload(), schema_version: 2, launch_sha256: launch.launch_sha256 }
+  const calls = []
+  const client = createWorkbenchClient({ fetchImpl: async (url, options) => {
+    if (url.includes('/data/')) return response(graph)
+    calls.push({ url, options })
+    return response(page(request, f))
+  } })
+  await client.connect(credentials)
+  try {
+    const read = await client.nativeObservationsPage(request, f.selection)
+    assert.equal(read.schema_version, 2)
+    assert.deepEqual(read.launch.receipt, launch.receipt)
+    assert.deepEqual(read.records, page(request, f).records)
+    assert.notEqual(launch.receipt.evidence_sha256, launch.checkpoint.checkpoint_sha256)
+    assert.equal(calls[0].url, credentials.origin + '/api/native-observations/page/graph_1')
+    assert.deepEqual(JSON.parse(calls[0].options.body), request)
+    await assert.rejects(client.nativeObservationsPage({ ...request, schema_version: 1 }, f.selection), code('invalid_request'))
+    const capture = clone(f.selection)
+    const original = capture.launch, checkpoint = original.checkpoint
+    original.request.run_id = checkpoint.source_run_id
+    original.request.schema_version = 1
+    delete original.request.source_run_id; delete original.request.checkpoint_sha256
+    original.checkpoint = { mode: 'capture' }
+    original.launch_sha256 = digest(pick(original, 'schema_version display_graph_id scope preparation request limits ceiling_microusd model_label checkpoint'))
+    original.workflow = null
+    Object.assign(original.receipt, { run_id: original.request.run_id, request_fingerprint: digest(original.request), evidence_sha256: checkpoint.checkpoint_sha256 })
+    await assert.rejects(client.nativeObservationsPage({ ...request, launch_id: original.request.run_id, launch_sha256: original.launch_sha256 }, capture), code('invalid_reply'))
+    const crossed = page(request, f)
+    crossed.launch.receipt.evidence_sha256 = checkpoint.checkpoint_sha256
+    await assert.rejects(validateNativeObservationsResult(crossed, ctx(request, f)), code('invalid_reply'))
+    await assert.rejects(client.nativeObservationsPage(request, { ...f.selection, launch: crossed.launch }), code('invalid_reply'))
+    assert.equal(calls.length, 1)
+  } finally { client.disconnect() }
 })
 test('independent raw UTF8 hashes preserve float, exponent, large integer and Unicode lexemes', async () => {
   const result = await validateNativeObservationsResult(page(), ctx())
