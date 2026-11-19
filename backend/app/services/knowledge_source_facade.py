@@ -63,6 +63,8 @@ def validate_original_public_result(method, data, scope, payload):
 
 
 def validate_public_result(method, data, scope, payload):
+    if method == "legacy_report_read":
+        return validate_result(method, data, scope, payload)
     """Recheck the HTTP DTO even when Main explicitly injects a facade."""
     if method != "retain":
         return validate_result(method, data, scope, payload)

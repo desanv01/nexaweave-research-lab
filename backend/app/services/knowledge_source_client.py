@@ -128,6 +128,32 @@ def pdf_receipt(value, scope, payload):
     return value
 
 
+def legacy_report_id(value):
+    if type(value) is not str or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", value):
+        raise ValueError
+    return value
+
+
+def legacy_report_result(value, scope, payload):
+    fields = {"schema_version", "project_id", "legacy_report_id", "byte_length", "sha256", "content_base64"}
+    if (type(value) is not dict or set(value) != fields
+            or type(value["schema_version"]) is not int or value["schema_version"] != 1
+            or value["project_id"] != scope["project_id"]
+            or legacy_report_id(value["legacy_report_id"]) != payload["legacy_report_id"]
+            or type(value["byte_length"]) is not int or not 1 <= value["byte_length"] <= 2 * TEXT_BYTES
+            or type(value["sha256"]) is not str or not HASH.fullmatch(value["sha256"])):
+        raise ValueError
+    content = value["content_base64"]
+    if (type(content) is not str or not content.isascii()
+            or len(content) != 4 * ((value["byte_length"] + 2) // 3)):
+        raise ValueError
+    raw = base64.b64decode(content, validate=True)
+    if (len(raw) != value["byte_length"] or base64.b64encode(raw).decode("ascii") != content
+            or hashlib.sha256(raw).hexdigest() != value["sha256"] or len(encoded(value)) > MAX_BYTES):
+        raise ValueError
+    return value
+
+
 def original_binary(value, scope, revision):
     if (type(value) is not dict or set(value) != {"contract_version", "project_id",
             "source_revision", "media_type", "byte_length", "sha256"}
@@ -275,6 +301,10 @@ def validate_payload(method, value):
             if set(value) != {"source_revision"}:
                 raise ValueError
             _uuid(value["source_revision"])
+        elif method == "legacy_report_read":
+            if set(value) != {"legacy_report_id"}:
+                raise ValueError
+            legacy_report_id(value["legacy_report_id"])
         elif method == "retain":
             if set(value) != {"source_revision", "source_name", "text", "blocks"}:
                 raise ValueError
@@ -318,6 +348,8 @@ def metadata(value, scope):
 
 def validate_result(method, value, scope, payload):
     try:
+        if method == "legacy_report_read":
+            return legacy_report_result(value, scope, payload)
         if method in {"retain_pdf_binary", "binary_metadata", "binary_read"}:
             result = original_result(method, value, scope, payload)
             if len(encoded(result)) > MAX_BYTES:
