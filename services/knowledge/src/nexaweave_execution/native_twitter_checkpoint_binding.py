@@ -295,6 +295,7 @@ class _RestoredTwitterSession:
         operation = _start_fresh_restored_twitter(
             prepared_dir, checkpoint_dir, child_dir, lineage, factory.prepared.model_factory,
             factory.expected_post_content, remaining,
+            **({"intervention": request.intervention} if request.intervention is not None else {}),
         )
         if isinstance(operation, Coroutine):
             asyncio.run(asyncio.wait_for(operation, max(0.0, deadline - time.monotonic())))
@@ -322,7 +323,7 @@ class NativeRestoredTwitterFactory:
         producer_run = canonical_uuid(self.expected_producer_run)
         producer_pid = self.expected_producer_pid
         expected_digest = sha256(self.expected_lineage_sha256)
-        if (request.schema_version == 2
+        if (request.schema_version in (2, 3)
                 and (request.source_run_id != producer_run
                      or request.checkpoint_sha256 != expected_digest)):
             raise ValueError("owned Twitter continuation binding mismatch")
@@ -351,6 +352,9 @@ class NativeRestoredTwitterFactory:
             raise ValueError("owned Twitter lineage identity mismatch")
         _checked_anchors(lineage["anchors"], self.prepared, request, producer_run)
         _check_lineage_body(lineage, request)
+        if (request.intervention is not None
+                and request.intervention.manifest_sha256 != lineage["manifest_sha256"]):
+            raise ValueError("owned Twitter fork manifest mismatch")
         return prepared_dir, checkpoint_dir, child_dir, lineage
 
     def validate(self, request):
