@@ -6,6 +6,7 @@ import path from 'node:path'
 import { installBodyObserver, ontologyStages } from './research-browser-ontology.mjs'
 import { inspectPreparedProfiles } from './research-browser-prepared-profiles.mjs'
 import { browserMode, inspectReadyConfiguration, suggestPlatforms } from './research-browser-ready-configuration.mjs'
+import { inspectDossierSupport } from './research-browser-support-review.mjs'
 
 const WIRE = 7200
 const FRONTEND = 'http://127.0.0.1:4317'
@@ -644,7 +645,8 @@ async function pdfAfterRestart(command) {
   // This is a real UI GET with a deliberately wrong credential, not an API call.
   const invalid = connection.token === 'research-browser-invalid' ? 'research-browser-invalid-2' : 'research-browser-invalid'
   await connectForm(page, invalid, 401)
-  await connectForm(page)
+  const { value: graph } = await connectForm(page)
+  await inspectDossierSupport({ page, graph, sourceRoute, exchange, enabled, requireTrue, sha })
   const original = await readPdf()
   // Use a second ordinary frontend origin to observe actual server refusal.
   // Do not override Origin headers, disable CORS, or ignore browser security.
@@ -656,7 +658,7 @@ async function pdfAfterRestart(command) {
     await connectForm(denied, connection.token, 403)
   } finally { await denied.close() }
   requireTrue(await page.locator('#bearer-token').inputValue() === '')
-  return { reference: { source_revision: pdf.source_revision }, proof: { pdf: original, auth_denied: true, origin_denied: true, token_cleared: true } }
+  return { reference: { source_revision: pdf.source_revision }, proof: { pdf: original, auth_denied: true, origin_denied: true, token_cleared: true, dossier_support_review: true } }
 }
 async function cleanup() {
   if (closing) return closing
