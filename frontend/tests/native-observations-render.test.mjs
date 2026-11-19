@@ -35,19 +35,55 @@ function ascii(v) {
 const digest = v => createHash('sha256').update(ascii(v), 'ascii').digest('hex'), bytesHash = v => createHash('sha256').update(v, 'utf8').digest('hex')
 const pick = (v, keys) => Object.fromEntries(keys.split(' ').map(k => [k, v[k]]))
 const lines = Array.from({ length: 23 }, (_, i) => i === 22 ? '{"unknown":"中😀","n":1.0}' : JSON.stringify({ event_type: hostile, action_type: 'POST ' + i, success: i % 2 === 0, text: hostile }))
+const searchQuery = 'Mira "Vale"\\north\n' + hostile
+function redditRecord(action, args, success = true) {
+  return JSON.stringify({ round: 1, timestamp: '2026-10-05T00:00:00.000000', agent_id: 1, agent_name: 'Mira Vale',
+    action_type: action, action_args: args, result: null, success })
+}
+const redditLines = [
+  redditRecord('SEARCH_USER', { query: searchQuery }),
+  redditRecord('LIKE_COMMENT', { comment_id: 0, like_id: 7 }),
+  redditRecord('DISLIKE_COMMENT', { comment_id: 42, dislike_id: 9 }),
+  redditRecord('SEARCH_USER', undefined, false),
+  redditRecord('SEARCH_USER', { query: { value: 'Mira' } }, false),
+  redditRecord('LIKE_COMMENT', { comment_id: '42' }, false),
+  redditRecord('DISLIKE_COMMENT', { comment_id: -1 }, false),
+  redditRecord('LIKE_COMMENT', { like_id: 17 }),
+  redditRecord('DISLIKE_COMMENT', { comment_id: 1.5 }, false),
+  redditRecord('LIKE_COMMENT', { comment_id: 0 }, false).replace('"comment_id":0', '"comment_id":2e-324'),
+  redditRecord('DISLIKE_COMMENT', { comment_id: 42 }, false).replace('"comment_id":42', '"comment_id":42.000000000000001'),
+  redditRecord('search_user', { query: 'An unrecognized action' }),
+  '{"round":1,"timestamp":"2026-10-05T00:00:00.000000","event_type":"round_start","simulated_hour":0}',
+]
+const platformLogs = { twitter: lines, reddit: redditLines }
 function fixture() {
   const files = ['state.json', 'simulation_config.json', 'source_grounding.json', 'twitter_profiles.csv', 'reddit_profiles.json'].map(name => ({ name, sha256: hash, size: 123 }))
   const preparation = { schema_version: 1, display_graph_id: 'graph_1', scope: { schema_version: 1, workspace_id: uid(1), project_id: uid(2), graph_id: uid(3), run_id: null, branch_id: null, layer: 'source' }, project_revision: 1, operation_id: uid(9), source: { source_revision: uid(5), source_name: hostile, source_sha256: hash }, options: { types: null, max_agents: 10, seed: 0, platforms: ['twitter', 'reddit'], max_rounds: 24, simulation_requirement: hostile }, actors: [{ source_entity_uuid: uid(7), name: hostile, labels: ['Person'] }], projection_sha256: hash, plan_sha256: null, state: 'ready', progress: { stage: 'ready', completed: 100, total: 100 }, error_code: null, authorization: { model_calls_enabled: true, ceiling_microusd: '12345' }, receipt: { simulation_id: 'sim_' + uid(9).replaceAll('-', ''), artifact_sha256: digest({ schema_version: 1, files }), files }, graph_snapshot_atomic: false, model_calls_started: true, simulation_executed: false }
   preparation.plan_sha256 = digest(pick(preparation, 'schema_version display_graph_id scope project_revision operation_id source options actors projection_sha256'))
-  const manifest = { schema_version: 1, files: ['twitter', 'reddit'].flatMap(p => [{ name: p + '_simulation.db', sha256: bytesHash('db'), size: 2 }, { name: p + '/actions.jsonl', sha256: bytesHash(lines.join('\n') + '\n'), size: Buffer.byteLength(lines.join('\n') + '\n') }]) }
+  const manifest = { schema_version: 1, files: ['twitter', 'reddit'].flatMap(platform => {
+    const rawLog = platformLogs[platform].join('\n') + '\n'
+    return [{ name: platform + '_simulation.db', sha256: bytesHash('db'), size: 2 },
+      { name: platform + '/actions.jsonl', sha256: bytesHash(rawLog), size: Buffer.byteLength(rawLog) }]
+  }) }
   const launch = { schema_version: 1, display_graph_id: 'graph_1', scope: clone(preparation.scope), preparation: { operation_id: preparation.operation_id, plan_sha256: preparation.plan_sha256, simulation_id: preparation.receipt.simulation_id, artifact_sha256: preparation.receipt.artifact_sha256 }, request: { schema_version: 1, principal: 'local-research', project_id: uid(2), project_revision: 1, simulation_id: preparation.receipt.simulation_id, run_id: uid(10), artifact_sha256: preparation.receipt.artifact_sha256, runtime_sha256: hash, platforms: ['twitter', 'reddit'], seed: 0, max_rounds: 24 }, limits: { max_calls: 20, max_input_bytes: 2097152, max_output_tokens: 4096, max_run_seconds: 600 }, ceiling_microusd: '12345', model_label: hostile, launch_sha256: null, state: 'completed', error_code: null, authorization: { model_calls_enabled: false }, workflow: null, receipt: null, cancel_requested: false, cleanup: { known: true, pending: false, owner_thread_alive: false } }
   launch.launch_sha256 = digest(pick(launch, 'schema_version display_graph_id scope preparation request limits ceiling_microusd model_label'))
   launch.receipt = { run_id: uid(10), attempt_id: uid(12), instance_id: uid(13), request_fingerprint: digest(launch.request), outcome: 'completed', evidence_sha256: digest(manifest) }
   return { selection: { launch, preparation }, manifest }
 }
 function page(payload, f = fixture()) {
-  const records = lines.slice(payload.offset, payload.offset + payload.limit).map((raw_json, i) => ({ index: payload.offset + i, raw_json, record_sha256: bytesHash(raw_json) }))
-  return { schema_version: 1, launch: clone(f.selection.launch), manifest: clone(f.manifest), platform: payload.platform, offset: payload.offset, limit: payload.limit, total_records: 23, next_offset: payload.offset + records.length < 23 ? payload.offset + records.length : null, counts: { event_records: 22, action_records: 22, successful_action_records: 11, failed_action_records: 11 }, records }
+  const log = platformLogs[payload.platform]
+  const records = log.slice(payload.offset, payload.offset + payload.limit).map((raw_json, i) => ({ index: payload.offset + i, raw_json, record_sha256: bytesHash(raw_json) }))
+  const counts = { event_records: 0, action_records: 0, successful_action_records: 0, failed_action_records: 0 }
+  for (const raw of log) {
+    const record = JSON.parse(raw)
+    if (typeof record.event_type === 'string') counts.event_records++
+    if (typeof record.action_type === 'string') {
+      counts.action_records++
+      if (record.success === true) counts.successful_action_records++
+      if (record.success === false) counts.failed_action_records++
+    }
+  }
+  return { schema_version: 1, launch: clone(f.selection.launch), manifest: clone(f.manifest), platform: payload.platform, offset: payload.offset, limit: payload.limit, total_records: log.length, next_offset: payload.offset + records.length < log.length ? payload.offset + records.length : null, counts, records }
 }
 function mount(initial = {}) {
   const props = reactive({ methods: { page: async payload => page(payload), clear: () => {} }, selection: fixture().selection, connected: true, busy: false, displayGraphId: 'graph_1', resetVersion: 0, locale: 'en', ...initial })
@@ -95,7 +131,31 @@ test('explicit page controls render original inert JSON, honest counts, unknown 
     m.root.querySelector('.refresh').click(); await finished(m); assert.equal(requests[3].offset, 0)
     const select = m.root.querySelector('select'); select.value = 'reddit'; select.dispatchEvent(new dom.window.Event('change', { bubbles: true })); await nextTick()
     assert.equal(m.root.querySelector('.records'), null); assert.equal(requests.length, 4)
-    m.root.querySelector('.load').click(); await finished(m); assert.equal(requests[4].platform, 'reddit')
+    m.root.querySelector('.load').click(); await finished(m)
+    assert.deepEqual(requests[4], { ...requests[0], platform: 'reddit' })
+    assert.equal(m.root.querySelector('.next').disabled, true)
+    assert.equal(document.activeElement, m.root.querySelector('.feedback'))
+    for (const locale of ['en', 'zh', 'ms', 'constructor']) {
+      m.props.locale = locale
+      await nextTick()
+      const copy = nativeObservationsCopy[locale === 'constructor' ? 'en' : locale]
+      const { SEARCH_USER, LIKE_COMMENT, DISLIKE_COMMENT } = copy.redditActions
+      const rows = [...m.root.querySelectorAll('.records > li')]
+      assert.deepEqual(rows.map(row => row.querySelector('.event-label').textContent), [
+        SEARCH_USER, LIKE_COMMENT, DISLIKE_COMMENT, SEARCH_USER, SEARCH_USER, LIKE_COMMENT,
+        DISLIKE_COMMENT, LIKE_COMMENT, DISLIKE_COMMENT, LIKE_COMMENT, DISLIKE_COMMENT, 'search_user', 'round_start',
+      ])
+      assert.deepEqual(rows.map(row => row.querySelector('.event-target dt')?.textContent), [
+        copy.searchQuery, copy.commentId, copy.commentId, ...Array(10).fill(undefined),
+      ])
+      assert.deepEqual(rows.map(row => row.querySelector('.event-target pre')?.textContent), [
+        searchQuery, '0', '42', ...Array(10).fill(undefined),
+      ])
+      assert.equal(m.root.querySelector('a,img,script'), null)
+      assert.deepEqual(rows.map(row => row.querySelector('details pre').textContent), redditLines)
+      assert.deepEqual(rows.map(row => row.querySelector('details .mono').textContent), redditLines.map(bytesHash))
+      assert.equal(requests.length, 5)
+    }
   } finally { m.cleanup() }
 })
 test('pending contradictory controls are disabled; clear, disconnect, source context and unmount fence late replies', async () => {
