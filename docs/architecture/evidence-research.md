@@ -227,3 +227,31 @@ that allowed notification in its passive observation set. Other notifications,
 log records, warnings and errors retain their normal stderr behavior and fail
 the existing assertion. No production driver/configuration/query/logging setting
 changes; this fixture filter does not claim production stderr is empty.
+
+
+## Installed CLI directed two-hop research
+
+The installed `nexaweave_knowledge.research_cli` accepts an opt-in request with
+`schema_version: 2`, `operation: "two_hop"`, a single `display_graph_id` and
+two distinct canonical UUID strings in `source_node_id` and `target_node_id`.
+The optional aware `valid_at` and `recorded_before` use the same retained-edge
+and evidence rules as version 1. The display binding must resolve to the exact
+scope supplied by the trusted CLI configuration. A different run or layer
+in the same graph is refused.
+
+The CLI uses the same admissible edge pages, deadline, and five-page limit.
+It chooses the first fully cited directed path `source -> intermediate -> target`
+with three distinct nodes, by ascending first edge ID and then second edge ID. The
+`hops` array preserves that order. A result exposes the original episode IDs,
+retained evidence IDs and exact citations for each hop. Citation order follows
+each edge's validated evidence order. The selection orders recorded edges by
+identity and carries no relevance score or inferred claim.
+
+`found` means the selected path has complete retained citations for both hops.
+`no_path_in_scan` means the admitted scan contained no directed two-edge path.
+When directed paths exist in the admitted scan and none has complete retained
+citations on both hops, the CLI returns `selected_path_evidence_unavailable`
+with an empty path.
+The scope coverage reports the actual pages, scanned and eligible counts,
+temporal exclusions, unknowns, returned hops and truncation. Passage coverage
+counts only returned citations. Absence remains limited to the admitted scan. Version 1 CLI and framed IPC retain their existing shapes.

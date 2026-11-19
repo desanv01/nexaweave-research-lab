@@ -98,6 +98,7 @@ def _request_bytes(wire):
 
 def _assert_v1_catalog_upgrade(factory, source, legacy_wire, legacy_fingerprint):
     sql = files("nexaweave_execution").joinpath("migrations/native_runs_0001.sql").read_text("utf-8")
+    v2_sql = files("nexaweave_execution").joinpath("migrations/native_runs_0002.sql").read_text("utf-8")
     checksum = hashlib.sha256(sql.encode("utf-8")).hexdigest()
     assert checksum == "85edf91461d79d0a577739bb68abcb36420068623a51661cb9f3b1e586f5ceb6"
     attempt_id, owner_id = uuid4(), uuid4()
@@ -109,7 +110,7 @@ def _assert_v1_catalog_upgrade(factory, source, legacy_wire, legacy_fingerprint)
     with factory() as conn:
         current_catalog = conn.execute(migrations).fetchall()
         conn.rollback()
-        assert [row[0] for row in current_catalog] == [1, 2]
+        assert [row[0] for row in current_catalog] == [1, 2, 3]
         original_catalog_receipt = current_catalog[0]
         assert original_catalog_receipt[1] == checksum
         with conn.transaction(force_rollback=True):
@@ -140,6 +141,23 @@ def _assert_v1_catalog_upgrade(factory, source, legacy_wire, legacy_fingerprint)
                 with pytest.raises(NativeRunMigrationMismatch):
                     migrate_native_runs(conn)
 
+            with conn.transaction(force_rollback=True):
+                conn.execute(v2_sql)
+                conn.execute("INSERT INTO mf_native_execution.schema_migrations VALUES (%s,%s,%s)",
+                             current_catalog[1])
+                assert conn.execute(persisted, (source.run_id,)).fetchone() == (*original_row, None, None)
+                for drift in (
+                    "ALTER TABLE mf_native_execution.runs ADD COLUMN unexpected_v2 integer",
+                    "UPDATE mf_native_execution.schema_migrations SET sql_sha256=repeat('0',64) WHERE version=2",
+                ):
+                    with conn.transaction(force_rollback=True):
+                        conn.execute(drift)
+                        with pytest.raises(NativeRunMigrationMismatch):
+                            migrate_native_runs(conn)
+                        assert len(conn.execute(migrations).fetchall()) == 2
+                migrate_native_runs(conn)
+                assert conn.execute(migrations).fetchall() == current_catalog
+
             migrate_native_runs(conn)
             migrate_native_runs(conn)
             assert conn.execute(migrations).fetchall() == current_catalog
@@ -150,7 +168,11 @@ def _assert_v1_catalog_upgrade(factory, source, legacy_wire, legacy_fingerprint)
                 with pytest.raises(NativeRunMigrationMismatch):
                     migrate_native_runs(conn)
             assert conn.execute(migrations).fetchall() == current_catalog
-            assert conn.execute(persisted, (source.run_id,)).fetchone() == (*original_row, None, None)
+            with conn.transaction(force_rollback=True):
+                conn.execute("ALTER TABLE mf_native_execution.runs DISABLE TRIGGER runs_fork_intervention_guard")
+                with pytest.raises(NativeRunMigrationMismatch):
+                    migrate_native_runs(conn)
+            assert conn.execute(persisted, (source.run_id,)).fetchone() == (*original_row, None, None, None)
             migrated = NativeRunStore(lambda: nullcontext(conn)).get("owner", source.run_id)
             assert migrated.request.to_wire() == legacy_wire
             assert migrated.fingerprint == migrated.request.fingerprint == legacy_fingerprint

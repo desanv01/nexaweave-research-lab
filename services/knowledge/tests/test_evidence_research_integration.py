@@ -107,6 +107,13 @@ sys.setprofile(observe)
 threading.setprofile(observe)
 status = 96  # CLI did not terminate through its expected SystemExit path.
 try:
+    if sys.flags.isolated:
+        from importlib.util import find_spec
+        from pathlib import Path
+        origin = Path(find_spec('nexaweave_knowledge.research_cli').origin).resolve(strict=True)
+        prefix = Path(sys.prefix).resolve()
+        if not origin.is_relative_to(prefix) or 'site-packages' not in origin.relative_to(prefix).parts:
+            raise SystemExit(97)
     sys.argv = ['nexaweave_knowledge.research_cli']
     try:
         runpy.run_module('nexaweave_knowledge.research_cli', run_name='__main__')
@@ -159,13 +166,14 @@ async def retained_graph(factory):
                                          connection_timeout=3, connection_acquisition_timeout=3)
 
     writer = new_driver()
-    edge_ids, episode_ids = [], []
+    edge_ids, episode_ids, nodes = [], [], []
     stamp = datetime.now(timezone.utc)
     try:
         for scope, fact_text in ((source, "Alice works for 猫 source"), (simulation, "Alice works for 猫 simulation")):
             edge, episode, subject, target = map(str, (uuid4(), uuid4(), uuid4(), uuid4()))
             edge_ids.append(edge)
             episode_ids.append(episode)
+            nodes.append((subject, target))
             await writer.execute_query(
                 "CREATE (a:Entity {uuid:$subject,group_id:$group_id,name:'Alice'}), "
                 "(b:Entity {uuid:$target,group_id:$group_id,name:'猫'}), "
@@ -178,7 +186,7 @@ async def retained_graph(factory):
                     "evidence": [str(first), str(second)], "stamp": stamp.isoformat()})
         yield dict(factory=factory, source=source, simulation=simulation, retained=retained,
                    ids=(source_display, simulation_display), new_driver=new_driver,
-                   writer=writer, edges=edge_ids, episodes=episode_ids, stamp=stamp)
+                   writer=writer, edges=edge_ids, episodes=episode_ids, nodes=nodes, stamp=stamp)
     finally:
         try:
             await writer.execute_query("MATCH (n) WHERE n.group_id IN $groups DETACH DELETE n",
@@ -391,11 +399,17 @@ async def test_real_subprocess_json_cli_history_and_denied_display(retained_grap
         KNOWLEDGE_NEO4J_PASSWORD=os.environ['KNOWLEDGE_TEST_PASSWORD'],
     )
 
-    async def invoke(request, expected_status):
+    async def invoke(request, expected_status, *, installed=False):
         raw = json.dumps(request, ensure_ascii=False, allow_nan=False).encode('utf-8')
+        command = [sys.executable, '-c', _CLI_CHILD]
+        if installed:
+            # The isolated child can import the socket guard from ROOT, but
+            # ignores the source checkout in PYTHONPATH.
+            isolated = 'import sys; sys.path.append(sys.argv[1])\n' + _CLI_CHILD
+            command = [sys.executable, '-I', '-c', isolated, str(root)]
         try:
             completed = await asyncio.to_thread(
-                subprocess.run, [sys.executable, '-c', _CLI_CHILD],
+                subprocess.run, command,
                 input=raw, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 cwd=tmp_path, env=env, timeout=60, check=False,
                 creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
@@ -409,7 +423,7 @@ async def test_real_subprocess_json_cli_history_and_denied_display(retained_grap
             category = {
                 91: 'guard_violation', 92: 'model_or_search_observed',
                 93: 'driver_close_missing', 94: 'pg_close_missing',
-                95: 'driver_and_pg_close_missing', 96: 'cli_exit_missing',
+                95: 'driver_and_pg_close_missing', 96: 'cli_exit_missing', 97: 'installed_cli_required',
             }.get(completed.returncode, 'exit_status')
             stderr_category = 'empty'
             if completed.stderr:
@@ -471,6 +485,73 @@ async def test_real_subprocess_json_cli_history_and_denied_display(retained_grap
 
     denied = await invoke({**request, 'display_graph_ids': ['denied_' + uuid4().hex]}, 1)
     assert denied == {'error': 'research_unavailable'}
+
+    source_node, middle_node = f['nodes'][0]
+    target_node = str(uuid4())
+    second_ids = sorted('8' + str(uuid4())[1:] for _ in range(2))
+    second_episodes = [str(uuid4()) for _ in second_ids]
+    original = f['retained'].passages
+    candidates = [
+        {'edge': edge, 'episode': episode, 'evidence': [str(passage.evidence_id)]}
+        for edge, episode, passage in zip(second_ids, second_episodes, reversed(original), strict=True)
+    ]
+    # Admit this earlier edge by topology and valid time, then require its
+    # dangling evidence to lose to the later fully cited alternative.
+    uncited_edge = '0' + str(uuid4())[1:]
+    candidates.insert(0, {'edge': uncited_edge, 'episode': str(uuid4()), 'evidence': [str(uuid4())]})
+    await f['writer'].execute_query(
+        'MATCH (b:Entity {uuid:$middle,group_id:$group_id}) '
+        'CREATE (c:Entity {uuid:$target,group_id:$group_id,name:"Laboratory"}) '
+        'WITH b,c UNWIND $candidates AS item '
+        'CREATE (e:Episodic {uuid:item.episode,group_id:$group_id,created_at:datetime($stamp)}), '
+        "(o:MiroFishIngest {uuid:item.episode,group_id:$group_id,status:'complete',evidence_ids:item.evidence}), "
+        "(b)-[:RELATES_TO {uuid:item.edge,group_id:$group_id,name:'LOCATED_IN', "
+        "fact:'The organization is based at the laboratory',episodes:[item.episode],"
+        'created_at:datetime($stamp),valid_at:datetime($stamp)}]->(c)',
+        parameters_={'middle': middle_node, 'target': target_node, 'group_id': f['source'].group_id,
+                     'candidates': candidates, 'stamp': f['stamp'].isoformat()},
+    )
+    path_request = {
+        'schema_version': 2, 'operation': 'two_hop', 'display_graph_id': f['ids'][0],
+        'source_node_id': source_node, 'target_node_id': target_node,
+        'valid_at': f['stamp'].isoformat(),
+    }
+    two_hop = await invoke(path_request, 0, installed=True)
+    assert two_hop['schema_version'] == 2 and two_hop['operation'] == 'two_hop'
+    assert two_hop['source_node_id'] == source_node and two_hop['target_node_id'] == target_node
+    assert two_hop['path_status'] == 'found' and two_hop['historical'] is True
+    assert two_hop['rank_basis'] == 'directed_path_edge_id_order'
+    assert two_hop['path']['intermediate_node_id'] == middle_node
+    first_hop, second_hop = two_hop['path']['hops']
+    assert [hop['provider_id'] for hop in (first_hop, second_hop)] == [f['edges'][0], second_ids[0]]
+    assert [(hop['source_node_id'], hop['target_node_id']) for hop in (first_hop, second_hop)] == [
+        (source_node, middle_node), (middle_node, target_node),
+    ]
+    assert [hop['episode_ids'] for hop in (first_hop, second_hop)] == [[f['episodes'][0]], [second_episodes[0]]]
+    assert [hop['evidence_ids'] for hop in (first_hop, second_hop)] == [
+        sorted(str(p.evidence_id) for p in original), [str(original[1].evidence_id)],
+    ]
+    for hop in (first_hop, second_hop):
+        assert [citation['evidence_id'] for citation in hop['citations']] == hop['evidence_ids']
+        for citation in hop['citations']:
+            passage = next(item for item in original if str(item.evidence_id) == citation['evidence_id'])
+            assert citation['source_revision'] == str(f['retained'].source_revision)
+            assert citation['source_sha256'] == f['retained'].text_sha256
+            assert (citation['start'], citation['end'], citation['excerpt'], citation['excerpt_sha256']) == (
+                passage.start, passage.end, passage.excerpt, passage.excerpt_sha256,
+            )
+    assert two_hop['scope_coverage'] == {
+        'display_graph_id': f['ids'][0], 'scope': f['source'].model_dump(mode='json'),
+        'pages': 1, 'scanned': 4, 'eligible': 4, 'excluded': 0, 'unknown': 0,
+        'returned': 2, 'truncated': False,
+    }
+    assert two_hop['passage_coverage'] == result['passage_coverage']
+    reversed_path = await invoke(dict(path_request, source_node_id=target_node,
+                                      target_node_id=source_node), 0, installed=True)
+    assert reversed_path['path_status'] == 'no_path_in_scan' and reversed_path['path'] is None
+    assert reversed_path['scope_coverage']['returned'] == 0 and reversed_path['passage_coverage'] == []
+    crossed = await invoke(dict(path_request, display_graph_id=f['ids'][1]), 1, installed=True)
+    assert crossed == {'error': 'research_unavailable'}
     # Normal child exit observed driver/PG close. This additional admission
     # smoke check is not proof of exclusive lock release (read locks are shared).
     ledger = Ledger(f['factory'])

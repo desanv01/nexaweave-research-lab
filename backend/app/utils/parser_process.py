@@ -25,10 +25,13 @@ from .file_parser import (
     ParseLimitError,
     ParseLimits,
     UnsupportedDocumentError,
+    _SCANNED_OCR_MAX_TEXT_BYTES,
 )
 
 
 _PROTOCOL_VERSION = 1
+_OCR_PROTOCOL_VERSION = 2
+_OCR_JOB_COMMIT_LIMIT_BYTES = 268435456
 _MAX_REQUEST_BYTES = 16 * 1024
 _WORKER_SCRIPT = Path(__file__).with_name("parser_worker.py")
 _ERROR_TYPES = {
@@ -74,7 +77,7 @@ def _reject_constant(_constant):
     raise ParserProtocolError()
 
 
-def _request_bytes(file_path, limits):
+def _request_bytes(file_path, limits, *, version=_PROTOCOL_VERSION):
     if type(file_path) is str:
         path = file_path
     elif isinstance(file_path, os.PathLike):
@@ -91,7 +94,7 @@ def _request_bytes(file_path, limits):
     try:
         absolute_path = os.path.abspath(path)
         request = {
-            "version": _PROTOCOL_VERSION,
+            "version": version,
             "file_path": absolute_path,
             "limits": asdict(limits),
         }
@@ -177,7 +180,7 @@ def _stop_and_reap(owner, threads):
     owner.stop(threads)
 
 
-def _parse_response(data, limits):
+def _parse_response(data, limits, *, version=_PROTOCOL_VERSION):
     if not data.startswith(b"{") or not data.endswith(b"}"):
         raise ParserProtocolError()
     try:
@@ -190,12 +193,19 @@ def _parse_response(data, limits):
         raise ParserProtocolError() from None
     if type(response) is not dict or type(response.get("version")) is not int:
         raise ParserProtocolError()
-    if response["version"] != _PROTOCOL_VERSION:
+    if response["version"] != version:
         raise ParserProtocolError()
     if set(response) == {"version", "text"} and type(response["text"]) is str:
-        if len(response["text"]) > limits.max_text_chars:
+        text = response["text"]
+        if len(text) > limits.max_text_chars:
             raise ParserProtocolError()
-        return response["text"]
+        if version == _OCR_PROTOCOL_VERSION:
+            try:
+                if not text.strip() or len(text.encode("utf-8")) > _SCANNED_OCR_MAX_TEXT_BYTES:
+                    raise ParserProtocolError()
+            except UnicodeError:
+                raise ParserProtocolError() from None
+        return text
     if set(response) == {"version", "error"} and type(response["error"]) is str:
         code = response["error"]
         if code == "missing_file":
@@ -208,6 +218,19 @@ def _parse_response(data, limits):
 
 def extract_text_isolated(file_path, *, limits=None, timeout_seconds=30) -> str:
     """Extract one source using the fixed sibling worker and a strict deadline."""
+    return _extract_isolated(
+        file_path, limits, timeout_seconds, version=_PROTOCOL_VERSION,
+    )
+
+
+def extract_scanned_pdf_text_isolated(file_path, *, limits=None, timeout_seconds=30) -> str:
+    """Recognize one admitted grayscale scan in the owned OCR worker lane."""
+    return _extract_isolated(
+        file_path, limits, timeout_seconds, version=_OCR_PROTOCOL_VERSION,
+    )
+
+
+def _extract_isolated(file_path, limits, timeout_seconds, *, version):
     timeout = _validated_timeout(timeout_seconds)
     if limits is None:
         limits = ParseLimits()
@@ -218,8 +241,13 @@ def extract_text_isolated(file_path, *, limits=None, timeout_seconds=30) -> str:
     limits = ParseLimits(
         **{name: getattr(limits, name) for name in ParseLimits.__dataclass_fields__}
     )
-    payload = _request_bytes(file_path, limits)
-    byte_limit = limits.max_text_chars * 6 + 4096
+    payload = _request_bytes(file_path, limits, version=version)
+    char_limit = limits.max_text_chars
+    ocr = version == _OCR_PROTOCOL_VERSION
+    if ocr:
+        char_limit = min(char_limit, _SCANNED_OCR_MAX_TEXT_BYTES)
+    job_profile = {"job_commit_limit_bytes": _OCR_JOB_COMMIT_LIMIT_BYTES} if ocr else {}
+    byte_limit = char_limit * 6 + 4096
     deadline = None
     process = None
     owner = OwnedProcess()
@@ -245,6 +273,7 @@ def extract_text_isolated(file_path, *, limits=None, timeout_seconds=30) -> str:
                 cwd=directory,
                 env=_private_environment(directory),
                 creationflags=creationflags,
+                **job_profile,
             )
             deadline = time.monotonic() + timeout
             writer = threading.Thread(
@@ -305,4 +334,9 @@ def extract_text_isolated(file_path, *, limits=None, timeout_seconds=30) -> str:
         except (OSError, OwnedProcessError):
             if not interrupted:
                 raise ParserFailedError() from None
-    return _parse_response(response_bytes, limits)
+    text = _parse_response(response_bytes, limits, version=version)
+    if ocr:
+        accounting = owner.terminal_job_memory
+        if accounting is None or accounting[0] != _OCR_JOB_COMMIT_LIMIT_BYTES:
+            raise ParserFailedError()
+    return text

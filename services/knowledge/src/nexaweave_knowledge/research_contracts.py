@@ -49,6 +49,50 @@ class ResearchRequest(StrictModel):
         return _aware(value)
 
 
+class TwoHopRequest(StrictModel):
+    schema_version: Literal[2]
+    operation: Literal["two_hop"]
+    display_graph_id: str
+    source_node_id: str
+    target_node_id: str
+    valid_at: datetime | None = None
+    recorded_before: datetime | None = None
+
+    @field_validator("schema_version", mode="before")
+    @classmethod
+    def version(cls, value):
+        if type(value) is not int or value != 2:
+            raise ValueError("invalid two-hop version")
+        return value
+
+    @field_validator("display_graph_id")
+    @classmethod
+    def display(cls, value):
+        return display_id(value)
+
+    @field_validator("source_node_id", "target_node_id")
+    @classmethod
+    def canonical_node_id(cls, value):
+        if value != str(UUID(value)):
+            raise ValueError("invalid entity identity")
+        return value
+
+    @field_validator("valid_at", "recorded_before")
+    @classmethod
+    def aware(cls, value):
+        return _aware(value)
+
+    @model_validator(mode="after")
+    def endpoints(self):
+        if self.source_node_id == self.target_node_id:
+            raise ValueError("two distinct entities are required")
+        return self
+
+    @property
+    def display_graph_ids(self):
+        return (self.display_graph_id,)
+
+
 class Citation(StrictModel):
     evidence_id: UUID
     project_id: UUID
@@ -148,6 +192,62 @@ class ResearchResult(StrictModel):
     historical: bool
     historical_semantics: Literal["retained_edges_not_bitemporal_reconstruction"] = "retained_edges_not_bitemporal_reconstruction"
     rank_basis: Literal["lexical_token_overlap"] = "lexical_token_overlap"
+
+
+class TwoHopEdge(StrictModel):
+    provider_id: str
+    name: str | None = Field(default=None, max_length=256)
+    fact: str = Field(min_length=1, max_length=32768)
+    source_node_id: str
+    target_node_id: str
+    episode_ids: tuple[str, ...] = Field(min_length=1, max_length=100)
+    evidence_ids: tuple[UUID, ...] = Field(min_length=1, max_length=100)
+    valid_at: datetime | None = None
+    invalid_at: datetime | None = None
+    expired_at: datetime | None = None
+    created_at: datetime | None = None
+    citations: tuple[Citation, ...] = Field(min_length=1, max_length=100)
+
+    @model_validator(mode="after")
+    def evidence_order(self):
+        if tuple(item.evidence_id for item in self.citations) != self.evidence_ids:
+            raise ValueError("citations must match the ordered edge evidence")
+        return self
+
+
+class TwoHopPath(StrictModel):
+    intermediate_node_id: str
+    hops: tuple[TwoHopEdge, TwoHopEdge]
+
+
+class TwoHopResult(StrictModel):
+    schema_version: Literal[2] = 2
+    operation: Literal["two_hop"] = "two_hop"
+    source_node_id: str
+    target_node_id: str
+    path: TwoHopPath | None
+    path_status: Literal["found", "no_path_in_scan", "selected_path_evidence_unavailable"]
+    scope_coverage: ScopeCoverage
+    passage_coverage: tuple[PassageCoverage, ...] = Field(max_length=200)
+    historical: bool
+    historical_semantics: Literal["retained_edges_not_bitemporal_reconstruction"] = "retained_edges_not_bitemporal_reconstruction"
+    rank_basis: Literal["directed_path_edge_id_order"] = "directed_path_edge_id_order"
+
+    @model_validator(mode="after")
+    def directed_path(self):
+        if self.path is None:
+            if self.path_status == "found" or self.passage_coverage or self.scope_coverage.returned != 0:
+                raise ValueError("invalid empty path coverage")
+            return self
+        first, second = self.path.hops
+        middle = self.path.intermediate_node_id
+        if (self.path_status != "found" or self.scope_coverage.returned != 2
+                or len({self.source_node_id, middle, self.target_node_id}) != 3
+                or (first.source_node_id, first.target_node_id) != (self.source_node_id, middle)
+                or (second.source_node_id, second.target_node_id) != (middle, self.target_node_id)
+                or first.provider_id == second.provider_id):
+            raise ValueError("invalid directed two-hop path")
+        return self
 
 
 class ResearchError(StrictModel):

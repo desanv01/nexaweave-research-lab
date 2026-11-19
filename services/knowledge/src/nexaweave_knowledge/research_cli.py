@@ -7,7 +7,7 @@ import sys
 
 from .evidence_research import EvidenceResearchService, ResearchFailure, MAX_RESPONSE_BYTES
 from .read_runtime import ReadSettings
-from .research_contracts import ResearchError, ResearchRequest
+from .research_contracts import ResearchError, ResearchRequest, TwoHopRequest
 
 MAX_REQUEST_BYTES = 16384
 
@@ -27,7 +27,8 @@ def parse_request(raw):
             raise ValueError
         data = json.loads(raw.decode("utf-8"), object_pairs_hook=_pairs,
                           parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
-        return ResearchRequest.model_validate_json(json.dumps(data, ensure_ascii=True, allow_nan=False))
+        model = TwoHopRequest if type(data) is dict and data.get("schema_version") == 2 else ResearchRequest
+        return model.model_validate_json(json.dumps(data, ensure_ascii=True, allow_nan=False))
     except (ValueError, TypeError, UnicodeError, RecursionError):
         raise ResearchFailure("invalid_request") from None
 
@@ -44,7 +45,8 @@ def main(*, stdin=None, stdout=None, settings_factory=None):
             raise ResearchFailure("invalid_configuration") from None
         service = EvidenceResearchService(settings.principal, settings.connection, settings.driver,
                                           trusted_scope=settings.scope)
-        result = asyncio.run(service.research(request))
+        operation = service.two_hop if isinstance(request, TwoHopRequest) else service.research
+        result = asyncio.run(operation(request))
         payload = result.model_dump_json()
         if len(payload.encode("utf-8")) + 1 > MAX_RESPONSE_BYTES:
             raise ResearchFailure("result_too_large")

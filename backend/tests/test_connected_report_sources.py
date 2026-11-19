@@ -223,6 +223,23 @@ def freezer_fixture(tmp_path, monkeypatch):
         calls.append(revision)
         return scope, project, rows[revision]
     preparation = SimpleNamespace(root=tmp_path, _owned=owned)
+
+    def owned_sources(revisions, *, expected_revision=None, check=None, validate_record=None):
+        records = []
+        for index, revision in enumerate(revisions):
+            if check is not None:
+                check()
+            current_scope, current_project, record = preparation._owned(revision, expected_revision=expected_revision)
+            if check is not None:
+                check()
+            if (current_scope, current_project) != (scope, project):
+                raise ReportError('conflict')
+            if validate_record is not None:
+                validate_record(current_scope, current_project, index, record)
+            records.append(record)
+        return scope, project, tuple(records)
+
+    preparation._owned_sources = owned_sources
     prep = SimpleNamespace(operation_id=UUID(int=10), project_revision=1, receipt={'prepared': True},
         frozen={'public': {'source': deepcopy(context['binding']['source'])}})
     native_binding = context['binding']['native']
