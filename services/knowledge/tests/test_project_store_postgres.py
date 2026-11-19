@@ -148,7 +148,11 @@ def test_schema_constraints_and_drift(factory):
 def test_cli_import_update_export_and_fixed_failures(factory, tmp_path, monkeypatch, capsys):
     workspace, project = uuid4(), uuid4()
     value = snapshot()
-    value["files"] = [{"filename": "uploaded.pdf", "size": 17}]
+    value["files"].insert(0, {"filename": "uploaded.pdf", "size": 17})
+    value["files"].append({
+        "original_filename": "notes.txt", "saved_filename": "saved_notes.txt",
+        "path": "../archive/saved_notes.txt", "size": 23,
+    })
     source = tmp_path / "legacy.json"
     source.write_text(json.dumps(value), encoding="utf-8")
     monkeypatch.setenv("NEXAWEAVE_APPSTORE_DSN", os.environ["PROJECT_STORE_POSTGRES_TEST_DSN"])
@@ -182,3 +186,29 @@ def test_cli_import_update_export_and_fixed_failures(factory, tmp_path, monkeypa
     assert "NEXAWEAVE_APPSTORE_DSN" not in errors
     assert os.environ["PROJECT_STORE_POSTGRES_TEST_DSN"] not in errors
     assert str(source) not in errors
+
+    legacy_path = tmp_path / "historical-flat.json"
+    assert cli_main([
+        "export-project", *common, "--revision", "1", "--legacy-snapshot",
+        "--output", str(legacy_path),
+    ]) == 0
+    assert json.loads(legacy_path.read_text(encoding="utf-8")) == value
+
+    target_workspace, target_project = uuid4(), uuid4()
+    target_owner = "round trip owner"
+    assert cli_main([
+        "import-project", "--principal", target_owner,
+        "--workspace-id", str(target_workspace), "--project-id", str(target_project),
+        "--display-id", "proj_1", "--input", str(legacy_path),
+    ]) == 0
+    restored = ProjectStore(factory).get(target_owner, target_project)
+    assert restored.workspace_id == target_workspace and restored.display_id == "proj_1"
+    assert restored.revision == 1 and restored.snapshot == value and restored.evidence == ()
+    assert capsys.readouterr() == ("", "")
+
+    denied_path = tmp_path / "unauthorized-flat.json"
+    assert cli_main([
+        "export-project", *wrong_owner, "--legacy-snapshot", "--output", str(denied_path),
+    ]) == 2
+    assert not denied_path.exists()
+    assert capsys.readouterr() == ("", "not_found\n")
