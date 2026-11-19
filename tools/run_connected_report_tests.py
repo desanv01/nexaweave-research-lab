@@ -384,6 +384,7 @@ def main() -> int:
             (ROOT / 'services/knowledge/tests/research_browser_stages.py', 50000),
             (ROOT / 'frontend/tests/research-browser-ready-configuration.mjs', 50000),
             (ROOT / 'frontend/tests/run-research-browser.mjs', 50000),
+            (ROOT / 'frontend/tests/research-browser-restart.mjs', 50000),
             (ROOT / 'frontend/tests/research-browser-ontology.mjs', 16000),
         )
         if args.twitter_browser:
