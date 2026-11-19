@@ -12,7 +12,7 @@ import re
 import sys
 import time
 from types import SimpleNamespace
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -285,12 +285,44 @@ def _actual_graph_sources(factory, directory, monkeypatch, prep, scope):
         {'name': 'Organization', 'description': 'Named organization'}), edge_types=(
         {'name': 'WORKS_FOR', 'description': 'Employment relationship',
          'source_targets': ({'source': 'Person', 'target': 'Organization'},)},))
+    def verify_ingestion(record, data, operation):
+        assert data['state'] == 'completed' and data['budget_state'] == 'settled'
+        assert data['scope'] == scope.model_dump(mode='json')
+        assert data['operation_id'] == str(operation) and data['ceiling_microusd'] == 1
+        assert data['episode_id'] == str(scope.episode_uuid(operation))
+        assert data['evidence_ids'] == [str(p.evidence_id) for p in record.passages]
+        assert data['graph_ingestion_executed'] is True and data['actual_usage_microusd'] is None
+        saved = Ledger(factory).get(scope, operation)
+        with factory() as conn:
+            capacity = prep.budget._row(conn, prep.account_id, operation)
+        assert capacity.state == ReservationState.settled and capacity.ceiling_microusd == 1
+        assert type(capacity.receipt) is CompletionReceipt and capacity.receipt == saved.receipt
+        assert saved.receipt.json_value() == data['receipt']
+        assert capacity.fingerprint == saved.fingerprint == data['fingerprint']
+        assert capacity.scope_group_id == scope.group_id
+        assert capacity.episode_id == saved.receipt.episode_id == scope.episode_uuid(operation)
+        assert capacity.evidence_ids == tuple(p.evidence_id for p in record.passages)
+        rows, _, _ = driver.execute_query(
+            'MATCH (e:Episodic {uuid:$episode}), (m:MiroFishIngest {uuid:$episode}) '
+            'RETURN e.group_id AS group_id,e.content AS content,m.status AS state,'
+            'm.group_id AS marker_group,m.sha256 AS marker_sha256,'
+            'm.fingerprint AS fingerprint,m.evidence_ids AS evidence_ids',
+            episode=data['episode_id'], routing_='r')
+        assert len(rows) == 1 and rows[0]['group_id'] == scope.group_id
+        assert rows[0]['content'] == record.text and rows[0]['state'] == 'complete'
+        assert rows[0]['marker_group'] == scope.group_id and rows[0]['marker_sha256'] == record.text_sha256
+        assert hashlib.sha256(rows[0]['content'].encode()).hexdigest() == record.text_sha256
+        assert rows[0]['fingerprint'] == data['fingerprint']
+        assert rows[0]['evidence_ids'] == data['evidence_ids']
+        return capacity.attempt_id
+
     _assert_accounted(prep, 0)
     with neo_scope(scope) as driver, model_server() as (model_port, records, errors, _):
         selected.ingestion = []
         with host(directory / 'actual-source-ingestion', scope, prep.display_graph_id,
                   prep.account_id, model_port, ceiling=1) as (port, token, _):
-            for index, record in enumerate(selected.records):
+            initial = selected.records[1:] if _research_browser_journey else selected.records
+            for index, record in enumerate(initial):
                 operation = uuid4()
                 payload = dict(schema_version=1, source_revision=str(record.source_revision),
                                operation_id=str(operation), ontology=ontology.model_dump(mode='json'))
@@ -298,39 +330,12 @@ def _actual_graph_sources(factory, directory, monkeypatch, prep, scope):
                 status, _, result = _exchange(port, 'POST', route, payload, token=token)
                 assert status == 200, result
                 data = result['data']
-                assert data['state'] == 'completed' and data['budget_state'] == 'settled'
-                assert data['scope'] == scope.model_dump(mode='json')
-                assert data['operation_id'] == str(operation) and data['ceiling_microusd'] == 1
-                assert data['episode_id'] == str(scope.episode_uuid(operation))
-                assert data['evidence_ids'] == [str(p.evidence_id) for p in record.passages]
-                assert data['graph_ingestion_executed'] is True and data['actual_usage_microusd'] is None
-                saved = Ledger(factory).get(scope, operation)
-                with factory() as conn:
-                    capacity = prep.budget._row(conn, prep.account_id, operation)
-                assert capacity.state == ReservationState.settled and capacity.ceiling_microusd == 1
-                assert type(capacity.receipt) is CompletionReceipt and capacity.receipt == saved.receipt
-                assert saved.receipt.json_value() == data['receipt']
-                assert capacity.fingerprint == saved.fingerprint == data['fingerprint']
-                assert capacity.scope_group_id == scope.group_id
-                assert capacity.episode_id == saved.receipt.episode_id == scope.episode_uuid(operation)
-                assert capacity.evidence_ids == tuple(p.evidence_id for p in record.passages)
-                rows, _, _ = driver.execute_query(
-                    'MATCH (e:Episodic {uuid:$episode}), (m:MiroFishIngest {uuid:$episode}) '
-                    'RETURN e.group_id AS group_id,e.content AS content,m.status AS state,'
-                    'm.fingerprint AS fingerprint,m.evidence_ids AS evidence_ids',
-                    episode=data['episode_id'], routing_='r')
-                assert len(rows) == 1 and rows[0]['group_id'] == scope.group_id
-                assert rows[0]['content'] == record.text and rows[0]['state'] == 'complete'
-                assert hashlib.sha256(rows[0]['content'].encode()).hexdigest() == record.text_sha256
-                assert rows[0]['fingerprint'] == data['fingerprint']
-                assert rows[0]['evidence_ids'] == data['evidence_ids']
+                verify_ingestion(record, data, operation)
                 before = len(records)
                 assert _exchange(port, 'POST', route, payload, token=token)[2]['data'] == data
                 assert len(records) == before and errors == []
                 _assert_accounted(prep, index + 1)
                 selected.ingestion.append(data)
-        assert len({data['operation_id'] for data in selected.ingestion}) == 4
-        assert len({data['episode_id'] for data in selected.ingestion}) == 4
         assert records and errors == []
         assert {row['model'] for row in records} == {'fixture-generation', 'fixture-embedding'}
         pg = conninfo_to_dict(os.environ['PROJECT_STORE_POSTGRES_TEST_DSN'])
@@ -343,22 +348,71 @@ def _actual_graph_sources(factory, directory, monkeypatch, prep, scope):
         settings = replace(prep.settings, python=os.environ['KNOWLEDGE_PYTHON'],
             bootstrap=os.environ['KNOWLEDGE_BOOTSTRAP_SCRIPT'], child_environment=child)
         reader = KnowledgeReadFacade(settings)
-        before_reads = len(records)
-        graph = reader.graph_data(prep.display_graph_id)
-        assert graph['graph_id'] == prep.display_graph_id and graph['nodes'] and graph['edges']
-        expected = {p['evidence_id'] for source in selected.snapshots for p in source['passages']}
-        linked = {uid for fact in graph['nodes'] + graph['edges'] for uid in fact['evidence_ids']}
-        assert linked == expected
-        assert all({p['evidence_id'] for p in source['passages']} & linked for source in selected.snapshots)
-        assert len(records) == before_reads and errors == []
-        _assert_accounted(prep, 4)
         prep.settings, prep.reader = settings, reader
-        selected.graph = graph
         selected.model_records, selected.model_errors = records, errors
-        selected.ingestion_calls = before_reads
+
+        def verify_complete():
+            before_reads = len(records)
+            assert len({data['operation_id'] for data in selected.ingestion}) == 4
+            assert len({data['episode_id'] for data in selected.ingestion}) == 4
+            graph = reader.graph_data(prep.display_graph_id)
+            assert graph['graph_id'] == prep.display_graph_id and graph['nodes'] and graph['edges']
+            expected = {p['evidence_id'] for source in selected.snapshots for p in source['passages']}
+            linked = {uid for fact in graph['nodes'] + graph['edges'] for uid in fact['evidence_ids']}
+            assert linked == expected
+            assert all({p['evidence_id'] for p in source['passages']} & linked for source in selected.snapshots)
+            _assert_accounted(prep, 4)
+            assert len(records) == before_reads and errors == []
+            selected.graph = graph
+            selected.ingestion_calls = before_reads
+
+        if _research_browser_journey:
+            selected.model_port = model_port
+            selected.verify_ingestion = verify_ingestion
+            selected.verify_complete = verify_complete
+        else:
+            verify_complete()
         yield selected
-        # All later graph reads/reauthorization/recovery are read-only and never reingest.
-        assert len(records) == before_reads and errors == []
+        assert len(records) == selected.ingestion_calls and errors == []
+
+
+def _browse_saved_pdf(browser, factory, prep, scope, selected):
+    from nexaweave_knowledge.operations import Ledger, NotFound
+
+    record = selected.records[0]
+    source = {'source_revision': str(record.source_revision)}
+    before = len(selected.model_records)
+    _assert_accounted(prep, 3)
+    saved = browser.perform('ontology-review', source)
+    ontology = saved['ontology']
+    assert any(entity.get('examples') for entity in ontology['entity_types'])
+    assert all(item['attributes'] for item in ontology['entity_types'] + ontology['edge_types'])
+    assert any('Entity' in (pair['source'], pair['target'])
+               for edge in ontology['edge_types'] for pair in edge['source_targets'])
+    planned = browser.perform('ontology-plan', dict(source, project_revision=saved['project_revision']))
+    operation = UUID(planned['operation_id'])
+    assert planned['source_sha256'] == record.text_sha256
+    assert planned['scope'] == scope.model_dump(mode='json')
+    assert planned['episode_id'] == str(scope.episode_uuid(operation))
+    assert planned['evidence_ids'] == [str(p.evidence_id) for p in record.passages]
+    with pytest.raises(NotFound):
+        Ledger(factory).get(scope, operation)
+    with factory() as conn:
+        assert prep.budget._row(conn, prep.account_id, operation) is None
+    assert len(selected.model_records) == before and not selected.model_errors
+    _assert_accounted(prep, 3)
+    ref = dict(source, operation_id=str(operation))
+    executed = browser.perform('ontology-execute', ref)
+    attempt = selected.verify_ingestion(record, executed, operation)
+    assert executed['fingerprint'] == planned['execution_fingerprint']
+    selected.ingestion.append(executed)
+    selected.verify_complete()
+    assert len(selected.model_records) > before
+    browser.restart()
+    assert browser.perform('ontology-recover', ref) == executed
+    assert selected.verify_ingestion(record, executed, operation) == attempt
+    assert len(selected.model_records) == selected.ingestion_calls and not selected.model_errors
+    _assert_accounted(prep, 4)
 
 @pytest.fixture(scope='module')
 def factory():
@@ -371,7 +425,7 @@ def factory():
     'ordinary', 'cooperative-heartbeat',
     pytest.param('caller-cancel', marks=pytest.mark.connected_report_caller_cancel),
 ])
-async def test_actual_native_receipt_to_inherited_report_preserves_inputs_and_disabled_reads(factory, tmp_path, monkeypatch, profile):
+async def test_actual_native_receipt_to_inherited_report_preserves_inputs_and_disabled_reads(factory, tmp_path, monkeypatch, profile, capsys):
     from test_connected_preparation_native_launch import RichConnectedChat
     from test_preparation_store import real_host, request, reference as prep_reference
     from test_native_launch_store import migrate_all, launch_host, declaration
@@ -444,7 +498,6 @@ async def test_actual_native_receipt_to_inherited_report_preserves_inputs_and_di
             # Main fixture replaces only the existing synthetic projection byte
             # transport with actual owned children. It does not claim graph quality.
             from dataclasses import replace
-            import sys
             from app.services.knowledge_read_facade import KnowledgeReadFacade
             facts = {}
             for kind in ('node', 'edge'):
@@ -488,12 +541,14 @@ async def test_actual_native_receipt_to_inherited_report_preserves_inputs_and_di
                     browser = await browser_lifecycle.enter_async_context(
                         ResearchBrowserSession(tmp_path, prep, native_host, reports, selected, report_log))
                     browser.ordered_sources()
+                    await asyncio.to_thread(_browse_saved_pdf, browser, factory, prep, source_scope, selected)
                 phases.start('preparation-plan-start')
                 payload = request(retained)
                 if selected is not None:
                     payload = dict(request(selected.records[0]), schema_version=2, source_revisions=selected.revisions[:])
                 payload['options'].update(types=['Person','Organization'], max_agents=2, max_rounds=1)
                 if browser:
+                    payload['options']['simulation_requirement'] += '。使用 Twitter 和 Reddit。'
                     planned = await asyncio.to_thread(browser.perform, 'preparation-plan', payload)
                 else:
                     planned = await asyncio.to_thread(prep.plan, payload)
@@ -547,6 +602,13 @@ async def test_actual_native_receipt_to_inherited_report_preserves_inputs_and_di
                     assert capacity.receipt.fingerprint == capacity.fingerprint
                     assert capacity.receipt.artifact_sha256 == ready['receipt']['artifact_sha256']
                     _assert_accounted(prep, 6)
+                    if profile == 'ordinary' and sys.platform == 'linux':
+                        from test_preparation_store import assert_installed_prepared_profile
+
+                        await asyncio.to_thread(assert_installed_prepared_profile, prep, ready,
+                            original_inputs, selected.revisions[0], monkeypatch, tmp_path)
+                        with capsys.disabled():
+                            print('NEXAWEAVE_W13_DISTINCT_PROFILE_READER_CLOSED', flush=True)
                 phases.start('native-plan-start')
                 if browser:
                     launch = await asyncio.to_thread(browser.perform, 'native-start', declaration(planned))

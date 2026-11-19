@@ -148,6 +148,26 @@ def multisource_host(tmp_path, *, chat=None, contents=('PDF 原文 😀', 'DOCX 
             raise PreparationError('not_found')
         return scope, project, records[revision]
     host._owned = owned
+
+    def owned_sources(revisions, *, expected_revision=None, check=None, validate_record=None):
+        retained = []
+        for index, revision in enumerate(revisions):
+            if check is not None:
+                check()
+            current_scope, current_project, record = host._owned(revision, expected_revision=expected_revision)
+            if check is not None:
+                check()
+            if (current_scope, current_project) != (scope, project):
+                raise PreparationError('conflict')
+            if (record.project_id != scope.project_id or str(record.source_revision) != revision
+                    or not record.passages or record.codepoint_length > 32768):
+                raise PreparationError('invalid_request')
+            if validate_record is not None:
+                validate_record(current_scope, current_project, index, record)
+            retained.append(record)
+        return scope, project, tuple(retained)
+
+    host._owned_sources = owned_sources
     original_call = transport.call
     def projected(raw):
         reply = json.loads(original_call(raw))

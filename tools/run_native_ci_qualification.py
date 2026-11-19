@@ -43,7 +43,7 @@ EXPERIMENT_SELECTORS = (
 FIXTURE_TESTS = (
     ('native-store', 'run_native_store_tests.py', '--postgres'),
     ('native-temporal', 'run_native_temporal_tests.py', '--integration'),
-    ('preparation', 'run_preparation_tests.py', '--integration'),
+    ('preparation', 'run_preparation_tests.py', '--hosted-integration'),
     ('native-launch-integration', 'run_native_launch_tests.py', '--integration'),
     ('native-launch-engine', 'run_native_launch_tests.py', '--engine'),
     ('observations-integration', 'run_native_observations_tests.py', '--integration'),
@@ -325,7 +325,7 @@ def _write_scripts(directory, python, token):
     fixture = directory / 'fixture.ps1'
     pg = _quote_ps(ROOT / 'tools/native_store_ci_postgres.ps1')
     temporal = _quote_ps(ROOT / 'tools/native_temporal_ci_server.ps1')
-    lines = ["$ErrorActionPreference = 'Stop'", '$failed = $false',
+    lines = ["$ErrorActionPreference = 'Stop'", '$failed = $false', '$preparationSucceeded = $false',
              '$laneClock = [Diagnostics.Stopwatch]::StartNew()',
              'function Write-Timing($gate, $phase, $clock) {',
              '  $savedExit = $global:LASTEXITCODE',
@@ -358,7 +358,14 @@ def _write_scripts(directory, python, token):
              '  if (-not $script:gateSucceeded) { throw \'Temporal prerequisite failed\' }']
     # Keep actual Windows journeys; the same CI runs database-only cases on Linux.
     for gate, script, mode in FIXTURE_TESTS[1:]:
+        if gate == 'native-launch-integration':
+            lines.append(f'  $launchIntegrationMode = {_quote_ps(mode)}')
+            lines.append("  if ($preparationSucceeded) { $launchIntegrationMode = '--hosted-integration' }")
+            mode = '$launchIntegrationMode'
         lines.append(f"  Invoke-Gate {_quote_ps(gate)} {{ & {_quote_ps(python)} {_quote_ps(ROOT / 'tools' / script)} {mode} }}")
+        if gate == 'preparation':
+            # The runner exits zero only after exact selection and owned cleanup.
+            lines.append('  $preparationSucceeded = $script:gateSucceeded')
     lines.extend(['} catch { Write-Output $_; $failed = $true } finally {',
                   f"  Invoke-Gate 'temporal-stop' {{ & {temporal} -Action stop }}",
                   f"  Invoke-Gate 'postgres-stop' {{ & {pg} -Action stop }}",
