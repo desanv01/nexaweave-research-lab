@@ -263,7 +263,15 @@ class ReportProcess:
                 checkpoint()
                 if not ready and time.monotonic() >= handshake:
                     code = 'timeout'; break
-                if parent.poll(0.1):
+                frame_ready = parent.poll(0.1)
+                if not frame_ready and not process.is_alive():
+                    # A terminal frame can arrive between the poll and child exit.
+                    frame_ready = parent.poll(0)
+                    if not frame_ready:
+                        break
+                    if time.monotonic() >= (deadline if ready else handshake):
+                        code = 'timeout'; break
+                if frame_ready:
                     message = parent.recv()
                     if message == ('ready',) and not ready:
                         parent.send(('checking', 'go'))
@@ -287,8 +295,6 @@ class ReportProcess:
                         break
                     else:
                         raise ReportError('invalid_reply')
-                elif not process.is_alive():
-                    break
             else:
                 code = 'timeout'
         except BaseException as error:

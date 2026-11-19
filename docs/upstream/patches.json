@@ -26,8 +26,8 @@
     {
       "imported_path": "backend/app/api/graph.py",
       "original_sha256": "096f8b54a1a81430678a4082067be000d05e9b0ebbbe047ba05ce4abde5ba56b",
-      "current_sha256": "ed19a390f4259ba1d6287f28b9bf8a6eaf01a9355653b133db63f81c622ae1ee",
-      "reason": "U02a validates supplied project IDs/storage paths. U02g bounds ontology admission/save/extraction, uses isolated parsing, rejects mixed multipart field confusion and prevents model work after parsing/phase failure with safe retained FAILED state. NexaWeave canonical package/configuration and ordinary display names; reviewed derived source change preserving legal/provenance and persisted v1 identities.",
+      "current_sha256": "67c3bf83fc6ad10871c14bb61e42243344b6b862f02d99f8501517a10943d470",
+      "reason": "U02a validates supplied project IDs/storage paths. U02g bounds ontology admission/save/extraction, uses isolated parsing, rejects mixed multipart field confusion and prevents model work after parsing/phase failure with safe retained FAILED state. NexaWeave canonical package/configuration and ordinary display names; reviewed derived source change preserving legal/provenance and persisted v1 identities. W7.2 enables one optional owned Windows OCR recovery for eligible scanned PDF uploads with bounded recognition and verified original bytes.",
       "phase": "NexaWeave canonical rebrand"
     },
     {
@@ -47,8 +47,8 @@
     {
       "imported_path": "backend/app/config.py",
       "original_sha256": "a85580b4551724b3c2fff419565c9aa11f6dba1992f5981ed34037a264c2a2f3",
-      "current_sha256": "35b2b414b0313ffae66279a857228ef20806ee2ffb49f2232a6dca542908ccbf",
-      "reason": "U02d explicit origins retained. U03i separate read-only host validation without Zep/model credentials; inherited legacy validation unchanged. U13a adds DOCX to the inherited allowed-extension list only. NexaWeave canonical package/configuration and ordinary display names; reviewed derived source change preserving legal/provenance and persisted v1 identities.",
+      "current_sha256": "af4cc31f93e9ba5a3c2a195d7e443d36df9fcb821228067260c8737420d723e6",
+      "reason": "U02d explicit origins retained. U03i separate read-only host validation without Zep/model credentials; inherited legacy validation unchanged. U13a adds DOCX to the inherited allowed-extension list only. NexaWeave canonical package/configuration and ordinary display names; reviewed derived source change preserving legal/provenance and persisted v1 identities. W7.2 enables one optional owned Windows OCR recovery for eligible scanned PDF uploads with bounded recognition and verified original bytes.",
       "phase": "NexaWeave canonical rebrand"
     },
     {
@@ -75,8 +75,8 @@
     {
       "imported_path": "backend/app/services/oasis_profile_generator.py",
       "original_sha256": "ed9cd3416a46b922bc2f9bf0e9623435d9b96bdf0198db27602ca8c4f0dd0e37",
-      "current_sha256": "124e565981ec6cebe43b5a63b7fe8b91236cef7b0d82d8dc67a330574c0f9492",
-      "reason": "U03j basic-only/local RNG and inherited Twitter formatting. U03k explicit injected chat/context, strict neutral parsing without fallback, preserving legacy defaults. U03n strict-neutral realtime/final Reddit serialization preserves missing demographic attributes and supplied values; legacy defaults remain. NexaWeave canonical package/configuration and ordinary display names; reviewed derived source change preserving legal/provenance and persisted v1 identities.",
+      "current_sha256": "d9183b20a1ddfac504de9ab2d17e93ad42c31503cdcd89a58ce1fec03545cdcd",
+      "reason": "U03j basic-only/local RNG and inherited Twitter formatting. U03k explicit injected chat/context, strict neutral parsing without fallback, preserving legacy defaults. U03n strict-neutral realtime/final Reddit serialization preserves missing demographic attributes and supplied values; legacy defaults remain. NexaWeave canonical package/configuration and ordinary display names; reviewed derived source change preserving legal/provenance and persisted v1 identities. W1.3 extracts the existing profile row loader for reuse by the owned read-only prepared profile child.",
       "phase": "NexaWeave canonical rebrand"
     },
     {
@@ -152,8 +152,8 @@
     {
       "imported_path": "backend/app/utils/file_parser.py",
       "original_sha256": "f1adfdda1a6674ad7af76dc95a9b76f388470098e4cf514be908440c4167c398",
-      "current_sha256": "85aebeb61b19849080ccf2572cc7eb9f655b197c42846828972fbf51c60f5369",
-      "reason": "Bound source bytes/PDF pages/extracted text/multifile results; safe classified errors, BOM decoding and progress-guaranteed bounded chunking. Native parser isolation remains separate. U13a adds bounded DOCX extraction through a fixed standard-library sibling while retaining the five-field saved parser contract and existing formats. NexaWeave canonical package/configuration and ordinary display names; reviewed derived source change preserving legal/provenance and persisted v1 identities.",
+      "current_sha256": "a74cac3d6dda7ffe723d14b9629bf3f71c3bc10f7d27cd4c278b606aafd36d52",
+      "reason": "Bound source bytes/PDF pages/extracted text/multifile results; safe classified errors, BOM decoding and progress-guaranteed bounded chunking. Native parser isolation remains separate. U13a adds bounded DOCX extraction through a fixed standard-library sibling while retaining the five-field saved parser contract and existing formats. NexaWeave canonical package/configuration and ordinary display names; reviewed derived source change preserving legal/provenance and persisted v1 identities. W7.2 enables one optional owned Windows OCR recovery for eligible scanned PDF uploads with bounded recognition and verified original bytes.",
       "phase": "NexaWeave canonical rebrand"
     },
     {
@@ -486,6 +486,14 @@
       "current_sha256": "4c6465c9725cb00a798322006d16bb613fdfd23692e4842d6db85943b69cc63f",
       "reason": "W1.2 adds focused fixtures for strict ontology validation and detached accepted edits.",
       "phase": "W1.2 reviewed ontology validation"
+    },
+    {
+      "imported_path": "frontend/src/components/Step1GraphBuild.vue",
+      "original_sha256": "2eda6d5ad075363a9b4bc198eedf72ef04d52a41d9e539968d0c9371168e308d",
+      "current_sha256": "975e3c03a34ca4e882b1d397aeac45f784639e0836d3b80471bf6920ccd95c76",
+      "reason": "W6.1 localizes initial graph ontology detail labels while preserving the displayed ontology and existing workflow.",
+      "phase": "W6.1",
+      "review_status": "Scoped review complete. Exact hosted checks pending."
     }
   ]
 }

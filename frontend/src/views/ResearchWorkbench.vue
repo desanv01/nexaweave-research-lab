@@ -20,6 +20,7 @@ const connected = ref(false), busy = ref(false), status = ref('disconnected'), e
 const ingestionRequest = ref('')
 const bannerError = computed(() => {
   if (errorCode.value && ['unauthorized', 'origin_denied'].includes(errorCode.value)) return safeError(copy.value, errorCode.value)
+  if (errorCode.value === 'ontology_ineligible') return ''
   if (ingestionRequest.value && (errorCode.value || status.value === 'cancelled')) return copy.value.ingestionBanner[ingestionRequest.value]
   return errorCode.value ? safeError(copy.value, errorCode.value) : ''
 })
@@ -28,6 +29,7 @@ const sections = ref([{ heading: '', query: '' }]), advanced = ref(false), topK 
 const graphPage = ref(0), graphKind = ref('nodes')
 const client = createWorkbenchClient()
 const sourceReset = ref(0)
+const experimentCancel = ref(0)
 const populationReset = ref(0)
 const populationFeedback = ref('')
 const populationStatus = computed(() => populationCopyFor(locale.value)[populationFeedback.value] || '')
@@ -76,12 +78,16 @@ const nativeMethods = Object.freeze({
 const preparationMethods = Object.freeze({
   plan: (payload, source) => operation(() => client.preparationPlan(payload, source), false, true),
   start: payload => operation(() => client.preparationStart(payload), false, true),
-  status: payload => operation(() => client.preparationStatus(payload), false, true)
+  status: payload => operation(() => client.preparationStatus(payload), false, true),
+  profiles: (payload, ready, options) => operation(() => client.preparationProfiles(payload, ready, options), false, true, '', false, true),
+  configuration: (payload, ready, options) => operation(() => client.preparationConfiguration(payload, ready, options), false, true, '', false, true)
 })
 const ingestionMethods = Object.freeze({
-  plan: (payload, inspected) => operation(() => client.ingestionPlan(payload, inspected), false, true, 'plan'),
+  plan: (payload, inspected, saved) => operation(() => client.ingestionPlan(payload, inspected, saved?.scope, saved), false, true, 'plan'),
   execute: (payload, known) => operation(() => client.ingestionExecute(payload, known), false, true, 'execute'),
-  status: (payload, known) => operation(() => client.ingestionStatus(payload, known, undefined, inspectedSource.value?.source.project_id), false, true, 'status')
+  status: (payload, known) => operation(() => client.ingestionStatus(payload, known, undefined, inspectedSource.value?.source.project_id), false, true, 'status'),
+  loadOntology: known => operation(() => client.sourceOntologyLoad(known, inspectedSource.value?.source.project_id), false, true, '', false, true),
+  saveOntology: (payload, known) => operation(() => client.sourceOntologySave(payload, known, inspectedSource.value?.source.project_id), false, true, '', false, true)
 })
 // Methods capture the single private client. Neither token nor origin is a prop.
 const sourceMethods = Object.freeze({
@@ -94,7 +100,8 @@ const sourceMethods = Object.freeze({
 })
 const experimentMethods = Object.freeze({
   catalog: () => operation(() => client.experimentCatalog(), false, true),
-  compare: (payload, catalog) => operation(() => client.experimentCompare(payload, catalog), false, true)
+  compare: (payload, catalog) => operation(() => client.experimentCompare(payload, catalog), false, true),
+  download: (payload, catalog, known, signal) => operation(() => client.experimentDownload(payload, catalog, known, signal), false, true)
 })
 const populationMethods = Object.freeze({
   preview: options => operation(() => client.populationPreview(options), false, true, '', true),
@@ -105,7 +112,7 @@ let generation = 0
 const graphEntries = computed(() => graphData.value?.[graphKind.value] || [])
 function clearProtected() { clearNativeViews(); sourceCatalog.value = null; sourceReset.value++; populationReset.value++; preparationReset.value++; nativeReset.value++; nativeReady.value = null; inspectedSource.value = null; graphData.value = null; result.value = null; graphPage.value = 0 }
 function disconnect() { generation++; client.disconnect(); token.value = ''; reveal.value = false; connected.value = false; busy.value = false; clearProtected(); errorCode.value = ''; ingestionRequest.value = ''; status.value = 'disconnected' }
-function cancel() { generation++; populationReset.value++; client.cancel(); busy.value = false; status.value = 'cancelled'; errorCode.value = ''; if (!connected.value) { client.disconnect(); token.value = ''; clearProtected() } }
+function cancel() { generation++; experimentCancel.value++; populationReset.value++; client.cancel(); busy.value = false; status.value = 'cancelled'; errorCode.value = ''; if (!connected.value) { client.disconnect(); token.value = ''; clearProtected() } }
 async function operation(action, connecting = false, source = false, ingestion = '', population = false, preserveProtected = false, graphRefresh = false) {
   const epoch = ++generation
   if (!population) populationReset.value++
@@ -171,7 +178,7 @@ onBeforeUnmount(disconnect)
       </section>
       <SourceLibrary :methods="sourceMethods" :connected="connected" :busy="busy" :reset-version="sourceReset" :locale="locale" @inspected="inspectedSource = $event" @catalog="sourceCatalog = $event" />
       <SourceIngestion :methods="ingestionMethods" :inspected="inspectedSource" :connected="connected" :busy="busy" :reset-version="sourceReset" :locale="locale" />
-      <ExperimentComparison :methods="experimentMethods" :connected="connected" :busy="busy" :reset-version="sourceReset" :locale="locale" />
+      <ExperimentComparison :methods="experimentMethods" :connected="connected" :busy="busy" :reset-version="sourceReset" :cancel-version="experimentCancel" :locale="locale" />
       <PopulationWorkbench :methods="populationMethods" :connected="connected" :busy="busy" :reset-version="populationReset" :locale="locale" :type-labels="populationTypes" />
       <SimulationPreparation :methods="preparationMethods" :connected="connected" :busy="busy" :reset-version="preparationReset" :locale="locale" :source="inspectedSource?.source || null" :source-catalog="sourceCatalog" :display-graph-id="graphData?.graph_id || ''" :type-labels="populationTypes" @ready="nativeReady = $event" @cleared="nativeReset++" />
       <NativeLaunch :methods="nativeMethods" :ready="nativeReady" :connected="connected" :busy="busy" :reset-version="nativeReset" :locale="locale" :display-graph-id="graphData?.graph_id || ''" @inspect="observationSelection = $event" @report="reportSelection = $event" @cleared="clearNativeViews" />

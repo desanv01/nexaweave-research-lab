@@ -1,13 +1,18 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
-import { experimentSelection, validateExperimentCatalog, validateExperimentComparison } from '../../api/experimentComparison.js'
+import { comparisonReportBytes, comparisonReportFilename, comparisonReportMedia, experimentSelection,
+  validateExperimentCatalog, validateExperimentComparison } from '../../api/experimentComparison.js'
 import { copyFor } from '../../i18n/workbench.js'
-const props = defineProps({ methods: { type: Object, required: true }, connected: Boolean, busy: Boolean, resetVersion: Number, locale: { type: String, default: 'en' } })
+const props = defineProps({ methods: { type: Object, required: true }, connected: Boolean, busy: Boolean, resetVersion: Number, cancelVersion: Number, locale: { type: String, default: 'en' } })
 const copy = computed(() => copyFor(props.locale).experiments)
+const exportCopy = computed(() => copyFor(props.locale).exports)
 const catalog = ref(null), selected = ref([]), title = ref(''), result = ref(null), pending = ref(false), message = ref(''), error = ref('')
 const feedback = ref(null), resultsPanel = ref(null)
+const downloadPending = ref(false), downloadFeedback = ref('')
+const downloadButton = ref(null)
+let comparisonRequest = null, downloadOwner = null, ownedUrl = null, cleanupTimer = null
 let generation = 0
-const disabled = computed(() => !props.connected || props.busy || pending.value)
+const disabled = computed(() => !props.connected || props.busy || pending.value || downloadPending.value)
 const bytes = computed(() => new TextEncoder().encode(title.value).length)
 const titleInvalid = computed(() => title.value !== '' && (bytes.value > 160 || !title.value.trim() || /[\u0000-\u001f\u007f]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u.test(title.value)))
 const ordered = computed(() => catalog.value?.members.filter(m => selected.value.includes(m.member_id)).map(m => m.member_id) || [])
@@ -15,9 +20,27 @@ const valid = computed(() => { try { experimentSelection({ version: 1, title: ti
 const statusText = computed(() => pending.value ? copy.value.working : error.value ? copy.value[error.value] || copy.value.failed : copy.value[message.value] || copy.value.idle)
 const metricText = value => value === null ? copy.value.unavailable : String(value)
 const stateText = state => copy.value.states[state] || copy.value.unavailable
-function clear() { generation++; catalog.value = null; selected.value = []; title.value = ''; result.value = null; pending.value = false; message.value = ''; error.value = '' }
+function revokeDownload() {
+  if (cleanupTimer !== null) { clearTimeout(cleanupTimer); cleanupTimer = null }
+  if (ownedUrl !== null) {
+    const url = ownedUrl; ownedUrl = null
+    try { URL.revokeObjectURL(url) } catch { /* Best effort browser cleanup. */ }
+  }
+}
+function clearDownload() {
+  downloadOwner?.abort()
+  downloadOwner = null; downloadPending.value = false; downloadFeedback.value = ''
+  revokeDownload()
+}
+function clearResult() { clearDownload(); comparisonRequest = null; result.value = null }
+function clear() { generation++; clearResult(); catalog.value = null; selected.value = []; title.value = ''; pending.value = false; message.value = ''; error.value = '' }
 watch(() => [props.connected, props.resetVersion], clear, { flush: 'sync' })
-watch([title, selected], () => { generation++; result.value = null; error.value = ''; message.value = catalog.value ? 'loaded' : ''; pending.value = false }, { deep: true, flush: 'sync' })
+watch([title, selected], () => { generation++; clearResult(); error.value = ''; message.value = catalog.value ? 'loaded' : ''; pending.value = false }, { deep: true, flush: 'sync' })
+watch(() => props.cancelVersion, () => {
+  const wasPending = downloadPending.value || downloadFeedback.value === 'cancelled'
+  clearDownload()
+  if (wasPending) downloadFeedback.value = 'cancelled'
+}, { flush: 'sync' })
 onBeforeUnmount(clear)
 function errorKey(code) {
   if (['invalid_request', 'limit_exceeded'].includes(code)) return 'invalid'
@@ -42,7 +65,7 @@ async function load() {
 }
 async function compare() {
   if (disabled.value || !catalog.value) return
-  result.value = null; message.value = ''; error.value = ''
+  clearResult(); message.value = ''; error.value = ''
   let snapshot
   try { snapshot = experimentSelection({ version: 1, title: title.value, member_ids: ordered.value }, catalog.value) }
   catch { error.value = 'invalid'; await nextTick(); feedback.value?.focus(); return }
@@ -51,11 +74,54 @@ async function compare() {
   try {
     const admitted = validateExperimentComparison(await props.methods.compare(snapshot.payload, snapshot.catalog), snapshot.catalog, snapshot.payload)
     if (epoch !== generation || !props.connected) return
+    comparisonRequest = snapshot
     result.value = JSON.parse(JSON.stringify(admitted)); message.value = 'completed'
     await nextTick(); if (epoch === generation) resultsPanel.value?.focus()
   } catch (e) {
     if (epoch === generation && props.connected) { error.value = errorKey(e.code); await nextTick(); feedback.value?.focus() }
   } finally { if (epoch === generation) pending.value = false }
+}
+async function download() {
+  if (disabled.value || !result.value || !comparisonRequest || !props.methods.download) return
+  clearDownload()
+  const displayed = result.value, epoch = generation
+  const restoreFocus = document.activeElement === downloadButton.value
+  const owner = new AbortController()
+  downloadOwner = owner; downloadPending.value = true
+  const current = () => props.connected && generation === epoch &&
+    downloadOwner === owner && result.value === displayed && !owner.signal.aborted
+  let anchor
+  try {
+    const { payload, catalog } = experimentSelection(comparisonRequest.payload, comparisonRequest.catalog)
+    const known = JSON.parse(JSON.stringify(displayed))
+    const bytes = await props.methods.download(payload, catalog, known, owner.signal)
+    if (!current()) return
+    if (!(bytes instanceof Uint8Array) || !bytes.length || bytes.length > comparisonReportBytes) {
+      downloadFeedback.value = 'invalidReply'
+      return
+    }
+    ownedUrl = URL.createObjectURL(new Blob([bytes], { type: comparisonReportMedia }))
+    anchor = document.createElement('a')
+    anchor.href = ownedUrl; anchor.download = comparisonReportFilename
+    anchor.hidden = true; document.body.append(anchor)
+    if (!current()) { revokeDownload(); return }
+    anchor.click()
+    downloadFeedback.value = 'requested'
+    cleanupTimer = setTimeout(revokeDownload, 1000)
+  } catch (e) {
+    if (current()) {
+      revokeDownload()
+      downloadFeedback.value = errorKey(e?.code)
+    }
+  } finally {
+    anchor?.remove()
+    if (downloadOwner === owner) {
+      downloadPending.value = false
+      await nextTick()
+      if (current() && restoreFocus && document.activeElement === document.body) downloadButton.value?.focus()
+      if (downloadOwner === owner) downloadOwner = null
+    }
+  }
 }
 </script>
 <template>
@@ -107,6 +173,10 @@ async function compare() {
       </details>
       <details class="comparability"><summary>{{ copy.comparability }}</summary><p>{{ copy.comparabilityHint }}</p><p v-if="!result.comparability_matrix.length">{{ copy.singleMember }}</p><details v-for="pair in result.comparability_matrix" :key="pair.left_member_id + '|' + pair.right_member_id"><summary>{{ pair.left_member_id }} / {{ pair.right_member_id }}</summary><dl><div v-for="(cell, field) in pair.fields" :key="field"><dt>{{ copy.fieldLabels[field] }}</dt><dd>{{ cell.equal === null ? copy.unavailable : cell.equal ? copy.same : copy.different }}</dd></div></dl></details></details>
       <details class="result-provenance"><summary>{{ copy.resultProvenance }}</summary><dl><dt>{{ copy.cohortDigest }}</dt><dd class="mono">{{ result.cohort_manifest_digest }}</dd><dt>{{ copy.nativeDigest }}</dt><dd class="mono">{{ result.native_result_digest }}</dd><dt>{{ copy.publicDigest }}</dt><dd class="mono">{{ result.public_projection_digest }}</dd></dl><p>{{ copy.fingerprints }}</p><p>{{ copy.coverage }}</p></details>
+      <footer v-if="methods.download" class="comparison-download">
+        <button ref="downloadButton" type="button" :disabled="disabled" @click="download">{{ exportCopy.json }}</button>
+        <p role="status" aria-live="polite">{{ downloadPending ? copy.working : downloadFeedback && (downloadFeedback === 'requested' || downloadFeedback === 'failed' ? exportCopy[downloadFeedback] : copy[downloadFeedback]) }}</p>
+      </footer>
     </section>
   </section>
 </template>

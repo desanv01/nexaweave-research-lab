@@ -9,7 +9,7 @@ import hashlib
 import json
 import os
 import stat
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 _INPUT_LIMIT = 2 * 1024 * 1024
@@ -99,6 +99,7 @@ class NativeOwnedSessionFactory:
     runtime_sha256: str
     model_factory: object
     timeout_seconds: float = 120.0
+    audited_scripted_interview: str | None = field(default=None, repr=False)
 
     def _root(self) -> Path:
         path = Path(self.simulation_dir)
@@ -153,7 +154,8 @@ class NativeOwnedSessionFactory:
 
     def create_session(self, request, *, round_capture=None):
         self.validate(request)
-        models = self.model_factory()
+        models = (self.model_factory() if self.audited_scripted_interview is None else
+                  self.model_factory(audited_scripted_interview=self.audited_scripted_interview))
         if type(models) is not dict or set(models) != set(self.platforms):
             raise ValueError("invalid owned native models")
         from app.services.native_simulation import NativeSimulationSession
