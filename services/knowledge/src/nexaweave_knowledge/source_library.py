@@ -114,6 +114,10 @@ def validate_payload(method, payload):
         if set(payload) != {"source_revision"}:
             raise ValueError
         uuid_value(payload["source_revision"])
+    elif method == "legacy_report_read":
+        if (set(payload) != {"legacy_report_id"} or type(payload["legacy_report_id"]) is not str
+                or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", payload["legacy_report_id"])):
+            raise ValueError
     elif method == "retain":
         if set(payload) != {"source_revision", "source_name", "text", "blocks"}:
             raise ValueError
@@ -262,6 +266,17 @@ class SourceLibrary:
                                       payload["source_revision"])
             self.authorize()
             return source_result(record, include_text=True)
+        if method == "legacy_report_read":
+            from nexaweave_storage.legacy_report import LegacyReportStore
+
+            report_id = payload["legacy_report_id"]
+            markdown, digest = LegacyReportStore(self.connect).read(
+                self.settings.principal, scope.workspace_id, scope.project_id, report_id,
+            )
+            self.authorize()
+            return {"schema_version": 1, "project_id": str(scope.project_id),
+                    "legacy_report_id": report_id, "byte_length": len(markdown), "sha256": digest,
+                    "content_base64": base64.b64encode(markdown).decode("ascii")}
         if method in {"binary_metadata", "binary_read"}:
             original = store.get_original(self.settings.principal, scope.project_id,
                                           payload["source_revision"])
