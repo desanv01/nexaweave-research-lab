@@ -10,7 +10,7 @@ from uuid import uuid4
 import pymupdf
 import pytest
 
-from nexaweave_storage.pdf import extract_pdf, PdfError
+from nexaweave_storage.pdf import extract_pdf, PdfAllBlank, PdfError
 
 
 def pdf_bytes(pages):
@@ -51,9 +51,14 @@ def test_malformed_truncated_and_input_limit(binary):
 
 
 def test_actual_textless_and_page_limit():
-    for binary in [pdf_bytes([""]), pdf_bytes(["x"] * 101)]:
-        with pytest.raises(PdfError):
+    for count in (1, 2):
+        with pytest.raises(PdfAllBlank) as error:
+            extract_pdf(pdf_bytes([""] * count))
+        assert error.value.page_count == count and error.value.code == "invalid_request"
+    for binary in (b"%PDF-1.7\n%%EOF", pdf_bytes([""] * 101), pdf_bytes(["x"] * 101)):
+        with pytest.raises(PdfError) as error:
             extract_pdf(binary)
+        assert type(error.value) is PdfError and error.value.code == "invalid_request"
 
 
 def test_actual_image_only_page_is_rejected_without_ocr():
