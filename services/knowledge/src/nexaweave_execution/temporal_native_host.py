@@ -211,6 +211,10 @@ class TemporalNativeHost:
         return NativeWorkflowStatus(ref.workflow_id, ref.temporal_run_id,
             str(request.run_id), "cancel_requested", "cancel_requested")
 
+    def local_interview(self, value, command, admit):
+        # Synchronous same-process registry access; no Temporal message.
+        return self._activities.local_interview(self._request(value), command, admit)
+
     async def local_status(self, value: object) -> LocalNativeStatus:
         request = self._request(value)
         try:

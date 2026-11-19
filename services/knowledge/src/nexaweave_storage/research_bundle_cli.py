@@ -42,7 +42,14 @@ def parse_request(raw):
                 if type(data["expected_sha256"]) is not str or not HEX.fullmatch(data["expected_sha256"]):
                     raise ValueError()
         elif operation == "export":
-            if set(data) != {"operation", "principal", "project_id", "revision", "source_revisions", "output"}:
+            fields = {"operation", "principal", "project_id", "revision", "source_revisions", "output"}
+            version = 1
+            if "schema_version" in data:
+                version = data["schema_version"]
+                if type(version) is not int or version != 2:
+                    raise ValueError()
+                fields.add("schema_version")
+            if set(data) != fields:
                 raise ValueError()
             principal_id(data["principal"])
             if type(data["project_id"]) is not str:
@@ -51,7 +58,7 @@ def parse_request(raw):
             if type(data["revision"]) is not int or not 1 <= data["revision"] <= 2_147_483_647:
                 raise ValueError()
             selected = data["source_revisions"]
-            if type(selected) is not list or not 1 <= len(selected) <= 16:
+            if type(selected) is not list or not 1 <= len(selected) <= (1 if version == 2 else 16):
                 raise ValueError()
             for item in selected:
                 if type(item) is not str:
@@ -189,7 +196,8 @@ def main(*, stdin=None, stdout=None):
         else:
             project_store, source_store = _stores()
             raw = export_bundle(project_store, source_store, request["principal"],
-                                request["project_id"], request["revision"], request["source_revisions"])
+                                request["project_id"], request["revision"], request["source_revisions"],
+                                schema_version=request.get("schema_version", 1))
             result = inspect_bundle(raw)
             _write_new(_path(request["output"]), raw)
         reply, status = {"ok": True, "result": result}, 0

@@ -374,22 +374,25 @@
           </div>
 
           <!-- Survey Results -->
-          <div v-if="surveyResults.length > 0" class="survey-results">
+          <div v-if="surveyResults" class="survey-results">
             <div class="results-header">
               <span class="results-title">{{ $t('step5.surveyResults') }}</span>
-              <span class="results-count">{{ $t('step5.surveyResultsCount', { count: surveyResults.length }) }}</span>
+              <span class="results-count">{{ $t('step5.surveyResultsCount', { count: surveyReplyCount }) }}</span>
+              <button type="button" class="action-link" @click="exportSurvey">{{ surveyCopy.download }}</button>
             </div>
+            <p v-if="surveyExportError" class="survey-export-status" role="status">{{ surveyCopy[surveyExportError] }}</p>
             <div class="results-list">
               <div 
-                v-for="(result, idx) in surveyResults" 
-                :key="idx"
+                v-for="result in surveyResults.replies"
+                :key="`${result.agent_id}-${result.platform}`"
                 class="result-card"
               >
                 <div class="result-header">
                   <div class="result-avatar">{{ (result.agent_name || 'A')[0] }}</div>
                   <div class="result-info">
-                    <span class="result-name">{{ result.agent_name }}</span>
+                    <span class="result-name">{{ result.agent_name || surveyCopy.actor(result.agent_id) }}</span>
                     <span class="result-role">{{ result.profession || $t('step2.unknownProfession') }}</span>
+                    <span class="result-role">{{ result.platform || surveyCopy.unknownPlatform }}<template v-if="result.timestamp !== null"> · {{ result.timestamp }}</template></span>
                   </div>
                 </div>
                 <div class="result-question">
@@ -398,9 +401,10 @@
                     <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path>
                     <line x1="12" y1="17" x2="12.01" y2="17"></line>
                   </svg>
-                  <span>{{ result.question }}</span>
+                  <span>{{ surveyResults.question }}</span>
                 </div>
-                <div class="result-answer" v-html="renderSafeMarkdown(result.answer)"></div>
+                <div v-if="result.status === 'received'" class="result-answer" v-html="renderSafeMarkdown(result.answer)"></div>
+                <div v-else class="result-answer">{{ surveyCopy.missing }}</div>
               </div>
             </div>
           </div>
@@ -414,10 +418,12 @@
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { chatWithReport, getReport, getAgentLog } from '../api/report'
-import { interviewAgents, getSimulationProfilesRealtime } from '../api/simulation'
+import { getEnvStatus, getSimulationProfilesRealtime, interviewAgents } from '../api/simulation'
 import { renderSafeMarkdown } from '../utils/safeMarkdown'
+import { guidedSurveyCopyFor } from '../i18n/guidedSurvey.js'
+import { availableSurveyPlatforms, captureSurvey, downloadSurveyResults, serializeSurveyResults, surveyResultSnapshot } from '../utils/surveyResults.js'
 
-const { t } = useI18n()
+const { t, locale } = useI18n()
 
 const props = defineProps({
   reportId: String,
@@ -446,8 +452,14 @@ const chatInputRef = ref(null)
 // Survey State
 const selectedAgents = ref(new Set())
 const surveyQuestion = ref('')
-const surveyResults = ref([])
+const surveyResults = ref(null)
 const isSurveying = ref(false)
+const surveyCopy = computed(() => guidedSurveyCopyFor(locale.value))
+const surveyReplyCount = computed(() => surveyResults.value?.replies.filter(row => row.status === 'received').length ?? 0)
+const surveyExportError = ref('')
+let releaseSurveyDownload
+let surveyRevision = 0
+let profileRevision = 0
 
 // Report Data
 const reportOutline = ref(null)
@@ -716,70 +728,52 @@ const clearAgentSelection = () => {
   selectedAgents.value = new Set()
 }
 
-const submitSurvey = async () => {
-  if (selectedAgents.value.size === 0 || !surveyQuestion.value.trim()) return
-  
-  isSurveying.value = true
-  addLog(t('log.sendSurvey', { count: selectedAgents.value.size }))
-  
-  try {
-    const interviews = Array.from(selectedAgents.value).map(idx => ({
-      agent_id: idx,
-      prompt: surveyQuestion.value.trim()
-    }))
-    
-    const res = await interviewAgents({
-      simulation_id: props.simulationId,
-      interviews: interviews
-    })
-    
-    if (res.success && res.data) {
-      // 正确的数据路径: res.data.result.results 是一个对象字典
-      // 格式: {"twitter_0": {...}, "reddit_0": {...}, "twitter_1": {...}, ...}
-      const resultData = res.data.result || res.data
-      const resultsDict = resultData.results || resultData
-      
-      // 将对象字典转换为数组格式
-      const surveyResultsList = []
-      
-      for (const interview of interviews) {
-        const agentIdx = interview.agent_id
-        const agent = profiles.value[agentIdx]
-        
-        // 优先使用 reddit 平台回复，其次 twitter
-        let responseContent = t('step5.noResponse')
+const clearSurveyResults = () => {
+  surveyResults.value = null
+  surveyExportError.value = ''
+  releaseSurveyDownload?.()
+  releaseSurveyDownload = undefined
+}
 
-        if (typeof resultsDict === 'object' && !Array.isArray(resultsDict)) {
-          const redditKey = `reddit_${agentIdx}`
-          const twitterKey = `twitter_${agentIdx}`
-          const agentResult = resultsDict[redditKey] || resultsDict[twitterKey]
-          if (agentResult) {
-            responseContent = agentResult.response || agentResult.answer || t('step5.noResponse')
-          }
-        } else if (Array.isArray(resultsDict)) {
-          // 兼容数组格式
-          const matchedResult = resultsDict.find(r => r.agent_id === agentIdx)
-          if (matchedResult) {
-            responseContent = matchedResult.response || matchedResult.answer || t('step5.noResponse')
-          }
-        }
-        
-        surveyResultsList.push({
-          agent_id: agentIdx,
-          agent_name: agent?.username || `Agent ${agentIdx}`,
-          profession: agent?.profession,
-          question: surveyQuestion.value.trim(),
-          answer: responseContent
-        })
-      }
-      
-      surveyResults.value = surveyResultsList
-      addLog(t('log.receivedReplies', { count: surveyResults.value.length }))
-    } else {
-      throw new Error(res.error || t('step5.requestFailed'))
+const exportSurvey = () => {
+  if (!surveyResults.value) return
+  surveyExportError.value = ''
+  try {
+    const bytes = serializeSurveyResults(surveyResults.value)
+    if (!bytes) {
+      surveyExportError.value = 'exportTooLarge'
+      return
     }
+    releaseSurveyDownload?.()
+    releaseSurveyDownload = downloadSurveyResults(bytes)
+  } catch {
+    surveyExportError.value = 'exportFailed'
+  }
+}
+
+const submitSurvey = async () => {
+  const question = surveyQuestion.value.trim()
+  if (isSurveying.value || !props.simulationId || !selectedAgents.value.size || !question) return
+
+  const survey = captureSurvey(props.simulationId, question, selectedAgents.value, profiles.value)
+  const revision = surveyRevision
+  const interviews = survey.actors.map(({ agent_id }) => ({ agent_id, prompt: survey.question }))
+  clearSurveyResults()
+  isSurveying.value = true
+  addLog(t('log.sendSurvey', { count: interviews.length }))
+
+  try {
+    const request = { simulation_id: survey.simulation_id }
+    const status = await getEnvStatus(request).catch(() => null)
+    if (revision !== surveyRevision) return
+    const platforms = availableSurveyPlatforms(status, survey.simulation_id)
+    const res = await interviewAgents({ ...request, interviews })
+    if (revision !== surveyRevision) return
+    if (!res.success || !res.data) throw new Error(res.error || t('step5.requestFailed'))
+    surveyResults.value = surveyResultSnapshot(survey, res.data, platforms)
+    addLog(t('log.receivedReplies', { count: surveyReplyCount.value }))
   } catch (err) {
-    addLog(t('log.surveySendFailed', { error: err.message }))
+    if (revision === surveyRevision) addLog(t('log.surveySendFailed', { error: err.message }))
   } finally {
     isSurveying.value = false
   }
@@ -828,17 +822,16 @@ const loadAgentLogs = async () => {
   }
 }
 
-const loadProfiles = async () => {
-  if (!props.simulationId) return
-  
+const loadProfiles = async (simulationId, revision) => {
   try {
-    const res = await getSimulationProfilesRealtime(props.simulationId)
-    if (res.success && res.data) {
-      profiles.value = res.data.profiles || []
+    const res = await getSimulationProfilesRealtime(simulationId)
+    if (revision !== profileRevision) return
+    if (res.success && res.data && (res.data.simulation_id == null || res.data.simulation_id === simulationId)) {
+      profiles.value = Array.isArray(res.data.profiles) ? res.data.profiles : []
       addLog(t('log.loadedProfiles', { count: profiles.value.length }))
     }
   } catch (err) {
-    addLog(t('log.loadProfilesFailed', { error: err.message }))
+    if (revision === profileRevision) addLog(t('log.loadProfilesFailed', { error: err.message }))
   }
 }
 
@@ -854,11 +847,13 @@ const handleClickOutside = (e) => {
 onMounted(() => {
   addLog(t('log.step5Init'))
   loadReportData()
-  loadProfiles()
   document.addEventListener('click', handleClickOutside)
 })
 
 onUnmounted(() => {
+  surveyRevision++
+  profileRevision++
+  releaseSurveyDownload?.()
   document.removeEventListener('click', handleClickOutside)
 })
 
@@ -868,11 +863,16 @@ watch(() => props.reportId, (newId) => {
   }
 }, { immediate: true })
 
-watch(() => props.simulationId, (newId) => {
-  if (newId) {
-    loadProfiles()
-  }
-}, { immediate: true })
+watch([selectedAgents, surveyQuestion], () => { surveyRevision++ }, { flush: 'sync' })
+
+watch(() => props.simulationId, simulationId => {
+  surveyRevision++
+  const revision = ++profileRevision
+  clearSurveyResults()
+  clearAgentSelection()
+  profiles.value = []
+  if (simulationId) loadProfiles(simulationId, revision)
+}, { immediate: true, flush: 'sync' })
 </script>
 
 <style scoped>
@@ -2307,9 +2307,17 @@ watch(() => props.simulationId, (newId) => {
 
 .results-header {
   display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
   justify-content: space-between;
   align-items: center;
   margin-bottom: 20px;
+}
+
+.survey-export-status {
+  color: #92400E;
+  font-size: 13px;
+  margin: 0 0 16px;
 }
 
 .results-title {

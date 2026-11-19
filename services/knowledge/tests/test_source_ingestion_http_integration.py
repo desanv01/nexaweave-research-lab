@@ -89,6 +89,9 @@ def model_server():
                     assert body['response_format']['type'] == 'json_schema'
                     schema = body['response_format']['json_schema']
                     records[-1]['schema'] = schema['name']
+                    records[-1]['saved_example'] = any(
+                        'Fixture saved example for Mira Vale' in message.get('content', '')
+                        for message in body['messages'] if isinstance(message.get('content'), str))
                     reply = {'id': 'local-synthetic', 'object': 'chat.completion',
                         'created': 1, 'model': body['model'], 'choices': [{'index': 0,
                         'message': {'role': 'assistant', 'content': json.dumps(canned(schema))},
@@ -260,6 +263,12 @@ def test_real_production_http_sdk_ingestion_restart_and_denials(factory, tmp_pat
             assert _exchange(port,'GET',status_url,token=token)[2]['data'] == data
             assert _exchange(port,'POST',execute_url,payload,token=token)[2]['data'] == data
             assert len(records) == before
+        ontology_url = f'/api/source/ontology/{display}'
+        reviewed = {key: deepcopy(payload['ontology'][key]) for key in ('entity_types', 'edge_types')}
+        for kind in ('entity_types', 'edge_types'):
+            for definition in reviewed[kind]:
+                definition['attributes'] = [{'name':'fixture_note', 'type':'text',
+                                             'description':'A short fixture note'}]
         with host(tmp_path/'restart',scope,display,account,model_port) as (port,token,events):
             assert _exchange(port,'POST',execute_url,payload,token=token)[2]['data'] == data
             assert _exchange(port,'GET',status_url,token=token)[2]['data'] == data
@@ -267,6 +276,11 @@ def test_real_production_http_sdk_ingestion_restart_and_denials(factory, tmp_pat
             changed = {**payload, 'ontology':{**payload['ontology'], 'revision':str(uuid4())}}
             assert _exchange(port,'POST',execute_url,changed,token=token)[0] == 409
             assert len(records) == before
+            current = _exchange(port,'GET',ontology_url,token=token)[2]['data']
+            save = {'schema_version':1, 'expected_revision':current['project_revision'], 'ontology':reviewed}
+            saved_status, _, saved_reply = _exchange(port,'POST',ontology_url,save,token=token)
+            assert saved_status == 200, saved_reply
+            saved = saved_reply['data']
         rows, _, _ = driver.execute_query(
             'MATCH (e:Episodic {uuid:$episode}), (m:MiroFishIngest {uuid:$episode}) '
             'RETURN e.group_id AS group_id, e.content AS content, m.status AS state, '
@@ -280,6 +294,87 @@ def test_real_production_http_sdk_ingestion_restart_and_denials(factory, tmp_pat
         assert any('Mira Vale works for Harbor Labs' in row['fact'] for row in facts)
         assert SourceStore(factory).get_source('owner',scope.project_id,retained.source_revision) == retained
         assert BudgetLedger(factory).status('owner',account).accounted_ceiling_microusd == 4
+
+        saved_operation = uuid4()
+        saved_status_url = f'/api/source/ingestion/operation/{display}/{saved_operation}'
+        ledger = BudgetLedger(factory)
+        with host(tmp_path/'saved-reopen',scope,display,account,model_port) as (port,token,events):
+            assert _exchange(port,'GET',ontology_url,token=token)[2]['data'] == saved
+            selector = {'schema_version':4, 'source_revision':str(retained.source_revision),
+                        'project_revision':saved['project_revision'], 'operation_id':str(saved_operation)}
+            baseline_budget = ledger.status('owner',account)
+            planned_status, _, planned_reply = _exchange(port,'POST',plan_url,selector,token=token)
+            assert planned_status == 200, planned_reply
+            draft = planned_reply['data']
+            assert draft['schema_version'] == 4 and draft['project_revision'] == selector['project_revision']
+            assert draft['fingerprint'] != draft['execution_fingerprint']
+            assert draft['spending_authorized'] is draft['model_calls_made'] is False
+            stale = dict(selector, fingerprint=draft['fingerprint'], execution_fingerprint=draft['execution_fingerprint'])
+
+            outside = deepcopy(reviewed)
+            outside['entity_types'][0]['attributes'][0]['description'] = 'a' * 501
+            outside_save = dict(save, expected_revision=saved['project_revision'], ontology=outside)
+            outside_status, _, outside_reply = _exchange(port,'POST',ontology_url,outside_save,token=token)
+            assert outside_status == 200, outside_reply
+            outside_selector = dict(selector, project_revision=outside_reply['data']['project_revision'])
+            outside_execute = dict(stale, project_revision=outside_selector['project_revision'])
+            for url, body in ((plan_url, outside_selector), (execute_url, outside_execute)):
+                refused, _, refusal = _exchange(port,'POST',url,body,token=token)
+                assert refused == 422
+                assert refusal == {'success':False, 'error':{'code':'ontology_ineligible'}}
+            assert _exchange(port,'POST',execute_url,stale,token=token)[0] == 409
+            assert _exchange(port,'GET',saved_status_url,token=token)[0] == 404
+            assert len(records) == before and ledger.status('owner',account) == baseline_budget
+            with factory() as conn:
+                assert ledger._row(conn, account, saved_operation) is None
+
+            revised = deepcopy(reviewed)
+            revised['entity_types'][0]['examples'] = ['Fixture saved example for Mira Vale']
+            revised['edge_types'][0]['source_targets'].append({'source':'Entity', 'target':'Organization'})
+            save = dict(save, expected_revision=outside_selector['project_revision'], ontology=revised)
+            updated_status, _, updated_reply = _exchange(port,'POST',ontology_url,save,token=token)
+            assert updated_status == 200, updated_reply
+            assert updated_reply['data']['ontology'] == revised
+            assert _exchange(port,'POST',execute_url,stale,token=token)[0] == 409
+            assert _exchange(port,'GET',saved_status_url,token=token)[0] == 404
+            assert len(records) == before and ledger.status('owner',account) == baseline_budget
+            with factory() as conn:
+                assert ledger._row(conn, account, saved_operation) is None
+
+            selector['project_revision'] = updated_reply['data']['project_revision']
+            draft_status, _, draft_reply = _exchange(port,'POST',plan_url,selector,token=token)
+            assert draft_status == 200, draft_reply
+            current_draft = draft_reply['data']
+            assert all(current_draft[key] != draft[key] for key in ('fingerprint','execution_fingerprint'))
+            execute = dict(selector, fingerprint=current_draft['fingerprint'],
+                           execution_fingerprint=current_draft['execution_fingerprint'])
+            for key in ('fingerprint','execution_fingerprint'):
+                assert _exchange(port,'POST',execute_url,dict(execute, **{key: '0' * 64}),token=token)[0] == 409
+            assert _exchange(port,'GET',saved_status_url,token=token)[0] == 404
+            assert len(records) == before and ledger.status('owner',account) == baseline_budget
+            finished_status, _, finished_reply = _exchange(port,'POST',execute_url,execute,token=token)
+            assert finished_status == 200, finished_reply
+            finished = finished_reply['data']
+            assert finished['schema_version'] == 1 and finished['state'] == 'completed'
+            assert finished['budget_state'] == 'settled' and finished['fingerprint'] == execute['execution_fingerprint']
+            assert finished['receipt']['fingerprint'] == execute['execution_fingerprint']
+            assert finished['episode_id'] == str(scope.episode_uuid(saved_operation))
+            assert any(call.get('saved_example') for call in records[before:]) and errors == []
+            with factory() as conn:
+                reservation = ledger._row(conn, account, saved_operation)
+            assert reservation.receipt.json_value() == finished['receipt']
+            assert Ledger(factory).get(scope, saved_operation).receipt == reservation.receipt
+            after_saved = len(records)
+            assert _exchange(port,'GET',saved_status_url,token=token)[2]['data'] == finished
+            assert _exchange(port,'POST',execute_url,execute,token=token)[2]['data'] == finished
+            assert len(records) == after_saved
+            with factory() as conn:
+                assert ledger._row(conn, account, saved_operation).attempt_id == reservation.attempt_id
+        markers, _, _ = driver.execute_query(
+            'MATCH (m:MiroFishIngest {uuid:$episode}) RETURN m.fingerprint AS fingerprint',
+            episode=finished['episode_id'], routing_='r')
+        assert [marker['fingerprint'] for marker in markers] == [execute['execution_fingerprint']]
+        assert ledger.status('owner',account).accounted_ceiling_microusd == 8
 
 
 def test_real_protected_http_selected_retained_passage(factory, tmp_path):

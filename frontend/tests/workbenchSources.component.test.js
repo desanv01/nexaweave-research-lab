@@ -343,13 +343,100 @@ test('selected retained passage resets review and recovers one derived operation
   }
 
   let mismatch = false, admitted, submitted
+  const ontologyAttributes = Array.from({ length: 6 }, (_, i) => ({
+    name: `detail_${i}`, type: 'text', description: `Detail ${i + 1}`
+  }))
+  const originalOntology = {
+    entity_types: [
+      { name: 'Person', description: 'A reviewed person.', attributes: ontologyAttributes, examples: ['立花 😀'] },
+      { name: 'Archive', description: 'A reviewed archive.', attributes: [ontologyAttributes[0]] }
+    ],
+    edge_types: [{
+      name: 'REFERS_TO', description: 'A reviewed reference.', attributes: [ontologyAttributes[0]],
+      source_targets: [{ source: 'Person', target: 'Entity' }]
+    }]
+  }
+  const reviewedDescription = 'The edited project description.'
+  const lostDescription = 'The edit whose save response was lost.'
+  const eligibleDescription = 'The edited and eligible project description.'
+  const projectVersion = description => ({
+    ...originalOntology, entity_types: [{ ...originalOntology.entity_types[0], description }, originalOntology.entity_types[1]]
+  })
+  let projectRevision = 5, savedOntology = originalOntology, ontologyWrites = 0
+  let holdOntologyLoad = false, releaseOntologyLoad
+  const wholeText = chunks[0]
+  const wholeSource = { ...source, source_revision: uid(19), text_sha256: hash(wholeText),
+    codepoint_length: passages[0].end, byte_length: Buffer.byteLength(wholeText) }
+  const wholePassages = [passages[0]]
+  let useWhole = false, savedAdmission, savedSubmission, returnReviewHash = false
+  let ineligibleStatus = null
+  const conflict = () => new Response(JSON.stringify({ success: false, error: { code: 'conflict' } }), {
+    status: 409, headers: { 'Content-Type': 'application/json' }
+  })
+  function savedPlanReply(payload) {
+    const { operation_id, project_revision, source_revision } = payload
+    const identity = JSON.stringify(canonical({ scope, project_revision, ontology: savedOntology }))
+    const ontology_revision = urlUuid('mirofish:saved-ontology:v4:' + identity)
+    const ontology = { schema_version: 1, revision: ontology_revision, ...savedOntology }
+    const evidence_ids = wholePassages.map(passage => passage.evidence_id)
+    const envelope = { schema_version: 1, source_revision, source_sha256: wholeSource.text_sha256,
+      ontology_revision, operation_id, source_kind: 'document', content: wholeText,
+      source_name: wholeSource.source_name, recorded_at: wholeSource.recorded_at, asserted_valid_at: null, evidence_ids }
+    const requestHash = ontology => hash(JSON.stringify(canonical({ scope, source: envelope, ontology })))
+    return { ...payload, scope, episode_id: urlUuid(`mirofish:episode:v1:${group}:${operation_id}`),
+      fingerprint: hash(['mirofish:source-ingestion:saved-ontology-plan:v4', identity, requestHash(ontology)].join('\0')),
+      execution_fingerprint: requestHash({ ...ontology, saved_ontology: 'project_revision_v4' }),
+      evidence_ids, actual_usage_microusd: null, graph_ingestion_executed: false, model_calls_made: false,
+      spending_authorized: false, source_sha256: wholeSource.text_sha256, source_byte_length: wholeSource.byte_length,
+      source_codepoint_length: wholeSource.codepoint_length, ontology_revision, eligibility_codepoint_limit: 32768 }
+  }
   globalThis.fetch = async (url, options) => {
     calls.push({ url, options })
     if (url.includes('/data/')) return reply(projection('Actor', 'Person', 1))
-    if (url.includes('/source/library/')) return reply({ ...viewFlags, sources: [source], has_more: false, window_limit: 20 })
-    if (url.includes('/source/item/')) return reply({ ...viewFlags, source, text, offset_unit: 'unicode_codepoint', passages })
+    if (url.includes('/source/library/')) return reply({ ...viewFlags, sources: [useWhole ? wholeSource : source], has_more: false, window_limit: 20 })
+    if (url.includes('/source/item/')) return reply({ ...viewFlags, offset_unit: 'unicode_codepoint',
+      ...(useWhole ? { source: wholeSource, text: wholeText, passages: wholePassages } : { source, text, passages }) })
+    if (url.endsWith('/api/source/ontology/graph_1')) {
+      assert.equal(options.headers.Authorization, 'Bearer private-token')
+      assert.equal(options.credentials, 'omit')
+      assert.equal(options.redirect, 'error')
+      const result = () => reply({ schema_version: 1, scope, project_revision: projectRevision, ontology: savedOntology })
+      if (options.method === 'GET') {
+        assert.equal(options.body, undefined)
+        assert.equal(options.headers['Content-Type'], undefined)
+        if (holdOntologyLoad) return new Promise(resolve => { releaseOntologyLoad = () => resolve(result()) })
+        return result()
+      }
+      assert.equal(options.method, 'POST')
+      assert.equal(options.headers['Content-Type'], 'application/json')
+      const payload = JSON.parse(options.body)
+      ontologyWrites++
+      const description = useWhole ? eligibleDescription : ontologyWrites === 3 ? lostDescription : reviewedDescription
+      assert.deepEqual(payload, { schema_version: 1, expected_revision: projectRevision, ontology: projectVersion(description) })
+      projectRevision++
+      if (ontologyWrites === 1) {
+        savedOntology = projectVersion('A concurrent edit.')
+        return new Response(JSON.stringify({ success: false, error: { code: 'conflict' } }), {
+          status: 409, headers: { 'Content-Type': 'application/json' }
+        })
+      }
+      savedOntology = payload.ontology
+      if (ontologyWrites === 3) throw new TypeError('fixture drops the saved ontology reply')
+      return result()
+    }
     if (url.includes('/ingestion/plan/')) {
       const payload = JSON.parse(options.body)
+      if (payload.schema_version === 4) {
+        assert.equal(options.headers.Authorization, 'Bearer private-token')
+        assert.deepEqual(Object.keys(payload).sort(), ['operation_id', 'project_revision', 'schema_version', 'source_revision'])
+        assert.equal(payload.source_revision, wholeSource.source_revision)
+        if (payload.project_revision !== projectRevision) return conflict()
+        if (ineligibleStatus) return new Response(JSON.stringify({ success: false, error: { code: 'ontology_ineligible' } }), {
+          status: ineligibleStatus, headers: { 'Content-Type': 'application/json' }
+        })
+        savedAdmission = { payload, plan: savedPlanReply(payload) }
+        return reply(savedAdmission.plan)
+      }
       assert.deepEqual(Object.keys(payload).sort(), ['evidence_id', 'ontology', 'schema_version', 'source_revision'])
       assert.equal(payload.schema_version, 2)
       assert.equal(payload.source_revision, source.source_revision)
@@ -359,14 +446,23 @@ test('selected retained passage resets review and recovers one derived operation
       return reply(plan)
     }
     if (url.includes('/ingestion/execute/')) {
-      submitted = JSON.parse(options.body)
-      assert.deepEqual(submitted, admitted.payload)
+      const payload = JSON.parse(options.body)
+      if (payload.schema_version === 4) {
+        savedSubmission = payload
+        const { fingerprint, execution_fingerprint } = savedAdmission.plan
+        assert.deepEqual(payload, { ...savedAdmission.payload, fingerprint, execution_fingerprint })
+      } else {
+        submitted = payload
+        assert.deepEqual(submitted, admitted.payload)
+      }
       throw new TypeError('fixture drops the execute reply')
     }
     if (url.includes('/ingestion/operation/')) {
       assert.equal(options.method, 'GET')
       assert.equal(options.body, undefined)
-      const { operation_id, episode_id, fingerprint, evidence_ids } = admitted.plan
+      const plan = useWhole ? savedAdmission.plan : admitted.plan
+      const { operation_id, episode_id, evidence_ids } = plan
+      const fingerprint = useWhole && !returnReviewHash ? plan.execution_fingerprint : plan.fingerprint
       assert.ok(url.endsWith('/ingestion/operation/graph_1/' + operation_id))
       return reply({ schema_version: 1, scope, operation_id, episode_id, fingerprint, evidence_ids,
         graph_ingestion_executed: true, model_calls_made: null, actual_usage_microusd: null,
@@ -385,6 +481,9 @@ test('selected retained passage resets review and recovers one derived operation
   const manual = '#ingestion-operation'
   const plan = () => m.root.querySelector('.source-ingestion form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }))
   const callsFor = method => calls.filter(call => call.url.includes('/ingestion/' + method + '/'))
+  const control = name => m.root.querySelector('#reviewed-ontology-' + name)
+  const projectStatus = () => control('status')?.textContent
+  const ontologyWire = () => calls.filter(call => call.url.includes('/source/ontology/')).map(call => call.options.method)
   try {
     await connectRefresh(m)
     await inspectRefreshSource(m, { editEntityName: false })
@@ -405,6 +504,50 @@ test('selected retained passage resets review and recovers one derived operation
     assert.equal(m.root.querySelector(draft).value, description)
     assert.equal(m.root.querySelector(manual).value, uid(77))
     assert.equal(callsFor('execute').length, 0)
+
+    control('mode').click()
+    await nextTick()
+    assert.deepEqual(ontologyWire(), [])
+    assert.equal(control('mode').getAttribute('aria-pressed'), 'true')
+    assert.equal(control('status').getAttribute('role'), 'status')
+    control('load').click()
+    await waitFor(() => projectStatus().includes('Loaded project revision 5'))
+    assert.equal(m.root.querySelector(draft).value, originalOntology.entity_types[0].description)
+    assert.equal(m.root.querySelector('.source-ingestion select[id^="edge-pair-target-"]').value, 'Entity')
+    assert.equal(m.root.querySelectorAll('.source-ingestion input[id^="entity-attribute-name-"]').length, 7)
+    assert.equal(control('save').disabled, true)
+    input(m, draft, reviewedDescription)
+    await nextTick()
+    control('save').click()
+    await waitFor(() => projectStatus().includes('may have changed') && document.activeElement === control('load'))
+    assert.equal(m.root.querySelector(draft).value, reviewedDescription)
+    assert.equal(control('save').disabled, true)
+    assert.deepEqual(ontologyWire(), ['GET', 'POST'])
+
+    control('load').click()
+    await waitFor(() => projectStatus().includes('revision 6 differs') && control('keep'))
+    assert.equal(m.root.querySelector(draft).value, reviewedDescription)
+    assert.equal(control('save').disabled, true)
+    control('keep').click()
+    await nextTick()
+    control('save').click()
+    await waitFor(() => projectStatus().includes('Saved project revision 7'))
+    assert.equal(m.root.querySelector(draft).value, reviewedDescription)
+    assert.equal(control('save').disabled, true)
+
+    control('mode').click()
+    await nextTick()
+    assert.equal(picker().value, passages[1].evidence_id)
+    assert.equal(m.root.querySelector(draft).value, description)
+    assert.equal(m.root.querySelector(manual).value, uid(77))
+    control('mode').click()
+    await nextTick()
+    control('load').click()
+    await waitFor(() => projectStatus().includes('Loaded project revision 7'))
+    assert.equal(m.root.querySelector(draft).value, reviewedDescription)
+    assert.deepEqual(ontologyWire(), ['GET', 'POST', 'GET', 'POST', 'GET'])
+    control('mode').click()
+    await nextTick()
 
     mismatch = true
     plan()
@@ -429,6 +572,121 @@ test('selected retained passage resets review and recovers one derived operation
     assert.equal(callsFor('plan').length, 3)
     assert.equal(callsFor('execute').length, 1)
     assert.equal(callsFor('operation').length, 1)
+
+    control('mode').click()
+    await nextTick()
+    input(m, draft, lostDescription)
+    await nextTick()
+    control('save').click()
+    await waitFor(() => projectStatus().includes('could not be confirmed') && document.activeElement === control('load'))
+    assert.equal(m.root.querySelector(draft).value, lostDescription)
+    assert.equal(control('save').disabled, true)
+    assert.ok(m.root.querySelector('.source-ingestion .attempt').textContent.includes(admitted.plan.operation_id))
+    control('load').click()
+    await waitFor(() => projectStatus().includes('Saved project revision 8'))
+    assert.equal(m.root.querySelector(draft).value, lostDescription)
+    assert.equal(picker().value, passages[1].evidence_id)
+    assert.ok(m.root.querySelector('.source-ingestion .outcome').textContent.includes(admitted.plan.operation_id))
+    assert.deepEqual(ontologyWire(), ['GET', 'POST', 'GET', 'POST', 'GET', 'POST', 'GET'])
+
+    holdOntologyLoad = true
+    control('load').click()
+    await waitFor(() => releaseOntologyLoad)
+    m.root.querySelector('.connection-form button[type="button"]:not([aria-pressed])').click()
+    releaseOntologyLoad()
+    await waitFor(() => !m.root.querySelector('.graph-refresh'))
+    await connectRefresh(m)
+    control('mode').click()
+    await waitFor(() => projectStatus()?.includes('to start editing'))
+    assert.equal(control('save'), null)
+
+    holdOntologyLoad = false
+    useWhole = true
+    await inspectRefreshSource(m, { editEntityName: false })
+    control('mode').click()
+    await nextTick()
+    control('load').click()
+    await waitFor(() => projectStatus().includes('Loaded project revision 8'))
+    const savedPlanButton = () => m.root.querySelector('#saved-ingestion-plan')
+    const planCount = callsFor('plan').length
+    const executeCount = callsFor('execute').length
+    input(m, draft, 'An unsaved edit.')
+    await nextTick()
+    assert.equal(savedPlanButton().disabled, true)
+    savedPlanButton().click()
+    assert.equal(callsFor('plan').length, planCount)
+    input(m, draft, lostDescription)
+    await nextTick()
+    const ineligible = () => m.root.querySelector('#saved-ingestion-ineligible')
+    ineligibleStatus = 409
+    savedPlanButton().click()
+    await waitFor(() => callsFor('plan').length === planCount + 1 && !savedPlanButton().disabled &&
+      m.root.querySelector('.source-ingestion > p.feedback:not(#reviewed-ontology-status)').textContent.includes(copyFor('en').ingestion.failed))
+    assert.equal(ineligible(), null)
+    ineligibleStatus = 422
+    savedPlanButton().click()
+    await waitFor(() => ineligible()?.textContent.includes('not eligible for ingestion') && !control('load').disabled)
+    assert.equal(review(), null)
+    assert.equal(savedPlanButton().disabled, true)
+    savedPlanButton().click()
+    assert.equal(callsFor('plan').length, planCount + 2)
+    control('load').click()
+    await waitFor(() => projectStatus().includes('Loaded project revision 8') && !control('load').disabled)
+    assert.ok(ineligible())
+    assert.equal(savedPlanButton().disabled, true)
+    input(m, draft, eligibleDescription)
+    await nextTick()
+    assert.equal(control('save').disabled, false)
+    assert.equal(savedPlanButton().disabled, true)
+    control('save').click()
+    await waitFor(() => projectStatus().includes('Saved project revision 9') && !savedPlanButton().disabled)
+    assert.equal(ineligible(), null)
+    ineligibleStatus = null
+    savedPlanButton().click()
+    await waitFor(() => review()?.textContent.includes(savedAdmission?.plan.execution_fingerprint) && !savedPlanButton().disabled)
+    assert.ok(review().textContent.includes(savedAdmission.plan.fingerprint))
+    for (const [locale, label] of [['zh', '执行指纹'], ['ms', 'Cap jari pelaksanaan'], ['en', 'Execution fingerprint']]) {
+      input(m, '#workbench-language', locale)
+      await nextTick()
+      assert.ok(review().textContent.includes(label))
+      assert.equal(callsFor('plan').length, planCount + 3)
+    }
+    assert.equal(review().querySelector('button.primary').disabled, true)
+    review().querySelector('input[type="checkbox"]').click()
+    await waitFor(() => !review().querySelector('button.primary').disabled)
+    input(m, draft, 'An edit after review.')
+    await nextTick()
+    assert.equal(review(), null)
+    assert.equal(callsFor('execute').length, executeCount)
+    input(m, draft, eligibleDescription)
+    projectRevision++
+    await nextTick()
+    savedPlanButton().click()
+    await waitFor(() => projectStatus().includes('may have changed'))
+    assert.equal(review(), null)
+    assert.equal(savedPlanButton().disabled, true)
+    control('load').click()
+    await waitFor(() => projectStatus().includes('project revision 10') && !savedPlanButton().disabled)
+    savedPlanButton().click()
+    await waitFor(() => review()?.textContent.includes(savedAdmission?.plan.operation_id) && !savedPlanButton().disabled)
+    assert.equal(review().querySelector('input[type="checkbox"]').checked, false)
+    review().querySelector('input[type="checkbox"]').click()
+    await waitFor(() => !review().querySelector('button.primary').disabled)
+    review().querySelector('button.primary').click()
+    await waitFor(() => savedSubmission && status() && !status().disabled)
+    assert.equal(callsFor('execute').length, executeCount + 1)
+    assert.equal(review().querySelector('button.primary').disabled, true)
+    returnReviewHash = true
+    const recoveryCount = callsFor('operation').length
+    status().click()
+    await waitFor(() => callsFor('operation').length === recoveryCount + 1 && !status().disabled &&
+      m.root.querySelector('.source-ingestion > p.feedback:not(#reviewed-ontology-status)').textContent.includes(copyFor('en').ingestion.failed))
+    assert.equal(m.root.querySelector('.source-ingestion .outcome'), null)
+    returnReviewHash = false
+    input(m, manual, savedSubmission.operation_id)
+    m.root.querySelector('.source-ingestion .manual-recovery').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }))
+    await waitFor(() => m.root.querySelector('.source-ingestion .outcome')?.textContent.includes(savedSubmission.operation_id))
+    assert.equal(callsFor('execute').length, executeCount + 1)
   } finally {
     m.cleanup()
     globalThis.fetch = previous
