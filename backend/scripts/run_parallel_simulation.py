@@ -61,6 +61,7 @@ sys.path.append(os.path.join(_project_root, "services", "knowledge", "src"))
 from native_seed_posts import apply_native_seed_posts, validate_native_seed_plan
 from simulation_action_trace import (
     ACTION_TYPE_MAP,
+    FILTERED_ACTIONS,
     _enrich_action_context,
     _get_comment_info,
     _get_post_info,
@@ -540,10 +541,6 @@ def load_config(config_path: str) -> Dict[str, Any]:
         return json.load(f)
 
 
-# 需要过滤掉的非核心动作类型（这些动作对分析价值较低）
-FILTERED_ACTIONS = {'refresh', 'sign_up'}
-
-# 动作类型映射表（数据库中的名称 -> 标准名称）
 def create_model(config: Dict[str, Any], use_boost: bool = False):
     """
     创建LLM模型

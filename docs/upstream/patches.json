@@ -26,8 +26,8 @@
     {
       "imported_path": "backend/app/api/graph.py",
       "original_sha256": "096f8b54a1a81430678a4082067be000d05e9b0ebbbe047ba05ce4abde5ba56b",
-      "current_sha256": "ed19a390f4259ba1d6287f28b9bf8a6eaf01a9355653b133db63f81c622ae1ee",
-      "reason": "U02a validates supplied project IDs/storage paths. U02g bounds ontology admission/save/extraction, uses isolated parsing, rejects mixed multipart field confusion and prevents model work after parsing/phase failure with safe retained FAILED state. NexaWeave canonical package/configuration and ordinary display names; reviewed derived source change preserving legal/provenance and persisted v1 identities.",
+      "current_sha256": "67c3bf83fc6ad10871c14bb61e42243344b6b862f02d99f8501517a10943d470",
+      "reason": "U02a validates supplied project IDs/storage paths. U02g bounds ontology admission/save/extraction, uses isolated parsing, rejects mixed multipart field confusion and prevents model work after parsing/phase failure with safe retained FAILED state. NexaWeave canonical package/configuration and ordinary display names; reviewed derived source change preserving legal/provenance and persisted v1 identities. W7.2 enables one optional owned Windows OCR recovery for eligible scanned PDF uploads with bounded recognition and verified original bytes.",
       "phase": "NexaWeave canonical rebrand"
     },
     {
@@ -47,8 +47,8 @@
     {
       "imported_path": "backend/app/config.py",
       "original_sha256": "a85580b4551724b3c2fff419565c9aa11f6dba1992f5981ed34037a264c2a2f3",
-      "current_sha256": "35b2b414b0313ffae66279a857228ef20806ee2ffb49f2232a6dca542908ccbf",
-      "reason": "U02d explicit origins retained. U03i separate read-only host validation without Zep/model credentials; inherited legacy validation unchanged. U13a adds DOCX to the inherited allowed-extension list only. NexaWeave canonical package/configuration and ordinary display names; reviewed derived source change preserving legal/provenance and persisted v1 identities.",
+      "current_sha256": "af4cc31f93e9ba5a3c2a195d7e443d36df9fcb821228067260c8737420d723e6",
+      "reason": "U02d explicit origins retained. U03i separate read-only host validation without Zep/model credentials; inherited legacy validation unchanged. U13a adds DOCX to the inherited allowed-extension list only. NexaWeave canonical package/configuration and ordinary display names; reviewed derived source change preserving legal/provenance and persisted v1 identities. W7.2 enables one optional owned Windows OCR recovery for eligible scanned PDF uploads with bounded recognition and verified original bytes.",
       "phase": "NexaWeave canonical rebrand"
     },
     {
@@ -152,8 +152,8 @@
     {
       "imported_path": "backend/app/utils/file_parser.py",
       "original_sha256": "f1adfdda1a6674ad7af76dc95a9b76f388470098e4cf514be908440c4167c398",
-      "current_sha256": "85aebeb61b19849080ccf2572cc7eb9f655b197c42846828972fbf51c60f5369",
-      "reason": "Bound source bytes/PDF pages/extracted text/multifile results; safe classified errors, BOM decoding and progress-guaranteed bounded chunking. Native parser isolation remains separate. U13a adds bounded DOCX extraction through a fixed standard-library sibling while retaining the five-field saved parser contract and existing formats. NexaWeave canonical package/configuration and ordinary display names; reviewed derived source change preserving legal/provenance and persisted v1 identities.",
+      "current_sha256": "a74cac3d6dda7ffe723d14b9629bf3f71c3bc10f7d27cd4c278b606aafd36d52",
+      "reason": "Bound source bytes/PDF pages/extracted text/multifile results; safe classified errors, BOM decoding and progress-guaranteed bounded chunking. Native parser isolation remains separate. U13a adds bounded DOCX extraction through a fixed standard-library sibling while retaining the five-field saved parser contract and existing formats. NexaWeave canonical package/configuration and ordinary display names; reviewed derived source change preserving legal/provenance and persisted v1 identities. W7.2 enables one optional owned Windows OCR recovery for eligible scanned PDF uploads with bounded recognition and verified original bytes.",
       "phase": "NexaWeave canonical rebrand"
     },
     {
@@ -215,7 +215,7 @@
     {
       "imported_path": "backend/scripts/run_parallel_simulation.py",
       "original_sha256": "e1ee10de9a4599a8b18d01f0678f9f9caf4e0846c2355f302aaf0d56ed95e942",
-      "current_sha256": "681bd6cc118d1e3432da13f2c4ca3c52c082d33f728c12f77850089107a9fca1",
+      "current_sha256": "e895d829142bd1ba3c1a9c0cab029c9f3d48e372096986f3ebcc69ece3ed312d",
       "reason": "Delegate file IPC to shared bounded transport, preserving parallel platform selection, interview dispatch and availability status flags. U03m defers native/CLI setup to execution, closes owned environments, and supplies a trusted injected native session without changing inherited action algorithms. U03n uses an explicit trusted neutral Reddit graph seam for honestly partial native profiles; legacy loader remains unchanged. U07a trusted opt-in initial native follows, full-minute local eligibility/probability and initial-event trace cursor; missing controls/direct CLI defaults preserved. U07f shared whole-batch seed admission, sequential native response/post/trace-proven execution, exact repeated/interleaved seed preservation and initial trace cursor; autonomous loops/catalogs unchanged; installed execution preferred with trusted legacy fallback. W4.2 adds trusted opt-in first-round capture hooks and deadline-bound trace projection; ordinary action algorithms and CLI defaults are retained. Capture-only runner position is forwarded through the existing owned W4.2 boundary when explicitly enabled. W4.3 extracts existing platform action trace reads without changing either native simulation loop.",
       "phase": "U02c/U03m/U03n/U07a/U07f/W4.2",
       "review_status": "Runner position source review and delivery gates pending"

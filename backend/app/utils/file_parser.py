@@ -1,9 +1,13 @@
 """Bounded text extraction for locally admitted PDF, Markdown, and TXT files."""
 
 import codecs
+import hashlib
+from io import BytesIO
 import os
+import re
 import stat
-from dataclasses import dataclass
+import tempfile
+from dataclasses import dataclass, replace
 from itertools import islice
 from pathlib import Path
 from typing import List, Optional
@@ -60,6 +64,107 @@ class ParseLimits:
 
 DEFAULT_LIMITS = ParseLimits()
 
+_SCANNED_PDF_MAX_BYTES = 2 * 1024 * 1024
+_SCANNED_PDF_MAX_AXIS = 4096
+_SCANNED_PDF_MAX_PIXELS = 4_000_000
+_SCANNED_PDF_DPI = 200
+_SCANNED_PDF_HEADER = b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n"
+_SCANNED_CATALOG = b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n"
+_SCANNED_PAGES = b"2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n"
+_SCANNED_PAGE = re.compile(
+    rb"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox \[0 0 "
+    rb"([1-9][0-9]{0,3}) ([1-9][0-9]{0,3})\]"
+    rb" /Resources << /XObject << /Im0 4 0 R >> >> /Contents 5 0 R >>\nendobj\n"
+)
+_SCANNED_IMAGE_HEADER = re.compile(
+    rb"4 0 obj\n<< /Type /XObject /Subtype /Image /Width ([1-9][0-9]{0,4})"
+    rb" /Height ([1-9][0-9]{0,4}) /ColorSpace /DeviceGray /BitsPerComponent 8"
+    rb" /Length ([1-9][0-9]{0,6}) >>\nstream\n"
+)
+_SCANNED_STREAM_END = b"\nendstream\nendobj\n"
+_SCANNED_OCR_SIZE = (1200, 600)
+_SCANNED_OCR_MAX_TEXT_BYTES = 32 * 1024
+_SCANNED_OCR_MAX_PDF_BYTES = 2 * 1024 * 1024
+_SCANNED_OCR_DATA_DIR = Path(__file__).with_name("ocr_tessdata")
+_SCANNED_OCR_DATA_NAME = "eng.traineddata"
+_SCANNED_OCR_DATA_SIZE = 4_113_088
+_SCANNED_OCR_DATA_SHA256 = "7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2"
+
+
+@dataclass(frozen=True)
+class _ScannedPDFImage:
+    width: int
+    height: int
+    offset: int
+    length: int
+
+
+def _expect_pdf_bytes(data: bytes, offset: int, expected: bytes) -> int:
+    if not data.startswith(expected, offset):
+        raise MalformedDocumentError()
+    return offset + len(expected)
+
+
+def _preflight_scanned_pdf(
+    data: bytes, *, limits: Optional[ParseLimits] = None
+) -> _ScannedPDFImage:
+    """Validate the classic-xref grayscale scan profile without decoding a page."""
+    if type(data) is not bytes:
+        raise InvalidSourceError()
+    resolved = _limits_or_default(limits)
+    if len(data) > min(resolved.max_file_bytes, _SCANNED_PDF_MAX_BYTES):
+        raise ParseLimitError()
+    if not data.startswith(_SCANNED_PDF_HEADER):
+        if data.startswith(b"%PDF-"):
+            raise UnsupportedDocumentError()
+        raise MalformedDocumentError()
+
+    catalog_offset = len(_SCANNED_PDF_HEADER)
+    pages_offset = _expect_pdf_bytes(data, catalog_offset, _SCANNED_CATALOG)
+    page_offset = _expect_pdf_bytes(data, pages_offset, _SCANNED_PAGES)
+    page = _SCANNED_PAGE.match(data, page_offset)
+    if page is None:
+        raise UnsupportedDocumentError()
+    page_width, page_height = (int(part) for part in page.groups())
+
+    image_offset = page.end()
+    image = _SCANNED_IMAGE_HEADER.match(data, image_offset)
+    if image is None:
+        raise UnsupportedDocumentError()
+    width, height, length = (int(part) for part in image.groups())
+    if width > _SCANNED_PDF_MAX_AXIS or height > _SCANNED_PDF_MAX_AXIS:
+        raise ParseLimitError()
+    pixel_count = width * height
+    if pixel_count > _SCANNED_PDF_MAX_PIXELS:
+        raise ParseLimitError()
+    if (width * 72 != page_width * _SCANNED_PDF_DPI
+            or height * 72 != page_height * _SCANNED_PDF_DPI):
+        raise UnsupportedDocumentError()
+    if length != pixel_count or length > len(data) - image.end():
+        raise MalformedDocumentError()
+    samples_offset = image.end()
+    content_offset = _expect_pdf_bytes(data, samples_offset + length, _SCANNED_STREAM_END)
+
+    # The exact paint sequence excludes hidden text, inline images and forms.
+    content = b"q %d 0 0 %d 0 0 cm /Im0 Do Q\n" % (page_width, page_height)
+    content_object = (
+        b"5 0 obj\n<< /Length %d >>\nstream\n" % len(content)
+        + content + _SCANNED_STREAM_END
+    )
+    if not data.startswith(content_object, content_offset):
+        raise UnsupportedDocumentError()
+
+    xref_offset = content_offset + len(content_object)
+    object_offsets = (catalog_offset, pages_offset, page_offset, image_offset, content_offset)
+    xref = (
+        b"xref\n0 6\n0000000000 65535 f \n"
+        + b"".join(b"%010d 00000 n \n" % offset for offset in object_offsets)
+        + b"trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % xref_offset
+    )
+    if _expect_pdf_bytes(data, xref_offset, xref) != len(data):
+        raise MalformedDocumentError()
+    return _ScannedPDFImage(width, height, samples_offset, length)
+
 
 def _limits_or_default(limits: Optional[ParseLimits]) -> ParseLimits:
     if limits is None:
@@ -108,6 +213,120 @@ def _bounded_source_bytes(file_path: str, limits: ParseLimits) -> bytes:
     if len(data) > limits.max_file_bytes:
         raise ParseLimitError()
     return data
+
+
+def _ocr_data_file(details) -> bool:
+    reparse = getattr(details, "st_file_attributes", 0) & getattr(
+        stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0,
+    )
+    return (stat.S_ISREG(details.st_mode) and not reparse
+            and details.st_nlink == 1 and details.st_size == _SCANNED_OCR_DATA_SIZE)
+
+
+def _ocr_file_identity(details) -> tuple:
+    return (details.st_dev, details.st_ino, details.st_size,
+            details.st_mtime_ns, details.st_ctime_ns)
+
+
+def _stage_scanned_ocr_data(destination: Path) -> None:
+    """Expose only a verified, exclusively staged copy to the OCR library."""
+    path = _SCANNED_OCR_DATA_DIR / _SCANNED_OCR_DATA_NAME
+    for parent in path.parents:
+        details = parent.lstat()
+        reparse = getattr(details, "st_file_attributes", 0) & getattr(
+            stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0,
+        )
+        if not stat.S_ISDIR(details.st_mode) or reparse:
+            raise RuntimeError("OCR profile unavailable")
+    before = path.lstat()
+    if not _ocr_data_file(before):
+        raise RuntimeError("OCR profile unavailable")
+
+    flags = (os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+             | getattr(os, "O_NONBLOCK", 0))
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if (not _ocr_data_file(opened)
+                or _ocr_file_identity(opened)[:3] != _ocr_file_identity(before)[:3]):
+            raise RuntimeError("OCR profile unavailable")
+        digest = hashlib.sha256()
+        remaining = _SCANNED_OCR_DATA_SIZE
+        with (destination / _SCANNED_OCR_DATA_NAME).open("xb") as staged:
+            while remaining:
+                chunk = os.read(descriptor, min(65536, remaining))
+                if not chunk:
+                    raise RuntimeError("OCR profile unavailable")
+                digest.update(chunk)
+                staged.write(chunk)
+                remaining -= len(chunk)
+            if os.read(descriptor, 1) or digest.hexdigest() != _SCANNED_OCR_DATA_SHA256:
+                raise RuntimeError("OCR profile unavailable")
+        after = os.fstat(descriptor)
+        path_after = path.lstat()
+        if (not _ocr_data_file(after) or not _ocr_data_file(path_after)
+                or _ocr_file_identity(after) != _ocr_file_identity(opened)
+                or _ocr_file_identity(path_after) != _ocr_file_identity(before)):
+            raise RuntimeError("OCR profile unavailable")
+    finally:
+        os.close(descriptor)
+
+
+class _CappedOCRPDF(BytesIO):
+    """Cap retained OCR PDF bytes, including after native seek and truncate."""
+
+    exceeded = False
+
+    def _check_extent(self, end):
+        if not 0 <= end <= _SCANNED_OCR_MAX_PDF_BYTES:
+            self.exceeded = True
+            raise ParseLimitError()
+
+    def write(self, data):
+        self._check_extent(self.tell() + len(data))
+        return super().write(data)
+
+    def seek(self, offset, whence=os.SEEK_SET):
+        if whence == os.SEEK_CUR:
+            offset += self.tell()
+        elif whence == os.SEEK_END:
+            with self.getbuffer() as buffer:
+                offset += len(buffer)
+        elif whence != os.SEEK_SET:
+            raise ValueError("invalid OCR output seek")
+        self._check_extent(offset)
+        return super().seek(offset)
+
+    def truncate(self, size=None):
+        size = self.tell() if size is None else size
+        self._check_extent(size)
+        return super().truncate(size)
+
+
+def _recognize_scanned_samples(samples: bytes, image: _ScannedPDFImage, tessdata: Path) -> str:
+    import pymupdf
+    if pymupdf.VersionBind != "1.26.7":
+        raise RuntimeError("OCR profile unavailable")
+
+    gray = pymupdf.Pixmap(pymupdf.csGRAY, image.width, image.height, samples, False)
+    rgb = pymupdf.Pixmap(pymupdf.csRGB, gray)
+    del gray
+    rgb.set_dpi(_SCANNED_PDF_DPI, _SCANNED_PDF_DPI)
+    with _CappedOCRPDF() as output:
+        try:
+            rgb.pdfocr_save(output, compress=1, language="eng", tessdata=str(tessdata))
+        finally:
+            # Preserve the bound if the native bridge translates the exception.
+            if output.exceeded:
+                raise ParseLimitError() from None
+        generated_pdf = output.getvalue()
+    del rgb
+    if not generated_pdf or len(generated_pdf) > _SCANNED_OCR_MAX_PDF_BYTES:
+        raise RuntimeError("OCR output unavailable")
+    with pymupdf.open(stream=generated_pdf, filetype="pdf") as recognized:
+        if recognized.is_repaired or len(recognized) != 1:
+            raise RuntimeError("OCR output unavailable")
+        return recognized[0].get_text()
 
 
 def _decode_text(data: bytes, limits: ParseLimits) -> str:
@@ -212,6 +431,37 @@ class FileParser:
                         "malformed_document": MalformedDocumentError,
                         "invalid_source": InvalidSourceError}
             raise failures.get(error.code, MalformedDocumentError)() from None
+
+    @staticmethod
+    def _extract_scanned_pdf_text(file_path: str, *, limits: Optional[ParseLimits] = None) -> str:
+        if Path(file_path).suffix.lower() != ".pdf":
+            raise UnsupportedDocumentError()
+        resolved = _limits_or_default(limits)
+        ocr_limits = replace(
+            resolved, max_file_bytes=min(resolved.max_file_bytes, _SCANNED_PDF_MAX_BYTES),
+        )
+        data = _bounded_source_bytes(file_path, ocr_limits)
+        image = _preflight_scanned_pdf(data, limits=ocr_limits)
+        if (image.width, image.height) != _SCANNED_OCR_SIZE:
+            raise UnsupportedDocumentError()
+        samples = data[image.offset:image.offset + image.length]
+        del data
+        try:
+            with tempfile.TemporaryDirectory(prefix="ocr-data-", dir=Path.cwd()) as directory:
+                tessdata = Path(directory)
+                _stage_scanned_ocr_data(tessdata)
+                text = _recognize_scanned_samples(samples, image, tessdata)
+            if len(text) > min(resolved.max_text_chars, _SCANNED_OCR_MAX_TEXT_BYTES):
+                raise ParseLimitError()
+            if len(text.encode("utf-8")) > _SCANNED_OCR_MAX_TEXT_BYTES:
+                raise ParseLimitError()
+            if not text.strip():
+                raise UnsupportedDocumentError()
+            return text
+        except ParseError:
+            raise
+        except Exception:
+            raise RuntimeError("OCR profile or result unavailable") from None
 
     @staticmethod
     def _extract_from_pdf(file_path: str, *, limits: Optional[ParseLimits] = None) -> str:

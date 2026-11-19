@@ -20,6 +20,9 @@ LARGE_INTEGER = ctypes.c_int64
 CREATE_SUSPENDED = 0x00000004
 CREATE_NO_WINDOW = 0x08000000
 INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+_JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
+_JOB_OBJECT_LIMIT_JOB_MEMORY = 0x00000200
+_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
 _MAX_JOB_PROCESSES = 65536
 
 
@@ -72,7 +75,7 @@ class OwnedProcessError(RuntimeError):
 
 
 class _WindowsJob:
-    def __init__(self):
+    def __init__(self, *, job_commit_limit_bytes=None):
         self.handle = None
         self.api = ctypes.WinDLL("kernel32", use_last_error=True)
         signatures = {
@@ -102,9 +105,14 @@ class _WindowsJob:
             raise OwnedProcessError()
         try:
             limits = _ExtendedLimits()
-            limits.BasicLimitInformation.LimitFlags = 0x00002000  # KILL_ON_JOB_CLOSE
+            flags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            if job_commit_limit_bytes is not None:
+                flags |= _JOB_OBJECT_LIMIT_JOB_MEMORY
+                limits.JobMemoryLimit = job_commit_limit_bytes
+            limits.BasicLimitInformation.LimitFlags = flags
             if not self.api.SetInformationJobObject(
-                    self.handle, 9, ctypes.byref(limits), ctypes.sizeof(limits)):
+                    self.handle, _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+                    ctypes.byref(limits), ctypes.sizeof(limits)):
                 raise OwnedProcessError()
         except BaseException:
             self.close()
@@ -113,6 +121,26 @@ class _WindowsJob:
     def assign(self, process):
         if not self.api.AssignProcessToJobObject(self.handle, int(process._handle)):
             raise OwnedProcessError()
+
+    def verify_commit_limit(self, expected_bytes):
+        limits = _ExtendedLimits()
+        returned = DWORD()
+        flags = _JOB_OBJECT_LIMIT_JOB_MEMORY | _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if (not self.api.QueryInformationJobObject(
+                self.handle, _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION, ctypes.byref(limits),
+                ctypes.sizeof(limits), ctypes.byref(returned))
+                or returned.value != ctypes.sizeof(limits)
+                or (limits.BasicLimitInformation.LimitFlags & flags) != flags
+                or limits.JobMemoryLimit != expected_bytes):
+            raise OwnedProcessError()
+        return limits
+
+    def terminal_commit_accounting(self, expected_bytes):
+        limits = self.verify_commit_limit(expected_bytes)
+        process_peak, job_peak = limits.PeakProcessMemoryUsed, limits.PeakJobMemoryUsed
+        if not 0 < process_peak <= job_peak <= expected_bytes:
+            raise OwnedProcessError()
+        return limits.JobMemoryLimit, process_peak, job_peak
 
     def resume(self, process):
         # Popen closes CreateProcess's primary thread handle. Inspect a bounded
@@ -285,6 +313,8 @@ class OwnedProcess:
         self.closed = False
         self.cleanup_deadline = None
         self.cleanup_timeout = None
+        self._verified_job_commit_limit_bytes = None
+        self.terminal_job_memory = None  # (limit, process peak, Job peak), in bytes
         self._private_directory = None
         self._directory_name = None
         self._cwd = None
@@ -323,15 +353,23 @@ class OwnedProcess:
                 if time.monotonic() >= self.cleanup_deadline:
                     raise OwnedProcessError(outcome_unknown=self.started) from None
 
-    def start(self, popen, args, **kwargs):
+    def start(self, popen, args, *, job_commit_limit_bytes=None, **kwargs):
         self._cwd = _path.normcase(_path.abspath(kwargs["cwd"])) if "cwd" in kwargs else None
         try:
+            if job_commit_limit_bytes is not None and (
+                    os.name != "nt" or type(job_commit_limit_bytes) is not int
+                    or not 0 < job_commit_limit_bytes <= SIZE_T(-1).value):
+                raise OwnedProcessError()
             if os.name == "nt":
-                self.job = _WindowsJob()
+                self.job = (_WindowsJob() if job_commit_limit_bytes is None else
+                            _WindowsJob(job_commit_limit_bytes=job_commit_limit_bytes))
                 kwargs["creationflags"] = kwargs.get("creationflags", 0) | CREATE_SUSPENDED | CREATE_NO_WINDOW
             self.process = popen(args, **kwargs)
             if self.job is not None:
                 self.job.assign(self.process)
+                if job_commit_limit_bytes is not None:
+                    self.job.verify_commit_limit(job_commit_limit_bytes)
+                    self._verified_job_commit_limit_bytes = job_commit_limit_bytes
                 # From this point a resume attempt can execute child code even
                 # if its result or thread-handle cleanup subsequently fails.
                 self.started = True
@@ -360,14 +398,28 @@ class OwnedProcess:
             return min(timeout, self.cleanup_timeout, max(0, deadline - time.monotonic()))
 
         failed = False
+        accounting_interrupt = None
         process = self.process
         try:
             if self.job is not None:
                 try:
                     self.job.terminate_and_wait(deadline)
-                    self.tree_empty = True
                 except Exception:
                     failed = True
+                else:
+                    self.tree_empty = True
+                    if self._verified_job_commit_limit_bytes is not None and remaining_timeout() > 0:
+                        try:
+                            accounting = self.job.terminal_commit_accounting(
+                                self._verified_job_commit_limit_bytes,
+                            )
+                            if remaining_timeout() > 0:
+                                self.terminal_job_memory = accounting
+                        except Exception:
+                            # Successful teardown is independent of accounting availability.
+                            pass
+                        except BaseException as error:
+                            accounting_interrupt = error
                 finally:
                     try:
                         self.job.close()
@@ -410,5 +462,7 @@ class OwnedProcess:
                         failed = True
             self.closed = not failed
         finally:
+            if accounting_interrupt is not None:
+                raise accounting_interrupt
             if failed:
                 raise OwnedProcessError(outcome_unknown=self.started) from None

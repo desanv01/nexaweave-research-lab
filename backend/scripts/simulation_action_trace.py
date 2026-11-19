@@ -8,6 +8,10 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 
+# 需要过滤掉的非核心动作类型（这些动作对分析价值较低）
+FILTERED_ACTIONS = {'refresh', 'sign_up'}
+
+# 动作类型映射表（数据库中的名称 -> 标准名称）
 ACTION_TYPE_MAP = {
     'create_post': 'CREATE_POST',
     'like_post': 'LIKE_POST',
