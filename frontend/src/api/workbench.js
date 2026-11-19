@@ -1,9 +1,12 @@
 // Isolated protected read client. Never share the inherited Axios interceptors.
 import { sourcePayload, sourceReadRequest, verifySourceInput, validateSourceResult, sourceOriginalPayload, verifyOriginalPdfInput, validateSourceOriginalResult } from './sourceLibrary.js'
-import { ingestionPayload, validateIngestionResult } from './sourceIngestion.js'
-import { experimentSelection, validateExperimentCatalog, validateExperimentComparison } from './experimentComparison.js'
+import { ingestionPassages, ingestionPayload, validateIngestionResult } from './sourceIngestion.js'
+import { reviewedOntologyRequest, validateReviewedOntologyResult, REVIEWED_ONTOLOGY_ERROR_STATUS } from './reviewedOntology.js'
+import { comparisonReportBytes, comparisonReportMedia, experimentSelection, validateComparisonReport,
+  validateExperimentCatalog, validateExperimentComparison } from './experimentComparison.js'
 import { populationOptions, validatePopulationPreview, validatePopulationExport } from './populationWorkbench.js'
-import { preparationPayload, preparationSource, preparationSources, validatePreparationResult, PREPARATION_CODES } from './simulationPreparation.js'
+import { preparationPayload, preparationSource, preparationSources, configurationPayload, validateConfigurationResult, validatePreparationResult, PREPARATION_CODES } from './simulationPreparation.js'
+import { preparedProfilePayload, validatePreparedProfiles } from './preparedProfiles.js'
 import { nativeLaunchPayload, validateNativeLaunchResult, NATIVE_LAUNCH_CODES, NATIVE_ERROR_STATUS } from './nativeLaunch.js'
 import { createNativeObservationsChannel } from './nativeObservations.js'
 import { createConnectedReportsChannel } from './connectedReports.js'
@@ -233,8 +236,13 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
   async function request(method, payload, ingestionContext, options = {}) {
     if (!connection || (method !== 'graph' && !authenticated)) fail('disconnected')
     const population = method.startsWith('population')
-    // Original PDF reads have no effect on report or follow-up ownership.
-    if (['sourceOriginalMetadata', 'sourceOriginalRead'].includes(method)) cancelShared()
+    const ontology = method === 'sourceOntologyLoad' || method === 'sourceOntologySave'
+    const profiles = method === 'preparationProfiles'
+    const configuration = method === 'preparationConfiguration'
+    const preparationInspection = profiles || configuration
+    // These source operations leave report and follow-up ownership alone.
+    if (preparationInspection) cancelShared(true)
+    else if (ontology || ['sourceOriginalMetadata', 'sourceOriginalRead'].includes(method)) cancelShared()
     else cancel(method === 'populationExport')
     const source = method.startsWith('source'), ingestion = method.startsWith('ingestion'), experiment = method.startsWith('experiment')
     const original = ['sourceRetainOriginal', 'sourceOriginalMetadata', 'sourceOriginalRead'].includes(method)
@@ -258,17 +266,24 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
     }
     let preparationRaw, preparationContext
     if (preparation) {
-      preparationRaw = preparationPayload(payload, method === 'preparationPlan')
+      preparationRaw = profiles ? preparedProfilePayload(payload) : configuration ? configurationPayload(payload) : preparationPayload(payload, method === 'preparationPlan')
       payload = JSON.parse(preparationRaw)
       if (method === 'preparationPlan' && !preparationPlans.has(payload.operation_id) && preparationPlans.size >= 100) fail('busy')
       try {
         preparationContext = method === 'preparationPlan' ? { source: payload.schema_version === 2 ? preparationSources(ingestionContext, payload) : preparationSource(ingestionContext), known: preparationPlans.get(payload.operation_id) } : { known: preparationPlans.get(payload.operation_id) }
         if (method !== 'preparationPlan' && (!preparationContext.known || preparationContext.known.plan_sha256 !== payload.plan_sha256)) fail('invalid_request')
+        if (preparationInspection) {
+          const ready = preparationContext.known
+          if (ready.state !== 'ready' || JSON.stringify(ready) !== JSON.stringify(ingestionContext) ||
+              (profiles && !ready.actors.some(actor => actor.source_entity_uuid === payload.source_entity_uuid)) ||
+              (configuration && (payload.source_revision !== ready.source.source_revision ||
+                payload.artifact_sha256 !== ready.receipt.artifact_sha256))) fail('invalid_request')
+        }
         if (method === 'preparationStart' && (preparationStarted.has(payload.operation_id) || preparationContext.known.state !== 'planned')) fail('conflict')
         if (method === 'preparationStart' && (!preparationContext.known.authorization.model_calls_enabled || !preparationContext.known.authorization.ceiling_microusd)) fail('model_calls_disabled')
       } catch (e) { if (e instanceof WorkbenchError) throw e; fail('invalid_request') }
     }
-    if (!population || method === 'populationPreview') populationAdmission = null
+    if (!preparationInspection && (!population || method === 'populationPreview')) populationAdmission = null
     let populationRequest
     if (population) {
       try { populationRequest = populationOptions(payload?.options, payload?.platform); payload = populationRequest }
@@ -280,17 +295,26 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
         if (!populationAdmission || JSON.stringify(previewOptions) !== JSON.stringify(populationAdmission.options) || JSON.stringify(ingestionContext) !== JSON.stringify(populationAdmission.preview)) fail('invalid_request')
       }
     }
-    let experimentRequest
-    if (method === 'experimentCompare') {
-      try { experimentRequest = experimentSelection(payload, ingestionContext); payload = experimentRequest.payload } catch { fail('invalid_request') }
+    const comparisonExport = method === 'experimentDownload'
+    let experimentRequest, knownComparison
+    if (method === 'experimentCompare' || comparisonExport) {
+      try {
+        experimentRequest = experimentSelection(payload, comparisonExport ? ingestionContext.catalog : ingestionContext)
+        payload = experimentRequest.payload
+        if (comparisonExport) {
+          knownComparison = JSON.parse(JSON.stringify(ingestionContext.known))
+          validateExperimentComparison(knownComparison, experimentRequest.catalog, payload)
+        }
+      } catch { fail('invalid_request') }
     }
-    const ingestionRaw = ingestion ? ingestionPayload(payload, method === 'ingestionStatus') : undefined
+    const ingestionRaw = ingestion ? ingestionPayload(payload, method === 'ingestionStatus', method === 'ingestionExecute') : undefined
     if (ingestion) {
       payload = JSON.parse(ingestionRaw)
       ingestionContext = JSON.parse(JSON.stringify({ ...ingestionContext, ...(ingestionScope ? { scope: ingestionScope } : {}) }))
     }
     const originalRaw = original ? sourceOriginalPayload(method, payload) : undefined
-    const raw = native ? nativeRaw : preparation ? preparationRaw : population ? JSON.stringify(populationRequest) : experiment ? experimentRequest?.raw : ingestion ? (method === 'ingestionStatus' ? undefined : ingestionRaw) : original ? (method === 'sourceRetainOriginal' ? originalRaw : undefined) : method === 'graph' || method === 'sourceList' || method === 'sourceGet' ? undefined : method === 'sourceRetain' ? sourcePayload(payload) : requestPayload(method, payload, connection.graph)
+    const ontologyRequest = ontology ? reviewedOntologyRequest(method, payload, ingestionContext?.known, ingestionContext?.project) : undefined
+    const raw = ontology ? ontologyRequest.raw : native ? nativeRaw : preparation ? preparationRaw : population ? JSON.stringify(populationRequest) : experiment ? experimentRequest?.raw : ingestion ? (method === 'ingestionStatus' ? undefined : ingestionRaw) : original ? (method === 'sourceRetainOriginal' ? originalRaw : undefined) : method === 'graph' || method === 'sourceList' || method === 'sourceGet' ? undefined : method === 'sourceRetain' ? sourcePayload(payload) : requestPayload(method, payload, connection.graph)
     if (population && encoder.encode(raw).length > 16384) fail('invalid_request')
     const sourceRequest = original ? (method === 'sourceRetainOriginal' ? JSON.parse(originalRaw) : originalRaw) : method === 'sourceGet' ? sourceReadRequest(payload) : method === 'sourceRetain' ? JSON.parse(raw) : undefined
     const epoch = generation, current = connection, controller = new AbortController()
@@ -318,15 +342,30 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
       if (method === 'ingestionPlan') {
         await guarded(validateSourceResult('sourceGet', ingestionContext.inspected, { source_revision: payload.source_revision }))
         owned()
-        if (ingestionContext.inspected.source.codepoint_length > 32768 || !ingestionContext.inspected.passages.length) fail('invalid_request')
+        if (payload.schema_version === 2) {
+          if (!ingestionPassages(ingestionContext.inspected).some(p => p.evidence_id === payload.evidence_id)) fail('invalid_request')
+        } else if (ingestionContext.inspected.source.codepoint_length > 32768 || !ingestionContext.inspected.passages.length) {
+          fail('invalid_request')
+        }
       }
-      const sourcePaths = { sourceList: 'library', sourceGet: 'item', sourceRetain: 'retain', sourceRetainOriginal: 'retain-original', sourceOriginalMetadata: 'original-metadata', sourceOriginalRead: 'original' }
+      if (method === 'ingestionExecute' && payload.schema_version === 2) {
+        const { known } = ingestionContext
+        if (known?.schema_version !== 2 || known.source_revision !== payload.source_revision ||
+            known.ontology_revision !== payload.ontology.revision || known.window?.evidence_id !== payload.evidence_id) fail('invalid_request')
+      }
+      if (method === 'ingestionExecute' && payload.schema_version === 4) {
+        const { known } = ingestionContext
+        if (known?.schema_version !== 4 || ['source_revision', 'operation_id', 'project_revision', 'fingerprint', 'execution_fingerprint']
+          .some(key => known[key] !== payload[key])) fail('invalid_request')
+      }
+      const sourcePaths = { sourceList: 'library', sourceGet: 'item', sourceRetain: 'retain', sourceRetainOriginal: 'retain-original', sourceOriginalMetadata: 'original-metadata', sourceOriginalRead: 'original', sourceOntologyLoad: 'ontology', sourceOntologySave: 'ontology' }
       const ingestionPaths = { ingestionPlan: 'plan', ingestionExecute: 'execute', ingestionStatus: 'operation' }
-      const path = native ? `/api/native-launch/${{ nativeLaunchPlan: 'plan', nativeLaunchStart: 'start', nativeLaunchStatus: 'status', nativeLaunchCancel: 'cancel' }[method]}/${current.graph}` : preparation ? `/api/preparation/${current.graph}/${{ preparationPlan: 'plan', preparationStart: 'start', preparationStatus: 'status' }[method]}` : population ? `/api/graph/population/${current.graph}/${method === 'populationPreview' ? 'preview' : 'export'}` : experiment ? `/api/experiments/${method === 'experimentCatalog' ? 'catalog' : 'compare'}` : ingestion ? `/api/source/ingestion/${ingestionPaths[method]}/${current.graph}${method === 'ingestionStatus' ? '/' + payload.operation_id : ''}` : source ? `/api/source/${sourcePaths[method]}/${current.graph}${['sourceGet', 'sourceOriginalMetadata', 'sourceOriginalRead'].includes(method) ? '/' + sourceRequest.source_revision : ''}` : `/api/graph/${paths[method]}/${current.graph}`
+      const path = native ? `/api/native-launch/${{ nativeLaunchPlan: 'plan', nativeLaunchStart: 'start', nativeLaunchStatus: 'status', nativeLaunchCancel: 'cancel' }[method]}/${current.graph}` : preparation ? `/api/preparation/${current.graph}/${{ preparationPlan: 'plan', preparationStart: 'start', preparationStatus: 'status', preparationProfiles: 'profiles', preparationConfiguration: 'configuration' }[method]}` : population ? `/api/graph/population/${current.graph}/${method === 'populationPreview' ? 'preview' : 'export'}` : experiment ? `/api/experiments/${method === 'experimentCatalog' ? 'catalog' : 'compare'}` : ingestion ? `/api/source/ingestion/${ingestionPaths[method]}/${current.graph}${method === 'ingestionStatus' ? '/' + payload.operation_id : ''}` : source ? `/api/source/${sourcePaths[method]}/${current.graph}${['sourceGet', 'sourceOriginalMetadata', 'sourceOriginalRead'].includes(method) ? '/' + sourceRequest.source_revision : ''}` : `/api/graph/${paths[method]}/${current.graph}`
       // Fence before invoking fetch, including synchronous throws and lost replies.
       if (method === 'preparationStart') preparationStarted.add(payload.operation_id)
       if (method === 'nativeLaunchStart' || method === 'nativeLaunchCancel') nativeStarted.add(payload.launch_id)
-      const response = await guarded(fetchImpl(`${current.origin}${path}`, { method: raw === undefined ? 'GET' : 'POST', headers: { Authorization: `Bearer ${current.token}`, ...(raw ? { 'Content-Type': 'application/json' } : {}) }, body: raw, signal: controller.signal, redirect: 'error', credentials: 'omit', cache: 'no-store', referrerPolicy: 'no-referrer' }))
+      owned()
+      const response = await guarded(fetchImpl(`${current.origin}${path}`, { method: raw === undefined ? 'GET' : 'POST', headers: { Authorization: `Bearer ${current.token}`, ...(raw ? { 'Content-Type': 'application/json' } : {}), ...(comparisonExport ? { Accept: comparisonReportMedia } : {}) }, body: raw, signal: controller.signal, redirect: 'error', credentials: 'omit', cache: 'no-store', referrerPolicy: 'no-referrer' }))
       responseBody = response.body
       owned()
       if (response.status === 401) { disconnect(); fail('unauthorized') }
@@ -336,19 +375,20 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
       if ((source || ingestion) && response.status === 404 && !/^application\/json(?:\s*;|$)/i.test(response.headers.get('content-type') || '')) fail('source_unavailable')
       if (population && [404, 501].includes(response.status) && !/^application\/json(?:\s*;|$)/i.test(response.headers.get('content-type') || '')) fail('population_unavailable')
       const exportOk = method === 'populationExport' && response.ok && (payload.platform === 'twitter' ? /^text\/csv\s*;\s*charset=utf-8$/i : /^application\/json\s*;\s*charset=utf-8$/i).test(response.headers.get('content-type') || '')
-      if (method === 'populationExport' && response.ok && !exportOk) fail()
-      if (response.redirected || response.type === 'opaqueredirect' || (!exportOk && !/^application\/json(?:\s*;|$)/i.test(response.headers.get('content-type') || '')) || !response.body?.getReader) fail()
-      const cap = native ? 65664 : preparation ? 263168 : population ? 2097152 + (method === 'populationPreview' ? 1024 : 0) : experiment ? (method === 'experimentCatalog' ? 32768 : 524288) + 16384 : ingestion ? 263168 : (source || method === 'dossier' ? 4194304 : 2097152) + 1024
+      const reportOk = comparisonExport && response.status === 200 && response.headers.get('content-type') === comparisonReportMedia
+      if (method === 'populationExport' && response.ok && !exportOk || comparisonExport && response.ok && !reportOk) fail()
+      if (response.redirected || response.type === 'opaqueredirect' || (!exportOk && !reportOk && !/^application\/json(?:\s*;|$)/i.test(response.headers.get('content-type') || '')) || !response.body?.getReader) fail()
+      const cap = comparisonExport ? comparisonReportBytes : native ? 65664 : preparation ? 263168 : population ? 2097152 + (method === 'populationPreview' ? 1024 : 0) : experiment ? (method === 'experimentCatalog' ? 32768 : 524288) + 16384 : ingestion ? 263168 : (source || method === 'dossier' ? 4194304 : 2097152) + 1024
       const length = response.headers.get('content-length')
       if (length && (!/^\d+$/.test(length) || Number(length) > cap)) fail('result_too_large')
       reader = response.body.getReader()
-      const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: population }); let size = 0, body = ''; const exportChunks = []
+      const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: population || comparisonExport }); let size = 0, body = ''; const exportChunks = []
       while (true) {
         const chunk = await guarded(reader.read()); owned()
         if (chunk.done) break
         size += chunk.value.byteLength
         if (size > cap) fail('result_too_large')
-        if (exportOk) exportChunks.push(new Uint8Array(chunk.value))
+        if (exportOk || reportOk) exportChunks.push(new Uint8Array(chunk.value))
         try { body += decoder.decode(chunk.value, { stream: true }) } catch { fail() }
       }
       try { body += decoder.decode() } catch { fail() }
@@ -362,23 +402,44 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
       }
       let value
       try { value = uniqueJson(body) } catch { fail() }
+      if (reportOk) {
+        try {
+          await guarded(validateComparisonReport(value, body, knownComparison, experimentRequest.catalog, experimentRequest.payload))
+        } catch { fail('invalid_reply') }
+        owned()
+        const bytes = new Uint8Array(size); let offset = 0
+        for (const chunk of exportChunks) { bytes.set(chunk, offset); offset += chunk.byteLength }
+        return bytes
+      }
       if (!obj(value) || typeof value.success !== 'boolean') fail()
       if (!response.ok || !value.success) {
         shape(value, 'success error'); shape(value.error, 'code')
-        if (value.success !== false || !(native ? NATIVE_LAUNCH_CODES.has(value.error.code) && response.status === NATIVE_ERROR_STATUS[value.error.code] : preparation ? PREPARATION_CODES.has(value.error.code) : SERVER_CODES.has(value.error.code) || experiment && response.status === 503 && value.error.code === 'experiment_unavailable' || (source || ingestion) && ['source_unavailable', 'source_denied', 'outcome_unknown', 'cancelled', 'uncertain', 'model_calls_disabled', 'budget_denied'].includes(value.error.code))) fail()
+        if (ingestion && (response.status === 422 || value.error.code === 'ontology_ineligible')) {
+          if (value.success !== false || response.status !== 422 || value.error.code !== 'ontology_ineligible' ||
+              payload.schema_version !== 4 || !['ingestionPlan', 'ingestionExecute'].includes(method)) fail()
+          fail('ontology_ineligible')
+        }
+        if (value.success !== false || !(ontology ? Object.hasOwn(REVIEWED_ONTOLOGY_ERROR_STATUS, value.error.code) && response.status === REVIEWED_ONTOLOGY_ERROR_STATUS[value.error.code] : native ? NATIVE_LAUNCH_CODES.has(value.error.code) && response.status === NATIVE_ERROR_STATUS[value.error.code] : preparation ? PREPARATION_CODES.has(value.error.code) : SERVER_CODES.has(value.error.code) || experiment && response.status === 503 && value.error.code === 'experiment_unavailable' || (source || ingestion) && ['source_unavailable', 'source_denied', 'outcome_unknown', 'cancelled', 'uncertain', 'model_calls_disabled', 'budget_denied'].includes(value.error.code))) fail()
         if (['unauthorized', 'origin_denied'].includes(value.error.code)) disconnect()
         fail(value.error.code)
       }
+      if ((ontology || preparationInspection) && response.status !== 200) fail()
       shape(value, 'success data')
       let result
       if (native) {
         result = await guarded(validateNativeLaunchResult(value.data, { graph: current.graph, payload, ...nativeContext, planning: method === 'nativeLaunchPlan' }))
+      } else if (profiles) {
+        result = validatePreparedProfiles(value.data, current.graph, preparationContext.known, payload)
+      } else if (configuration) {
+        result = validateConfigurationResult(value.data, current.graph, preparationContext.known, payload)
       } else if (preparation) {
         result = await guarded(validatePreparationResult(value.data, { graph: current.graph, payload, ...preparationContext, planning: method === 'preparationPlan' }))
       } else if (experiment) {
         try { result = method === 'experimentCatalog' ? validateExperimentCatalog(value.data) : validateExperimentComparison(value.data, experimentRequest.catalog, experimentRequest.payload) } catch { fail('invalid_reply') }
       } else if (population) {
         try { result = validatePopulationPreview(value.data, current.graph, populationRequest) } catch { fail('invalid_reply') }
+      } else if (ontology) {
+        result = validateReviewedOntologyResult(value.data, ontologyRequest)
       } else result = original ? await guarded(validateSourceOriginalResult(method, value.data, sourceRequest)) : ingestion ? await guarded(validateIngestionResult(method, value.data, { ...ingestionContext, payload })) : source ? await guarded(validateSourceResult(method, value.data, sourceRequest)) : validateResult(method, value.data, current.graph)
       if (method === 'research' && [...result.source_claims, ...result.simulation_observations, ...result.other_claims].length > (payload.top_k ?? 10)) fail()
       if (method === 'dossier') {
@@ -392,7 +453,7 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
         nativePlans.set(result.request.run_id, { plan: JSON.parse(JSON.stringify(result)), preparation: JSON.parse(JSON.stringify(nativeContext.preparation)) })
         if (result.state !== 'planned') nativeStarted.add(result.request.run_id)
       }
-      if (preparation) {
+      if (preparation && !preparationInspection) {
         preparationPlans.set(result.operation_id, JSON.parse(JSON.stringify(result)))
         if (result.state !== 'planned') preparationStarted.add(result.operation_id)
       }
@@ -436,13 +497,18 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
     sourceRetainOriginal: (payload, options) => request('sourceRetainOriginal', payload, undefined, options),
     sourceOriginalMetadata: (payload, options) => request('sourceOriginalMetadata', payload, undefined, options),
     sourceOriginalRead: (payload, options) => request('sourceOriginalRead', payload, undefined, options),
+    sourceOntologyLoad: (known, project) => request('sourceOntologyLoad', undefined, { known, project }),
+    sourceOntologySave: (payload, known, project) => request('sourceOntologySave', payload, { known, project }),
     experimentCatalog: () => request('experimentCatalog'),
     experimentCompare: (payload, catalog) => request('experimentCompare', payload, catalog),
+    experimentDownload: (payload, catalog, known, signal) => request('experimentDownload', payload, { catalog, known }, { signal }),
     populationPreview: options => request('populationPreview', { options }),
     populationExport: (platform, options, preview) => request('populationExport', { platform, options }, preview),
     preparationPlan: (payload, source) => request('preparationPlan', payload, source),
     preparationStart: payload => request('preparationStart', payload),
     preparationStatus: payload => request('preparationStatus', payload),
+    preparationProfiles: (payload, ready, options = {}) => request('preparationProfiles', payload, ready, options),
+    preparationConfiguration: (payload, ready, options = {}) => request('preparationConfiguration', payload, ready, options),
     nativeLaunchPlan: (payload, ready) => request('nativeLaunchPlan', payload, ready),
     nativeLaunchStart: payload => request('nativeLaunchStart', payload),
     nativeLaunchStatus: payload => request('nativeLaunchStatus', payload),
@@ -465,7 +531,7 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
     connectedFollowupDownload: (payload, known) => followups.download(payload, known),
     connectedFollowupHistory: payload => followups.history(payload),
     clearConnectedFollowups: () => followups.clear(),
-    ingestionPlan: (payload, inspected, scope) => request('ingestionPlan', payload, { inspected, scope }),
+    ingestionPlan: (payload, inspected, scope, saved) => request('ingestionPlan', payload, { inspected, scope, saved }),
     ingestionExecute: (payload, known) => request('ingestionExecute', payload, { known, scope: known.scope }),
     ingestionStatus: (payload, known, scope, project) => request('ingestionStatus', payload, { known, scope, project }),
     cancel, cancelShared, disconnect

@@ -8,7 +8,8 @@ from uuid import uuid4
 
 from .knowledge_source_client import (KnowledgeSourceProcessClient, MAX_BYTES, HASH,
     TEXT_BYTES, encoded, text_value, declarations, metadata, validate_payload, validate_result,
-    pdf_upload, pdf_receipt, original_result)
+    pdf_upload, pdf_receipt, original_result, ONTOLOGY_METHODS, KnowledgeOntologyProcessClient,
+    validate_ontology_result)
 from .knowledge_transport import KnowledgeBusy, KnowledgeTransportFailure, _json_object, _uuid
 from .knowledge_reader import KnowledgeReadError
 
@@ -129,24 +130,33 @@ class KnowledgeSourceFacade:
         self._admission = threading.BoundedSemaphore(2)
 
     def _call(self, method, payload, deadline):
-        validate_payload(method, payload)
+        ontology = method in ONTOLOGY_METHODS
+        profile = KnowledgeOntologyProcessClient if ontology else KnowledgeSourceProcessClient
+        profile._validate_payload(method, payload)
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise KnowledgeReadError("timeout")
-        client = self._factory() if self._factory else KnowledgeSourceProcessClient(self._settings)
+        client = self._factory() if self._factory else profile(self._settings)
         if isinstance(client, KnowledgeSourceProcessClient):
             client._timeout = min(60, remaining)
         request_id = str(uuid4())
         raw = encoded({"version": 1, "request_id": request_id, "method": method,
                        "scope": self._settings.scope, "payload": payload})
         reply = client.call(raw)
-        KnowledgeSourceProcessClient._validate_reply(client, reply, request_id)
+        profile._validate_reply(client, reply, request_id)
         result = _json_object(reply)
         if not result["ok"]:
-            raise KnowledgeReadError(result["error"]["code"])
-        data = validate_result(method, result["result"], self._settings.scope, payload)
+            code = result["error"]["code"]
+            if method == "ontology_save" and code in {"source_unavailable", "result_too_large"}:
+                # The installed child cannot attest that a save did not commit.
+                raise KnowledgeTransportFailure(outcome_unknown=True)
+            raise KnowledgeReadError(code)
+        validate = validate_ontology_result if ontology else validate_result
+        data = validate(method, result["result"], self._settings.scope, payload)
         if time.monotonic() > deadline:
-            raise KnowledgeTransportFailure(outcome_unknown=method in {"retain", "retain_pdf", "retain_pdf_binary"})
+            raise KnowledgeTransportFailure(
+                outcome_unknown=method in {"retain", "retain_pdf", "retain_pdf_binary", "ontology_save"},
+            )
         return data
 
     def execute(self, method, graph_id, payload):
@@ -155,7 +165,7 @@ class KnowledgeSourceFacade:
         binary = validate_upload(payload) if method == "retain" else None
         if method == "retain_pdf_binary":
             validate_original_upload(payload)
-        if method not in {"retain", "retain_pdf_binary"}:
+        if method not in {"retain", "retain_pdf_binary"} | ONTOLOGY_METHODS:
             validate_payload(method, payload)
         if not self._admission.acquire(blocking=False):
             raise KnowledgeBusy()
