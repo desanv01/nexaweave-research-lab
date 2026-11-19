@@ -75,6 +75,11 @@ export function awareTimestamp(v) {
   if (year < 1 || month < 1 || month > 12 || day < 1 || day > maxDay || Number(v.slice(11, 13)) > 23 || Number(v.slice(14, 16)) > 59 || Number(v.slice(17, 19)) > 59) fail('invalid_request')
   return v
 }
+// Date.parse retains milliseconds. Keep the remaining accepted digits separately.
+const submillisecond = stamp => (stamp.match(/\.(\d+)/)?.[1] || '').padEnd(6, '0').slice(3)
+export function sameAwareTimestamp(a, b) {
+  return a == null && b == null || a != null && b != null && Date.parse(a) === Date.parse(b) && submillisecond(a) === submillisecond(b)
+}
 function scope(v) {
   shape(v, 'schema_version workspace_id project_id graph_id run_id branch_id layer')
   if (v.schema_version !== 1 || !layers.includes(v.layer)) fail()
@@ -242,7 +247,8 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
     const preparationInspection = profiles || configuration
     // These source operations leave report and follow-up ownership alone.
     if (preparationInspection) cancelShared(true)
-    else if (ontology || ['sourceOriginalMetadata', 'sourceOriginalRead'].includes(method)) cancelShared()
+    else if (ontology || ['sourceOriginalMetadata', 'sourceOriginalRead'].includes(method) ||
+      (method === 'sourceGet' && options.dossierReview)) cancelShared()
     else cancel(method === 'populationExport')
     const source = method.startsWith('source'), ingestion = method.startsWith('ingestion'), experiment = method.startsWith('experiment')
     const original = ['sourceRetainOriginal', 'sourceOriginalMetadata', 'sourceOriginalRead'].includes(method)
@@ -444,9 +450,7 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
       if (method === 'research' && [...result.source_claims, ...result.simulation_observations, ...result.other_claims].length > (payload.top_k ?? 10)) fail()
       if (method === 'dossier') {
         const returned = result.request
-        const submillisecond = stamp => (stamp.match(/\.(\d+)/)?.[1] || '').padEnd(6, '0').slice(3)
-        const sameTime = (a, b) => a == null && b == null || a != null && b != null && Date.parse(a) === Date.parse(b) && submillisecond(a) === submillisecond(b)
-        if (returned.title !== payload.title || returned.sections.length !== payload.sections.length || returned.sections.some((s, i) => s.heading !== payload.sections[i].heading || s.query !== payload.sections[i].query || s.top_k !== (payload.sections[i].top_k ?? 10)) || !sameTime(returned.valid_at, payload.valid_at) || !sameTime(returned.recorded_before, payload.recorded_before)) fail()
+        if (returned.title !== payload.title || returned.sections.length !== payload.sections.length || returned.sections.some((s, i) => s.heading !== payload.sections[i].heading || s.query !== payload.sections[i].query || s.top_k !== (payload.sections[i].top_k ?? 10)) || !sameAwareTimestamp(returned.valid_at, payload.valid_at) || !sameAwareTimestamp(returned.recorded_before, payload.recorded_before)) fail()
       }
       owned()
       if (native) {
@@ -493,6 +497,7 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
     dossier: payload => request('dossier', payload),
     sourceList: () => request('sourceList'),
     sourceGet: payload => request('sourceGet', payload),
+    sourceReadForDossierReview: payload => request('sourceGet', payload, undefined, { dossierReview: true }),
     sourceRetain: payload => request('sourceRetain', payload),
     sourceRetainOriginal: (payload, options) => request('sourceRetainOriginal', payload, undefined, options),
     sourceOriginalMetadata: (payload, options) => request('sourceOriginalMetadata', payload, undefined, options),
