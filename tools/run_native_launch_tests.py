@@ -27,6 +27,11 @@ PG_REGRESSIONS = (
     ROOT / 'services/knowledge/tests/test_budget_postgres.py',
     ROOT / 'services/knowledge/tests/test_preparation_store.py',
 )
+HOSTED_COUNTS = {
+    'test_native_launch_store.py': 8,
+    'test_native_launch_budget.py': 2,
+    'test_temporal_connected_launch.py': 2,
+}
 MARKERS = ('postgres: disposable PostgreSQL integration\n'
            'native_launch_temporal: actual connected Temporal native launch\n'
            'native_launch_engine: actual generated-preparation owned OASIS native launch\n'
@@ -53,6 +58,7 @@ def child(mode: str) -> int:
             skipped = 0
             node_paths = {}
             targets = {p.name: 0 for p in (*NEW_TARGETS, ENGINE_TARGET)}
+            passed_nodes = set()
 
             def pytest_collection_finish(self, session):
                 self.collected = len(session.items)
@@ -63,6 +69,7 @@ def child(mode: str) -> int:
                     self.skipped += 1
                 if report.when == 'call' and report.passed:
                     self.passed += 1
+                    self.passed_nodes.add(report.nodeid)
                     name = self.node_paths.get(report.nodeid)
                     if name in self.targets:
                         self.targets[name] += 1
@@ -80,8 +87,8 @@ def child(mode: str) -> int:
             targets = (ENGINE_TARGET,)
             selection = 'native_launch_engine'
             required = (ENGINE_TARGET.name,)
-        elif mode == 'integration':
-            targets = NEW_TARGETS + PG_REGRESSIONS
+        elif mode in ('integration', 'hosted-integration'):
+            targets = NEW_TARGETS + (PG_REGRESSIONS if mode == 'integration' else ())
             selection = '(postgres or native_launch_temporal) and not native_launch_engine'
             required = ('test_native_launch_store.py', 'test_native_launch_budget.py',
                         'test_temporal_connected_launch.py')
@@ -99,6 +106,12 @@ def child(mode: str) -> int:
             '-k' if mode == 'fixture' else '-m', selection, *map(str, targets),
         ], plugins=[proof]))
         complete = proof.collected > 0 and proof.skipped == 0 and all(proof.targets[n] > 0 for n in required)
+        if mode == 'hosted-integration':
+            complete = (complete and result == 0
+                        and proof.collected == proof.passed == sum(HOSTED_COUNTS.values())
+                        and proof.passed_nodes == proof.node_paths.keys()
+                        and len(proof.passed_nodes) == proof.collected
+                        and all(proof.targets[name] == count for name, count in HOSTED_COUNTS.items()))
         print(json.dumps(dict(native_launch_mode=mode, collected=proof.collected, passed=proof.passed,
                               skipped=proof.skipped, targets=proof.targets, complete=complete), sort_keys=True))
         if not complete:
@@ -116,12 +129,18 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     group = parser.add_mutually_exclusive_group(required=True)
     for mode in ('unit', 'fixture', 'integration', 'temporal', 'engine'):
-        group.add_argument('--' + mode, action='store_true')
+        group.add_argument('--' + mode, dest='mode', action='store_const', const=mode)
+    group.add_argument('--hosted-integration', dest='mode', action='store_const',
+                       const='hosted-integration', help=argparse.SUPPRESS)
     parser.add_argument('--child', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args()
-    mode = 'engine' if args.engine else 'temporal' if args.temporal else 'integration' if args.integration else 'fixture' if args.fixture else 'unit'
+    mode = args.mode
     if args.child:
         return child(mode)
+    if mode == 'hosted-integration' and (os.name != 'nt' or os.environ.get('GITHUB_ACTIONS') != 'true'
+            or os.environ.get('RUNNER_ENVIRONMENT') != 'github-hosted'
+            or Path(sys.executable).absolute() != (ROOT / 'backend/.venv/Scripts/python.exe').absolute()):
+        parser.error('locked hosted Windows CI required for launch-only qualification')
     if mode not in ('unit', 'fixture'):
         password = os.environ.get('PROJECT_STORE_TEST_PASSWORD')
         if not password or os.environ.get('TEMPORAL_TEST_ADDRESS') != '127.0.0.1:17233':

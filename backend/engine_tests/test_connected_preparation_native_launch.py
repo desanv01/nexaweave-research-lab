@@ -7,6 +7,8 @@ import asyncio
 import json
 import os
 import sqlite3
+from contextlib import contextmanager
+from dataclasses import replace
 from hashlib import sha256
 from itertools import islice
 from pathlib import Path
@@ -76,10 +78,12 @@ def _checkpoint_reference(dto):
     return {'schema_version': 2, 'launch_id': dto['request']['run_id'], 'launch_sha256': dto['launch_sha256']}
 
 
-def _checkpoint_http(monkeypatch, host):
+def _checkpoint_http(monkeypatch, host, observations):
     from app import create_app
     from app.services.knowledge_read_facade import ReadHostSettings
     from app.services.native_launch_facade import NativeLaunchFacade
+    from app.services.native_observations_client import ENVELOPE_OVERHEAD, RESULT_BYTES
+    from app.services.native_observations_facade import NativeObservationsFacade
 
     monkeypatch.setenv('NEXAWEAVE_APP_MODE', 'research_local')
     monkeypatch.delenv('FLASK_HOST', raising=False)
@@ -88,7 +92,10 @@ def _checkpoint_http(monkeypatch, host):
                                 'owner', host.display_graph_id, host.scope_dto, {})
     monkeypatch.setattr(ReadHostSettings, 'from_config', classmethod(lambda _cls, _config: settings))
 
-    client = create_app(native_launch_facade=NativeLaunchFacade(settings, host=host)).test_client()
+    client = create_app(
+        native_launch_facade=NativeLaunchFacade(settings, host=host),
+        native_observations_facade=NativeObservationsFacade(settings, host=observations),
+    ).test_client()
     headers = {'Authorization': 'Bearer ' + settings.token}
 
     async def post(method, payload, *, status=200, code=None):
@@ -101,7 +108,25 @@ def _checkpoint_http(monkeypatch, host):
         assert response.headers['Cache-Control'] == 'no-store'
         return response.json['data']
 
-    return post
+    async def page(payload, *, refused=()):
+        response = await asyncio.to_thread(
+            client.post, f'/api/native-observations/page/{host.display_graph_id}', json=payload, headers=headers,
+        )
+        assert response.mimetype == 'application/json'
+        assert response.headers['Cache-Control'] == 'no-store'
+        assert len(response.get_data()) <= RESULT_BYTES + ENVELOPE_OVERHEAD
+        body = response.json
+        if refused:
+            status_by_code = {'conflict': 409, 'not_found': 404, 'invalid_reply': 502, 'evidence_invalid': 502}
+            assert any(
+                response.status_code == status_by_code[code] and body == {'success': False, 'error': {'code': code}}
+                for code in refused
+            ), (response.status_code, body)
+            return None
+        assert response.status_code == 200 and body == {'success': True, 'data': body['data']}
+        return body['data']
+
+    return post, page
 
 
 @pytest.mark.asyncio
@@ -173,18 +198,23 @@ async def test_new_inherited_ready_artifacts_run_actual_both_platforms_through_p
 
 
 @pytest.mark.asyncio
-async def test_generated_twitter_checkpoint_and_continuation_through_protected_http(factory, tmp_path, monkeypatch):
+@pytest.mark.parametrize('cancel_in_flight', [False, True], ids=['completed', 'cancelled'])
+async def test_generated_twitter_checkpoint_and_continuation_through_protected_http(
+        factory, tmp_path, monkeypatch, cancel_in_flight):
     from app.services.durable_native_launch_host import DurableNativeLaunchHost
     from app.services.native_launch_models import BoundedNativeModelFactory
+    from app.services.native_observations_host import NativeObservationsHost
     from native_twitter_fresh_fixture import (
         _DB_LIMIT, _LOG_LIMIT, _PROFILE_LIMIT, _RECEIPT_LIMIT, _RESTORE_OUTPUTS,
-        _captured_checkpoint, _captured_owners, _events,
+        _captured_checkpoint, _captured_owners, _events, _gated_checkpoint_twitter_backends,
+        _restored_wait_marker,
     )
     from nexaweave_execution.native_owned_binding import _manifest
     from nexaweave_execution.native_run_contracts import NativeRunDenied, RunState
     from nexaweave_execution.native_twitter_checkpoint_binding import (
         NativeRestoredTwitterFactory, NativeTwitterCaptureFactory,
     )
+    from nexaweave_storage.store import ProjectStore
     from test_durable_native_launch import LIMITS
     from test_native_round_capture import _artifact, _native_rows, _read_bounded
 
@@ -203,13 +233,14 @@ async def test_generated_twitter_checkpoint_and_continuation_through_protected_h
                                             trusted_host=prep, allow_dispatch=lambda: True)
     loop = asyncio.get_running_loop()
     prep.scheduler = prep_temporal.scheduler_for(loop)
-    model = BoundedNativeModelFactory(('twitter',), dict(LIMITS), _scripted_checkpoint_twitter_backends,
-                                      cooperative_transport=True)
+    backends = _gated_checkpoint_twitter_backends if cancel_in_flight else _scripted_checkpoint_twitter_backends
+    model = BoundedNativeModelFactory(('twitter',), dict(LIMITS), backends, cooperative_transport=True)
     host = DurableNativeLaunchHost(preparation_host=prep, connection_factory=factory, runtime_sha256='c' * 64,
         model_label='scripted checkpoint', limits=LIMITS, model_factory=model, account_id=prep.account_id,
         ceiling_microusd=4, authorize=lambda: True)
     created = {}
     exited = {}
+    reaped = {}
 
     def construct(request):
         supervisor = host.supervisor_factory(request)
@@ -229,6 +260,22 @@ async def test_generated_twitter_checkpoint_and_continuation_through_protected_h
             return result
 
         driver.observe = observe
+        if cancel_in_flight and request.source_run_id is not None:
+            genuine_cancel = driver.cancel
+
+            def cancel(req, attempt, child):
+                owned = driver._owned
+                assert owned is not None and owned.request == req
+                assert owned.child == child and owned.attempt == attempt
+                assert owned.sent_go and owned.process.pid == child.process_id and owned.process.is_alive()
+                result = genuine_cancel(req, attempt, child)
+                assert result.status == 'cancelled' and not owned.process.is_alive()
+                assert owned.process.exitcode is not None
+                assert req.run_id not in reaped
+                reaped[req.run_id] = owned, result.receipt
+                return result
+
+            driver.cancel = cancel
         return supervisor
 
     native = TemporalNativeHost(client=temporal, task_queue='mf-checkpoint-oasis-' + uuid4().hex,
@@ -242,28 +289,40 @@ async def test_generated_twitter_checkpoint_and_continuation_through_protected_h
         return temporal_call(method, request, ref)
 
     host.attach_temporal(native, call)
-    post = _checkpoint_http(monkeypatch, host)
+    observations = NativeObservationsHost(launch_host=host)
+    post, observations_page = _checkpoint_http(monkeypatch, host, observations)
+    reader_roots = []
+    real_page = observations.reader.page
 
-    async def launch(dto):
+    @contextmanager
+    def traced_page(root, *args, **kwargs):
+        reader_roots.append(root)
+        with real_page(root, *args, **kwargs) as result:
+            yield result
+
+    monkeypatch.setattr(observations.reader, 'page', traced_page)
+
+    async def read_page(ref, *, offset=0, refused=()):
+        payload = {**ref, 'platform': 'twitter', 'offset': offset, 'limit': 3}
+        return await asyncio.wait_for(observations_page(payload, refused=refused), remaining(20))
+
+    async def settled_launch(dto, row, outcome):
         ref = _checkpoint_reference(dto)
-        await asyncio.wait_for(post('start', ref), remaining(30))
-        row = host.store.get('owner', ref['launch_id'])
         receipt = await asyncio.wait_for(native.result(row.request, NativeWorkflowRef(**row.workflow)), remaining(180))
-        assert receipt.outcome == 'completed'
+        assert receipt.outcome == outcome
         cleanup = await asyncio.wait_for(native.retry_cleanup(row.request), remaining(20))
         assert not cleanup.cleanup_pending and not cleanup.owner_thread_alive
         final = await asyncio.wait_for(post('status', ref), remaining(30))
         saved = NativeRunStore(factory).get('owner', row.run_id)
-        assert saved.state == RunState.completed and saved.request == row.request and saved.receipt == receipt
-        assert exited[row.run_id] == (saved.child, receipt)
-        assert final['state'] == 'completed' and final['receipt'] == receipt.to_wire()
+        assert saved.state == RunState(outcome) and saved.request == row.request and saved.receipt == receipt
+        assert final['state'] == outcome and final['receipt'] == receipt.to_wire()
         assert final['checkpoint'] == dto['checkpoint'] and _checkpoint_reference(final) == ref
         assert final['cleanup'] == {'known': True, 'pending': False, 'owner_thread_alive': False}
         settled = host.store.get('owner', row.run_id)
         assert settled.workflow == row.workflow and settled.receipt == receipt.to_wire()
         with factory() as conn:
             reservation = host.budget._row(conn, host.account_id, row.run_id)
-        assert reservation.attempt_id == settled.budget_attempt_id
+        assert reservation.attempt_id == settled.budget_attempt_id == row.budget_attempt_id
         assert type(reservation.receipt) is NativeBudgetReceipt
         assert reservation.receipt.attempt_id == reservation.attempt_id
         assert reservation.receipt.launch_sha256 == settled.launch_sha256
@@ -271,6 +330,70 @@ async def test_generated_twitter_checkpoint_and_continuation_through_protected_h
         driver = created[row.run_id].coordinator.driver
         assert driver._closed and driver._owned is None
         return saved, driver._factory, reservation
+
+    async def launch(dto):
+        ref = _checkpoint_reference(dto)
+        await asyncio.wait_for(post('start', ref), remaining(30))
+        row = host.store.get('owner', ref['launch_id'])
+        saved, driver_factory, reservation = await settled_launch(dto, row, 'completed')
+        assert exited[row.run_id] == (saved.child, saved.receipt)
+        return saved, driver_factory, reservation
+
+    async def cancel_restored(dto, producer):
+        ref = _checkpoint_reference(dto)
+        start = await asyncio.wait_for(post('start', ref), remaining(30))
+        row = host.store.get('owner', ref['launch_id'])
+        assert row.dispatch_claimed and row.workflow is not None and row.budget_attempt_id is not None
+        assert row.request.source_run_id == producer.request.run_id
+        assert dispatched == [producer.request.run_id, row.run_id]
+
+        async def wait_for_gate():
+            while True:
+                supervisor = created.get(row.run_id)
+                if supervisor is not None:
+                    continuation = supervisor.coordinator.driver._factory
+                    marker = _restored_wait_marker(Path(continuation.child_dir))
+                    try:
+                        with marker.open('rb') as stream:
+                            token = stream.read(32)
+                    except FileNotFoundError:
+                        token = b''
+                    if token:
+                        return token
+                await asyncio.sleep(0.025)
+
+        token = await asyncio.wait_for(wait_for_gate(), remaining(180))
+        active = NativeRunStore(factory).get('owner', row.run_id)
+        assert active.state == RunState.running and active.request == row.request
+        assert active.attempt_id is not None and active.child is not None and active.receipt is None
+        assert not active.cancel_requested
+        assert active.child.process_id not in {os.getpid(), producer.child.process_id}
+        assert token == f'{active.child.process_id}\n'.encode('ascii')
+
+        cancelled = await asyncio.wait_for(post('cancel', ref), remaining(10))
+        assert cancelled['cancel_requested'] and _checkpoint_reference(cancelled) == ref
+        saved, continuation, reservation = await settled_launch(dto, row, 'cancelled')
+        assert saved.cancel_requested and saved.attempt_id == active.attempt_id and saved.child == active.child
+        assert saved.receipt.run_id == row.run_id and saved.receipt.attempt_id == active.attempt_id
+        assert saved.receipt.instance_id == active.child.instance_id
+        assert saved.receipt.request_fingerprint == row.request.fingerprint
+        owned, receipt = reaped[row.run_id]
+        assert owned.child == active.child and receipt == saved.receipt
+        assert owned.pipe.closed and not owned.reader.thread.is_alive()
+        assert set(reaped) == {row.run_id} and set(exited) == {producer.request.run_id}
+
+        for response in (start, cancelled):
+            assert set(response) == set(dto) and response['checkpoint'] == dto['checkpoint']
+            assert Path(continuation.child_dir).name not in json.dumps(response)
+        return saved, continuation, reservation
+
+    async def refuse_competing(dto):
+        competing_ref = _checkpoint_reference(dto)
+        await post('start', competing_ref, status=409, code='conflict')
+        declined = host.store.get('owner', competing_ref['launch_id'])
+        assert not declined.dispatch_claimed and declined.workflow is None and declined.budget_attempt_id is None
+        with pytest.raises(NativeRunDenied):
+            NativeRunStore(factory).get('owner', declined.run_id)
 
     try:
         async with prep_temporal.worker(), native.worker():
@@ -357,7 +480,10 @@ async def test_generated_twitter_checkpoint_and_continuation_through_protected_h
                 assert host.budget.status('owner', host.account_id).accounted_ceiling_microusd == 8
             finally:
                 parked_lineage.rename(lineage_path)
-            restored, continuation, restore_budget = await launch(continue_dto)
+            if cancel_in_flight:
+                restored, continuation, restore_budget = await cancel_restored(continue_dto, producer)
+            else:
+                restored, continuation, restore_budget = await launch(continue_dto)
             assert type(continuation) is NativeRestoredTwitterFactory
             assert restored.request.source_run_id == producer.request.run_id
             assert restored.child.process_id not in {os.getpid(), producer_pid}
@@ -367,8 +493,35 @@ async def test_generated_twitter_checkpoint_and_continuation_through_protected_h
             child_dir = Path(continuation.child_dir)
             assert child_dir.parent == root.parent and child_dir not in {root, checkpoint, lineage_path.parent}
             assert {path.name for path in islice(child_dir.iterdir(), 3)} == set(_RESTORE_OUTPUTS)
-            assert _manifest(child_dir, _RESTORE_OUTPUTS, _DB_LIMIT) == restored.receipt.evidence_sha256
             child_db, child_log = child_dir / 'native.sqlite3', child_dir / 'actions.jsonl'
+            if cancel_in_flight:
+                assert not child_db.samefile(database) and not child_db.samefile(producer_db)
+                assert sha256(_read_bounded(child_db, _DB_LIMIT)).hexdigest() == manifest['database_sha256']
+                assert _read_bounded(child_log, _LOG_LIMIT) == prefix
+                await read_page(continue_ref, refused=('conflict',))
+                assert not reader_roots
+                accounted = host.budget.status('owner', host.account_id).accounted_ceiling_microusd
+                assert 8 <= accounted <= 12
+                for method in ('start', 'status'):
+                    replay = await asyncio.wait_for(post(method, continue_ref), remaining(30))
+                    assert set(replay) == set(continue_dto) and replay['cancel_requested']
+                    assert replay['state'] == 'cancelled' and replay['receipt'] == restored.receipt.to_wire()
+                    assert _checkpoint_reference(replay) == continue_ref and replay['checkpoint'] == checkpoint_intent
+                    assert replay['cleanup'] == {'known': True, 'pending': False, 'owner_thread_alive': False}
+                    assert child_dir.name not in json.dumps(replay)
+                await asyncio.wait_for(refuse_competing(competing_dto), remaining(30))
+                assert dispatched == [producer.request.run_id, restored.request.run_id]
+                assert set(created) == set(dispatched)
+                with factory() as conn:
+                    assert host.budget._row(conn, host.account_id, producer.request.run_id) == capture_budget
+                    assert host.budget._row(conn, host.account_id, restored.request.run_id) == restore_budget
+                assert host.budget.status('owner', host.account_id).accounted_ceiling_microusd == accounted
+                assert {path: _artifact(path, limit) for path, limit in limits.items()} == pins
+                assert {name: _read_bounded(root / name, _PROFILE_LIMIT) for name in originals} == originals
+                assert (root / '.native_prepared_start_claim').is_file() and not (root / 'reddit_simulation.db').exists()
+                assert monotonic() < deadline
+                return
+            assert _manifest(child_dir, _RESTORE_OUTPUTS, _DB_LIMIT) == restored.receipt.evidence_sha256
             child_pins = {child_db: _artifact(child_db, _DB_LIMIT), child_log: _artifact(child_log, _LOG_LIMIT)}
             assert sum(pin[0] for pin in (*pins.values(), *child_pins.values())) <= 160 * 1024 * 1024
             assert not child_db.samefile(database) and not child_db.samefile(producer_db)
@@ -394,12 +547,7 @@ async def test_generated_twitter_checkpoint_and_continuation_through_protected_h
                 ref = _checkpoint_reference(dto)
                 assert (await post('start', ref))['receipt'] == saved.receipt.to_wire()
                 assert (await post('status', ref))['receipt'] == saved.receipt.to_wire()
-            competing_ref = _checkpoint_reference(competing_dto)
-            await post('start', competing_ref, status=409, code='conflict')
-            declined = host.store.get('owner', competing_ref['launch_id'])
-            assert not declined.dispatch_claimed and declined.workflow is None and declined.budget_attempt_id is None
-            with pytest.raises(NativeRunDenied):
-                NativeRunStore(factory).get('owner', declined.run_id)
+            await refuse_competing(competing_dto)
             assert dispatched == [producer.request.run_id, restored.request.run_id]
             assert set(created) == set(exited) == set(dispatched)
             with factory() as conn:
@@ -410,6 +558,138 @@ async def test_generated_twitter_checkpoint_and_continuation_through_protected_h
             assert {child_db: _artifact(child_db, _DB_LIMIT), child_log: _artifact(child_log, _LOG_LIMIT)} == child_pins
             assert {name: _read_bounded(root / name, _PROFILE_LIMIT) for name in originals} == originals
             assert (root / '.native_prepared_start_claim').is_file() and not (root / 'reddit_simulation.db').exists()
+            assert monotonic() < deadline
+
+            run_ids = [producer.request.run_id, restored.request.run_id]
+            native_before = [host.native.get('owner', run_id) for run_id in run_ids]
+            launches_before = [host.store.get('owner', run_id) for run_id in run_ids]
+            capture_ref = _checkpoint_reference(capture_dto)
+            crossed = {**continue_ref, 'launch_sha256': capture_ref['launch_sha256']}
+            assert crossed['launch_sha256'] != continue_ref['launch_sha256']
+            await read_page(capture_ref, refused=('conflict',))
+            await read_page(crossed, refused=('conflict', 'not_found'))
+            assert not reader_roots
+
+            offset = len(_events(prefix))
+            observed = await read_page(continue_ref, offset=offset)
+            assert reader_roots == [child_dir]
+            assert observed['schema_version'] == 2 and observed['platform'] == 'twitter'
+            assert observed['offset'] == offset and observed['limit'] == 3
+            observed_launch = observed['launch']
+            assert _checkpoint_reference(observed_launch) == continue_ref
+            assert observed_launch['state'] == 'completed' and observed_launch['request'] == continue_dto['request']
+            assert observed_launch['checkpoint'] == checkpoint_intent and not observed_launch['cancel_requested']
+            assert observed_launch['receipt'] == restored.receipt.to_wire()
+            assert observed_launch['cleanup'] == {'known': False, 'pending': None, 'owner_thread_alive': None}
+            assert observed['manifest'] == {
+                'schema_version': 1,
+                'files': [{'name': path.name, 'size': child_pins[path][0], 'sha256': child_pins[path][1]}
+                          for path in (child_db, child_log)],
+            }
+            raw_lines = child_raw_log[len(prefix):].splitlines()
+            assert len(raw_lines) == 3 and observed['total_records'] == offset + 3 and observed['next_offset'] is None
+            assert observed['records'] == [
+                {'index': index, 'record_sha256': sha256(raw).hexdigest(), 'raw_json': raw.decode('utf-8')}
+                for index, raw in enumerate(raw_lines, offset)
+            ]
+            assert json.loads(observed['records'][1]['raw_json'])['action_args']['content'] == content
+            all_events = _events(child_raw_log)
+            action_records = [record for record in all_events if type(record.get('action_type')) is str]
+            assert observed['counts'] == {
+                'event_records': sum(type(record.get('event_type')) is str for record in all_events),
+                'action_records': len(action_records),
+                'successful_action_records': sum(record.get('success') is True for record in action_records),
+                'failed_action_records': sum(record.get('success') is False for record in action_records),
+            }
+            public = json.dumps(observed)
+            for private in (child_dir.name, checkpoint.name, lineage_path.parent.name,
+                            '"process_id"', '"owner_id"'):
+                assert private not in public
+
+            # A completed receipt can coexist with cancellation intent on either durable row.
+            completed_launch, completed_native = launches_before[-1], native_before[-1]
+            assert completed_launch.state == 'completed' and completed_native.state == RunState.completed
+            assert completed_launch.cancel_requested is completed_native.cancel_requested is False
+            for store, baseline in ((host.store, completed_launch), (host.native, completed_native)):
+                genuine_get = store.get
+                overridden = []
+
+                def get_with_cancel_requested(*args, **kwargs):
+                    row = genuine_get(*args, **kwargs)
+                    if row.request.run_id != restored.request.run_id:
+                        return row
+                    assert row == baseline
+                    overridden.append(row)
+                    return replace(row, cancel_requested=True)
+
+                with monkeypatch.context() as cancel_flag:
+                    cancel_flag.setattr(store, 'get', get_with_cancel_requested)
+                    await read_page(continue_ref, offset=offset, refused=('conflict',))
+                assert overridden == [baseline] and reader_roots == [child_dir]
+
+            cancelled_reply = dict(observed, launch=dict(observed_launch, cancel_requested=True))
+            received = []
+
+            def injected_page(payload):
+                received.append(payload)
+                return cancelled_reply
+
+            with monkeypatch.context() as reply_probe:
+                reply_probe.setattr(observations, 'page', injected_page)
+                await read_page(continue_ref, offset=offset, refused=('invalid_reply',))
+            assert received == [{**continue_ref, 'platform': 'twitter', 'offset': offset, 'limit': 3}]
+            assert reader_roots == [child_dir]
+
+            # Keep valid JSON, file size and path while breaking the receipt hash.
+            byte_offset = child_raw_log.index(b'round_start', len(prefix))
+            tampered = child_raw_log[:byte_offset] + b'R' + child_raw_log[byte_offset + 1:]
+            try:
+                with child_log.open('r+b') as stream:
+                    stream.seek(byte_offset)
+                    assert stream.write(b'R') == 1
+                assert len(tampered) == len(child_raw_log)
+                assert _read_bounded(child_log, _LOG_LIMIT) == tampered
+                await read_page(continue_ref, offset=offset, refused=('evidence_invalid',))
+            finally:
+                with child_log.open('r+b') as stream:
+                    stream.seek(byte_offset)
+                    assert stream.write(b'r') == 1
+            assert _read_bounded(child_log, _LOG_LIMIT) == child_raw_log
+            assert reader_roots == [child_dir, child_dir]
+
+            projects = ProjectStore(factory)
+            project = projects.get('owner', scope.project_id)
+            assert project.revision == restored.request.project_revision
+            advanced = []
+
+            @contextmanager
+            def revoke_during_read(output, *args, **kwargs):
+                with traced_page(output, *args, **kwargs) as result:
+                    # The real reader has verified the hashes and still owns its descriptors.
+                    assert result['manifest'] == observed['manifest'] and result['records'] == observed['records']
+                    revised = projects.update(
+                        'owner', scope.project_id, project.revision, project.snapshot, project.evidence,
+                    )
+                    assert revised.revision == project.revision + 1
+                    advanced.append(revised)
+                    yield result
+
+            stale_refusal = ('conflict', 'not_found')
+            with monkeypatch.context() as mid_read:
+                mid_read.setattr(observations.reader, 'page', revoke_during_read)
+                await read_page(continue_ref, offset=offset, refused=stale_refusal)
+            assert len(advanced) == 1 and projects.get('owner', scope.project_id) == advanced[0]
+            await read_page(continue_ref, offset=offset, refused=stale_refusal)
+            assert reader_roots == [child_dir, child_dir, child_dir]
+
+            assert dispatched == run_ids
+            assert set(created) == set(exited) == set(dispatched) and not reaped
+            assert [host.native.get('owner', run_id) for run_id in run_ids] == native_before
+            assert [host.store.get('owner', run_id) for run_id in run_ids] == launches_before
+            with factory() as conn:
+                assert host.budget._row(conn, host.account_id, producer.request.run_id) == capture_budget
+                assert host.budget._row(conn, host.account_id, restored.request.run_id) == restore_budget
+            assert host.budget.status('owner', host.account_id).accounted_ceiling_microusd == 12
             assert monotonic() < deadline
     finally:
         for supervisor in created.values():

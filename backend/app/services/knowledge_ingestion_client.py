@@ -12,6 +12,11 @@ from .knowledge_source_client import encoded, CHILD_KEYS
 MAX_BYTES = 256 * 1024
 ENVELOPE_OVERHEAD = 1024
 HASH = re.compile(r"[0-9a-f]{64}\Z")
+_PASSAGE_TEXT_LIMIT = 32768
+_PASSAGE_UTF8_BYTE_LIMIT = 32768
+_RETAINED_TEXT_BYTE_LIMIT = 1024 * 1024
+_WINDOW_FIELDS = frozenset({"evidence_id", "start", "end", "page", "ordinal", "count",
+    "sha256", "retained_sha256", "retained_byte_length", "retained_codepoint_length"})
 NAME = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,63}\Z")
 RESERVED_ATTRIBUTES = frozenset({"uuid", "name", "group_id", "graph_id", "labels", "attributes",
     "summary", "created_at", "valid_at", "invalid_at", "expired_at", "episodes", "source_node_uuid",
@@ -20,7 +25,7 @@ RESERVED_ATTRIBUTES = frozenset({"uuid", "name", "group_id", "graph_id", "labels
     "validate", "update_forward_refs", "from_orm"})
 ERROR_CODES = frozenset({"invalid_request", "not_found", "source_denied", "tombstoned",
     "conflict", "busy", "cancelled", "uncertain", "model_calls_disabled",
-    "budget_denied", "source_unavailable", "result_too_large"})
+    "budget_denied", "source_unavailable", "result_too_large", "ontology_ineligible"})
 EXECUTION_KEYS = ("KNOWLEDGE_INGESTION_ENABLED", "KNOWLEDGE_MODEL_CALLS_AUTHORIZED",
     "KNOWLEDGE_INGESTION_ACCOUNT_ID", "KNOWLEDGE_INGESTION_CEILING_MICROUSD",
     "KNOWLEDGE_NEO4J_URI", "KNOWLEDGE_NEO4J_USER", "KNOWLEDGE_NEO4J_PASSWORD",
@@ -87,24 +92,46 @@ def validate_payload(method, value):
         if method == "status":
             if set(value) != {"operation_id"}:
                 raise ValueError
+            _uuid(value["operation_id"])
         elif method in {"plan", "execute"}:
-            if (set(value) != {"schema_version", "source_revision", "operation_id", "ontology"}
-                    or type(value["schema_version"]) is not int or value["schema_version"] != 1):
+            version = value.get("schema_version")
+            if type(version) is not int or version not in (1, 2, 4):
+                raise ValueError
+            if version == 4:
+                fields = {"schema_version", "source_revision", "operation_id", "project_revision"}
+                hashes = {"fingerprint", "execution_fingerprint"} if method == "execute" else set()
+                if (set(value) != fields | hashes or type(value["project_revision"]) is not int
+                        or not 1 <= value["project_revision"] <= 2_147_483_647
+                        or any(type(value[key]) is not str or not HASH.fullmatch(value[key]) for key in hashes)):
+                    raise ValueError
+                _uuid(value["source_revision"])
+                _uuid(value["operation_id"])
+                return value
+            identity_key = "operation_id" if version == 1 else "evidence_id"
+            if set(value) != {"schema_version", "source_revision", identity_key, "ontology"}:
                 raise ValueError
             _uuid(value["source_revision"])
+            _uuid(value[identity_key])
             ontology_value(value["ontology"])
         else:
             raise ValueError
-        _uuid(value["operation_id"])
         return value
     except (ValueError, TypeError, KeyError, UnicodeError, RecursionError, OverflowError):
         raise KnowledgeInvalidRequest() from None
 
 
-def identities(scope, operation):
+def _scope_group(scope):
     canonical = {k: v for k, v in scope.items() if k != "schema_version"}
-    group = "mf1_" + hashlib.sha256(encoded_sorted(canonical)).hexdigest()
-    return group, str(uuid5(NAMESPACE_URL, f"mirofish:episode:v1:{group}:{operation}"))
+    return "mf1_" + hashlib.sha256(encoded_sorted(canonical)).hexdigest()
+
+
+def identities(scope, operation):
+    group = _scope_group(scope)
+    return group, _episode(group, operation)
+
+
+def _episode(group, operation):
+    return str(uuid5(NAMESPACE_URL, f"mirofish:episode:v1:{group}:{operation}"))
 
 
 def encoded_sorted(value):
@@ -112,38 +139,98 @@ def encoded_sorted(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
 
 
+def _selected_window_operation(group, window, payload):
+    import json
+
+    if type(window) is not dict or set(window) != _WINDOW_FIELDS:
+        raise ValueError
+    evidence = _uuid(window["evidence_id"])
+    if evidence != payload["evidence_id"]:
+        raise ValueError
+    for key in ("sha256", "retained_sha256"):
+        if type(window[key]) is not str or not HASH.fullmatch(window[key]):
+            raise ValueError
+    start, end = window["start"], window["end"]
+    retained_chars = window["retained_codepoint_length"]
+    retained_bytes = window["retained_byte_length"]
+    ordinal, count = window["ordinal"], window["count"]
+    page = window["page"]
+    if (any(type(item) is not int for item in (start, end, retained_chars, retained_bytes, ordinal, count))
+            or not _PASSAGE_TEXT_LIMIT < retained_chars <= retained_bytes <= _RETAINED_TEXT_BYTE_LIMIT
+            or retained_bytes > 4 * retained_chars or not 0 <= start < end <= retained_chars
+            or end - start > _PASSAGE_TEXT_LIMIT or not 1 <= ordinal <= count <= 100
+            or (ordinal == 1) != (start == 0) or (ordinal == count) != (end == retained_chars)
+            or start < ordinal - 1 or retained_chars - end < count - ordinal
+            or (page is not None and (type(page) is not int or page < 1))):
+        raise ValueError
+    identity = [group, payload["source_revision"], window["retained_sha256"],
+                start, end, evidence, window["sha256"], payload["ontology"]["revision"]]
+    name = "mirofish:retained-window:v1:" + json.dumps(identity, ensure_ascii=True, separators=(",", ":"))
+    return str(uuid5(NAMESPACE_URL, name))
+
+
 def validate_result(method, value, scope, payload):
     try:
         scope = _scope(scope)
         if scope["layer"] != "source" or scope["run_id"] is not None or scope["branch_id"] is not None:
             raise ValueError
-        group, episode = identities(scope, payload["operation_id"])
+        version = 1 if method == "status" else payload["schema_version"]
         common = {"schema_version", "scope", "operation_id", "episode_id", "fingerprint",
             "evidence_ids", "graph_ingestion_executed", "model_calls_made", "actual_usage_microusd"}
         extra = ({"source_revision", "source_sha256", "source_byte_length", "source_codepoint_length",
                   "ontology_revision", "eligibility_codepoint_limit", "spending_authorized"}
                  if method == "plan" else {"state", "budget_state", "ceiling_microusd", "receipt"})
-        if (type(value) is not dict or set(value) != common | extra
-                or type(value["schema_version"]) is not int or value["schema_version"] != 1
-                or _scope(value["scope"]) != scope or value["operation_id"] != payload["operation_id"]
-                or value["episode_id"] != episode or value["actual_usage_microusd"] is not None
+        if version == 2:
+            extra.add("window")
+        draft = version == 4 and method == "plan"
+        if draft:
+            extra |= {"project_revision", "execution_fingerprint"}
+        response_version = 1 if version == 4 and method == "execute" else version
+        if (type(version) is not int or version not in (1, 2, 4)
+                or type(value) is not dict or set(value) != common | extra
+                or type(value["schema_version"]) is not int or value["schema_version"] != response_version
+                or _scope(value["scope"]) != scope or value["actual_usage_microusd"] is not None
                 or type(value["fingerprint"]) is not str or not HASH.fullmatch(value["fingerprint"])):
+            raise ValueError
+        group = _scope_group(scope)
+        operation = (_selected_window_operation(group, value["window"], payload)
+                     if version == 2 else payload["operation_id"])
+        episode = _episode(group, operation)
+        if value["operation_id"] != operation or value["episode_id"] != episode:
             raise ValueError
         evidence = value["evidence_ids"]
         if type(evidence) is not list or not (0 if method == "status" else 1) <= len(evidence) <= 100 or len(set(evidence)) != len(evidence):
             raise ValueError
         for identity in evidence:
             _uuid(identity)
+        if version == 2 and evidence != [payload["evidence_id"]]:
+            raise ValueError
         if method == "plan":
+            if draft:
+                if (type(value["project_revision"]) is not int or value["project_revision"] != payload["project_revision"]
+                        or type(value["execution_fingerprint"]) is not str or not HASH.fullmatch(value["execution_fingerprint"])
+                        or value["execution_fingerprint"] == value["fingerprint"]):
+                    raise ValueError
+                _uuid(value["ontology_revision"])
             if (value["graph_ingestion_executed"] is not False or value["model_calls_made"] is not False
                     or value["spending_authorized"] is not False or value["source_revision"] != payload["source_revision"]
-                    or value["ontology_revision"] != payload["ontology"]["revision"]
+                    or (not draft and value["ontology_revision"] != payload["ontology"]["revision"])
                     or type(value["source_sha256"]) is not str or not HASH.fullmatch(value["source_sha256"])
-                    or type(value["eligibility_codepoint_limit"]) is not int or value["eligibility_codepoint_limit"] != 32768
-                    or type(value["source_codepoint_length"]) is not int or not 1 <= value["source_codepoint_length"] <= 32768
+                    or type(value["eligibility_codepoint_limit"]) is not int or value["eligibility_codepoint_limit"] != _PASSAGE_TEXT_LIMIT
+                    or type(value["source_codepoint_length"]) is not int or not 1 <= value["source_codepoint_length"] <= _PASSAGE_TEXT_LIMIT
                     or type(value["source_byte_length"]) is not int
                     or not value["source_codepoint_length"] <= value["source_byte_length"] <= 4 * value["source_codepoint_length"]):
                 raise ValueError
+            if version == 2:
+                window = value["window"]
+                selected_chars = window["end"] - window["start"]
+                remaining_chars = window["retained_codepoint_length"] - selected_chars
+                remaining_bytes = window["retained_byte_length"] - value["source_byte_length"]
+                if (value["source_sha256"] != window["sha256"]
+                        or value["source_codepoint_length"] != selected_chars
+                        or value["source_byte_length"] > _PASSAGE_UTF8_BYTE_LIMIT
+                        or not remaining_chars <= remaining_bytes <= 4 * remaining_chars):
+                    raise ValueError
         else:
             state, budget = value["state"], value["budget_state"]
             if (type(state) is not str or state not in {"pending", "running", "completed", "uncertain", "cancelled", "failed_no_effect", "not_admitted"}
@@ -170,6 +257,8 @@ def validate_result(method, value, scope, payload):
             elif receipt is not None or value["graph_ingestion_executed"] is not False:
                 raise ValueError
             if method == "execute" and (state != "completed" or budget != "settled"):
+                raise ValueError
+            if version == 4 and value["fingerprint"] != payload["execution_fingerprint"]:
                 raise ValueError
         if len(encoded(value)) > MAX_BYTES:
             raise ValueError
@@ -203,7 +292,11 @@ class KnowledgeIngestionProcessClient(KnowledgeProcessClient):
                     or self._scope["layer"] != "source" or self._scope["run_id"] is not None or self._scope["branch_id"] is not None):
                 raise ValueError
             validate_payload(value["method"], value["payload"])
-            return _uuid(value["request_id"])
+            request_id = _uuid(value["request_id"])
+            self._eligibility_request_id = (
+                request_id if value["method"] in {"plan", "execute"}
+                and value["payload"]["schema_version"] == 4 else None)
+            return request_id
         except (ValueError, TypeError, KeyError):
             raise KnowledgeInvalidRequest() from None
 
@@ -224,6 +317,9 @@ class KnowledgeIngestionProcessClient(KnowledgeProcessClient):
             elif (set(value) != {"version", "request_id", "ok", "error"}
                     or type(value["error"]) is not dict or set(value["error"]) != {"code"}
                     or type(value["error"]["code"]) is not str or value["error"]["code"] not in ERROR_CODES):
+                raise ValueError
+            elif (value["error"]["code"] == "ontology_ineligible"
+                  and getattr(self, "_eligibility_request_id", None) != request_id):
                 raise ValueError
         except (ValueError, TypeError, KeyError):
             raise KnowledgeTransportFailure(outcome_unknown=True) from None

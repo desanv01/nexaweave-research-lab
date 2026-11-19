@@ -266,11 +266,30 @@ def test_actual_native_closed_recording_fresh_process_metrics_and_parent_preserv
         assert played == events[p]
         assert offsets == list(range(len(events[p])))
         status, replies = _cli(bundle, revision, anchors, [{"version": 1,
-            "operation": "metrics", "platform": p, "limit": 100}], tmp_path)
-        assert status == 0 and replies[0]["ok"] is True
+            "operation": "metrics", "platform": p, "limit": 100,
+            "include_round_action_counts": True}], tmp_path)
+        assert status == 0 and len(replies) == 1 and replies[0]["ok"] is True
         metrics = replies[0]["result"]
+        assert metrics["platform"] == p
+        assert metrics["anchors"] == anchors.wire()
+        assert metrics["recording_revision"] == revision
+        assert metrics["continuation_supported"] is False
+        assert metrics["branch_execution_supported"] is False
+        assert metrics["deterministic_model_rerun"] is False
+        # Independent oracle from this platform's raw JSONL, not playback/metrics.
+        pairs = Counter((item["round"], item["action_type"])
+                        for item in events[p] if "event_type" not in item)
+        expected_projection = {}
+        for (round_number, action_type), count in pairs.items():
+            expected_projection.setdefault(str(round_number), {})[action_type] = count
+        assert "0" in expected_projection and "1" in expected_projection
+        assert metrics["logged_round_action_counts"] == expected_projection
+        assert metrics["logged_round_counts"] == {
+            round_number: sum(counts.values())
+            for round_number, counts in expected_projection.items()}
+        assert sum(pairs.values()) == sum(metrics["logged_action_counts"].values())
         assert metrics["logged_action_counts"] == dict(Counter(
-            item["action_type"] for item in events[p] if "action_type" in item))
+            item["action_type"] for item in events[p] if "event_type" not in item))
         for table, count in native_counts[p].items():
             assert metrics["final_native_tables"][table]["count"] == count
         assert metrics["coverage"]["historical_per_round_graph_state"] is False
