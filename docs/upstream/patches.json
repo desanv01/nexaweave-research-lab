@@ -310,8 +310,8 @@
     {
       "imported_path": "frontend/src/components/Step5Interaction.vue",
       "original_sha256": "067f165535e5b6583515ed30d9eb97727c273a410b81e0b7e95886bdb37d9541",
-      "current_sha256": "dc83d1d229b8ea15cef26500d8719a237e85fbfbf55343304dec38635d78ea8f",
-      "reason": "Use bounded shared sanitized Markdown at report/chat/interview HTML sinks; preserve chat headings and native ordered-list start/nesting semantics.",
+      "current_sha256": "c0905bb7b67ac5acab6535476f6aefaf4fb5f19bc8b7741de85de45283c98c15",
+      "reason": "Use bounded shared sanitized Markdown at report/chat/interview HTML sinks; preserve chat headings and native ordered-list start/nesting semantics. W3.4 preserves the returned actor and platform in guided survey results and exports the displayed responses.",
       "phase": "U02h"
     },
     {
