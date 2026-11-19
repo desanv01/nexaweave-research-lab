@@ -80,12 +80,94 @@ test('lost Start permanently fences repeated start and Refresh keeps exact nativ
   } finally { m.cleanup() }
 })
 test('cancellation shows intent separately from receipt and cleanup observation', async () => {
-  let known, cancels = 0
-  const m = mount({ methods: { plan: async (p, ready) => known = planned(p, ready), start: async () => observed(known), cancel: async () => { cancels++; const v = observed(known); v.cancel_requested = true; return v }, status: async () => { const v = observed(known, 'cancelled'); v.cancel_requested = true; v.cleanup = { known: true, pending: true, owner_thread_alive: true }; return v } } })
+  let known, otherRun, cancels = 0, reads = 0
+  const calls = []
+  const m = mount({ methods: {
+    plan: async (payload, ready) => {
+      known = planned(payload, ready)
+      const otherRunId = payload.launch_id === uid(99) ? uid(98) : uid(99)
+      otherRun = planned({ ...payload, launch_id: otherRunId }, ready)
+      return known
+    },
+    start: async () => observed(known),
+    cancel: async payload => {
+      calls.push(['cancel', clone(payload)])
+      cancels++
+      if (cancels === 1) throw Object.assign(new Error('private provider error'), { code: 'conflict' })
+      const value = observed(known)
+      value.cancel_requested = true
+      return value
+    },
+    status: async payload => {
+      calls.push(['status', clone(payload)])
+      reads++
+      if (reads === 1) return observed(otherRun, 'completed')
+      if (reads === 2) return observed(known)
+      const value = observed(known, 'cancelled')
+      value.cancel_requested = true
+      value.cleanup = { known: true, pending: true, owner_thread_alive: true }
+      return value
+    }
+  } })
+  const copy = nativeLaunchCopy.en
+  const cancel = () => m.root.querySelector('.cancel')
+  const refresh = () => m.root.querySelector('.refresh')
+  const receipt = () => m.root.querySelector('.receipt')
+  const cleanup = () => m.root.querySelector('.cleanup')
+  const unconfirmed = () => m.root.querySelector('.cancellation-unconfirmed')
   try {
-    await review(m); assert.equal(m.root.querySelector('.cancel').disabled, false); m.root.querySelector('.start').click(); await settle()
-    m.root.querySelector('.cancel').click(); await settle(); assert.equal(cancels, 1); assert.ok(m.root.querySelector('.cancellation')); assert.equal(m.root.querySelector('.receipt'), null); assert.ok(m.root.textContent.includes(nativeLaunchCopy.en.noReceipt)); assert.equal(m.root.querySelector('.cancel').disabled, true)
-    m.root.querySelector('.refresh').click(); await settle(); assert.ok(m.root.querySelector('.receipt')); assert.ok(m.root.textContent.includes(nativeLaunchCopy.en.states.cancelled)); assert.ok(m.root.querySelector('.cleanup').textContent.includes(nativeLaunchCopy.en.pendingCleanup)); assert.ok(m.root.querySelector('.cleanup').textContent.includes(nativeLaunchCopy.en.alive))
+    await review(m)
+    assert.equal(cancel().disabled, false)
+    m.root.querySelector('.start').click()
+    await settle()
+
+    cancel().click()
+    await settle()
+    assert.equal(unconfirmed()?.textContent, copy.cancelUnconfirmed)
+    assert.equal(m.root.querySelector('.plan h3').textContent, copy.states.running)
+    assert.equal(m.root.querySelector('.cancellation'), null)
+    assert.equal(receipt(), null)
+    assert.equal(cleanup().textContent, copy.unknown)
+    assert.equal(m.root.textContent.includes('private provider error'), false)
+    assert.equal(cancel().disabled, true)
+    assert.equal(document.activeElement, refresh())
+    assert.equal(refresh().getAttribute('aria-describedby'), unconfirmed().id)
+    cancel().click()
+    assert.equal(calls.length, 1)
+
+    refresh().click()
+    await settle()
+    assert.ok(m.root.textContent.includes(copy.errors.invalid_reply))
+    assert.ok(unconfirmed())
+    assert.equal(cancel().disabled, true)
+    assert.equal(receipt(), null)
+    assert.equal(document.activeElement, refresh())
+
+    refresh().click()
+    await settle()
+    assert.equal(unconfirmed(), null)
+    assert.equal(refresh().hasAttribute('aria-describedby'), false)
+    assert.equal(cancel().disabled, false)
+    assert.equal(cancels, 1)
+
+    cancel().click()
+    await settle()
+    assert.equal(cancels, 2)
+    assert.equal(m.root.querySelector('.cancellation')?.textContent, copy.cancellation)
+    assert.equal(receipt(), null)
+    assert.ok(m.root.textContent.includes(copy.noReceipt))
+    assert.equal(cleanup().textContent, copy.unknown)
+    assert.equal(cancel().disabled, true)
+
+    refresh().click()
+    await settle()
+    assert.ok(receipt())
+    assert.equal(m.root.querySelector('.plan h3').textContent, copy.states.cancelled)
+    assert.equal(m.root.querySelector('.cancellation')?.textContent, copy.cancellation)
+    assert.ok(cleanup().textContent.includes(copy.pendingCleanup))
+    assert.ok(cleanup().textContent.includes(copy.alive))
+    const identity = { schema_version: 1, launch_id: known.request.run_id, launch_sha256: known.launch_sha256 }
+    assert.deepEqual(calls, ['cancel', 'status', 'status', 'cancel', 'status'].map(method => [method, identity]))
   } finally { m.cleanup() }
 })
 test('prepared source changes cannot relabel a started native run', async () => {

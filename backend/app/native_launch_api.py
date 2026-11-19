@@ -2,7 +2,7 @@
 from flask import Response, request
 from werkzeug.exceptions import BadRequest
 from .services.native_launch_client import (NativeLaunchError, REQUEST_BYTES, RESULT_BYTES,
-    ENVELOPE_OVERHEAD, encoded, validate_payload, validate_result, CODES)
+    ENVELOPE_OVERHEAD, encoded, validate_interview_result, validate_payload, validate_result, CODES)
 from .services.native_launch_facade import NativeLaunchFacade
 from .services.knowledge_transport import _json_object
 
@@ -41,9 +41,13 @@ def register_native_launch_routes(app, settings, *, native_launch_facade=None):
             if len(raw) != request.content_length or len(raw) > REQUEST_BYTES:
                 raise NativeLaunchError('invalid_request')
             payload = validate_payload(method, _json_object(raw))
-            data = validate_result(facade.execute(method, graph_id, payload), graph_id, settings.scope, payload, method)
-            if data['request']['principal'] != settings.principal:
-                raise NativeLaunchError('invalid_reply')
+            result = facade.execute(method, graph_id, payload)
+            if method == 'interview':
+                data = validate_interview_result(result, graph_id, settings.scope, payload)
+            else:
+                data = validate_result(result, graph_id, settings.scope, payload, method)
+                if data['request']['principal'] != settings.principal:
+                    raise NativeLaunchError('invalid_reply')
             body = encoded({'success': True, 'data': data})
             if len(body) > RESULT_BYTES + ENVELOPE_OVERHEAD:
                 raise NativeLaunchError('result_too_large')
@@ -55,6 +59,6 @@ def register_native_launch_routes(app, settings, *, native_launch_facade=None):
         except Exception:
             return failure('internal_error')
 
-    for method in ('plan', 'start', 'status', 'cancel'):
+    for method in ('plan', 'start', 'status', 'cancel', 'interview'):
         app.add_url_rule('/api/native-launch/' + method + '/<graph_id>', 'native_launch_' + method,
                         lambda graph_id, method=method: run(method, graph_id), methods=['POST'])

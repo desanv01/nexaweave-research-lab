@@ -305,16 +305,36 @@ class SourceStore:
         principal, project_id, source_revision = (principal_id(principal),
             uuid_value(project_id), uuid_value(source_revision))
         with _transaction(self._factory) as conn:
-            row = conn.execute("SELECT s." + _SOURCE.replace(",", ",s.") + " FROM mf_app.source_revisions s "
-                "JOIN mf_app.projects p ON p.project_id=s.project_id "
-                "WHERE p.principal=%s AND s.project_id=%s AND s.source_revision=%s",
-                (principal, project_id, source_revision)).fetchone()
-            if row is None:
-                raise NotFound()
-            passages = conn.execute("SELECT " + _PASSAGE + " FROM mf_app.passage_evidence "
-                "WHERE project_id=%s AND source_revision=%s ORDER BY ordinal",
-                (project_id, source_revision)).fetchall()
-            return _validated_source(row, passages)
+            return self._read_source(conn, principal, project_id, source_revision)
+
+    def get_sources(self, principal, project_id, source_revisions, *, validate_record) -> tuple[SourceRecord, ...]:
+        """Read a bounded ordered set, with in-memory validation before retaining each record."""
+        principal, project_id = principal_id(principal), uuid_value(project_id)
+        if type(source_revisions) not in (list, tuple) or not 1 <= len(source_revisions) <= 100:
+            raise InvalidProject()
+        revisions = tuple(uuid_value(revision) for revision in source_revisions)
+        if len(set(revisions)) != len(revisions):
+            raise InvalidProject()
+        records = []
+        with _transaction(self._factory) as conn:
+            for index, revision in enumerate(revisions):
+                record = self._read_source(conn, principal, project_id, revision)
+                validate_record(index, record)
+                records.append(record)
+        return tuple(records)
+
+    @staticmethod
+    def _read_source(conn, principal, project_id, source_revision) -> SourceRecord:
+        row = conn.execute("SELECT s." + _SOURCE.replace(",", ",s.") + " FROM mf_app.source_revisions s "
+            "JOIN mf_app.projects p ON p.project_id=s.project_id "
+            "WHERE p.principal=%s AND s.project_id=%s AND s.source_revision=%s",
+            (principal, project_id, source_revision)).fetchone()
+        if row is None:
+            raise NotFound()
+        passages = conn.execute("SELECT " + _PASSAGE + " FROM mf_app.passage_evidence "
+            "WHERE project_id=%s AND source_revision=%s ORDER BY ordinal",
+            (project_id, source_revision)).fetchall()
+        return _validated_source(row, passages)
 
     def list_sources(self, principal, project_id, limit=50) -> list[SourceMetadata]:
         principal, project_id = principal_id(principal), uuid_value(project_id)

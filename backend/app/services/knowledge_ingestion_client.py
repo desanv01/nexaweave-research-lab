@@ -25,7 +25,7 @@ RESERVED_ATTRIBUTES = frozenset({"uuid", "name", "group_id", "graph_id", "labels
     "validate", "update_forward_refs", "from_orm"})
 ERROR_CODES = frozenset({"invalid_request", "not_found", "source_denied", "tombstoned",
     "conflict", "busy", "cancelled", "uncertain", "model_calls_disabled",
-    "budget_denied", "source_unavailable", "result_too_large"})
+    "budget_denied", "source_unavailable", "result_too_large", "ontology_ineligible"})
 EXECUTION_KEYS = ("KNOWLEDGE_INGESTION_ENABLED", "KNOWLEDGE_MODEL_CALLS_AUTHORIZED",
     "KNOWLEDGE_INGESTION_ACCOUNT_ID", "KNOWLEDGE_INGESTION_CEILING_MICROUSD",
     "KNOWLEDGE_NEO4J_URI", "KNOWLEDGE_NEO4J_USER", "KNOWLEDGE_NEO4J_PASSWORD",
@@ -95,8 +95,18 @@ def validate_payload(method, value):
             _uuid(value["operation_id"])
         elif method in {"plan", "execute"}:
             version = value.get("schema_version")
-            if type(version) is not int or version not in (1, 2):
+            if type(version) is not int or version not in (1, 2, 4):
                 raise ValueError
+            if version == 4:
+                fields = {"schema_version", "source_revision", "operation_id", "project_revision"}
+                hashes = {"fingerprint", "execution_fingerprint"} if method == "execute" else set()
+                if (set(value) != fields | hashes or type(value["project_revision"]) is not int
+                        or not 1 <= value["project_revision"] <= 2_147_483_647
+                        or any(type(value[key]) is not str or not HASH.fullmatch(value[key]) for key in hashes)):
+                    raise ValueError
+                _uuid(value["source_revision"])
+                _uuid(value["operation_id"])
+                return value
             identity_key = "operation_id" if version == 1 else "evidence_id"
             if set(value) != {"schema_version", "source_revision", identity_key, "ontology"}:
                 raise ValueError
@@ -172,9 +182,13 @@ def validate_result(method, value, scope, payload):
                  if method == "plan" else {"state", "budget_state", "ceiling_microusd", "receipt"})
         if version == 2:
             extra.add("window")
-        if (type(version) is not int or version not in (1, 2)
+        draft = version == 4 and method == "plan"
+        if draft:
+            extra |= {"project_revision", "execution_fingerprint"}
+        response_version = 1 if version == 4 and method == "execute" else version
+        if (type(version) is not int or version not in (1, 2, 4)
                 or type(value) is not dict or set(value) != common | extra
-                or type(value["schema_version"]) is not int or value["schema_version"] != version
+                or type(value["schema_version"]) is not int or value["schema_version"] != response_version
                 or _scope(value["scope"]) != scope or value["actual_usage_microusd"] is not None
                 or type(value["fingerprint"]) is not str or not HASH.fullmatch(value["fingerprint"])):
             raise ValueError
@@ -192,9 +206,15 @@ def validate_result(method, value, scope, payload):
         if version == 2 and evidence != [payload["evidence_id"]]:
             raise ValueError
         if method == "plan":
+            if draft:
+                if (type(value["project_revision"]) is not int or value["project_revision"] != payload["project_revision"]
+                        or type(value["execution_fingerprint"]) is not str or not HASH.fullmatch(value["execution_fingerprint"])
+                        or value["execution_fingerprint"] == value["fingerprint"]):
+                    raise ValueError
+                _uuid(value["ontology_revision"])
             if (value["graph_ingestion_executed"] is not False or value["model_calls_made"] is not False
                     or value["spending_authorized"] is not False or value["source_revision"] != payload["source_revision"]
-                    or value["ontology_revision"] != payload["ontology"]["revision"]
+                    or (not draft and value["ontology_revision"] != payload["ontology"]["revision"])
                     or type(value["source_sha256"]) is not str or not HASH.fullmatch(value["source_sha256"])
                     or type(value["eligibility_codepoint_limit"]) is not int or value["eligibility_codepoint_limit"] != _PASSAGE_TEXT_LIMIT
                     or type(value["source_codepoint_length"]) is not int or not 1 <= value["source_codepoint_length"] <= _PASSAGE_TEXT_LIMIT
@@ -238,6 +258,8 @@ def validate_result(method, value, scope, payload):
                 raise ValueError
             if method == "execute" and (state != "completed" or budget != "settled"):
                 raise ValueError
+            if version == 4 and value["fingerprint"] != payload["execution_fingerprint"]:
+                raise ValueError
         if len(encoded(value)) > MAX_BYTES:
             raise ValueError
         return value
@@ -270,7 +292,11 @@ class KnowledgeIngestionProcessClient(KnowledgeProcessClient):
                     or self._scope["layer"] != "source" or self._scope["run_id"] is not None or self._scope["branch_id"] is not None):
                 raise ValueError
             validate_payload(value["method"], value["payload"])
-            return _uuid(value["request_id"])
+            request_id = _uuid(value["request_id"])
+            self._eligibility_request_id = (
+                request_id if value["method"] in {"plan", "execute"}
+                and value["payload"]["schema_version"] == 4 else None)
+            return request_id
         except (ValueError, TypeError, KeyError):
             raise KnowledgeInvalidRequest() from None
 
@@ -291,6 +317,9 @@ class KnowledgeIngestionProcessClient(KnowledgeProcessClient):
             elif (set(value) != {"version", "request_id", "ok", "error"}
                     or type(value["error"]) is not dict or set(value["error"]) != {"code"}
                     or type(value["error"]["code"]) is not str or value["error"]["code"] not in ERROR_CODES):
+                raise ValueError
+            elif (value["error"]["code"] == "ontology_ineligible"
+                  and getattr(self, "_eligibility_request_id", None) != request_id):
                 raise ValueError
         except (ValueError, TypeError, KeyError):
             raise KnowledgeTransportFailure(outcome_unknown=True) from None

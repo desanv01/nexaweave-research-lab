@@ -3,12 +3,17 @@
 Transport is cooperative and MUST have finite timeout, disabled SDK retries,
 and a non-streaming maximum-token policy. Paid mode remains disabled here.
 """
+import asyncio
 from dataclasses import dataclass
 import json
 import threading
 import time
 from urllib.parse import urlsplit
 from .native_launch_client import validate_limits
+
+
+_INTERVIEW_CLEANUP_SECONDS = 3
+_INTERVIEW_OUTPUT_BYTES = 4096
 
 
 class NativeModelBoundExceeded(RuntimeError):
@@ -91,6 +96,67 @@ class SharedCallBoundary:
             raise NativeModelBoundExceeded() from None
 
 
+class _AuditedScriptedInterview:
+    """One private scripted reply through the run's shared admission."""
+
+    def __init__(self, model, response, boundary, timeout):
+        self.model = model
+        self.response = response
+        self.boundary = boundary
+        self.timeout = timeout
+
+    async def answer(self, actor, prompt, deadline):
+        boundary = self.boundary
+        # Leave time on both original deadlines for the owning session to close.
+        end = min(deadline, boundary.deadline) - _INTERVIEW_CLEANUP_SECONDS
+        response = self.response
+        if response is None or end - boundary.clock() < self.timeout:
+            raise NativeModelBoundExceeded()
+        name = actor.user_info.name
+        persona = actor.user_info.profile["other_info"]["user_profile"]
+        if type(name) is not str or type(persona) is not str:
+            raise NativeModelBoundExceeded()
+        messages = [
+            {"role": "system", "content": (
+                f"Answer in plain text as Twitter actor {actor.social_agent_id}, {name}. "
+                f"Persona: {persona}"
+            )},
+            {"role": "user", "content": prompt},
+        ]
+        boundary.admit(messages, None, None)
+        self.response = None
+        if end - boundary.clock() < self.timeout:
+            raise NativeModelBoundExceeded()
+        return response
+
+
+def _validate_scripted_reply(reply, limits):
+    # Bound UTF-8 bytes conservatively by the shared output ceiling.
+    # A fixed reply needs no call to a backend or its token counter.
+    limit = min(_INTERVIEW_OUTPUT_BYTES, limits["max_output_tokens"])
+    try:
+        if (type(reply) is not str or not 1 <= len(reply) <= limit
+                or not reply.strip() or "\x00" in reply or len(reply.encode("utf-8")) > limit):
+            raise ValueError
+    except ValueError:
+        raise NativeModelBoundExceeded() from None
+
+
+def run_transient_twitter_interview(runner, model, actor, agent_id, prompt, deadline):
+    capability = getattr(model, "_audited_interview", None)
+    if (type(capability) is not _AuditedScriptedInterview or capability.model is not model
+            or actor.social_agent_id != agent_id or actor.env.action.agent_id != agent_id
+            or len(actor.model_backend.models) != 1 or actor.model_backend.models[0] is not model):
+        raise NativeModelBoundExceeded()
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        pass
+    else:
+        raise NativeModelBoundExceeded()
+    return runner.run(capability.answer(actor, prompt, deadline))
+
+
 @dataclass(frozen=True)
 class BoundedNativeModelFactory:
     platforms: tuple
@@ -111,9 +177,13 @@ class BoundedNativeModelFactory:
         except (ValueError,TypeError):
             return False
 
-    def __call__(self):
+    def __call__(self, *, audited_scripted_interview=None):
         if not self.configured():
             raise NativeModelBoundExceeded()
+        if audited_scripted_interview is not None:
+            if self.mode != 'scripted' or 'twitter' not in self.platforms:
+                raise NativeModelBoundExceeded()
+            _validate_scripted_reply(audited_scripted_interview, self.limits)
         from camel.models import BaseModelBackend
         from camel.utils.token_counting import BaseTokenCounter
         boundary = SharedCallBoundary(self.limits)
@@ -151,4 +221,10 @@ class BoundedNativeModelFactory:
 
         self_mode=self.mode
         transport_seconds=min(self.transport_timeout_seconds,self.limits['max_run_seconds'])
-        return {platform:BoundedModel(model) for platform,model in models.items()}
+        wrapped = {platform:BoundedModel(model) for platform,model in models.items()}
+        if audited_scripted_interview is not None:
+            twitter = wrapped['twitter']
+            twitter._audited_interview = _AuditedScriptedInterview(
+                twitter, audited_scripted_interview, boundary, transport_seconds,
+            )
+        return wrapped

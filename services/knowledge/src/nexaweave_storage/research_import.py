@@ -58,6 +58,7 @@ class ImportPlan:
     # Serialized copied values keep caller mutation out of the transaction.
     _payload_json: str
     _provenance_json: str
+    bundle_version: int = 1
 
     @property
     def payload(self):
@@ -102,7 +103,7 @@ def prepare_import(raw, principal, target_project_id, expected_revision, expecte
             raise ImportError()
         return ImportPlan(principal, target, expected_revision, expected_sha256,
                           summary["payload_sha256"], canonical(payload).decode("utf-8"),
-                          encoded.decode("utf-8"))
+                          encoded.decode("utf-8"), bundle_version=summary["schema_version"])
     except ImportError:
         raise
     except (BundleError, InvalidProject, ValueError, TypeError, UnicodeError, RecursionError, OverflowError):
@@ -183,6 +184,7 @@ class ResearchImportStore:
 
     def import_bundle(self, raw, principal, target_project_id, expected_revision, expected_sha256):
         plan = prepare_import(raw, principal, target_project_id, expected_revision, expected_sha256)
+        linked = plan.bundle_version == 2
         # Driver/storage dependencies are needed only after pure admission.
         import psycopg
         from psycopg.types.json import Jsonb
@@ -190,6 +192,8 @@ class ResearchImportStore:
         try:
             with self._factory() as conn:
                 with conn.transaction():
+                    if linked:
+                        conn.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
                     conn.execute("SET LOCAL statement_timeout = '5s'")
                     conn.execute("SET LOCAL lock_timeout = '2s'")
                     conn.execute("SET LOCAL idle_in_transaction_session_timeout = '10s'")
@@ -221,6 +225,17 @@ class ResearchImportStore:
                             raise StorageError()
                         _verify_sources(conn, plan, imported_at, StorageError)
                     else:
+                        if linked:
+                            if plan.target_project_id == UUID(origin["project_id"]):
+                                raise Conflict()
+                            # Run after the project lock in a fresh statement so a
+                            # source insert that held its FK lock first is visible.
+                            occupied = conn.execute(
+                                "SELECT EXISTS(SELECT 1 FROM mf_app.source_revisions WHERE project_id=%s) OR "
+                                "EXISTS(SELECT 1 FROM mf_app.research_imports WHERE target_project_id=%s)",
+                                (plan.target_project_id, plan.target_project_id)).fetchone()[0]
+                            if occupied:
+                                raise Conflict()
                         imported_at = datetime.now(timezone.utc)
                         target_revision = target[0]
                         digest = _receipt_digest(plan, target_revision, imported_at, provenance)
