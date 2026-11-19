@@ -213,4 +213,6 @@ The build checks the Vue artifact; it does not exercise a browser journey. If ru
 
 Graphiti and self-hosted Neo4j Community form the knowledge direction. PostgreSQL and Temporal provide durable authority and orchestration. Generation is configurable for official DeepSeek deepseek-flash, with embeddings separately configured. Paid calls require actual local credentials and a concrete total spending cap. There is no qualified fully local, no-egress profile, full release sequence or public app deployment yet.
 
+The Workbench UI locale controls interface strings. The connected report and follow-up output-language choice independently sends `en` (English), `zh` (Chinese), or `ms` (Malay) in the request. The backend uses that choice to instruct the model which language to write in. The scripted follow-up test checks that English and Malay instructions produce distinct answers in the protected Read response. This verifies the request-to-answer path with a scripted model. Live-model prose can vary.
+
 For scoped work and review expectations, see [contributing](../../CONTRIBUTING.md). The older [import-stage development notes](../development.md) remain a historical source record, not the current status page.

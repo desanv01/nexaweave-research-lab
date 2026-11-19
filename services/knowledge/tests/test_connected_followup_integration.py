@@ -174,8 +174,21 @@ class ScriptedFollowupTransport:
             content = '<tool_call>' + json.dumps(dict(name='recorded_native_events',
                 parameters=dict(platform=match[1], offset=int(match[2]), limit=1))) + '</tool_call>'
         else:
-            content = ('Final Answer: Source [['+sources[0]+']] and observed execution [['+natives[0]+']]. '
-                + 'Context ' * 650 + '猫 😀 <script>inert</script>')
+            languages = {
+                match.group(1)
+                for message in messages if message['role'] == 'system'
+                for match in re.finditer(r'^Connected report: write in (English|Malay)\.(?= |$)',
+                                         message['content'], re.MULTILINE)
+            }
+            assert languages in ({'English'}, {'Malay'})
+            if languages == {'Malay'}:
+                content = ('Final Answer: Jawapan ini merujuk kepada bukti yang direkodkan. '
+                           f'Sumber [[{sources[0]}]] dan pelaksanaan yang direkodkan [[{natives[0]}]]. '
+                           '猫 😀 <script>inert</script>')
+            else:
+                content = ('Final Answer: This answer refers to the recorded evidence. '
+                           f'Source [[{sources[0]}]] and observed execution [[{natives[0]}]]. '
+                           + 'Context ' * 650 + '猫 😀 <script>inert</script>')
         with self.path.open('a', encoding='utf-8', newline='\n') as output:
             output.write(json.dumps(dict(call=self.count, timeout=kwargs['timeout'],
                 max_tokens=tokens, reference_keys=refs, messages=messages), ensure_ascii=True)+'\n')
@@ -625,6 +638,10 @@ async def test_actual_report_followup_history_and_disabled_exports(factory, tmp_
                                  else await asyncio.to_thread(followups.read,identity))
                     validate_turn_read(read_turn,prep.display_graph_id,followups.scope_dto,identity,'owner')
                     assert '[[source:' in read_turn['content'] and '[[native:' in read_turn['content']
+                    if language == 'ms':
+                        assert 'Jawapan ini merujuk kepada bukti yang direkodkan.' in read_turn['content']
+                    else:
+                        assert 'This answer refers to the recorded evidence.' in read_turn['content']
                     answer_sha = hashlib.sha256(read_turn['content'].encode()).hexdigest()
                     head=digest(dict(schema_version=1,report_id=reference['report_id'],report_plan_sha256=reference['plan_sha256'],
                         predecessor_head_sha256=head,ordinal=ordinal,turn_id=identity['turn_id'],plan_sha256=identity['plan_sha256'],
