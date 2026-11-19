@@ -227,6 +227,7 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
   function cancelShared(preservePopulation = false) { generation++; active?.abort(); active = null; activeNativeOwner = null; if (!preservePopulation) populationAdmission = null }
   function cancel(preservePopulation = false) { reports.cancel(); followups.cancel(); cancelShared(preservePopulation) }
   function clearNativeLaunch(owner = singleNativeOwner) {
+    if (owner === singleNativeOwner) observations.clear()
     if (active && activeNativeOwner === owner) cancelShared(true)
     for (const [id, record] of nativePlans) {
       if (record.owner === owner) nativePlans.delete(id)
