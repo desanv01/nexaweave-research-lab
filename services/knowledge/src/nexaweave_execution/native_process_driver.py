@@ -6,6 +6,7 @@ import multiprocessing
 import queue
 import threading
 from dataclasses import dataclass
+from time import monotonic
 from uuid import UUID, uuid4
 
 from .native_process_worker import (MAX_MESSAGE, child_main, decode_message,
@@ -13,6 +14,8 @@ from .native_process_worker import (MAX_MESSAGE, child_main, decode_message,
 from .native_run_contracts import (InvalidNativeRun, NativeChildIdentity,
                                    NativeObservation, NativeRunReceipt, NativeRunRequest,
                                    NativeRunUnavailable, canonical_uuid, sha256)
+from .native_interview_protocol import (MAX_ANSWER_BYTES, OWNER_WINDOW_SECONDS,
+    InterviewUnavailable, base_fields, frame, private_text, timestamp, unframe, validate_frame)
 
 _READY_KEYS = frozenset({"kind", "run_id", "attempt_id", "instance_id",
                          "request_fingerprint", "process_id"})
@@ -75,10 +78,15 @@ class _Owned:
     process: object
     pipe: object
     reader: _FrameReader
+    private_pipe: object | None = None
+    private_reader: _FrameReader | None = None
     sent_go: bool = False
     terminal: NativeRunReceipt | None = None
     settled: object | None = None
     invalid: bool = False
+    interview_deadline: float = 0
+    interview_identity: tuple | None = None
+    interview_reply_seen: bool = False
 
 
 class NativeProcessDriver:
@@ -117,17 +125,21 @@ class NativeProcessDriver:
             process.join(self._join)
         return not process.is_alive()
 
-    def _release(self, process, pipe, reader):
+    def _release(self, process, pipe, reader, private_pipe, private_reader):
         try:
             stopped = self._stop(process)
             if not stopped:
                 return False
-            if pipe is not None:
-                pipe.close()
-            if reader is not None:
-                reader.thread.join(self._join)
-                if reader.thread.is_alive():
-                    return False
+            for connection in (pipe, private_pipe):
+                if connection is not None:
+                    connection.close()
+            for owned_reader in (reader, private_reader):
+                if owned_reader is not None:
+                    owned_reader.thread.join(self._join)
+                    owned_reader.drain()
+            if any(owned_reader is not None and owned_reader.thread.is_alive()
+                   for owned_reader in (reader, private_reader)):
+                return False
             if process is not None and process.pid is not None:
                 process.close()
             return True
@@ -145,51 +157,86 @@ class NativeProcessDriver:
         child_pipe = None
         process = None
         reader = None
+        private_parent = None
+        private_child = None
+        private_reader = None
+        failure_stage = "spawn"
         try:
             context = multiprocessing.get_context("spawn")
             parent, child_pipe = context.Pipe(duplex=True)
-            process = context.Process(target=child_main, args=(
+            args = (
                 child_pipe, encode_message(request.to_wire()), str(attempt),
-                str(instance), self._factory, self._go_timeout), daemon=False)
+                str(instance), self._factory, self._go_timeout)
+            if self._interview_enabled:
+                private_parent, private_child = context.Pipe(duplex=True)
+                args += (private_child,)
+            process = context.Process(target=child_main, args=args, daemon=False)
             process.start()
+            failure_stage = "ready_setup"
             try:
                 child_pipe.close()
             except Exception:
-                pass
+                if private_child is not None:
+                    raise
+            if private_child is not None:
+                private_child.close()
             reader = _FrameReader(parent)
+            if private_parent is not None:
+                private_reader = _FrameReader(private_parent)
+            failure_stage = "ready_wait"
             event = reader.next(self._handshake)
             if event is None or event[0] != "data" or reader.overflow:
+                if reader.overflow:
+                    failure_stage = "ready_queue_overflow"
+                elif event is None:
+                    failure_stage = "ready_timeout"
+                elif event[0] == "eof":
+                    failure_stage = "ready_eof"
+                else:
+                    # Bounded recv_bytes also reports an oversized frame as a receive error.
+                    failure_stage = "ready_frame_read_error"
                 raise NativeRunUnavailable()
+            failure_stage = "ready_invalid_frame_or_identity"
             ready = decode_message(event[1], _READY_KEYS)
             if (ready["kind"] != "ready" or ready["run_id"] != str(request.run_id)
                     or ready["attempt_id"] != str(attempt)
                     or ready["instance_id"] != str(instance)
                     or ready["request_fingerprint"] != request.fingerprint
                     or type(ready["process_id"]) is not int
-                    or ready["process_id"] != process.pid or not process.is_alive()
-                    or reader.drain()):
+                    or ready["process_id"] != process.pid):
                 raise InvalidNativeRun()
+            failure_stage = "ready_liveness"
+            if not process.is_alive():
+                raise InvalidNativeRun()
+            failure_stage = "ready_drain"
+            if reader.drain():
+                raise InvalidNativeRun()
+            failure_stage = "ready_ownership"
             fingerprint = hashlib.sha256(
                 f"{request.fingerprint}:{attempt}:{instance}:{process.pid}".encode("ascii")
             ).hexdigest()
             identity = NativeChildIdentity(instance, process.pid, fingerprint)
-            self._owned = _Owned(request, attempt, identity, process, parent, reader)
+            self._owned = _Owned(request, attempt, identity, process, parent, reader,
+                                 private_parent, private_reader)
             return identity
         except BaseException as error:
             if parent is not None or process is not None:
-                self._pending = (process, parent, reader)
+                self._pending = (process, parent, reader, private_parent, private_reader)
+            for connection in (child_pipe, private_child):
+                if connection is not None:
+                    try:
+                        connection.close()
+                    except Exception:
+                        pass
             try:
                 self.close()
             except Exception:
                 pass
-            try:
-                if child_pipe is not None:
-                    child_pipe.close()
-            except Exception:
-                pass
             if isinstance(error, (KeyboardInterrupt, SystemExit)):
                 raise
-            raise NativeRunUnavailable() from None
+            unavailable = NativeRunUnavailable()
+            unavailable.add_note(f"native_launch_stage={failure_stage}")
+            raise unavailable from None
 
     def _handle(self, request, attempt_id, child):
         request = NativeRunRequest.from_wire(request)
@@ -203,6 +250,66 @@ class NativeProcessDriver:
             raise InvalidNativeRun()
         return owned
 
+    @property
+    def _interview_enabled(self):
+        return getattr(self._factory, 'audited_scripted_interview', None) is not None
+
+    @property
+    def interview_ready(self):
+        owned = self._owned
+        return bool(owned is not None and owned.private_reader is not None and not self._closed
+                    and not owned.invalid and owned.terminal is None and not owned.reader.overflow
+                    and not owned.private_reader.overflow
+                    and owned.interview_identity is None and monotonic() < owned.interview_deadline)
+
+    @staticmethod
+    def _interview_base(owned):
+        return base_fields(owned.request, owned.attempt, owned.child.instance_id)
+
+    def send_interview(self, record, command, expires):
+        owned = self._handle(record.request, record.attempt_id, record.child)
+        if not self.interview_ready or owned is None or not owned.process.is_alive():
+            raise InterviewUnavailable()
+        expires = min(expires, owned.interview_deadline)
+        if monotonic() >= expires:
+            raise InterviewUnavailable()
+        raw = frame({'kind': 'interview', **self._interview_base(owned),
+                     'command': command, 'deadline': expires})
+        # A single bounded pipe write after readiness acknowledges consumption of GO.
+        # Fence the exact command before sending, including uncertain writes.
+        owned.interview_identity = (command['command_id'], command['agent_id'])
+        owned.private_pipe.send_bytes(raw)
+        return expires
+
+    def _interview_reply(self, owned, value):
+        validate_frame(value, 'interview_reply', self._interview_base(owned),
+                       {'command_id', 'agent_id', 'response'})
+        if (owned.interview_reply_seen or type(value['agent_id']) is not int
+                or (value['command_id'], value['agent_id']) != owned.interview_identity):
+            raise ValueError
+        owned.interview_reply_seen = True
+        response = value['response']
+        if response is not None:
+            private_text(response, MAX_ANSWER_BYTES, MAX_ANSWER_BYTES)
+        return response
+
+    def finish_interview(self, record, expires):
+        owned = self._handle(record.request, record.attempt_id, record.child)
+        if owned is None or owned.private_reader is None:
+            raise InterviewUnavailable()
+        event = owned.private_reader.next(max(0, expires - monotonic()))
+        if event is not None and event[0] == 'data':
+            try:
+                answer = self._interview_reply(owned, unframe(event[1]))
+            except (ValueError, TypeError, UnicodeError):
+                owned.invalid = True
+            else:
+                if answer is not None and monotonic() < expires and not owned.private_reader.overflow:
+                    return answer
+        elif event is not None and event[0] != 'eof':
+            owned.invalid = True
+        raise InterviewUnavailable()
+
     def _take_terminal(self, owned, event):
         if event is None:
             return
@@ -210,8 +317,15 @@ class NativeProcessDriver:
             owned.invalid = True
             return
         try:
-            value = decode_message(event[1], _TERMINAL_KEYS)
-            if (value["kind"] != "terminal"
+            value = decode_message(event[1])
+            if owned.private_reader is not None and owned.sent_go and value.get('kind') == 'interview_ready':
+                validate_frame(value, 'interview_ready', self._interview_base(owned), {'deadline'})
+                deadline = timestamp(value['deadline'])
+                if owned.interview_deadline or deadline > monotonic() + OWNER_WINDOW_SECONDS:
+                    raise ValueError
+                owned.interview_deadline = deadline
+                return
+            if (set(value) != _TERMINAL_KEYS or value["kind"] != "terminal"
                     or value["run_id"] != str(owned.request.run_id)
                     or value["attempt_id"] != str(owned.attempt)
                     or value["instance_id"] != str(owned.child.instance_id)
@@ -233,6 +347,23 @@ class NativeProcessDriver:
             return _observation("running")
         owned.reader.thread.join(self._join)
         extra = owned.reader.drain()
+        if owned.private_reader is not None:
+            owned.private_reader.thread.join(self._join)
+            if owned.private_reader.overflow or owned.private_reader.thread.is_alive():
+                owned.invalid = True
+            for kind, raw in owned.private_reader.drain():
+                if kind == 'eof':
+                    continue
+                if kind != 'data':
+                    owned.invalid = True
+                    break
+                # Drop one late correlated reply. Any duplicate or ambiguous frame
+                # prevents this child from qualifying as a completed owner.
+                try:
+                    self._interview_reply(owned, unframe(raw))
+                except (ValueError, TypeError, UnicodeError):
+                    owned.invalid = True
+                    break
         if (owned.reader.overflow or owned.reader.thread.is_alive()
                 or any(kind != "eof" for kind, _ in extra)
                 or owned.invalid or owned.process.exitcode != 0
@@ -327,7 +458,8 @@ class NativeProcessDriver:
             return True
         target = self._owned
         if target is not None:
-            if not self._release(target.process, target.pipe, target.reader):
+            if not self._release(target.process, target.pipe, target.reader,
+                                 target.private_pipe, target.private_reader):
                 return False
             self._owned = None
         pending = self._pending

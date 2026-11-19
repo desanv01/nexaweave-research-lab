@@ -3,6 +3,7 @@ import asyncio
 import json
 import os
 from datetime import timedelta
+from hashlib import sha256
 from pathlib import Path
 import subprocess
 import sys
@@ -100,6 +101,86 @@ async def test_real_multiple_ordered_queries_scoped_citations_and_union(retained
     _assert_connected(dossier, f)
     # Repeated unchanged retained records give stable keys and full export.
     assert await service.build(_request(f)) == dossier
+
+    # Human labels are a fixture oracle, separate from the dossier's reference checks.
+    pairs = (
+        ("paraphrase", "entailed",
+         "On 8 May, Mira closed the east desk.", "Mira shut the east desk on 8 May."),
+        ("lexical_decoy", "insufficient",
+         "On 8 May, Mira read the notice titled “East desk closed.”", "Mira closed the east desk on 8 May."),
+        ("negation", "contradicted",
+         "On 8 May, Mira did not close the east desk.", "Mira closed the east desk on 8 May."),
+        ("wrong_actor", "contradicted",
+         "On 8 May, only Mira closed the east desk.", "Leon closed the east desk on 8 May."),
+        ("different_date", "insufficient",
+         "On 8 May, Mira closed the east desk.", "Mira closed the east desk on 9 May."),
+    )
+    scope = f["source"]
+    revision = uuid4()
+    separator = "\n📄\n"
+    retained_text = separator.join(excerpt for _, _, excerpt, _ in pairs)
+    rows, passages, expected = [], [], {}
+    start = 0
+    for case, label, excerpt, fact in pairs:
+        end = start + len(excerpt)
+        evidence = uuid4()
+        edge, episode, subject, target = (str(uuid4()) for _ in range(4))
+        passages.append({"evidence_id": str(evidence), "start": start, "end": end})
+        rows.append({"edge": edge, "episode": episode, "subject": subject, "target": target,
+                     "actor": fact.split()[0], "evidence": str(evidence), "fact": fact})
+        expected[edge] = (case, label, episode, evidence, excerpt, fact, start, end)
+        start = end + len(separator)
+
+    from nexaweave_storage import SourceStore
+
+    retained = SourceStore(f["factory"]).ingest_text(
+        "owner", scope.project_id, revision, "fixed semantic-support excerpts", retained_text, passages,
+    )
+    # The fixture owns this exact graph group and tears it down on every exit.
+    await f["writer"].execute_query(
+        "UNWIND $rows AS row "
+        "CREATE (a:Entity {uuid:row.subject,group_id:$group_id,name:row.actor}), "
+        "(b:Entity {uuid:row.target,group_id:$group_id,name:'East desk'}), "
+        "(e:Episodic {uuid:row.episode,group_id:$group_id,created_at:datetime($stamp)}), "
+        "(o:MiroFishIngest {uuid:row.episode,group_id:$group_id,status:'complete',evidence_ids:[row.evidence]}) "
+        "CREATE (a)-[:RELATES_TO {uuid:row.edge,group_id:$group_id,name:'DESK_CLOSURE', "
+        "fact:row.fact,episodes:[row.episode],created_at:datetime($stamp),valid_at:datetime($stamp)}]->(b)",
+        parameters_={"rows": rows, "group_id": scope.group_id, "stamp": f["stamp"].isoformat()},
+    )
+    evaluation = await service.build(DossierRequest(
+        title="Fixed retained semantic-support pairs", display_graph_ids=(f["ids"][0],),
+        sections=(DossierSectionRequest(heading="Desk closure claims", query="east desk", top_k=len(pairs)),),
+    ))
+    assert not evaluation.model_generated and not evaluation.semantic_judge_used
+    assert evaluation.claim_support_status == "not_reviewed"
+    assert "Semantic claim support: not reviewed." in evaluation.markdown
+    assert len(evaluation.claims) == len(evaluation.references) == len(pairs)
+    assert evaluation.summary.resolved_references == len(pairs)
+    assert {claim.provider_id for claim in evaluation.claims} == set(expected)
+    references = {ref.key: ref for ref in evaluation.references}
+    labels = {}
+    for claim in evaluation.claims:
+        case, label, episode, evidence, excerpt, fact, start, end = expected[claim.provider_id]
+        assert claim.scope == scope and claim.claim_class == "source" and claim.text == fact
+        assert claim.episode_ids == (episode,) and claim.evidence_ids == (evidence,)
+        assert claim.reference_integrity == "resolved" and claim.claim_support_status == "not_reviewed"
+        ref_key, = claim.reference_keys
+        ref = references[ref_key]
+        assert ref.claim_key == claim.key and ref.provider_id == claim.provider_id
+        assert ref.scope == scope and ref.evidence_id == evidence and ref.status == "resolved"
+        citation = ref.citation
+        assert citation is not None
+        assert citation.project_id == scope.project_id and citation.source_revision == revision
+        assert citation.source_sha256 == retained.text_sha256 == sha256(retained_text.encode("utf-8")).hexdigest()
+        assert (citation.offset_unit, citation.start, citation.end) == ("unicode_codepoint", start, end)
+        assert citation.excerpt == excerpt == retained_text[start:end]
+        assert citation.excerpt_sha256 == sha256(excerpt.encode("utf-8")).hexdigest()
+        labels[case] = label
+
+    # Every citation resolved, but only the paraphrase is supported by its linked text.
+    assert labels == {"paraphrase": "entailed", "lexical_decoy": "insufficient",
+                      "negation": "contradicted", "wrong_actor": "contradicted",
+                      "different_date": "insufficient"}
 
 
 @pytest.mark.asyncio

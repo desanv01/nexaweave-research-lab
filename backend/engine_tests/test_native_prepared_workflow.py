@@ -219,6 +219,8 @@ def _connected_preparation(tmp_path):
 
 
 def test_connected_preparation_native_rounds_and_report_tool(tmp_path, monkeypatch):
+    from native_reddit_checkpoint_fixture import assert_fresh_reddit_continuation
+
     monkeypatch.chdir(tmp_path)
     root, state, facade, original_bytes = _connected_preparation(tmp_path)
     model = _offline_model()
@@ -279,6 +281,7 @@ def test_connected_preparation_native_rounds_and_report_tool(tmp_path, monkeypat
                    for item in result.interviews)
     assert all((root / name).read_bytes() == content
                for name, content in original_bytes.items())
+    assert_fresh_reddit_continuation(tmp_path)
 
 
 def test_prepared_profiles_execute_native_rounds_and_interview(tmp_path, monkeypatch, caplog, capsys):

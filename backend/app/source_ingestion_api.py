@@ -14,7 +14,7 @@ STATUS = {"invalid_request": 400, "not_found": 404, "source_denied": 403,
     "tombstoned": 410, "model_calls_disabled": 403, "budget_denied": 403,
     "conflict": 409, "cancelled": 409, "busy": 503, "uncertain": 503,
     "outcome_unknown": 503, "source_unavailable": 503, "internal_error": 500,
-    "result_too_large": 413}
+    "result_too_large": 413, "ontology_ineligible": 422}
 
 
 def register_ingestion_routes(app, settings, *, ingestion_facade=None):
@@ -40,6 +40,7 @@ def register_ingestion_routes(app, settings, *, ingestion_facade=None):
                         status=STATUS[code], content_type="application/json")
 
     def run(method, graph_id, operation_id=None):
+        saved_execution = False
         try:
             if graph_id != settings.display_graph_id:
                 raise KnowledgeReadError("not_found")
@@ -61,6 +62,7 @@ def register_ingestion_routes(app, settings, *, ingestion_facade=None):
                     raise KnowledgeReadError("invalid_request")
                 payload = _json_object(raw)
             validate_payload(method, payload)
+            saved_execution = method in {"plan", "execute"} and payload["schema_version"] == 4
             if method == "execute":
                 # Injection never bypasses the operator's explicit authorization.
                 require_execution(execution_settings())
@@ -73,8 +75,12 @@ def register_ingestion_routes(app, settings, *, ingestion_facade=None):
         except (BadRequest, ValueError, TypeError, UnicodeError, RecursionError):
             return failure("invalid_request")
         except KnowledgeReadError as error:
+            if error.code == "ontology_ineligible" and not saved_execution:
+                return failure("source_unavailable")
             return failure(error.code)
         except KnowledgeTransportError as error:
+            if error.code == "ontology_ineligible":
+                return failure("outcome_unknown" if error.outcome_unknown else "source_unavailable")
             return failure("outcome_unknown" if error.outcome_unknown else error.code)
         except Exception:
             return failure("internal_error")

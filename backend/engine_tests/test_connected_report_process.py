@@ -125,9 +125,78 @@ def frozen_report(*, language='en', report_id=None, context_version=1):
         configuration=dict(account_id=str(uuid4()), factory_sha256=hashlib.sha256(pickle.dumps(factory)).hexdigest())), factory
 
 
+class HeldTerminalPipe:
+    def __init__(self, connection, waiting, release):
+        self.connection, self.waiting, self.release = connection, waiting, release
+
+    def __getattr__(self, name):
+        return getattr(self.connection, name)
+
+    def send(self, frame):
+        if frame[0] == 'done':
+            self.waiting.set()
+            if not self.release.wait(timeout=10):
+                raise RuntimeError('owner did not release terminal send')
+        self.connection.send(frame)
+
+
+def child_with_held_terminal(target, args, waiting, release):
+    connection, *rest = args
+    target(HeldTerminalPipe(connection, waiting, release), *rest)
+
+
+def force_terminal_after_poll(monkeypatch):
+    import multiprocessing
+
+    get_context = multiprocessing.get_context
+    actual = get_context('spawn')
+    waiting, release = actual.Event(), actual.Event()
+    process = None
+    witness = []
+
+    class OwnerPipe:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def __getattr__(self, name):
+            return getattr(self.connection, name)
+
+        def poll(self, timeout):
+            ready = self.connection.poll(timeout)
+            if timeout == 0:
+                assert witness == ['missed', 'exited'] and ready
+                witness.append('queued')
+            elif not ready and waiting.is_set() and not witness:
+                witness.append('missed')
+                release.set()
+                process.join(timeout=10)
+                assert process.exitcode == 0
+                witness.append('exited')
+            return ready
+
+    class ControlledContext:
+        def Pipe(self, **kwargs):
+            parent, child = actual.Pipe(**kwargs)
+            return OwnerPipe(parent), child
+
+        def Process(self, *, target, args, name):
+            nonlocal process
+            process = actual.Process(target=child_with_held_terminal,
+                                     args=(target, args, waiting, release), name=name)
+            return process
+
+        def __getattr__(self, name):
+            return getattr(actual, name)
+
+    monkeypatch.setattr(multiprocessing, 'get_context',
+        lambda method=None: ControlledContext() if method == 'spawn' else get_context(method))
+    return witness
+
+
 @pytest.mark.parametrize('language', ['en', 'zh', 'ms'])
 @pytest.mark.parametrize('context_version', [1, 2])
-def test_actual_inherited_child_react_assembly_native_refs_locale_and_isolation(tmp_path, language, context_version):
+def test_actual_inherited_child_react_assembly_native_refs_locale_and_isolation(
+        tmp_path, monkeypatch, language, context_version):
     from app.services.report_process import ReportProcess, report_files
     from app.services.report_agent import ReportManager
     from app.utils.locale import get_locale
@@ -136,10 +205,13 @@ def test_actual_inherited_child_react_assembly_native_refs_locale_and_isolation(
     root = tmp_path / 'op'; root.mkdir()
     before_cwd, before_root, before_locale = os.getcwd(), ReportManager.REPORTS_DIR, get_locale()
     first, progress = [], []
+    race = force_terminal_after_poll(monkeypatch) if language == 'en' and context_version == 1 else None
     outcome = ReportProcess(frozen=frozen, model_factory=factory, operation_root=root).run(
         checkpoint=lambda: None, first_call=lambda: first.append(True), progress=progress.append, cancelled=lambda: False)
     assert outcome.state == 'completed' and outcome.error_code is None
     assert outcome.cleanup == dict(known=True, pending=False, owner_thread_alive=False)
+    if race is not None:
+        assert race == ['missed', 'exited', 'queued']
     assert first == [True] and progress
     assert (os.getcwd(), ReportManager.REPORTS_DIR, get_locale()) == (before_cwd, before_root, before_locale)
     with report_files(root/'output'/frozen['identity']['report_id'], outcome.manifest) as content:

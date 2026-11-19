@@ -23,12 +23,14 @@ function producerPlanSha(value) {
   if (value.schema_version === 2 && Object.hasOwn(value, 'sources')) identity.sources = value.sources
   return createHash('sha256').update(producerAscii(identity), 'ascii').digest('hex')
 }
-function fixture(state = 'planned') {
-  const value = { schema_version: 1, display_graph_id: 'graph_1', scope: { schema_version: 1, workspace_id: uid(1), project_id: uid(2), graph_id: uid(3), run_id: null, branch_id: null, layer: 'source' }, project_revision: 1, operation_id: payload.operation_id, source: { source_revision: source.source_revision, source_name: source.source_name, source_sha256: hash }, options: clone(payload.options), actors: [{ source_entity_uuid: uid(7), name: '<script>actor</script>😀', labels: ['Person'] }], projection_sha256: hash, plan_sha256: null, state, progress: { stage: state, completed: state === 'ready' ? 100 : 0, total: 100 }, error_code: null, authorization: { model_calls_enabled: true, ceiling_microusd: '12345' }, receipt: null, graph_snapshot_atomic: false, model_calls_started: state === 'ready', simulation_executed: false }
+function fixture(state = 'planned', options = payload.options) {
+  const value = { schema_version: 1, display_graph_id: 'graph_1', scope: { schema_version: 1, workspace_id: uid(1), project_id: uid(2), graph_id: uid(3), run_id: null, branch_id: null, layer: 'source' }, project_revision: 1, operation_id: payload.operation_id, source: { source_revision: source.source_revision, source_name: source.source_name, source_sha256: hash }, options: clone(options), actors: [{ source_entity_uuid: uid(7), name: '<script>actor</script>😀', labels: ['Person'] }], projection_sha256: hash, plan_sha256: null, state, progress: { stage: state, completed: state === 'ready' ? 100 : 0, total: 100 }, error_code: null, authorization: { model_calls_enabled: true, ceiling_microusd: '12345' }, receipt: null, graph_snapshot_atomic: false, model_calls_started: state === 'ready', simulation_executed: false }
   value.plan_sha256 = producerPlanSha(value); return value
 }
-function readyFixture() {
-  const v = fixture('ready'), files = ['state.json', 'simulation_config.json', 'source_grounding.json', 'twitter_profiles.csv', 'reddit_profiles.json'].map(name => ({ name, sha256: hash, size: 123 }))
+function readyFixture(options = payload.options) {
+  const v = fixture('ready', options)
+  const profileNames = options.platforms.map(platform => platform === 'twitter' ? 'twitter_profiles.csv' : 'reddit_profiles.json')
+  const files = ['state.json', 'simulation_config.json', 'source_grounding.json', ...profileNames].map(name => ({ name, sha256: hash, size: 123 }))
   const raw = JSON.stringify({ files: files.map(f => ({ name: f.name, sha256: f.sha256, size: f.size })), schema_version: 1 })
   v.receipt = { simulation_id: 'sim_' + payload.operation_id.replaceAll('-', ''), artifact_sha256: createHash('sha256').update(raw).digest('hex'), files }
   return v
@@ -269,23 +271,129 @@ test('ready receipt requires exact enabled filenames, native manifest hash and i
   for (const mutate of [v => v.receipt.files.reverse(), v => v.receipt.files.pop(), v => v.receipt.files[0].size = 0, v => v.receipt.files[0].size = 2097153, v => v.receipt.files[0].name = '../state.json', v => v.receipt.artifact_sha256 = hash, v => v.receipt.simulation_id = 'sim_' + 'f'.repeat(32), v => v.progress.completed = 99, v => v.model_calls_started = false, v => v.project_revision++, v => v.actors[0].name = 'other', v => v.projection_sha256 = 'f'.repeat(64)]) { const v = readyFixture(); mutate(v); await assert.rejects(validatePreparationResult(v, { graph: 'graph_1', payload: p, known }), code('invalid_reply')) }
 })
 test('private transport has only explicit POST routes, preserves flags and fences lost Start before recovery', async () => {
-  const calls = [], known = fixture()
+  const calls = [], known = fixture(), completed = readyFixture()
+  const reference = preparationIdentity(known)
+  const selector = { ...reference, source_entity_uuid: known.actors[0].source_entity_uuid }
+  const profiles = { ...selector, display_graph_id: completed.display_graph_id, scope: completed.scope,
+    project_revision: completed.project_revision, artifact_sha256: completed.receipt.artifact_sha256,
+    actor: { ordinal: 0, name: completed.actors[0].name, labels: completed.actors[0].labels },
+    generated_profiles: completed.options.platforms.map(platform => ({
+      platform, handle: 'actor', description: '<b>Grounded profile</b>', persona: '中文😀'
+    })),
+    frozen_support: { source_entity_uuid: selector.source_entity_uuid, labels: ['Entity', 'Person'],
+      summary: 'A retained summary.', attributes: { observation: ['a', 0, null] },
+      episode_ids: [uid(11)], evidence_ids: [uid(12)],
+      facts: [{ edge_uuid: uid(13), fact: 'A retained relationship.', episode_ids: [uid(11)], evidence_ids: [uid(12)] }] } }
+  let profileResult = profiles
+  let hold = false, release
   const client = createWorkbenchClient({ fetchImpl: async (url, options) => {
     calls.push({ url, options })
     if (url.includes('/data/')) return envelope(graph)
     if (url.endsWith('/plan')) return envelope(known)
     if (url.endsWith('/start')) throw new Error('provider private-token raw detail')
-    return envelope(readyFixture())
+    if (url.endsWith('/profiles')) return hold ? new Promise(resolve => { release = resolve }) : envelope(profileResult)
+    return envelope(completed)
   } })
   await client.connect(credentials); assert.equal(calls.length, 1)
   await client.preparationPlan(payload, source); const p = preparationIdentity(known)
+  await assert.rejects(client.preparationProfiles(selector, completed), code('invalid_request'))
   await assert.rejects(client.preparationStart(p), code('transport_failure'))
   await assert.rejects(client.preparationStart(p), code('conflict'))
-  assert.equal((await client.preparationStatus(p)).state, 'ready'); assert.equal(calls.length, 4)
-  assert.deepEqual(calls.slice(1).map(c => new URL(c.url).pathname), ['/api/preparation/graph_1/plan', '/api/preparation/graph_1/start', '/api/preparation/graph_1/status'])
+  const ready = await client.preparationStatus(p)
+  assert.equal(ready.state, 'ready'); assert.equal(calls.length, 4)
+  await assert.rejects(client.preparationProfiles({ ...selector, source_entity_uuid: uid(99) }, ready), code('invalid_request'))
+  await assert.rejects(client.preparationProfiles(selector, { ...ready, project_revision: 2 }), code('invalid_request'))
+  assert.equal(calls.length, 4)
+  assert.deepEqual(await client.preparationProfiles(selector, ready), profiles)
+  assert.deepEqual(calls.slice(1).map(c => new URL(c.url).pathname), ['/api/preparation/graph_1/plan', '/api/preparation/graph_1/start', '/api/preparation/graph_1/status', '/api/preparation/graph_1/profiles'])
   for (const { options } of calls.slice(1)) { assert.equal(options.method, 'POST'); assert.equal(options.redirect, 'error'); assert.equal(options.credentials, 'omit'); assert.equal(options.cache, 'no-store'); assert.equal(options.referrerPolicy, 'no-referrer'); assert.equal(options.headers.Authorization, 'Bearer private-token'); assert.ok(options.signal.aborted) }
   assert.deepEqual(JSON.parse(calls[2].options.body), JSON.parse(calls[3].options.body))
+  assert.deepEqual(JSON.parse(calls[4].options.body), selector)
+  profileResult = { ...profiles, actor: { ...profiles.actor, ordinal: 1 } }
+  await assert.rejects(client.preparationProfiles(selector, ready), code('invalid_reply'))
+  hold = true
+  const selection = new AbortController()
+  const stale = client.preparationProfiles(selector, ready, { signal: selection.signal })
+  const rejected = assert.rejects(stale, code('cancelled'))
+  assert.equal(typeof release, 'function')
+  selection.abort()
+  release(envelope(profiles))
+  await rejected
+  assert.deepEqual(await client.preparationStatus(p), ready)
   client.disconnect(); await assert.rejects(client.preparationStatus(p), code('disconnected'))
+})
+test('saved scenario configuration uses the admitted READY receipt and preserves native controls', async () => {
+  for (const platforms of [['twitter', 'reddit'], ['reddit']]) {
+    const planning = { ...clone(payload), options: { ...payload.options, platforms, seed: 7, max_rounds: 1 } }
+    const known = fixture('planned', planning.options), completed = readyFixture(planning.options)
+    const selector = { ...preparationIdentity(known), source_revision: source.source_revision, artifact_sha256: completed.receipt.artifact_sha256 }
+    const paired = platforms.length === 2
+    const configuration = {
+      ...selector, display_graph_id: completed.display_graph_id, scope: completed.scope, project_revision: completed.project_revision,
+      goal: planning.options.simulation_requirement, effective_controls: { platforms, seed: 7, max_rounds: 1 },
+      time_activity: paired ? {
+        total_simulation_hours: 12, minutes_per_round: 30, agents_per_hour_min: 2, agents_per_hour_max: 5,
+        peak_hours: [10, 23], peak_activity_multiplier: 1.5, off_peak_hours: [], off_peak_activity_multiplier: 0,
+        morning_hours: [7], morning_activity_multiplier: 2, work_hours: [9], work_activity_multiplier: 1
+      } : null,
+      hot_topics: paired ? ['Local reaction'] : [], hot_topics_omitted: paired ? 2 : null,
+      platform_controls: paired ? platforms.map(platform => ({
+        platform, viral_threshold: 3, recency_weight: 0, popularity_weight: 0.4, relevance_weight: 1, echo_chamber_strength: 0.3
+      })) : null
+    }
+    let reply = configuration, release
+    const requests = []
+    const client = createWorkbenchClient({ fetchImpl: async (url, options) => {
+      if (url.includes('/data/')) return envelope(graph)
+      if (url.endsWith('/plan')) return envelope(known)
+      if (url.endsWith('/status')) return envelope(completed)
+      assert.equal(new URL(url).pathname, '/api/preparation/graph_1/configuration')
+      requests.push(options)
+      if (typeof reply === 'string') return new Response(reply, { headers: { 'Content-Type': 'application/json' } })
+      return reply ? envelope(reply) : new Promise(resolve => { release = resolve })
+    } })
+    await client.connect(credentials)
+    await client.preparationPlan(planning, source)
+    const ready = await client.preparationStatus(preparationIdentity(known))
+    assert.equal(requests.length, 0)
+    for (const change of [{ source_revision: uid(91) }, { artifact_sha256: 'f'.repeat(64) }, { schema_version: 2 }]) {
+      await assert.rejects(client.preparationConfiguration({ ...selector, ...change }, ready), code('invalid_request'))
+    }
+    assert.equal(requests.length, 0)
+    assert.deepEqual(await client.preparationConfiguration(selector, ready), configuration)
+    assert.equal(requests[0].method, 'POST')
+    assert.equal(requests[0].headers.Authorization, 'Bearer private-token')
+    assert.equal(requests[0].credentials, 'omit')
+    assert.deepEqual(JSON.parse(requests[0].body), selector)
+    for (const change of [
+      { artifact_sha256: 'f'.repeat(64) }, { source_revision: uid(92) }, { display_graph_id: 'other' },
+      { scope: { ...completed.scope, project_id: uid(93) } }, { project_revision: 2 }, { goal: 'Different goal' },
+      { effective_controls: { ...configuration.effective_controls, seed: 8 } },
+      { effective_controls: { ...configuration.effective_controls, platforms: ['reddit', 'twitter'] } },
+      { effective_controls: { ...configuration.effective_controls, max_rounds: 2 } },
+      { hot_topics_omitted: null, hot_topics: ['Impossible topic'] }, { hot_topics: [' '], hot_topics_omitted: 0 },
+      { platform_controls: [] },
+      { time_activity: { ...configuration.time_activity, peak_hours: [7, 7] } }, { extra: 'field' }
+    ]) {
+      reply = { ...configuration, ...change }
+      await assert.rejects(client.preparationConfiguration(selector, ready), code('invalid_reply'))
+    }
+    for (const key of ['run_id', 'branch_id']) {
+      reply = JSON.stringify({ success: true, data: configuration }).replace(`"${key}":null`, `"${key}":1e400`)
+      await assert.rejects(client.preparationConfiguration(selector, ready), code('invalid_reply'))
+    }
+    reply = { ...configuration, hot_topics: [], hot_topics_omitted: 0 }
+    assert.deepEqual(await client.preparationConfiguration(selector, ready), reply)
+    reply = null
+    const owner = new AbortController()
+    const stale = assert.rejects(client.preparationConfiguration(selector, ready, { signal: owner.signal }), code('cancelled'))
+    assert.equal(typeof release, 'function')
+    owner.abort()
+    release(envelope(configuration))
+    await stale
+    assert.deepEqual(await client.preparationStatus(preparationIdentity(known)), ready)
+    client.disconnect()
+  }
 })
 test('malformed 401 clears authorization before body validation; fixed errors contain no raw details', async () => {
   let reply = envelope(fixture()), calls = 0

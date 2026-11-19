@@ -44,6 +44,12 @@ def _checkpoint(value, launch_id):
 
 def validate_payload(method, value):
     try:
+        if method == 'interview':
+            from nexaweave_execution.native_interview_protocol import command
+            result = command(value)
+            if len(encoded(result)) > REQUEST_BYTES:
+                raise ValueError
+            return result
         if method not in {'plan', 'start', 'status', 'cancel'} or type(value) is not dict:
             raise ValueError
         version = integer(value['schema_version'], 1, 2)
@@ -67,6 +73,27 @@ def validate_payload(method, value):
         return json.loads(encoded(value))
     except (ValueError, TypeError, KeyError, UnicodeError, RecursionError):
         raise NativeLaunchError('invalid_request') from None
+
+
+def validate_interview_result(value, graph_id, scope, payload):
+    from nexaweave_execution.native_interview_protocol import MAX_ANSWER_BYTES, frame, private_text
+    try:
+        expected = {'schema_version', 'display_graph_id', 'scope', 'launch_id', 'launch_sha256',
+                    'attempt_id', 'instance_id', 'request_fingerprint', 'command_id', 'platform',
+                    'agent_id', 'response'}
+        if (type(value) is not dict or set(value) != expected
+                or value['display_graph_id'] != graph_id or encoded(value['scope']) != encoded(scope)
+                or any(encoded(value[key]) != encoded(payload[key]) for key in (
+                    'schema_version', 'launch_id', 'launch_sha256', 'command_id', 'platform', 'agent_id'))):
+            raise ValueError
+        uuid_string(value['attempt_id'])
+        uuid_string(value['instance_id'])
+        sha(value['request_fingerprint'])
+        private_text(value['response'], MAX_ANSWER_BYTES, MAX_ANSWER_BYTES)
+        frame({'success': True, 'data': value})
+        return value
+    except (ValueError, TypeError, KeyError, UnicodeError, RecursionError):
+        raise NativeLaunchError('invalid_reply') from None
 
 
 def validate_limits(value):
