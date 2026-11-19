@@ -1,5 +1,6 @@
 """Actual prepared OASIS/CAMEL controls, offline only. Authored unverified."""
 
+from contextlib import contextmanager
 import json
 import random
 import sqlite3
@@ -56,6 +57,34 @@ class ObserveNetwork(NativeSimulationSession):
         return count
 
 
+@contextmanager
+def _observe_paired_startup(session):
+    try:
+        session.start()
+    except BaseException as error:
+        # start() has already attempted its owned close before raising.
+        failure = session.startup_failure
+        if session._closed and failure is not None:
+            try:
+                fields = {
+                    "platform": failure.platform,
+                    "elapsed_ms": failure.elapsed_ms,
+                    "remaining_ms": failure.remaining_ms,
+                    "failure_class": failure.failure_class,
+                    "deadline_elapsed": failure.deadline_elapsed,
+                }
+                BaseException.add_note(error, "NEXAWEAVE_NATIVE_STARTUP_FAILURE " + json.dumps(fields))
+            except Exception:
+                # Diagnostic formatting must leave the startup error intact.
+                pass
+        raise
+    try:
+        assert session.startup_failure is None
+        yield session
+    finally:
+        session.close()
+
+
 def test_network_before_rounds_frozen_input_round_logging_and_one_shot(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     root = _configured(tmp_path, _controls())
@@ -64,7 +93,7 @@ def test_network_before_rounds_frozen_input_round_logging_and_one_shot(tmp_path,
     session = _session(root, model, ObserveNetwork)
     duplicate = _session(root, model)
     before = random.getstate()
-    with session:
+    with _observe_paired_startup(session):
         assert session.observed == ["twitter", "reddit"]
         assert model.calls == 0
         assert random.getstate() == before
@@ -117,7 +146,7 @@ def test_every_preset_has_actual_sqlite_and_refresh_effects(tmp_path, monkeypatc
         parent = tmp_path / label
         parent.mkdir()
         root = _configured(parent, _controls(twitter, reddit))
-        with _session(root, _offline_model()) as session:
+        with _observe_paired_startup(_session(root, _offline_model())) as session:
             for platform in ("twitter", "reddit"):
                 before = random.getstate()
                 try:
@@ -244,6 +273,14 @@ def test_partial_native_network_failure_closes_and_preserves_truth(tmp_path, mon
     with pytest.raises(NeutralCapabilityError, match="internal_error"):
         session.start()
     assert session._closed and session._results == {}
+    failure = session.startup_failure
+    assert failure is not None
+    assert failure.platform == "twitter" and failure.failure_class == "startup_exception"
+    assert type(failure.elapsed_ms) is int and 0 <= failure.elapsed_ms <= 600_000
+    assert type(failure.remaining_ms) is int and 0 <= failure.remaining_ms <= 600_000
+    assert type(failure.deadline_elapsed) is bool
+    if failure.deadline_elapsed:
+        assert failure.remaining_ms == 0
     assert session.retained_env.platform_task.done()
     with pytest.raises(sqlite3.ProgrammingError):
         session.retained_env.platform.db.execute("SELECT 1")
