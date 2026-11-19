@@ -20,7 +20,8 @@ from .operations import Ledger
 from .graph_page_provider import _native
 from .read_runtime import _DirectPageProvider
 from .research_contracts import (Citation, ClaimCandidate, PassageCoverage, ResearchFact,
-                                 ResearchRequest, ResearchResult, ScopeCoverage)
+                                 ResearchRequest, ResearchResult, ScopeCoverage,
+                                 TwoHopEdge, TwoHopPath, TwoHopRequest, TwoHopResult)
 
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 DEADLINE_SECONDS = 30.0
@@ -121,6 +122,30 @@ def claim_candidates(facts):
     return tuple(result)
 
 
+def _directed_two_hop(facts, request, is_cited):
+    """Choose the first fully cited pair in first-edge, second-edge ID order."""
+    source, target = request.source_node_id, request.target_node_id
+    ordered = sorted(facts, key=lambda fact: fact.provider_id)
+    second_edges = {}
+    for edge in ordered:
+        if edge.target_node_id == target and edge.source_node_id not in (source, target):
+            second_edges.setdefault(edge.source_node_id, []).append(edge)
+    best_second = {}
+    has_topology = False
+    for edge in ordered:
+        middle = edge.target_node_id
+        if edge.source_node_id != source or middle not in second_edges:
+            continue
+        has_topology = True
+        if not is_cited(edge):
+            continue
+        if middle not in best_second:
+            best_second[middle] = next((second for second in second_edges[middle] if is_cited(second)), None)
+        if best_second[middle] is not None:
+            return (edge, best_second[middle]), True
+    return (), has_topology
+
+
 class EvidenceResearchService:
     """Own one driver per operation. Factories and identity come from trusted host."""
     def __init__(self, principal, connection_factory, driver_factory, *, trusted_scope=None):
@@ -138,10 +163,16 @@ class EvidenceResearchService:
         self._lock = threading.Lock()
 
     async def research(self, request):
+        return await self._read(request, ResearchRequest)
+
+    async def two_hop(self, request):
+        return await self._read(request, TwoHopRequest)
+
+    async def _read(self, request, request_model):
         try:
-            if not isinstance(request, ResearchRequest):
+            if not isinstance(request, request_model):
                 raise ValueError
-            request = ResearchRequest.model_validate(request.model_dump(warnings=False))
+            request = request_model.model_validate(request.model_dump(warnings=False))
         except (ValueError, TypeError, AttributeError):
             raise ResearchFailure("invalid_request") from None
         with self._lock:
@@ -194,6 +225,8 @@ class EvidenceResearchService:
                 anchor = self._trusted_scope
                 if identities != {(anchor.workspace_id, anchor.project_id, anchor.graph_id)}:
                     raise ResearchFailure()
+                if isinstance(request, TwoHopRequest) and records[0][1] != anchor:
+                    raise ResearchFailure()
             # Confirm project ownership even when the graph has no evidence links.
             self._remaining(deadline)
             project = self._projects.get(self.principal, records[0][1].project_id)
@@ -220,7 +253,8 @@ class EvidenceResearchService:
         driver = self._driver_factory()
         try:
             provider = _DirectPageProvider(driver)
-            query_tokens = _tokens(request.text)
+            two_hop = isinstance(request, TwoHopRequest)
+            query_tokens = frozenset() if two_hop else _tokens(request.text)
             collected, coverage = [], []
             history_evidence, revision_metadata = {}, {}
 
@@ -325,8 +359,29 @@ class EvidenceResearchService:
                 coverage.append(ScopeCoverage(display_graph_id=display, scope=scope, pages=pages,
                     scanned=scanned, eligible=eligible, excluded=excluded, unknown=unknown,
                     returned=0, truncated=cursor is not None))
-            selected = sorted(collected, key=lambda fact: (-fact.overlap_tokens, fact.scope.group_id,
-                                                          fact.kind, fact.provider_id))[:request.top_k]
+            if two_hop:
+                evidence_available = {}
+
+                def is_cited(fact):
+                    if not fact.episode_ids or not fact.evidence_ids:
+                        return False
+                    for evidence_id in fact.evidence_ids:
+                        self._remaining(deadline)
+                        key = (fact.scope.project_id, evidence_id)
+                        if key not in evidence_available:
+                            # Remember eligibility, not excerpts from discarded pairs.
+                            if request.recorded_before is not None:
+                                evidence_available[key] = history_evidence.get(key) == "eligible"
+                            else:
+                                evidence_available[key] = citation_for(fact.scope, evidence_id) is not None
+                        if not evidence_available[key]:
+                            return False
+                    return True
+
+                selected, has_topology = _directed_two_hop(collected, request, is_cited)
+            else:
+                selected = sorted(collected, key=lambda fact: (-fact.overlap_tokens, fact.scope.group_id,
+                                                              fact.kind, fact.provider_id))[:request.top_k]
             resolved, cache = [], {}
             response_estimate = sum(len(fact.model_dump_json().encode("utf-8")) for fact in selected)
             if response_estimate > MAX_RESPONSE_BYTES:
@@ -356,16 +411,38 @@ class EvidenceResearchService:
                 resolved.append(fact.model_copy(update={"citations": tuple(citations),
                                                         "unavailable_evidence_ids": tuple(missing)}))
             self._remaining(deadline)
-            result = ResearchResult(
-                source_claims=tuple(fact for fact in resolved if fact.claim_class == "source"),
-                simulation_observations=tuple(fact for fact in resolved if fact.claim_class == "simulation"),
-                other_claims=tuple(fact for fact in resolved if fact.claim_class not in {"source", "simulation"}),
-                scopes=tuple(item.model_copy(update={"returned": sum(fact.scope == item.scope for fact in resolved)}) for item in coverage),
-                passage_coverage=passage_coverage(resolved), competing_claim_candidates=claim_candidates(resolved),
-                linked_citations=sum(len(fact.evidence_ids) for fact in resolved),
-                resolved_citations=sum(len(fact.citations) for fact in resolved),
-                unavailable_citations=sum(len(fact.unavailable_evidence_ids) for fact in resolved),
-                historical=request.valid_at is not None or request.recorded_before is not None)
+            historical = request.valid_at is not None or request.recorded_before is not None
+            if two_hop:
+                path = None
+                status = "selected_path_evidence_unavailable" if has_topology else "no_path_in_scan"
+                if resolved:
+                    if all(fact.episode_ids and fact.citations and not fact.unavailable_evidence_ids
+                           for fact in resolved):
+                        hops = tuple(TwoHopEdge.model_validate(fact.model_dump(exclude={
+                            "kind", "scope", "claim_class", "rank_basis", "overlap_tokens",
+                            "query_tokens", "unavailable_evidence_ids",
+                        })) for fact in resolved)
+                        path = TwoHopPath(intermediate_node_id=resolved[0].target_node_id, hops=hops)
+                        status = "found"
+                    else:
+                        resolved = []
+                result = TwoHopResult(
+                    source_node_id=request.source_node_id, target_node_id=request.target_node_id,
+                    path=path, path_status=status,
+                    scope_coverage=coverage[0].model_copy(update={"returned": len(resolved)}),
+                    passage_coverage=passage_coverage(resolved), historical=historical,
+                )
+            else:
+                result = ResearchResult(
+                    source_claims=tuple(fact for fact in resolved if fact.claim_class == "source"),
+                    simulation_observations=tuple(fact for fact in resolved if fact.claim_class == "simulation"),
+                    other_claims=tuple(fact for fact in resolved if fact.claim_class not in {"source", "simulation"}),
+                    scopes=tuple(item.model_copy(update={"returned": sum(fact.scope == item.scope for fact in resolved)}) for item in coverage),
+                    passage_coverage=passage_coverage(resolved), competing_claim_candidates=claim_candidates(resolved),
+                    linked_citations=sum(len(fact.evidence_ids) for fact in resolved),
+                    resolved_citations=sum(len(fact.citations) for fact in resolved),
+                    unavailable_citations=sum(len(fact.unavailable_evidence_ids) for fact in resolved),
+                    historical=historical)
             if len(result.model_dump_json().encode("utf-8")) > MAX_RESPONSE_BYTES:
                 raise ResearchFailure("result_too_large")
             return result
