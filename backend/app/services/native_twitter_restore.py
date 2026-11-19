@@ -382,7 +382,7 @@ async def _run_owned_step(env, actions, channel, handles, clock, expected_tick,
 
 async def _advance_restored_twitter_round(
     child_dir, *, manifest, runner_state, config_bytes, graph, expected_post_content,
-    deadline_monotonic,
+    deadline_monotonic, intervention=None,
 ):
     """Drive one restored, scripted native action under the caller's owned lane."""
     ambient_rng = random.getstate()
@@ -438,6 +438,9 @@ async def _advance_restored_twitter_round(
             agent_id, agent = active[0]
             if not _integer(agent_id, 0, 1) or graph.get_agent(agent_id) is not agent:
                 raise RecordingError()
+            if intervention is not None:
+                agent_id = 1 - agent_id
+                agent = graph.get_agent(agent_id)
             if expected_post_content is not None:
                 _wire_size(("2", (agent_id, expected_post_content, ActionType.CREATE_POST.value)), MAX_WIRE)
             channel = _RestoredTwitterChannel(ActionType, agent_id, expected_post_content, deadline)
@@ -474,6 +477,7 @@ async def _advance_restored_twitter_round(
 
 
 _LINEAGE_LIMIT = 7200
+_RUNNER_STATE_BYTES = 2564
 _STAGE_DATABASE_LIMIT = 64 * 1024 * 1024
 _STAGE_TOTAL_LIMIT = 160 * 1024 * 1024
 _STAGE_ACTIVE_SECONDS = 10
@@ -964,7 +968,8 @@ def _append_restored_twitter_log(log_path, manifest, position, action, deadline)
 
 
 async def _run_fresh_restored_twitter(
-    prepared_dir, checkpoint_dir, child_dir, lineage, model_factory, content, deadline,
+    prepared_dir, checkpoint_dir, child_dir, lineage, model_factory, content, deadline, *,
+    intervention=None,
 ):
     from .native_recordings import _root, _round_inventory, _restore_twitter_round_recording_memory_with_runner
     from .native_twitter_child_graph import _rebuild_twitter_round_child_graph
@@ -980,12 +985,26 @@ async def _run_fresh_restored_twitter(
     )
     if prepared != lineage["prepared"] or prepared_names != names:
         raise RecordingError()
-    _, saved_digest, saved_identity = _read_lineage_input(
+    manifest_bytes, saved_digest, saved_identity = _read_lineage_input(
         checkpoint / "manifest.json", _LINEAGE_LIMIT, deadline,
     )
     inventory = _round_inventory(checkpoint, deadline)
     if saved_digest != lineage["manifest_sha256"] or saved_identity != inventory["manifest.json"]:
         raise RecordingError()
+    if intervention is not None:
+        if saved_digest != intervention.manifest_sha256:
+            raise RecordingError()
+        admitted_manifest = strict_json(manifest_bytes, _LINEAGE_LIMIT)
+        if type(admitted_manifest) is not dict:
+            raise RecordingError()
+        descriptor = admitted_manifest.get("runner_state")
+        if type(descriptor) is not dict or descriptor.get("sha256") != intervention.runner_state_sha256:
+            raise RecordingError()
+        _, runner_digest, runner_identity = _read_lineage_input(
+            checkpoint / "native-runner.bin", _RUNNER_STATE_BYTES, deadline,
+        )
+        if runner_digest != intervention.runner_state_sha256 or runner_identity != inventory["native-runner.bin"]:
+            raise RecordingError()
     contexts, model = _fresh_twitter_models(model_factory, bindings, deadline)
     expected_runner = (position[1], position[2], position[4], bytes.fromhex(prepared["config_sha256"]))
     manifest, runner_state, _, restored = _restore_twitter_round_recording_memory_with_runner(
@@ -994,6 +1013,8 @@ async def _run_fresh_restored_twitter(
         expected_memory_bindings=bindings, expected_memory_contexts=contexts,
     )
     if runner_state[0] != position or _round_inventory(checkpoint, deadline) != inventory:
+        raise RecordingError()
+    if intervention is not None and manifest["runner_state"]["sha256"] != intervention.runner_state_sha256:
         raise RecordingError()
     _restore_schedule(manifest, runner_state, config_bytes, deadline)
 
@@ -1019,6 +1040,7 @@ async def _run_fresh_restored_twitter(
         result = await _advance_restored_twitter_round(
             child, manifest=manifest, runner_state=runner_state, config_bytes=config_bytes,
             graph=graph, expected_post_content=content, deadline_monotonic=active_deadline,
+            **({"intervention": intervention} if intervention is not None else {}),
         )
     finally:
         if previous_path is None:
@@ -1036,7 +1058,7 @@ async def _run_fresh_restored_twitter(
 
 def _start_fresh_restored_twitter(
     prepared_dir, checkpoint_dir, child_dir, lineage, model_factory, expected_post_content,
-    timeout_seconds,
+    timeout_seconds, *, intervention=None,
 ):
     """Run one dedicated child's synchronous restore boundary to ordinary closure."""
     ambient_rng = random.getstate()
@@ -1049,9 +1071,14 @@ def _start_fresh_restored_twitter(
         deadline = time.monotonic() + timeout_seconds
         if expected_post_content is not None:
             _wire_size(expected_post_content, MAX_WIRE)
+        if intervention is not None:
+            from nexaweave_execution.native_run_contracts import SwapActiveActorV1
+            if type(intervention) is not SwapActiveActorV1:
+                raise RecordingError("invalid_request")
+            intervention = SwapActiveActorV1.from_wire(intervention)
         return asyncio.run(_run_fresh_restored_twitter(
             prepared_dir, checkpoint_dir, child_dir, lineage, model_factory,
-            expected_post_content, deadline,
+            expected_post_content, deadline, intervention=intervention,
         ))
     except RecordingError as error:
         refusal_code = error.code
