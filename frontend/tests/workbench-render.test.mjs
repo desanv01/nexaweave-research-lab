@@ -10,6 +10,7 @@ import { createWorkbenchClient } from '../src/api/workbench.js'
 import { sha256 } from '../src/api/sourceLibrary.js'
 import { ingestionFingerprint, ingestionIdentities } from '../src/api/sourceIngestion.js'
 import { copyFor, safeError, workbenchCopy } from '../src/i18n/workbench.js'
+import { registerTemporalClaimsTest } from './workbench-temporal-claims.mjs'
 const dom = new JSDOM('<!doctype html><html><body></body></html>', { url: 'http://127.0.0.1:5173/research' })
 Object.defineProperty(globalThis, 'crypto', { value: webcrypto, configurable: true })
 for (const name of ['window', 'document', 'Element', 'HTMLElement', 'SVGElement', 'Node', 'Document', 'ShadowRoot']) globalThis[name] = name === 'window' ? dom.window : dom.window[name]
@@ -149,6 +150,7 @@ test('actual route connects, renders fetched facts, changes local language and c
     assert.equal(mounted.root.querySelector('img,script'), null)
   } finally { mounted.cleanup(); globalThis.fetch = previousFetch }
 })
+registerTemporalClaimsTest({ dom, workbench, mount, settle, input, researchResult, graphResult, response })
 test('route unmount cancels the owned request and its eventual result cannot replace disconnected state', async () => {
   const previousFetch = globalThis.fetch; let signal, resolve
   globalThis.fetch = async (_url, options) => { signal = options.signal; return new Promise(r => { resolve = r }) }
