@@ -201,9 +201,11 @@ class DurableNativeLaunchHost:
                 'run_id': launch_id, 'artifact_sha256': prep.receipt['artifact_sha256'],
                 'runtime_sha256': self.runtime_sha256, 'platforms': opts['platforms'],
                 'seed': opts['seed'], 'max_rounds': opts['max_rounds']}
-        if checkpoint['mode'] == 'continue':
+        if checkpoint['mode'] in {'continue', 'fork'}:
             wire.update(schema_version=2, source_run_id=checkpoint['source_run_id'],
                         checkpoint_sha256=checkpoint['checkpoint_sha256'])
+        if checkpoint['mode'] == 'fork':
+            wire.update(schema_version=3, intervention=checkpoint['intervention'])
         return NativeRunRequest.from_wire(wire)
 
     def _checkpoint_producer(self, request, preparation):
@@ -211,7 +213,7 @@ class DurableNativeLaunchHost:
         from nexaweave_execution.native_run_contracts import NativeRunDenied, NativeRunReceipt, RunState
 
         original = replace(request, schema_version=1, run_id=request.source_run_id,
-                           source_run_id=None, checkpoint_sha256=None)
+                           source_run_id=None, checkpoint_sha256=None, intervention=None)
         try:
             producer = self.store.get(self.principal, request.source_run_id)
         except LaunchAuthorityError as error:
@@ -258,7 +260,8 @@ class DurableNativeLaunchHost:
         bound, prepared = self.preparation.bind_native(
             ref, run_id=request.run_id, runtime_sha256=request.runtime_sha256, model_factory=model,
         )
-        if bound != replace(request, schema_version=1, source_run_id=None, checkpoint_sha256=None):
+        if bound != replace(request, schema_version=1, source_run_id=None, checkpoint_sha256=None,
+                            intervention=None):
             raise NativeLaunchError('conflict')
         prepared = replace(prepared, timeout_seconds=self.limits['max_run_seconds'])
         try:
@@ -293,6 +296,26 @@ class DurableNativeLaunchHost:
         except (ValueError, TypeError, KeyError, OSError, OverflowError):
             raise NativeLaunchError('conflict') from None
 
+    def _fork_archive(self, restoration, request):
+        from nexaweave_execution.native_launch_contracts import (
+            NativeForkArchive, _ARCHIVE_LIMIT, _RUNNER_BYTES, verify_fork_archive,
+        )
+        from nexaweave_execution.native_owned_binding import _regular_bound_file
+        from nexaweave_execution.native_twitter_checkpoint_binding import _read_lineage
+        from .native_recording_contracts import RecordingError
+
+        try:
+            _, checkpoint, _, _ = restoration._checked_restore(request)
+            archive = NativeForkArchive(
+                _read_lineage(Path(restoration.lineage_dir)),
+                _regular_bound_file(checkpoint, 'manifest.json', _ARCHIVE_LIMIT),
+                _regular_bound_file(checkpoint, 'native-runner.bin', _RUNNER_BYTES),
+            )
+        except (RecordingError, ValueError, TypeError, KeyError, OSError, OverflowError):
+            raise NativeLaunchError('conflict') from None
+        verify_fork_archive(archive, request, self.display_graph_id, restoration.expected_producer_pid)
+        return archive
+
     def _dto(self,row,method,payload):
         cleanup = {'known':False,'pending':None,'owner_thread_alive':None}
         if self.temporal is not None and self.temporal_call is not None and row.state!='planned':
@@ -325,13 +348,16 @@ class DurableNativeLaunchHost:
             return self._dto(prior,'plan',payload)
         opts = prep.frozen['public']['options']
         checkpoint = payload.get('checkpoint')
+        archive = None
         if checkpoint is None:
             model = self.model_factory or BoundedNativeModelFactory(tuple(opts['platforms']),self.limits,None)
             request,_ = self.preparation.bind_native(ref,run_id=UUID(payload['launch_id']),
                     runtime_sha256=self.runtime_sha256,model_factory=model)
         else:
             request = self._checkpoint_request(prep, payload['launch_id'], checkpoint)
-            self._checkpoint_factory(prep, ref, request, checkpoint)
+            restoration = self._checkpoint_factory(prep, ref, request, checkpoint)
+            if request.intervention is not None:
+                archive = self._fork_archive(restoration, request)
         identity = {'schema_version':payload['schema_version'],'display_graph_id':self.display_graph_id,'scope':self.scope_dto,
             'preparation':self._preparation_descriptor(prep),
             'request':request.to_wire(),'limits':dict(self.limits),
@@ -339,9 +365,12 @@ class DurableNativeLaunchHost:
             'model_label':self.model_label}
         if checkpoint is not None:
             identity['checkpoint'] = checkpoint
-        return self._dto(self.store.put(self.principal,payload,identity,configuration=self._configuration()),'plan',payload)
+        row = self.store.put(self.principal, payload, identity, configuration=self._configuration(),
+                             **({'fork_archive': archive} if archive is not None else {}))
+        return self._dto(row, 'plan', payload)
 
     def start(self,payload):
+        from nexaweave_execution.native_launch_contracts import LaunchAuthorityError
         from nexaweave_knowledge.contracts import KnowledgeScope
         from nexaweave_execution.budget import ReservationState
         payload = validate_payload('start',payload)
@@ -352,35 +381,53 @@ class DurableNativeLaunchHost:
         if not self.authorization(row)['model_calls_enabled']:
             raise NativeLaunchError('model_calls_disabled')
         checkpoint = row.frozen['identity'].get('checkpoint')
+        fork = row.request.intervention is not None
         if checkpoint is not None:
-            self._checkpoint_factory(prep, ref, row.request, checkpoint, preflight=True)
-        scope = KnowledgeScope.model_validate_json(json.dumps(self.scope_dto))
-        reservation = self.budget.reserve_native(self.principal,self.account_id,scope,row.request,
-                                                 row.launch_sha256,int(row.frozen['identity']['ceiling_microusd']))
-        if reservation.state!=ReservationState.reserved:
-            raise NativeLaunchError('conflict')
-        try:
-            row,queued = self.store.queue(self.principal,row.run_id,row.launch_sha256,reservation.attempt_id)
-        except Exception:
-            # Queue acknowledgement can be lost after commit. The row-lock
-            # close serializes with every same-ID queue and permanently closes
-            # an unclaimed review BEFORE any shared reservation is released.
+            restoration = self._checkpoint_factory(prep, ref, row.request, checkpoint, preflight=not fork)
+            if fork:
+                self._fork_archive(restoration, row.request)
+        if fork:
             try:
-                _,closed = self.store.close_undispatched(self.principal,row.run_id,row.launch_sha256)
+                row, queued = self.store.queue_fork(self.principal, row.run_id, row.launch_sha256)
+            except LaunchAuthorityError as error:
+                if error.code not in {'native_launch_unavailable', 'native_launch_uncertain'}:
+                    raise
+                raise NativeLaunchError('native_launch_uncertain') from None
+            except Exception:
+                # The atomic queue may already have reserved and claimed.
+                raise NativeLaunchError('native_launch_uncertain') from None
+            if not queued:
+                return self._dto(self._recover(row), 'start', payload)
+            attempt_id = row.budget_attempt_id
+        else:
+            scope = KnowledgeScope.model_validate_json(json.dumps(self.scope_dto))
+            reservation = self.budget.reserve_native(self.principal,self.account_id,scope,row.request,
+                                                     row.launch_sha256,int(row.frozen['identity']['ceiling_microusd']))
+            if reservation.state!=ReservationState.reserved:
+                raise NativeLaunchError('conflict')
+            try:
+                row,queued = self.store.queue(self.principal,row.run_id,row.launch_sha256,reservation.attempt_id)
+            except Exception:
+                # Queue acknowledgement can be lost after commit. The row-lock
+                # close serializes with every same-ID queue and permanently closes
+                # an unclaimed review BEFORE any shared reservation is released.
+                try:
+                    _,closed = self.store.close_undispatched(self.principal,row.run_id,row.launch_sha256)
+                    if closed:
+                        self.budget.release_undispatched(self.principal,self.account_id,row.run_id,reservation.attempt_id)
+                except Exception:
+                    pass
+                raise
+            if not queued:
+                row,closed = self.store.close_undispatched(self.principal,row.run_id,row.launch_sha256)
                 if closed:
                     self.budget.release_undispatched(self.principal,self.account_id,row.run_id,reservation.attempt_id)
-            except Exception:
-                pass
-            raise
-        if not queued:
-            row,closed = self.store.close_undispatched(self.principal,row.run_id,row.launch_sha256)
-            if closed:
-                self.budget.release_undispatched(self.principal,self.account_id,row.run_id,reservation.attempt_id)
-            return self._dto(self._recover(row),'start',payload)
+                return self._dto(self._recover(row),'start',payload)
+            attempt_id = reservation.attempt_id
         try:
             # Account conservatively before the scheduler may dispatch. Even
             # an unacknowledged scheduler call keeps the full ceiling held.
-            self.budget.start(self.principal,self.account_id,row.run_id,reservation.attempt_id)
+            self.budget.start(self.principal,self.account_id,row.run_id,attempt_id)
             ref = self.temporal_call('start',row.request,None)
             from nexaweave_execution.temporal_native_host import NativeWorkflowRef
             if not isinstance(ref,NativeWorkflowRef):
@@ -388,7 +435,7 @@ class DurableNativeLaunchHost:
             row = self.store.workflow(self.principal,row.run_id,row.launch_sha256,asdict(ref))
         except Exception:
             try:
-                self.budget.mark_uncertain(self.principal,self.account_id,row.run_id,reservation.attempt_id,'dispatch_uncertain')
+                self.budget.mark_uncertain(self.principal,self.account_id,row.run_id,attempt_id,'dispatch_uncertain')
             except Exception:
                 pass
             try:

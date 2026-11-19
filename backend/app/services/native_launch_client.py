@@ -29,17 +29,30 @@ class NativeLaunchError(RuntimeError):
         super().__init__(self.code)
 
 
-def _checkpoint(value, launch_id):
+def _fork_intervention(value):
+    if (type(value) is not dict or set(value) != {'kind', 'manifest_sha256', 'runner_state_sha256'}
+            or type(value['kind']) is not str or value['kind'] != 'swap_active_actor_v1'):
+        raise ValueError
+    sha(value['manifest_sha256'])
+    sha(value['runner_state_sha256'])
+    return value
+
+
+def _checkpoint(value, launch_id, version):
     if type(value) is not dict or type(value.get('mode')) is not str:
         raise ValueError
-    if value['mode'] == 'capture' and set(value) == {'mode'}:
+    if version == 2 and value['mode'] == 'capture' and set(value) == {'mode'}:
         return None
-    if value['mode'] != 'continue' or set(value) != ({'mode'} | _CONTINUATION_KEYS):
+    fields = {'mode'} | _CONTINUATION_KEYS
+    if version == 3:
+        fields.add('intervention')
+    if value['mode'] != ('fork' if version == 3 else 'continue') or set(value) != fields:
         raise ValueError
     source_run_id = uuid_string(value['source_run_id'])
     if source_run_id == launch_id:
         raise ValueError
-    return source_run_id, sha(value['checkpoint_sha256'])
+    intervention = _fork_intervention(value['intervention']) if version == 3 else None
+    return source_run_id, sha(value['checkpoint_sha256']), intervention
 
 
 def validate_payload(method, value):
@@ -52,9 +65,9 @@ def validate_payload(method, value):
             return result
         if method not in {'plan', 'start', 'status', 'cancel'} or type(value) is not dict:
             raise ValueError
-        version = integer(value['schema_version'], 1, 2)
+        version = integer(value['schema_version'], 1, 3)
         expected = {'schema_version', 'launch_id', 'preparation' if method == 'plan' else 'launch_sha256'}
-        if version == 2 and method == 'plan':
+        if version >= 2 and method == 'plan':
             expected.add('checkpoint')
         if set(value) != expected:
             raise ValueError
@@ -64,8 +77,8 @@ def validate_payload(method, value):
             if type(prep) is not dict or set(prep) != {'operation_id', 'plan_sha256'}:
                 raise ValueError
             uuid_string(prep['operation_id']); sha(prep['plan_sha256'])
-            if version == 2:
-                _checkpoint(value['checkpoint'], launch_id)
+            if version >= 2:
+                _checkpoint(value['checkpoint'], launch_id, version)
         else:
             sha(value['launch_sha256'])
         if len(encoded(value)) > REQUEST_BYTES:
@@ -109,9 +122,9 @@ def validate_result(value, graph_id, scope, payload, method):
     try:
         if type(value) is not dict:
             raise ValueError
-        version = integer(value['schema_version'], 1, 2)
+        version = integer(value['schema_version'], 1, 3)
         expected = KEYS if version == 1 else _KEYS_V2
-        if (version != integer(payload['schema_version'], 1, 2) or set(value) != expected
+        if (version != integer(payload['schema_version'], 1, 3) or set(value) != expected
                 or len(encoded(value)) > RESULT_BYTES):
             raise ValueError
         if value['display_graph_id'] != graph_id or value['scope'] != scope:
@@ -127,10 +140,12 @@ def validate_result(value, graph_id, scope, payload, method):
         uuid_string(prep['operation_id']); sha(prep['plan_sha256']); sha(prep['artifact_sha256'])
         if prep['simulation_id'] != 'sim_' + UUID(prep['operation_id']).hex:
             raise ValueError
-        checkpoint = _checkpoint(value['checkpoint'], payload['launch_id']) if version == 2 else None
-        request_version = 1 if checkpoint is None else 2
+        checkpoint = _checkpoint(value['checkpoint'], payload['launch_id'], version) if version >= 2 else None
+        request_version = 1 if checkpoint is None else version
         request_keys = (_NATIVE_REQUEST_KEYS if request_version == 1
                         else _NATIVE_REQUEST_KEYS | _CONTINUATION_KEYS)
+        if request_version == 3:
+            request_keys |= {'intervention'}
         req = value['request']
         if type(req) is not dict or set(req) != request_keys:
             raise ValueError
@@ -146,10 +161,11 @@ def validate_result(value, graph_id, scope, payload, method):
                 or req['platforms'] not in [['twitter'], ['reddit'], ['twitter', 'reddit']]):
             raise ValueError
         integer(req['seed'], 0, 4294967295); integer(req['max_rounds'], 1, 24)
-        if version == 2 and (req['platforms'] != ['twitter'] or req['max_rounds'] != 1):
+        if version >= 2 and (req['platforms'] != ['twitter'] or req['max_rounds'] != 1):
             raise ValueError
+        intervention = _fork_intervention(req['intervention']) if request_version == 3 else None
         if checkpoint is not None and checkpoint != (
-                uuid_string(req['source_run_id']), sha(req['checkpoint_sha256'])):
+                uuid_string(req['source_run_id']), sha(req['checkpoint_sha256']), intervention):
             raise ValueError
         validate_limits(value['limits']); text(value['model_label'], 128)
         ceiling = value['ceiling_microusd']
@@ -162,7 +178,7 @@ def validate_result(value, graph_id, scope, payload, method):
         if method == 'plan':
             if {k: prep[k] for k in ('operation_id', 'plan_sha256')} != payload['preparation']:
                 raise ValueError
-            if version == 2 and value['checkpoint'] != payload['checkpoint']:
+            if version >= 2 and value['checkpoint'] != payload['checkpoint']:
                 raise ValueError
         elif value['launch_sha256'] != payload['launch_sha256']:
             raise ValueError
