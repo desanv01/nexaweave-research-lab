@@ -49,27 +49,84 @@ class PreparationReadAuthority:
     _missing_binding_unavailable = False
 
     def _owned(self, source_revision, *, expected_revision=None):
+        scope, project, (retained,) = self._owned_sources(
+            (source_revision,), expected_revision=expected_revision)
+        return scope, project, retained
+
+    def _current_source_authority(self, expected_revision, check=None):
+        from nexaweave_knowledge.operations import Tombstoned, NotFound
+
+        try:
+            binding = self.bindings.resolve(self.principal, self.display_graph_id)
+        except (Tombstoned, NotFound):
+            if self._missing_binding_unavailable:
+                raise PreparationError('preparation_unavailable') from None
+            raise
+        scope = binding.scope
+        if scope.model_dump(mode='json') != self.scope_dto or binding.principal != self.principal or binding.display_graph_id != self.display_graph_id:
+            raise PreparationError('conflict')
+        if check is not None:
+            check()
+        project = self.projects.get(self.principal, scope.project_id)
+        if project.workspace_id != scope.workspace_id or project.principal != self.principal or project.project_id != scope.project_id:
+            raise PreparationError('unauthorized')
+        if expected_revision is not None and project.revision != expected_revision:
+            raise PreparationError('conflict')
+        return binding, project
+
+    def _owned_sources(self, revisions, *, expected_revision=None, check=None, validate_record=None):
+        """Return ordered records bracketed by fresh binding and project reads for a set."""
         from nexaweave_knowledge.operations import Tombstoned, NotFound, StorageError
         from nexaweave_storage.store import NotFound as AppNotFound, StorageError as AppError
+
         try:
-            try:
-                binding = self.bindings.resolve(self.principal, self.display_graph_id)
-            except (Tombstoned, NotFound):
-                if self._missing_binding_unavailable:
-                    raise PreparationError('preparation_unavailable') from None
-                raise
+            if check is not None:
+                check()
+            binding, project = self._current_source_authority(expected_revision, check)
             scope = binding.scope
-            if scope.model_dump(mode='json') != self.scope_dto or binding.principal != self.principal or binding.display_graph_id != self.display_graph_id:
+
+            def admit(index, retained):
+                if check is not None:
+                    check()
+                if (retained.project_id != scope.project_id or str(retained.source_revision) != revisions[index]
+                        or not retained.passages or retained.codepoint_length > 32768):
+                    raise PreparationError('invalid_request')
+                if validate_record is not None:
+                    validate_record(scope, project, index, retained)
+
+            if check is not None:
+                check()
+            if len(revisions) == 1:
+                retained = self.sources.get_source(self.principal, scope.project_id, UUID(revisions[0]))
+                admit(0, retained)
+                return scope, project, (retained,)
+            from nexaweave_execution.report_contracts import ReportError
+            from nexaweave_storage.store import StoreError
+            from nexaweave_storage.validation import InvalidProject
+
+            source_ids = tuple(UUID(revision) for revision in revisions)
+            try:
+                records = self.sources.get_sources(self.principal, scope.project_id, source_ids, validate_record=admit)
+            except (StoreError, InvalidProject, PreparationError, ReportError) as refusal:
+                if getattr(refusal, 'code', None) in (
+                        'timeout', 'cancelled', 'preparation_cancelled', 'preparation_uncertain',
+                        'report_cancelled', 'report_uncertain'):
+                    raise
+                # The batch transaction has unwound. Changed authority takes precedence over a source refusal.
+                if check is not None:
+                    check()
+                if self._current_source_authority(expected_revision, check) != (binding, project):
+                    raise PreparationError('conflict')
+                if check is not None:
+                    check()
+                raise
+            if check is not None:
+                check()
+            if self._current_source_authority(expected_revision, check) != (binding, project):
                 raise PreparationError('conflict')
-            project = self.projects.get(self.principal, scope.project_id)
-            if project.workspace_id != scope.workspace_id or project.principal != self.principal or project.project_id != scope.project_id:
-                raise PreparationError('unauthorized')
-            if expected_revision is not None and project.revision != expected_revision:
-                raise PreparationError('conflict')
-            retained = self.sources.get_source(self.principal, scope.project_id, UUID(source_revision))
-            if retained.project_id != scope.project_id or str(retained.source_revision) != source_revision or not retained.passages or retained.codepoint_length > 32768:
-                raise PreparationError('invalid_request')
-            return scope, project, retained
+            if check is not None:
+                check()
+            return scope, project, records
         except Tombstoned:
             raise PreparationError('tombstoned') from None
         except (NotFound, AppNotFound):
@@ -111,22 +168,18 @@ class PreparationReadAuthority:
         check = check or self._source_check(deadline)
         try:
             validate_preparation_sources(row.frozen, check)
-            initial_scope = initial_project = anchor = None
-            for source in row.frozen['sources']:
-                check()
-                scope, project, retained = self._owned(source['source_revision'], expected_revision=expected_revision)
-                check()
+            sources = row.frozen['sources']
+
+            def verify(scope, project, index, retained):
                 if (scope.model_dump(mode='json') != row.frozen['public']['scope']
                         or str(project.project_id) != row.frozen['public']['scope']['project_id']
-                        or self._source_snapshot(retained, check) != source):
+                        or self._source_snapshot(retained, check) != sources[index]):
                     raise PreparationError('conflict')
-                if initial_scope is None:
-                    initial_scope, initial_project, anchor = scope, project, retained
-                    current_revision = project.revision
-                elif scope != initial_scope or project.revision != current_revision or project != initial_project:
-                    raise PreparationError('conflict')
+
+            scope, project, records = self._owned_sources(tuple(source['source_revision'] for source in sources),
+                expected_revision=expected_revision, check=check, validate_record=verify)
             check()
-            return initial_scope, initial_project, anchor
+            return scope, project, records[0]
         except (ValueError, TypeError, KeyError, UnicodeError, AttributeError):
             raise PreparationError('conflict') from None
 
