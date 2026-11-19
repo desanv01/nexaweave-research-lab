@@ -36,6 +36,7 @@ class _Entry:
     run_id: UUID
     fingerprint: str
     supervisor: NativeRunSupervisor | None = None
+    interview_entered: bool = False
     factory_task: asyncio.Task | None = None
     cleanup_task: asyncio.Task | None = None
     inflight: set[asyncio.Task] = field(default_factory=set)
@@ -150,7 +151,7 @@ class NativeExecutionActivities:
     def _stop_entry(entry: _Entry) -> None:
         # Call under the registry lock, before accepting the stop. This fence
         # acquires only the supervisor condition and performs no I/O.
-        if entry.supervisor is not None:
+        if entry.interview_entered and entry.supervisor is not None:
             entry.supervisor.fence_interview()
         entry.stop_requested = True
 
@@ -172,8 +173,6 @@ class NativeExecutionActivities:
                 self._stop_entry(entry)
                 entry.binding_invalid = True
                 entry.error_code = "invalid_supervisor"
-            elif entry.stop_requested:
-                value.fence_interview()
             stopped = entry.stop_requested
         if mismatch:
             self._schedule_cleanup(entry, cancel=False)
@@ -364,6 +363,7 @@ class NativeExecutionActivities:
                     or entry.supervisor is None or entry.supervisor.request != request):
                 raise InterviewUnavailable()
             supervisor = entry.supervisor
+            entry.interview_entered = True
         return supervisor.interview(command, admit)
 
     async def local_status(self, request: NativeRunRequest) -> LocalNativeStatus:

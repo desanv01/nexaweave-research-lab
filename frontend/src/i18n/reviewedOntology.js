@@ -1,6 +1,10 @@
 const copy = {
   en: {
     project: 'Saved project ontology',
+    plan: 'Review whole-source ingestion',
+    planHelp: 'Select an eligible source and save your ontology edits before reviewing the plan.',
+    ineligible: 'This saved ontology is not eligible for ingestion. Edit and save the ontology to review a new revision.',
+    projectRevision: 'Saved project revision', reviewFingerprint: 'Review fingerprint', executionFingerprint: 'Execution fingerprint',
     load: 'Load ontology', save: 'Save ontology', keepDraft: 'Keep draft', useSaved: 'Use saved version',
     initial: 'Load the project ontology to start editing.',
     loading: 'Loading project ontology…', saving: 'Saving project ontology…',
@@ -19,6 +23,10 @@ const copy = {
   },
   zh: {
     project: '已保存的项目本体',
+    plan: '审阅整个来源的摄取计划',
+    planHelp: '选择符合条件的来源，并保存本体修改后再审阅计划。',
+    ineligible: '此已保存本体不符合摄取要求。请编辑并保存本体，再审阅新修订版。',
+    projectRevision: '已保存的项目修订版', reviewFingerprint: '审阅指纹', executionFingerprint: '执行指纹',
     load: '加载本体', save: '保存本体', keepDraft: '保留草稿', useSaved: '使用已保存版本',
     initial: '加载项目本体后即可编辑。',
     loading: '正在加载项目本体…', saving: '正在保存项目本体…',
@@ -37,6 +45,10 @@ const copy = {
   },
   ms: {
     project: 'Ontologi projek yang disimpan',
+    plan: 'Semak pengingesan seluruh sumber',
+    planHelp: 'Pilih sumber yang layak dan simpan suntingan ontologi sebelum menyemak pelan.',
+    ineligible: 'Ontologi tersimpan ini tidak layak untuk pengingesan. Sunting dan simpan ontologi untuk menyemak semakan baharu.',
+    projectRevision: 'Semakan projek tersimpan', reviewFingerprint: 'Cap jari semakan', executionFingerprint: 'Cap jari pelaksanaan',
     load: 'Muatkan ontologi', save: 'Simpan ontologi', keepDraft: 'Kekalkan draf', useSaved: 'Guna versi tersimpan',
     initial: 'Muatkan ontologi projek untuk mula menyunting.',
     loading: 'Memuatkan ontologi projek…', saving: 'Menyimpan ontologi projek…',
