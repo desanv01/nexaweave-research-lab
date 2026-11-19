@@ -146,88 +146,6 @@ class ScriptedReportTransport:
             output.write(json.dumps(dict(closed=True, calls=self.count))+'\n')
 
 
-def _retain_four_formats(factory, directory, monkeypatch, prep, scope):
-    """Actual public parsing/retention for the explicitly selected real-graph journey."""
-
-    from nexaweave_storage import SourceStore
-    from nexaweave_storage.pdf import extract_pdf
-    from test_pdf_source import pdf_bytes
-    from test_document_source_integration import _package, _paragraph
-    from test_source_library_http_integration import _host, _exchange, _payload
-
-    # Separate Main-selected locked runtimes: never replace KG with backend Python.
-    assert _actual_graph_journey and os.environ.get('KNOWLEDGE_INTEGRATION') == '1'
-    python = Path(os.environ['KNOWLEDGE_PYTHON'])
-    backend = Path(os.environ['NEXAWEAVE_WORKBENCH_BACKEND_PYTHON'])
-    bootstrap = Path(os.environ['KNOWLEDGE_BOOTSTRAP_SCRIPT'])
-    assert python.is_absolute() and python.is_file()
-    assert backend.is_absolute() and backend.is_file() and backend == Path(sys.executable).absolute()
-    assert python != backend, 'separate locked KG/backend executable paths required'
-    assert not bootstrap.resolve().is_relative_to(Path(sys.prefix).resolve())
-    assert bootstrap.is_absolute() and bootstrap.is_file() and 'site-packages' in bootstrap.parts
-    assert bootstrap.name == 'read_bootstrap.py' and bootstrap.parent.name == 'nexaweave_knowledge'
-    assert all(bootstrap.with_name(name).is_file() for name in
-               ('source_bootstrap.py', 'source_ingestion_bootstrap.py', 'read_session_bootstrap.py'))
-    pdf = pdf_bytes(['PDF assertions 猫', 'Second PDF page 雪'])
-    markdown = '# Markdown assertions\n\nRetained **Markdown** evidence 猫.\n'
-    plain = 'Plain text assertions 雪 😀\n'
-    docx = _package(_paragraph('Office assertions 猫') +
-                    '<w:tbl><w:tr><w:tc>' + _paragraph('Table evidence 雪') + '</w:tc></w:tr></w:tbl>')
-    documents = [('original.pdf', 'pdf', pdf, extract_pdf(pdf).text),
-                 ('notes.md', 'text', markdown, markdown),
-                 ('notes.txt', 'text', plain, plain),
-                 ('office.docx', 'docx', docx, 'Office assertions 猫\n\nTable evidence 雪')]
-    upload_root = directory / 'uploaded-documents'
-    upload_root.mkdir()
-    http_root = directory / 'source-http'
-    http_root.mkdir()
-    records, snapshots, receipts = [], [], []
-    store = SourceStore(factory)
-    with _host(http_root, scope, prep.display_graph_id) as (port, token, _):
-        for name, kind, content, expected in documents:
-            binary = content.encode('utf-8') if isinstance(content, str) else content
-            (upload_root / name).write_bytes(binary)
-            revision = uuid4()
-            payload = _payload(revision, name, content, kind)
-            route = '/api/source/retain/' + prep.display_graph_id
-            if kind == 'pdf':
-                payload['schema_version'] = 2
-                route = '/api/source/retain-original/' + prep.display_graph_id
-            status, headers, reply = _exchange(port, 'POST', route, payload, token=token)
-            assert status == 200 and reply['success'] is True
-            assert headers['Cache-Control'] == 'no-store' and headers['X-Content-Type-Options'] == 'nosniff'
-            receipt = reply['data']
-            assert receipt['extraction']['format'] == kind
-            assert receipt['extraction']['input_hash_verified'] is True
-            assert receipt['extraction']['input_sha256'] == hashlib.sha256(binary).hexdigest()
-            assert receipt['graph_ingestion_executed'] is False
-            record = store.get_source('owner', scope.project_id, revision)
-            assert record.name == name and record.text == expected and record.passages
-            assert record.text_sha256 == hashlib.sha256(expected.encode('utf-8')).hexdigest()
-            if kind == 'pdf':
-                assert receipt['schema_version'] == 2 and receipt['binary_retained'] is True
-                assert receipt['binary']['sha256'] == hashlib.sha256(pdf).hexdigest()
-                original = store.get_original('owner', scope.project_id, revision)
-                assert original.content == pdf and original.source == record
-                assert [p.page for p in record.passages] == [1, 2]
-            else:
-                assert receipt['binary_retained'] is False
-            if kind == 'docx':
-                assert [p.excerpt for p in record.passages] == ['Office assertions 猫', 'Table evidence 雪']
-            passages = []
-            for p in record.passages:
-                assert expected[p.start:p.end] == p.excerpt
-                assert hashlib.sha256(p.excerpt.encode('utf-8')).hexdigest() == p.excerpt_sha256
-                passages.append(dict(evidence_id=str(p.evidence_id), start=p.start, end=p.end, page=p.page,
-                                     excerpt=p.excerpt, excerpt_sha256=p.excerpt_sha256))
-            snapshots.append(dict(source_revision=str(revision), source_name=name,
-                                  source_sha256=record.text_sha256, text=expected, passages=passages))
-            records.append(record)
-            receipts.append(receipt)
-    return SimpleNamespace(records=records, snapshots=snapshots, receipts=receipts, pdf=pdf,
-                           revisions=[str(record.source_revision) for record in records], upload_root=upload_root)
-
-
 def _assert_four_format_restart(factory, directory, prep, scope, selected):
     from nexaweave_storage import SourceStore, NotFound
     from test_source_library_http_integration import _host, _exchange
@@ -270,7 +188,7 @@ def _assert_accounted(prep, expected):
 
 
 @contextmanager
-def _actual_graph_sources(factory, directory, monkeypatch, prep, scope):
+def _actual_graph_sources(factory, directory, monkeypatch, prep, scope, *, browser_intake=False):
     """Actual installed Graphiti ingestion/read; only SDK model replies are canned."""
     from psycopg.conninfo import conninfo_to_dict
     from nexaweave_knowledge.contracts import OntologySpec
@@ -279,7 +197,9 @@ def _actual_graph_sources(factory, directory, monkeypatch, prep, scope):
     from test_source_ingestion_http_integration import host, model_server, neo_scope
     from test_source_library_http_integration import _exchange
     from app.services.knowledge_read_facade import KnowledgeReadFacade
-    selected = _retain_four_formats(factory, directory, monkeypatch, prep, scope)
+    from research_browser_intake import retain_four_formats
+    assert _actual_graph_journey
+    selected = retain_four_formats(factory, directory, prep, scope, browser_intake=browser_intake)
     ontology = OntologySpec(revision=uuid4(), entity_types=(
         {'name': 'Person', 'description': 'Named human'},
         {'name': 'Organization', 'description': 'Named organization'}), edge_types=(
@@ -319,25 +239,32 @@ def _actual_graph_sources(factory, directory, monkeypatch, prep, scope):
     _assert_accounted(prep, 0)
     with neo_scope(scope) as driver, model_server() as (model_port, records, errors, _):
         selected.ingestion = []
-        with host(directory / 'actual-source-ingestion', scope, prep.display_graph_id,
-                  prep.account_id, model_port, ceiling=1) as (port, token, _):
-            initial = selected.records[1:] if _research_browser_journey else selected.records
-            for index, record in enumerate(initial):
-                operation = uuid4()
-                payload = dict(schema_version=1, source_revision=str(record.source_revision),
-                               operation_id=str(operation), ontology=ontology.model_dump(mode='json'))
-                route = '/api/source/ingestion/execute/' + prep.display_graph_id
-                status, _, result = _exchange(port, 'POST', route, payload, token=token)
-                assert status == 200, result
-                data = result['data']
-                verify_ingestion(record, data, operation)
-                before = len(records)
-                assert _exchange(port, 'POST', route, payload, token=token)[2]['data'] == data
-                assert len(records) == before and errors == []
-                _assert_accounted(prep, index + 1)
-                selected.ingestion.append(data)
-        assert records and errors == []
-        assert {row['model'] for row in records} == {'fixture-generation', 'fixture-embedding'}
+
+        def ingest_sources():
+            with host(directory / 'actual-source-ingestion', scope, prep.display_graph_id,
+                      prep.account_id, model_port, ceiling=1) as (port, token, _):
+                initial = selected.records[1:] if _research_browser_journey else selected.records
+                for index, record in enumerate(initial):
+                    operation = uuid4()
+                    payload = dict(schema_version=1, source_revision=str(record.source_revision),
+                                   operation_id=str(operation), ontology=ontology.model_dump(mode='json'))
+                    route = '/api/source/ingestion/execute/' + prep.display_graph_id
+                    status, _, result = _exchange(port, 'POST', route, payload, token=token)
+                    assert status == 200, result
+                    data = result['data']
+                    verify_ingestion(record, data, operation)
+                    before = len(records)
+                    assert _exchange(port, 'POST', route, payload, token=token)[2]['data'] == data
+                    assert len(records) == before and errors == []
+                    _assert_accounted(prep, index + 1)
+                    selected.ingestion.append(data)
+            assert records and errors == []
+            assert {row['model'] for row in records} == {'fixture-generation', 'fixture-embedding'}
+
+        if browser_intake:
+            selected.ingest_companions = ingest_sources
+        else:
+            ingest_sources()
         pg = conninfo_to_dict(os.environ['PROJECT_STORE_POSTGRES_TEST_DSN'])
         child = dict(KNOWLEDGE_PRINCIPAL='owner', KNOWLEDGE_DISPLAY_GRAPH_ID=prep.display_graph_id,
             KNOWLEDGE_BOUND_SCOPE_JSON=scope.model_dump_json(), KNOWLEDGE_PG_HOST=pg['host'],
@@ -473,7 +400,8 @@ async def test_actual_native_receipt_to_inherited_report_preserves_inputs_and_di
         selected = None
         if _actual_graph_journey:
             selected = await asyncio.to_thread(actual_graph_lifecycle.enter_context,
-                _actual_graph_sources(factory, tmp_path, monkeypatch, prep, source_scope))
+                _actual_graph_sources(factory, tmp_path, monkeypatch, prep, source_scope,
+                                      browser_intake=_research_browser_journey))
         loop = asyncio.get_running_loop()
         preparation = TemporalPreparationHost(client=temporal, task_queue='mf-report-prep-'+uuid4().hex,
             trusted_host=prep, allow_dispatch=lambda: True)
@@ -541,6 +469,9 @@ async def test_actual_native_receipt_to_inherited_report_preserves_inputs_and_di
                     browser = await browser_lifecycle.enter_async_context(
                         ResearchBrowserSession(tmp_path, prep, native_host, reports, selected, report_log))
                     browser.ordered_sources()
+                    assert not selected.model_records and not selected.model_errors
+                    _assert_accounted(prep, 0)
+                    await asyncio.to_thread(selected.ingest_companions)
                     await asyncio.to_thread(_browse_saved_pdf, browser, factory, prep, source_scope, selected)
                 phases.start('preparation-plan-start')
                 payload = request(retained)
