@@ -56,17 +56,28 @@ const redditLines = [
   '{"round":1,"timestamp":"2026-10-05T00:00:00.000000","event_type":"round_start","simulated_hour":0}',
 ]
 const platformLogs = { twitter: lines, reddit: redditLines }
-function fixture() {
+function fixture(restored = false) {
   const files = ['state.json', 'simulation_config.json', 'source_grounding.json', 'twitter_profiles.csv', 'reddit_profiles.json'].map(name => ({ name, sha256: hash, size: 123 }))
   const preparation = { schema_version: 1, display_graph_id: 'graph_1', scope: { schema_version: 1, workspace_id: uid(1), project_id: uid(2), graph_id: uid(3), run_id: null, branch_id: null, layer: 'source' }, project_revision: 1, operation_id: uid(9), source: { source_revision: uid(5), source_name: hostile, source_sha256: hash }, options: { types: null, max_agents: 10, seed: 0, platforms: ['twitter', 'reddit'], max_rounds: 24, simulation_requirement: hostile }, actors: [{ source_entity_uuid: uid(7), name: hostile, labels: ['Person'] }], projection_sha256: hash, plan_sha256: null, state: 'ready', progress: { stage: 'ready', completed: 100, total: 100 }, error_code: null, authorization: { model_calls_enabled: true, ceiling_microusd: '12345' }, receipt: { simulation_id: 'sim_' + uid(9).replaceAll('-', ''), artifact_sha256: digest({ schema_version: 1, files }), files }, graph_snapshot_atomic: false, model_calls_started: true, simulation_executed: false }
+  if (restored) {
+    files.pop()
+    Object.assign(preparation.options, { platforms: ['twitter'], max_rounds: 1 })
+    preparation.receipt.artifact_sha256 = digest({ schema_version: 1, files })
+  }
   preparation.plan_sha256 = digest(pick(preparation, 'schema_version display_graph_id scope project_revision operation_id source options actors projection_sha256'))
-  const manifest = { schema_version: 1, files: ['twitter', 'reddit'].flatMap(platform => {
+  const manifest = { schema_version: 1, files: preparation.options.platforms.flatMap(platform => {
     const rawLog = platformLogs[platform].join('\n') + '\n'
-    return [{ name: platform + '_simulation.db', sha256: bytesHash('db'), size: 2 },
-      { name: platform + '/actions.jsonl', sha256: bytesHash(rawLog), size: Buffer.byteLength(rawLog) }]
+    return [{ name: restored ? 'native.sqlite3' : platform + '_simulation.db', sha256: bytesHash('db'), size: 2 },
+      { name: restored ? 'actions.jsonl' : platform + '/actions.jsonl', sha256: bytesHash(rawLog), size: Buffer.byteLength(rawLog) }]
   }) }
   const launch = { schema_version: 1, display_graph_id: 'graph_1', scope: clone(preparation.scope), preparation: { operation_id: preparation.operation_id, plan_sha256: preparation.plan_sha256, simulation_id: preparation.receipt.simulation_id, artifact_sha256: preparation.receipt.artifact_sha256 }, request: { schema_version: 1, principal: 'local-research', project_id: uid(2), project_revision: 1, simulation_id: preparation.receipt.simulation_id, run_id: uid(10), artifact_sha256: preparation.receipt.artifact_sha256, runtime_sha256: hash, platforms: ['twitter', 'reddit'], seed: 0, max_rounds: 24 }, limits: { max_calls: 20, max_input_bytes: 2097152, max_output_tokens: 4096, max_run_seconds: 600 }, ceiling_microusd: '12345', model_label: hostile, launch_sha256: null, state: 'completed', error_code: null, authorization: { model_calls_enabled: false }, workflow: null, receipt: null, cancel_requested: false, cleanup: { known: true, pending: false, owner_thread_alive: false } }
-  launch.launch_sha256 = digest(pick(launch, 'schema_version display_graph_id scope preparation request limits ceiling_microusd model_label'))
+  if (restored) {
+    launch.schema_version = 2
+    const source_run_id = uid(20), checkpoint_sha256 = 'c'.repeat(64)
+    launch.checkpoint = { mode: 'continue', source_run_id, checkpoint_sha256 }
+    Object.assign(launch.request, { schema_version: 2, source_run_id, checkpoint_sha256, platforms: ['twitter'], max_rounds: 1 })
+  }
+  launch.launch_sha256 = digest(pick(launch, 'schema_version display_graph_id scope preparation request limits ceiling_microusd model_label' + (restored ? ' checkpoint' : '')))
   launch.receipt = { run_id: uid(10), attempt_id: uid(12), instance_id: uid(13), request_fingerprint: digest(launch.request), outcome: 'completed', evidence_sha256: digest(manifest) }
   return { selection: { launch, preparation }, manifest }
 }
@@ -83,7 +94,7 @@ function page(payload, f = fixture()) {
       if (record.success === false) counts.failed_action_records++
     }
   }
-  return { schema_version: 1, launch: clone(f.selection.launch), manifest: clone(f.manifest), platform: payload.platform, offset: payload.offset, limit: payload.limit, total_records: log.length, next_offset: payload.offset + records.length < log.length ? payload.offset + records.length : null, counts, records }
+  return { schema_version: f.selection.launch.schema_version, launch: clone(f.selection.launch), manifest: clone(f.manifest), platform: payload.platform, offset: payload.offset, limit: payload.limit, total_records: log.length, next_offset: payload.offset + records.length < log.length ? payload.offset + records.length : null, counts, records }
 }
 function mount(initial = {}) {
   const props = reactive({ methods: { page: async payload => page(payload), clear: () => {} }, selection: fixture().selection, connected: true, busy: false, displayGraphId: 'graph_1', resetVersion: 0, locale: 'en', ...initial })
@@ -120,7 +131,7 @@ test('explicit page controls render original inert JSON, honest counts, unknown 
   const m = mount({ methods: { page: async (p, selection) => { requests.push(clone(p)); callerSelection = selection; return reply = page(p) } } })
   try {
     await admitted(m); m.root.querySelector('.load').focus(); m.root.querySelector('.load').click(); await finished(m)
-    assert.equal(requests.length, 1); assert.equal(m.root.querySelectorAll('.records li').length, 20); assert.equal(document.activeElement, m.root.querySelector('.feedback'))
+    assert.equal(requests.length, 1); assert.equal(requests[0].schema_version, 1); assert.equal(m.root.querySelectorAll('.records li').length, 20); assert.equal(document.activeElement, m.root.querySelector('.feedback'))
     assert.equal(m.root.querySelector('.previous').disabled, true); assert.equal(m.root.querySelector('.next').disabled, false)
     reply.records[0].raw_json = '{}'; callerSelection.preparation.source.source_name = 'mutated'; await nextTick()
     assert.ok(m.root.textContent.includes(hostile)); assert.equal(m.root.textContent.includes('mutated'), false); assert.equal(m.root.querySelector('a,img,script'), null)
@@ -156,6 +167,27 @@ test('explicit page controls render original inert JSON, honest counts, unknown 
       assert.deepEqual(rows.map(row => row.querySelector('details .mono').textContent), redditLines.map(bytesHash))
       assert.equal(requests.length, 5)
     }
+  } finally { m.cleanup() }
+})
+test('mounted restored observations request version two and render the bound output', async () => {
+  const f = fixture(true), calls = []
+  const m = mount({ selection: f.selection, methods: { page: async payload => {
+    calls.push(clone(payload)); return page(payload, f)
+  } } })
+  try {
+    await admitted(m)
+    assert.deepEqual([...m.root.querySelector('select').options].map(option => option.value), ['twitter'])
+    assert.equal(calls.length, 0)
+    m.root.querySelector('.load').click(); await finished(m)
+    assert.deepEqual(calls, [{ schema_version: 2, launch_id: f.selection.launch.request.run_id,
+      launch_sha256: f.selection.launch.launch_sha256, platform: 'twitter', offset: 0, limit: 20 }])
+    assert.equal(m.root.querySelectorAll('.records li').length, 20)
+    assert.ok(m.root.textContent.includes(f.selection.launch.receipt.evidence_sha256))
+    assert.deepEqual([...m.root.querySelectorAll('.records li details pre')].map(node => node.textContent), lines.slice(0, 20))
+    assert.ok(m.root.querySelector('.manifest').textContent.includes('native.sqlite3'))
+    assert.ok(m.root.querySelector('.manifest').textContent.includes('actions.jsonl'))
+    assert.equal(m.root.querySelector('.manifest').textContent.includes('twitter/actions.jsonl'), false)
+    assert.equal(m.root.textContent.includes(f.selection.launch.checkpoint.checkpoint_sha256), false)
   } finally { m.cleanup() }
 })
 test('pending contradictory controls are disabled; clear, disconnect, source context and unmount fence late replies', async () => {
