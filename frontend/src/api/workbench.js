@@ -217,23 +217,23 @@ export function validateResult(method, value, graph) {
 }
 export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs = 125000 } = {}) {
   if (!Number.isFinite(deadlineMs) || deadlineMs < 1 || deadlineMs > 150000) fail('invalid_connection')
-  let connection = null, active = null, activeMethod = null, generation = 0, authenticated = false, ingestionScope = null, populationAdmission = null
+  let connection = null, active = null, activeNativeOwner = null, generation = 0, authenticated = false, ingestionScope = null, populationAdmission = null
   const preparationPlans = new Map(), preparationStarted = new Set()
   const nativePlans = new Map(), nativeStarted = new Set()
+  const singleNativeOwner = Symbol(), ensembleNativeOwner = Symbol()
   const observations = createNativeObservationsChannel({ fetchImpl, deadlineMs, connection: () => authenticated && connection ? { ...connection } : null, denied: () => disconnect() })
   const reports = createConnectedReportsChannel({ fetchImpl, deadlineMs, connection: () => authenticated && connection ? { ...connection } : null, denied: () => disconnect() })
   const followups = createConnectedFollowupsChannel({ fetchImpl, deadlineMs, connection: () => authenticated && connection ? { ...connection } : null, denied: () => disconnect() })
-  function cancelShared(preservePopulation = false) { generation++; active?.abort(); active = null; activeMethod = null; if (!preservePopulation) populationAdmission = null }
+  function cancelShared(preservePopulation = false) { generation++; active?.abort(); active = null; activeNativeOwner = null; if (!preservePopulation) populationAdmission = null }
   function cancel(preservePopulation = false) { reports.cancel(); followups.cancel(); cancelShared(preservePopulation) }
-  function clearNativeLaunch() {
-    observations.clear()
-    // Child resets must not invalidate another section's transport epoch.
-    // Native requests retain the shared controller through digest admission.
-    if (active && activeMethod?.startsWith('nativeLaunch')) cancel()
-    nativePlans.clear()
+  function clearNativeLaunch(owner = singleNativeOwner) {
+    if (active && activeNativeOwner === owner) cancelShared(true)
+    for (const [id, record] of nativePlans) {
+      if (record.owner === owner) nativePlans.delete(id)
+    }
   }
   function disconnect() { reports.clear(); followups.clear(); observations.clear(); cancel(); connection = null; authenticated = false; ingestionScope = null; populationAdmission = null; preparationPlans.clear(); preparationStarted.clear(); nativePlans.clear(); nativeStarted.clear() }
-  async function request(method, payload, ingestionContext, options = {}) {
+  async function request(method, payload, ingestionContext, options = {}, nativeOwner = singleNativeOwner) {
     if (!connection || (method !== 'graph' && !authenticated)) fail('disconnected')
     const population = method.startsWith('population')
     const ontology = method === 'sourceOntologyLoad' || method === 'sourceOntologySave'
@@ -252,6 +252,7 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
     if (native) {
       nativeRaw = nativeLaunchPayload(payload, method === 'nativeLaunchPlan'); payload = JSON.parse(nativeRaw)
       const known = nativePlans.get(payload.launch_id)
+      if (known && known.owner !== nativeOwner) fail('invalid_request')
       if (method === 'nativeLaunchPlan') {
         const ready = preparationPlans.get(payload.preparation.operation_id)
         if (!ready || ready.state !== 'ready' || ready.plan_sha256 !== payload.preparation.plan_sha256 || JSON.stringify(ready) !== JSON.stringify(ingestionContext)) fail('invalid_request')
@@ -319,7 +320,7 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
     const sourceRequest = original ? (method === 'sourceRetainOriginal' ? JSON.parse(originalRaw) : originalRaw) : method === 'sourceGet' ? sourceReadRequest(payload) : method === 'sourceRetain' ? JSON.parse(raw) : undefined
     const epoch = generation, current = connection, controller = new AbortController()
     active = controller
-    activeMethod = method
+    activeNativeOwner = native ? nativeOwner : null
     let timedOut = false, reader, responseBody
     const timer = setTimeout(() => { timedOut = true; controller.abort() }, deadlineMs)
     const callerAbort = () => controller.abort()
@@ -450,7 +451,7 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
       }
       owned()
       if (native) {
-        nativePlans.set(result.request.run_id, { plan: JSON.parse(JSON.stringify(result)), preparation: JSON.parse(JSON.stringify(nativeContext.preparation)) })
+        nativePlans.set(result.request.run_id, { owner: nativeOwner, plan: JSON.parse(JSON.stringify(result)), preparation: JSON.parse(JSON.stringify(nativeContext.preparation)) })
         if (result.state !== 'planned') nativeStarted.add(result.request.run_id)
       }
       if (preparation && !preparationInspection) {
@@ -473,7 +474,7 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
       controller.abort()
       if (reader) { try { void reader.cancel().catch(() => {}) } catch { /* no raw errors */ } reader.releaseLock() }
       else if (responseBody) { try { void responseBody.cancel().catch(() => {}) } catch { /* no raw errors */ } }
-      if (active === controller) { active = null; activeMethod = null }
+      if (active === controller) { active = null; activeNativeOwner = null }
     }
   }
   return {
@@ -513,7 +514,13 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
     nativeLaunchStart: payload => request('nativeLaunchStart', payload),
     nativeLaunchStatus: payload => request('nativeLaunchStatus', payload),
     nativeLaunchCancel: payload => request('nativeLaunchCancel', payload),
-    clearNativeLaunch,
+    clearNativeLaunch: () => clearNativeLaunch(),
+    ensembleNative: Object.freeze({
+      plan: (payload, ready) => request('nativeLaunchPlan', payload, ready, {}, ensembleNativeOwner),
+      start: payload => request('nativeLaunchStart', payload, undefined, {}, ensembleNativeOwner),
+      status: payload => request('nativeLaunchStatus', payload, undefined, {}, ensembleNativeOwner),
+      clear: () => clearNativeLaunch(ensembleNativeOwner),
+    }),
     nativeObservationsPage: (payload, selection, knownPage) => observations.page(payload, selection, knownPage),
     clearNativeObservations: () => observations.clear(),
     connectedReportPlan: (payload, selection) => reports.plan(payload, selection),

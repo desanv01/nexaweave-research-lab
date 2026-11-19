@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, onBeforeUnmount, ref, watch } from 'vue'
 import { createWorkbenchClient, WorkbenchError, awareTimestamp } from '../api/workbench.js'
 import { copyFor, safeError } from '../i18n/workbench.js'
 import EvidenceResults from '../components/workbench/EvidenceResults.vue'
@@ -13,8 +13,13 @@ import NativeObservations from '../components/workbench/NativeObservations.vue'
 import ConnectedReports from '../components/workbench/ConnectedReports.vue'
 import ConnectedFollowup from '../components/workbench/ConnectedFollowup.vue'
 import { populationCopyFor } from '../i18n/populationWorkbench.js'
+import { nativeEnsembleCopyFor } from '../i18n/nativeEnsemble.js'
 import { uiLocale as locale } from '../i18n/index.js'
 const copy = computed(() => copyFor(locale.value))
+const NativeEnsemble = defineAsyncComponent(() => import('../components/workbench/NativeEnsemble.vue'))
+const ensembleCopy = computed(() => nativeEnsembleCopyFor(locale.value))
+const ensembleOpened = ref(false)
+function openEnsemble(event) { if (event.currentTarget.open) ensembleOpened.value = true }
 const origin = ref('http://127.0.0.1:5001'), graph = ref(''), token = ref(''), reveal = ref(false)
 const connected = ref(false), busy = ref(false), status = ref('disconnected'), errorCode = ref('')
 const ingestionRequest = ref('')
@@ -82,6 +87,18 @@ const preparationMethods = Object.freeze({
   profiles: (payload, ready, options) => operation(() => client.preparationProfiles(payload, ready, options), false, true, '', false, true),
   configuration: (payload, ready, options) => operation(() => client.preparationConfiguration(payload, ready, options), false, true, '', false, true)
 })
+const ensembleRequest = action => operation(action, false, true, '', false, false, false, true)
+const ensemblePreparationMethods = Object.freeze({
+  plan: (payload, source) => ensembleRequest(() => client.preparationPlan(payload, source)),
+  start: payload => ensembleRequest(() => client.preparationStart(payload)),
+  status: payload => ensembleRequest(() => client.preparationStatus(payload))
+})
+const ensembleNativeMethods = Object.freeze({
+  plan: (payload, ready) => ensembleRequest(() => client.ensembleNative.plan(payload, ready)),
+  start: payload => ensembleRequest(() => client.ensembleNative.start(payload)),
+  status: payload => ensembleRequest(() => client.ensembleNative.status(payload)),
+  clear: () => client.ensembleNative.clear()
+})
 const ingestionMethods = Object.freeze({
   plan: (payload, inspected, saved) => operation(() => client.ingestionPlan(payload, inspected, saved?.scope, saved), false, true, 'plan'),
   execute: (payload, known) => operation(() => client.ingestionExecute(payload, known), false, true, 'execute'),
@@ -108,17 +125,27 @@ const populationMethods = Object.freeze({
   export: (platform, options, preview) => operation(() => client.populationExport(platform, options, preview), false, true, '', true),
   feedback: code => { populationFeedback.value = ['ready', 'changed', 'prepared', 'requested', 'invalid', 'invalidReply', 'denied', 'cancelled', 'unavailable', 'emptySelection', 'failed'].includes(code) ? code : '' }
 })
-let generation = 0
+let generation = 0, ensembleOperation = null
 const graphEntries = computed(() => graphData.value?.[graphKind.value] || [])
 function clearProtected() { clearNativeViews(); sourceCatalog.value = null; sourceReset.value++; populationReset.value++; preparationReset.value++; nativeReset.value++; nativeReady.value = null; inspectedSource.value = null; graphData.value = null; result.value = null; graphPage.value = 0 }
-function disconnect() { generation++; client.disconnect(); token.value = ''; reveal.value = false; connected.value = false; busy.value = false; clearProtected(); errorCode.value = ''; ingestionRequest.value = ''; status.value = 'disconnected' }
-function cancel() { generation++; experimentCancel.value++; populationReset.value++; client.cancel(); busy.value = false; status.value = 'cancelled'; errorCode.value = ''; if (!connected.value) { client.disconnect(); token.value = ''; clearProtected() } }
-async function operation(action, connecting = false, source = false, ingestion = '', population = false, preserveProtected = false, graphRefresh = false) {
+function disconnect() { generation++; ensembleOperation = null; client.disconnect(); token.value = ''; reveal.value = false; connected.value = false; busy.value = false; clearProtected(); errorCode.value = ''; ingestionRequest.value = ''; status.value = 'disconnected' }
+function cancel() { generation++; ensembleOperation = null; experimentCancel.value++; populationReset.value++; client.cancel(); busy.value = false; status.value = 'cancelled'; errorCode.value = ''; if (!connected.value) { client.disconnect(); token.value = ''; clearProtected() } }
+async function operation(action, connecting = false, source = false, ingestion = '', population = false, preserveProtected = false, graphRefresh = false, ensemble = false) {
+  if (ensemble ? busy.value : ensembleOperation !== null) {
+    if (source && !graphRefresh) {
+      const error = new WorkbenchError('busy')
+      if (ensemble) error.beforeDispatch = true
+      throw error
+    }
+    return
+  }
   const epoch = ++generation
+  if (ensemble) ensembleOperation = epoch
+  busy.value = true
   if (!population) populationReset.value++
   if (preserveProtected) client.cancelShared(population)
   else client.cancel(population)
-  busy.value = true; errorCode.value = ''; ingestionRequest.value = ingestion; status.value = connecting ? 'connecting' : 'loading'
+  errorCode.value = ''; ingestionRequest.value = ingestion; status.value = connecting ? 'connecting' : 'loading'
   if (connecting) { connected.value = false; clearProtected() } else if (!source) result.value = null
   try {
     const data = await action()
@@ -132,7 +159,10 @@ async function operation(action, connecting = false, source = false, ingestion =
     status.value = errorCode.value === 'cancelled' ? 'cancelled' : ['unauthorized', 'origin_denied'].includes(errorCode.value) ? 'denied' : 'error'
     if (connecting || ['unauthorized', 'origin_denied'].includes(errorCode.value) || graphRefresh && errorCode.value === 'disconnected') { client.disconnect(); connected.value = false; token.value = ''; reveal.value = false; clearProtected() }
     if (source && !graphRefresh) throw e
-  } finally { if (epoch === generation) busy.value = false }
+  } finally {
+    if (ensembleOperation === epoch) ensembleOperation = null
+    if (epoch === generation) busy.value = false
+  }
 }
 function connect() {
   const credentials = { origin: origin.value, graph: graph.value, token: token.value }
@@ -182,6 +212,12 @@ onBeforeUnmount(disconnect)
       <PopulationWorkbench :methods="populationMethods" :connected="connected" :busy="busy" :reset-version="populationReset" :locale="locale" :type-labels="populationTypes" />
       <SimulationPreparation :methods="preparationMethods" :connected="connected" :busy="busy" :reset-version="preparationReset" :locale="locale" :source="inspectedSource?.source || null" :source-catalog="sourceCatalog" :display-graph-id="graphData?.graph_id || ''" :type-labels="populationTypes" @ready="nativeReady = $event" @cleared="nativeReset++" />
       <NativeLaunch :methods="nativeMethods" :ready="nativeReady" :connected="connected" :busy="busy" :reset-version="nativeReset" :locale="locale" :display-graph-id="graphData?.graph_id || ''" @inspect="observationSelection = $event" @report="reportSelection = $event" @cleared="clearNativeViews" />
+      <details class="ensemble-panel" @toggle="openEnsemble">
+        <summary>{{ ensembleCopy.title }}</summary>
+        <NativeEnsemble v-if="ensembleOpened" :preparation-methods="ensemblePreparationMethods" :native-methods="ensembleNativeMethods"
+          :ready="nativeReady" :source="inspectedSource?.source || null" :display-graph-id="graphData?.graph_id || ''"
+          :connected="connected" :busy="busy" :locale="locale" />
+      </details>
       <NativeObservations :methods="observationMethods" :selection="observationSelection" :connected="connected" :busy="busy" :reset-version="observationReset" :locale="locale" :display-graph-id="graphData?.graph_id || ''" />
       <ConnectedReports :methods="reportMethods" :selection="reportSelection" :source-catalog="sourceCatalog" :connected="connected" :busy="busy" :reset-version="reportReset" :locale="locale" :display-graph-id="graphData?.graph_id || ''" @followup="followupSelection = $event" />
       <ConnectedFollowup :methods="followupMethods" :selection="followupSelection" :connected="connected" :busy="busy" :reset-version="followupReset" :locale="locale" :display-graph-id="graphData?.graph_id || ''" />
@@ -198,4 +234,5 @@ onBeforeUnmount(disconnect)
 </template>
 <style scoped>
 .workbench{--canvas:#f4f6f9;--surface:#fff;--ink:#172638;--muted:#526174;--primary:#174d96;--border:#b9c4d2;--control-border:#7b8797;--accent:#a9650c;background:var(--canvas);color:var(--ink);min-height:100vh;font:16px/1.5 system-ui,sans-serif;overflow-wrap:anywhere}.workbench *{box-sizing:border-box}.header{background:var(--surface);border-bottom:1px solid var(--border);padding:16px clamp(16px,4vw,48px);display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:16px}.brand{font-weight:750;letter-spacing:.08em;text-decoration:none;color:var(--ink);min-height:44px;display:flex;align-items:center;flex-wrap:wrap;gap:16px}.brand span{letter-spacing:0;font-weight:500;color:var(--primary)}main{max-width:1320px;margin:0 auto;padding:32px clamp(16px,4vw,48px) 64px}.intro{margin-bottom:24px}h1{font-size:clamp(1.7rem,4vw,2.4rem);line-height:1.2;margin:8px 0 12px}h2{font-size:1.25rem;margin:0 0 16px}p{margin:8px 0}.eyebrow{font-size:.8rem;letter-spacing:.1em;color:var(--muted)}.connection,.query-section,.graph-overview{background:var(--surface);padding:24px;border:1px solid var(--border);border-radius:8px;margin-bottom:24px;min-width:0}label{display:flex;flex-direction:column;gap:6px;font-weight:550;min-width:0}input,textarea,select{width:100%;min-width:0;background:var(--surface);color:var(--ink);border:1px solid var(--control-border);border-radius:5px;font:inherit;padding:10px 12px;min-height:44px}textarea{resize:vertical}button{min-height:44px;max-width:100%;padding:10px 16px;border:1px solid var(--border);border-radius:5px;background:var(--surface);color:var(--primary);font:inherit;font-weight:550;cursor:pointer;overflow-wrap:anywhere}.primary{background:var(--primary);color:white;border-color:var(--primary)}button:hover:not(:disabled){filter:brightness(.92)}button:disabled,fieldset:disabled{opacity:.65}button:disabled{cursor:default}input:disabled,textarea:disabled{background:var(--canvas)}button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible,a:focus-visible,summary:focus-visible{outline:3px solid var(--primary);outline-offset:3px}.connection-form{display:grid;gap:12px;align-items:end}.help{font-size:.875rem;color:var(--muted);margin-top:12px}.status{border-left:3px solid var(--primary);padding:8px 12px;margin-top:16px}fieldset{border:0;padding:0;margin:0;min-width:0}legend{color:var(--muted);font-size:.875rem}.choices{display:flex;flex-wrap:wrap;gap:16px;margin:12px 0 20px}.choices label{flex-direction:row;align-items:center;min-height:44px}.choices input{width:20px;min-height:20px;margin-right:4px}.actions{display:flex;flex-wrap:wrap;align-items:center;gap:12px;margin-top:20px}.advanced-button{display:block;margin:20px 0 12px}.advanced{display:grid;gap:12px}.dossier-section{border-top:1px solid var(--border);margin-top:16px;padding:16px 0;display:grid;gap:12px}.dossier-section button{justify-self:start}.mono{font:.875rem/1.6 ui-monospace,Consolas,monospace}summary{cursor:pointer;min-height:44px;padding:10px 0}ul{padding-left:20px}.skip{position:absolute;left:16px;top:-100px;padding:12px;background:var(--surface);color:var(--primary);z-index:2}.skip:focus{top:8px}@media(min-width:768px){.connection-form{grid-template-columns:repeat(3,minmax(0,1fr))}.advanced{grid-template-columns:repeat(3,minmax(0,1fr))}.advanced .help{grid-column:1/-1}}@media(max-width:480px){.connection,.query-section,.graph-overview{padding:16px}}@media(prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;transition:none!important;animation:none!important}}
+.ensemble-panel{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px clamp(16px,3vw,24px);margin-bottom:24px}.ensemble-panel>summary{font-weight:650}
 </style>
