@@ -10,6 +10,7 @@ import json
 import hashlib
 import math
 import pickle
+from pathlib import Path
 from time import monotonic
 from uuid import UUID, NAMESPACE_URL, uuid5
 from .native_launch_client import (NativeLaunchError, IDENTITY, digest, encoded,
