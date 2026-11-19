@@ -7,7 +7,34 @@ const copy = computed(() => nativeObservationsCopyFor(props.locale))
 const selected = ref(null), platform = ref(''), page = ref(null), pending = ref(false), error = ref(''), stale = ref(false), feedback = ref(null)
 let epoch = 0
 const locked = computed(() => !props.connected || props.busy || pending.value || !selected.value)
-const labels = computed(() => page.value?.records.map(record => { const parsed = parseObservationRecord(record.raw_json); return typeof parsed.action_type === 'string' ? parsed.action_type : typeof parsed.event_type === 'string' ? parsed.event_type : copy.value.unknown }) || [])
+const redditTargetFields = { SEARCH_USER: 'query', LIKE_COMMENT: 'comment_id', DISLIKE_COMMENT: 'comment_id' }
+function isExactCommentId(raw, value) {
+  if (!Number.isSafeInteger(value) || value < 0) return false
+  const token = String(value)
+  // The strict parser has admitted this record. Check the original spelling
+  // so a rounded Number cannot appear as a recorded integer.
+  const checked = JSON.parse(raw, (key, decoded, context) => {
+    if (key === 'comment_id' && typeof decoded === 'number' && context?.source !== token) return null
+    return decoded
+  })
+  return checked.action_args?.comment_id === value
+}
+
+function recordView(record, isReddit) {
+  const { action_type: action, event_type: event, action_args: args } = parseObservationRecord(record.raw_json)
+  const label = typeof action === 'string' ? action : typeof event === 'string' ? event : null
+  if (!isReddit || typeof action !== 'string' || !Object.hasOwn(redditTargetFields, action)) return { record, label }
+
+  const field = redditTargetFields[action]
+  const value = args && Object.getPrototypeOf(args) === Object.prototype && Object.hasOwn(args, field) ? args[field] : undefined
+  const isQuery = field === 'query'
+  const valid = isQuery ? typeof value === 'string' : isExactCommentId(record.raw_json, value)
+  return { record, label, redditAction: action, target: valid ? { key: isQuery ? 'searchQuery' : 'commentId', value } : null }
+}
+const recordViews = computed(() => {
+  const admitted = page.value
+  return admitted ? admitted.records.map(record => recordView(record, admitted.platform === 'reddit')) : []
+})
 function clear() { epoch++; props.methods.clear?.(); selected.value = null; platform.value = ''; page.value = null; pending.value = false; error.value = ''; stale.value = false }
 async function announce() { await nextTick(); feedback.value?.focus() }
 async function select(value) {
@@ -63,7 +90,15 @@ async function load(offset = 0) {
       <p v-if="!page.total_records" class="empty">{{ copy.empty }}</p>
       <p v-else-if="page.records.length" class="range">{{ copy.range }}: {{ page.offset }}–{{ page.offset + page.records.length - 1 }}</p>
       <p v-if="page.records.length < page.total_records">{{ copy.partial }}</p>
-      <ol class="records" :start="page.offset + 1"><li v-for="(record, i) in page.records" :key="record.index" :data-index="record.index"><p class="event-label">{{ labels[i] }}</p><details><summary>{{ copy.literal }}</summary><pre>{{ record.raw_json }}</pre><p>{{ copy.recordHash }}<br><span class="mono">{{ record.record_sha256 }}</span></p></details></li></ol>
+      <ol class="records" :start="page.offset + 1">
+        <li v-for="{ record, label, redditAction, target } in recordViews" :key="record.index" :data-index="record.index">
+          <p class="event-label">{{ redditAction ? copy.redditActions[redditAction] : (label ?? copy.unknown) }}</p>
+          <dl v-if="target" class="event-target">
+            <dt>{{ copy[target.key] }}</dt><dd><pre>{{ target.value }}</pre></dd>
+          </dl>
+          <details><summary>{{ copy.literal }}</summary><pre>{{ record.raw_json }}</pre><p>{{ copy.recordHash }}<br><span class="mono">{{ record.record_sha256 }}</span></p></details>
+        </li>
+      </ol>
       <nav class="actions" :aria-label="copy.title"><button class="previous" type="button" :disabled="locked || page.offset === 0" @click="load(Math.max(0, page.offset - page.limit))">{{ copy.previous }}</button><button class="next" type="button" :disabled="locked || page.next_offset === null" @click="load(page.next_offset)">{{ copy.next }}</button></nav>
       <details class="manifest"><summary>{{ copy.files }}</summary><ul><li v-for="file in page.manifest.files" :key="file.name">{{ file.name }} · {{ copy.size }}: {{ file.size }}<br><span class="mono">{{ file.sha256 }}</span></li></ul></details>
     </template>
