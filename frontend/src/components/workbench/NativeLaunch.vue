@@ -6,23 +6,35 @@ const props = defineProps({ methods: { type: Object, required: true }, ready: { 
 const emit = defineEmits(['inspect', 'report', 'cleared'])
 const copy = computed(() => nativeLaunchCopyFor(props.locale))
 const plan = ref(null), binding = ref(null), history = ref([]), pending = ref(false), attempted = ref(false), error = ref(''), notice = ref(''), feedback = ref(null)
+const panel = ref(null), unconfirmedCancels = ref(new Set())
+const cancelDenials = new Set(['invalid_request', 'not_found', 'tombstoned', 'model_calls_disabled', 'budget_denied'])
 const started = new Set()
 let declaration = null
 let lifetime = 0, reviewEpoch = 0
 const locked = computed(() => !props.connected || props.busy || pending.value)
 const canStart = computed(() => !locked.value && !attempted.value && plan.value?.state === 'planned' && plan.value.authorization.model_calls_enabled && !!plan.value.ceiling_microusd)
+function canCancel(value) {
+  return !locked.value && !value.receipt && !value.cancel_requested && !unconfirmedCancels.value.has(value.request.run_id)
+}
 const records = computed(() => [plan.value && { key: 'plan', value: plan.value, preparation: binding.value }, ...history.value.filter(record => record.value.request.run_id !== plan.value?.request.run_id)].filter(Boolean))
 function retain(value, preparation) {
   const entry = { key: 'durable', value, preparation }, index = history.value.findIndex(record => record.value.request.run_id === value.request.run_id)
   if (index < 0) history.value.push(entry); else history.value[index] = entry
 }
-function clear() { lifetime++; reviewEpoch++; declaration = null; started.clear(); plan.value = null; binding.value = null; history.value = []; attempted.value = false; pending.value = false; error.value = ''; notice.value = ''; props.methods.clear?.(); emit('cleared') }
+function clear() { lifetime++; reviewEpoch++; declaration = null; started.clear(); unconfirmedCancels.value.clear(); plan.value = null; binding.value = null; history.value = []; attempted.value = false; pending.value = false; error.value = ''; notice.value = ''; props.methods.clear?.(); emit('cleared') }
 watch(() => props.resetVersion, clear, { flush: 'sync' })
 watch(() => props.connected, value => { if (!value) clear() }, { flush: 'sync' })
 watch(() => props.displayGraphId, clear, { flush: 'sync' })
 watch(() => props.ready, () => { reviewEpoch++; emit('cleared'); declaration = null; if (history.value.length) notice.value = 'changed'; plan.value = null; binding.value = null; attempted.value = false; error.value = '' }, { deep: true, flush: 'sync' })
 onBeforeUnmount(clear)
-async function announce() { await nextTick(); feedback.value?.focus() }
+async function announce(runId) {
+  const life = lifetime
+  await nextTick()
+  if (life !== lifetime) return
+  const refresh = unconfirmedCancels.value.has(runId) ? panel.value?.querySelector('#native-refresh-' + runId) : null
+  if (refresh && !refresh.disabled) refresh.focus()
+  else feedback.value?.focus()
+}
 async function inspect(record, event = 'inspect') {
   if (locked.value || record.value.state !== 'completed' || record.value.receipt?.outcome !== 'completed') return
   const life = lifetime, epoch = reviewEpoch, known = JSON.parse(JSON.stringify(record.value)), preparation = JSON.parse(JSON.stringify(record.preparation))
@@ -53,7 +65,7 @@ async function review() {
 }
 async function request(method, record) {
   const target = record?.value || plan.value, targetBinding = record?.preparation || binding.value
-  if (locked.value || !target || method === 'start' && (!canStart.value || target.request.run_id !== plan.value?.request.run_id) || method === 'cancel' && (target.receipt || target.cancel_requested)) return
+  if (locked.value || !target || method === 'start' && (!canStart.value || target.request.run_id !== plan.value?.request.run_id) || method === 'cancel' && !canCancel(target)) return
   const life = lifetime, known = JSON.parse(JSON.stringify(target)), ready = JSON.parse(JSON.stringify(targetBinding)), payload = nativeLaunchIdentity(known)
   if (method === 'start' || method === 'cancel') { if (plan.value?.request.run_id === known.request.run_id) attempted.value = true; started.add(known.request.run_id); retain(known, ready) }
   pending.value = true; error.value = ''; notice.value = ''
@@ -61,18 +73,29 @@ async function request(method, record) {
     const value = await props.methods[method](JSON.parse(JSON.stringify(payload)))
     const admitted = await validateNativeLaunchResult(value, { graph: props.displayGraphId, payload, preparation: ready, known })
     if (life !== lifetime) return
+    if (method === 'cancel' && !admitted.cancel_requested) {
+      error.value = 'invalid_reply'
+      unconfirmedCancels.value.add(payload.launch_id)
+      return
+    }
+    // The validated status belongs to this exact run and launch digest.
+    if (method === 'status') unconfirmedCancels.value.delete(payload.launch_id)
     if (plan.value?.request.run_id === admitted.request.run_id) { plan.value = admitted; if (admitted.state !== 'planned') attempted.value = true }
     if (started.has(admitted.request.run_id) || admitted.state !== 'planned') { started.add(admitted.request.run_id); retain(admitted, ready) }
   } catch (e) {
     if (life === lifetime) {
       if (['unauthorized', 'origin_denied', 'disconnected'].includes(e?.code)) { clear(); error.value = e.code }
-      else { error.value = e?.code || 'transport_failure'; if (['start', 'cancel'].includes(method) && ['deadline', 'timeout', 'cancelled', 'transport_failure', 'invalid_reply', 'native_launch_uncertain'].includes(error.value)) notice.value = 'lost' }
+      else {
+        error.value = e?.code || 'transport_failure'
+        if (method === 'cancel' && !cancelDenials.has(error.value)) unconfirmedCancels.value.add(payload.launch_id)
+        if (method === 'start' && ['deadline', 'timeout', 'cancelled', 'transport_failure', 'invalid_reply', 'native_launch_uncertain'].includes(error.value)) notice.value = 'lost'
+      }
     }
-  } finally { if (life === lifetime) { pending.value = false; await announce() } }
+  } finally { if (life === lifetime) { pending.value = false; await announce(payload.launch_id) } }
 }
 </script>
 <template>
-  <section class="native-launch" :lang="locale" aria-labelledby="native-launch-title">
+  <section ref="panel" class="native-launch" :lang="locale" aria-labelledby="native-launch-title">
     <h2 id="native-launch-title">{{ copy.title }}</h2><p>{{ copy.intro }}</p>
     <p v-if="!ready && !plan && !history.length">{{ copy.missing }}</p>
     <div class="actions"><button class="review" type="button" :disabled="locked || !ready" @click="review">{{ copy.review }}</button></div>
@@ -82,12 +105,13 @@ async function request(method, record) {
       <h3>{{ copy.states[record.value.state] }}</h3>
       <dl><dt>{{ copy.source }}</dt><dd>{{ record.preparation.source.source_name }}<br><span class="mono">{{ record.preparation.source.source_revision }}<br>{{ record.preparation.source.source_sha256 }}</span></dd><dt>{{ copy.project }}</dt><dd class="mono">{{ record.value.request.project_id }}</dd><dt>{{ copy.revision }}</dt><dd>{{ record.value.request.project_revision }}</dd><dt>{{ copy.operation }}</dt><dd class="mono">{{ record.value.preparation.operation_id }}</dd><dt>{{ copy.simulation }}</dt><dd class="mono">{{ record.value.request.simulation_id }}</dd><dt>{{ copy.artifact }}</dt><dd class="mono">{{ record.value.request.artifact_sha256 }}</dd><dt>{{ copy.run }}</dt><dd class="mono">{{ record.value.request.run_id }}</dd><dt>{{ copy.digest }}</dt><dd class="mono">{{ record.value.launch_sha256 }}</dd><dt>{{ copy.runtime }}</dt><dd class="mono">{{ record.value.request.runtime_sha256 }}</dd><dt>{{ copy.model }}</dt><dd>{{ record.value.model_label }}</dd><dt>{{ copy.ceiling }}</dt><dd>{{ record.value.ceiling_microusd || '—' }}</dd><dt>{{ copy.platforms }}</dt><dd>{{ record.value.request.platforms.join(', ') }}</dd><dt>{{ copy.seed }}</dt><dd>{{ record.value.request.seed }}</dd><dt>{{ copy.rounds }}</dt><dd>{{ record.value.request.max_rounds }}</dd><dt>{{ copy.calls }}</dt><dd>{{ record.value.limits.max_calls }}</dd><dt>{{ copy.input }}</dt><dd>{{ record.value.limits.max_input_bytes }}</dd><dt>{{ copy.output }}</dt><dd>{{ record.value.limits.max_output_tokens }}</dd><dt>{{ copy.seconds }}</dt><dd>{{ record.value.limits.max_run_seconds }}</dd></dl>
       <p v-if="record.value.error_code">{{ nativeLaunchError(copy, record.value.error_code) }}</p>
+      <p v-if="unconfirmedCancels.has(record.value.request.run_id)" :id="'native-cancel-unconfirmed-' + record.value.request.run_id" class="cancellation-unconfirmed">{{ copy.cancelUnconfirmed }}</p>
       <p v-if="record.value.cancel_requested" class="cancellation">{{ copy.cancellation }}</p>
       <h4>{{ copy.cleanup }}</h4><p class="cleanup">{{ !record.value.cleanup.known ? copy.unknown : record.value.cleanup.pending ? copy.pendingCleanup : copy.observedCleanup }}<span v-if="record.value.cleanup.known"> · {{ record.value.cleanup.owner_thread_alive ? copy.alive : copy.stopped }}</span></p>
       <template v-if="record.value.workflow"><dl><dt>{{ copy.workflow }}</dt><dd class="mono">{{ record.value.workflow.workflow_id }}</dd><dt>{{ copy.temporal }}</dt><dd class="mono">{{ record.value.workflow.temporal_run_id }}</dd></dl></template>
       <template v-if="record.value.receipt"><h4>{{ copy.receipt }}</h4><dl class="receipt"><dt>{{ copy.attempt }}</dt><dd class="mono">{{ record.value.receipt.attempt_id }}</dd><dt>{{ copy.instance }}</dt><dd class="mono">{{ record.value.receipt.instance_id }}</dd><dt>{{ copy.requestDigest }}</dt><dd class="mono">{{ record.value.receipt.request_fingerprint }}</dd><dt>{{ copy.evidence }}</dt><dd class="mono">{{ record.value.receipt.evidence_sha256 }}</dd></dl></template><p v-else class="no-receipt">{{ copy.noReceipt }}</p>
       <p v-if="!record.value.authorization.model_calls_enabled || !record.value.ceiling_microusd" class="limitations">{{ copy.disabled }}</p>
-      <div class="actions"><button v-if="record.key === 'plan'" class="start primary" type="button" :disabled="!canStart" @click="request('start', record)">{{ copy.start }}</button><button class="refresh" type="button" :disabled="locked" @click="request('status', record)">{{ copy.refresh }}</button><button class="cancel" type="button" :disabled="locked || !!record.value.receipt || record.value.cancel_requested" @click="request('cancel', record)">{{ copy.cancel }}</button><button v-if="record.value.state === 'completed' && record.value.receipt?.outcome === 'completed'" class="inspect" type="button" :disabled="locked" @click="inspect(record)">{{ copy.inspect }}</button><button v-if="record.value.state === 'completed' && record.value.receipt?.outcome === 'completed'" class="use-report" type="button" :disabled="locked" @click="inspect(record, 'report')">{{ copy.useReport }}</button></div>
+      <div class="actions"><button v-if="record.key === 'plan'" class="start primary" type="button" :disabled="!canStart" @click="request('start', record)">{{ copy.start }}</button><button :id="'native-refresh-' + record.value.request.run_id" class="refresh" type="button" :disabled="locked" :aria-describedby="unconfirmedCancels.has(record.value.request.run_id) ? 'native-cancel-unconfirmed-' + record.value.request.run_id : undefined" @click="request('status', record)">{{ copy.refresh }}</button><button class="cancel" type="button" :disabled="!canCancel(record.value)" @click="request('cancel', record)">{{ copy.cancel }}</button><button v-if="record.value.state === 'completed' && record.value.receipt?.outcome === 'completed'" class="inspect" type="button" :disabled="locked" @click="inspect(record)">{{ copy.inspect }}</button><button v-if="record.value.state === 'completed' && record.value.receipt?.outcome === 'completed'" class="use-report" type="button" :disabled="locked" @click="inspect(record, 'report')">{{ copy.useReport }}</button></div>
     </article>
     <div class="actions"><button class="clear" type="button" @click="clear">{{ copy.clear }}</button></div>
   </section>
