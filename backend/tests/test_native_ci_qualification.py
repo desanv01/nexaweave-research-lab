@@ -12,10 +12,12 @@ import subprocess
 import sys
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
 from tools import run_native_ci_qualification as ci
+from tools import run_native_temporal_tests as native_temporal
 
 
 pytestmark = pytest.mark.skipif(os.name != 'nt', reason='actual Windows job trees required')
@@ -167,7 +169,7 @@ def test_real_cancel_joins_both_active_trees_and_descendants(tmp_path):
     assert_controller_lifecycle(output, (first, second), interrupted=True)
 
 
-def test_real_whole_deadline_closes_both_trees(tmp_path):
+def test_real_whole_deadline_closes_both_trees(tmp_path, monkeypatch, capsys):
     first, _, _ = local_lane(tmp_path, 'first', wait=True)
     second, _, _ = local_lane(tmp_path, 'second', wait=True)
     started = time.monotonic()
@@ -176,6 +178,85 @@ def test_real_whole_deadline_closes_both_trees(tmp_path):
     assert time.monotonic() - started < 15
     assert b'whole deadline exhausted' in output
     assert_controller_lifecycle(output, (first, second), interrupted=True)
+
+    owners = []
+    owner_type = native_temporal._owner_type()
+
+    class RecordingOwner(owner_type):
+        def __init__(self):
+            super().__init__()
+            owners.append(self)
+
+    monkeypatch.setattr(native_temporal, "_owner_type", lambda: RecordingOwner)
+    for should_timeout in (False, True):
+        lane, root_ready, child_ready = local_lane(
+            tmp_path, "temporal-timeout" if should_timeout else "temporal-success",
+            wait=should_timeout, descendant=True,
+        )
+        assert native_temporal._run_owned(
+            lane.argv, lambda directory: None, max_seconds=10,
+        ) == int(should_timeout)
+        reported = capsys.readouterr()
+        assert reported.out == "native_temporal_owned_tree_private_cwd_closed\n"
+        assert reported.err == ("native_temporal_qualification_timeout\n" if should_timeout else "")
+        assert root_ready.is_file() and child_ready.is_file()
+        owner = owners[-1]
+        assert owner.closed and owner.tree_empty and owner.job is None
+        assert owner.process.returncode is not None
+        assert not Path(owner._directory_name).exists()
+
+    clock = SimpleNamespace(now=100.0)
+    monkeypatch.setattr(native_temporal, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    stops = []
+    startup_error = RuntimeError("synthetic native Temporal startup failure")
+
+    class StartupOwner:
+        def __init__(self):
+            self.closed = False
+            self.cleanup_deadline = None
+            self.started = False
+            self.tree_empty = False
+            self.process = None
+
+        def bind_private_directory(self, directory):
+            self.directory = directory
+
+        def start(self, _popen, _command, **_kwargs):
+            clock.now = start_at
+            self.started = True
+            self.process = SimpleNamespace(returncode=0, wait=self.wait)
+            if fail_start:
+                self.stop([])
+                raise startup_error
+            return self.process
+
+        def wait(self, *, timeout):
+            pytest.fail(f"late startup reached wait({timeout})")
+
+        def stop(self, _threads, *, timeout):
+            stops.append((self.cleanup_deadline, self.cleanup_timeout, timeout))
+            self.closed = self.tree_empty = True
+
+        def cleanup_private_directory(self, directory):
+            assert self.closed and self.tree_empty and directory is self.directory
+            directory.cleanup()
+
+    monkeypatch.setattr(native_temporal, "_owner_type", lambda: StartupOwner)
+    for start_at, expected_stop in ((101.0, (104.0, 3.0, 3.0)), (109.0, (110.0, 1.0, 1.0))):
+        clock.now = 100.0
+        fail_start = True
+        with pytest.raises(RuntimeError) as caught:
+            native_temporal._run_owned(("unused",), lambda directory: None, max_seconds=10)
+        assert caught.value is startup_error
+        assert stops.pop() == expected_stop and not stops
+
+    clock.now = 100.0
+    start_at, fail_start = 107.0, False
+    assert native_temporal._run_owned(("unused",), lambda directory: None, max_seconds=10) == 1
+    assert stops == [(110.0, 3.0, 3.0)]
+    reported = capsys.readouterr()
+    assert reported.out == "native_temporal_owned_tree_private_cwd_closed\n"
+    assert reported.err == "native_temporal_qualification_timeout\n"
 
 
 def test_controller_diagnostic_sink_failure_does_not_skip_either_tree_cleanup(tmp_path):
