@@ -25,9 +25,14 @@ UNIT_REGRESSIONS = (
     ROOT / 'services/knowledge/tests/test_budget.py',
 )
 PG_REGRESSIONS = (ROOT / 'services/knowledge/tests/test_budget_postgres.py',)
+HOSTED_COUNTS = {
+    'test_preparation_store.py': 8,
+    'test_budget_postgres.py': 10,
+    'test_temporal_preparation.py': 1,
+}
 
 
-def child(integration: bool) -> int:
+def child(integration: bool, *, hosted: bool = False) -> int:
     guard = LoopbackOnlySockets()
     guard.install()
     try:
@@ -43,13 +48,18 @@ def child(integration: bool) -> int:
                 return 1
         import pytest
 
+        new_targets = tuple(path.name for path in NEW_TARGETS)
+
         class Qualification:
             passed = 0
             skipped = 0
             new_passed = 0
             collected = 0
-            targets = {path.name: 0 for path in NEW_TARGETS}
+            targets = dict.fromkeys(new_targets, 0)
             node_paths = {}
+            if hosted:
+                targets[PG_REGRESSIONS[0].name] = 0
+            passed_nodes = set()
 
             def pytest_collection_finish(self, session):
                 self.collected = len(session.items)
@@ -60,10 +70,12 @@ def child(integration: bool) -> int:
                     self.skipped += 1
                 if report.when == 'call' and report.passed:
                     self.passed += 1
-                    for name in self.targets:
-                        if self.node_paths.get(report.nodeid) == name:
-                            self.targets[name] += 1
-                            self.new_passed += 1
+                    self.passed_nodes.add(report.nodeid)
+                    name = self.node_paths.get(report.nodeid)
+                    if name in self.targets:
+                        self.targets[name] += 1
+                    if name in new_targets:
+                        self.new_passed += 1
 
         proof = Qualification()
         targets = NEW_TARGETS + (PG_REGRESSIONS if integration else UNIT_REGRESSIONS)
@@ -81,7 +93,15 @@ def child(integration: bool) -> int:
             'test_durable_preparation.py', 'test_preparation_api.py', 'test_temporal_preparation.py')
         complete = (proof.collected > 0 and proof.new_passed > 0 and proof.skipped == 0
                     and all(proof.targets[name] > 0 for name in expected))
-        print(json.dumps(dict(preparation_mode='integration' if integration else 'unit',
+        mode = 'integration' if integration else 'unit'
+        if hosted:
+            mode = 'hosted-integration'
+            complete = (complete and result == 0
+                        and proof.collected == proof.passed == sum(HOSTED_COUNTS.values())
+                        and proof.passed_nodes == proof.node_paths.keys()
+                        and len(proof.passed_nodes) == proof.collected
+                        and all(proof.targets[name] == count for name, count in HOSTED_COUNTS.items()))
+        print(json.dumps(dict(preparation_mode=mode,
                               collected=proof.collected, passed=proof.passed,
                               skipped=proof.skipped, new_passed=proof.new_passed,
                               targets=proof.targets, complete=complete), sort_keys=True))
@@ -98,14 +118,17 @@ def child(integration: bool) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    mode = parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument('--unit', action='store_true')
-    mode.add_argument('--integration', action='store_true')
+    group = parser.add_mutually_exclusive_group(required=True)
+    for mode in ('unit', 'integration'):
+        group.add_argument('--' + mode, dest='mode', action='store_const', const=mode)
+    group.add_argument('--hosted-integration', dest='mode', action='store_const',
+                       const='hosted-integration', help=argparse.SUPPRESS)
     parser.add_argument('--child', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args()
+    integration = args.mode != 'unit'
     if args.child:
-        return child(args.integration)
-    if args.integration:
+        return child(integration, hosted=args.mode == 'hosted-integration')
+    if integration:
         password = os.environ.get('PROJECT_STORE_TEST_PASSWORD')
         if not password or os.environ.get('TEMPORAL_TEST_ADDRESS') != '127.0.0.1:17233':
             parser.error('explicit approved disposable PostgreSQL/Temporal fixture required')
@@ -120,7 +143,7 @@ def main() -> int:
         env['PYTHONPATH'] = os.pathsep.join((str(ROOT), str(ROOT / 'backend'), str(ROOT / 'backend/tests'), str(ROOT / 'services/knowledge/tests')))
         env.update(HF_HUB_OFFLINE='1', TRANSFORMERS_OFFLINE='1', HF_HUB_DISABLE_TELEMETRY='1',
                    DO_NOT_TRACK='1', NEXAWEAVE_NATIVE_TEST_OFFLINE='1')
-        if args.integration:
+        if integration:
             from psycopg.conninfo import make_conninfo
             env.update(PROJECT_STORE_POSTGRES_INTEGRATION='1', KNOWLEDGE_POSTGRES_INTEGRATION='1',
                        TEMPORAL_EXECUTION_INTEGRATION='1', TEMPORAL_TEST_ADDRESS='127.0.0.1:17233')
@@ -129,11 +152,11 @@ def main() -> int:
             env['PROJECT_STORE_POSTGRES_TEST_DSN'] = dsn
             env['KNOWLEDGE_POSTGRES_TEST_DSN'] = dsn
         process = owner.start(subprocess.Popen,
-            [sys.executable, str(Path(__file__).resolve()), '--child', '--integration' if args.integration else '--unit'],
+            [sys.executable, str(Path(__file__).resolve()), '--child', '--' + args.mode],
             cwd=directory.name, env=env, stdin=subprocess.DEVNULL, shell=False, close_fds=True,
             creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
         try:
-            return process.wait(timeout=600 if args.integration else 180)
+            return process.wait(timeout=600 if integration else 180)
         except subprocess.TimeoutExpired:
             print('preparation_qualification_timeout', file=sys.stderr)
             return 1

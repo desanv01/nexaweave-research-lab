@@ -336,6 +336,19 @@ async function plan(payload) {
   const before = await history({ schema_version: 1, report_id: parent.report_id,
     report_plan_sha256: parent.plan_sha256, before_ordinal: null })
   check(before.head_sha256 === payload.expected_history_sha256)
+  if (payload.output_language === 'ms') {
+    // History uses English; switch only the UI locale before submitting the Malay draft.
+    const requestsBeforeLocale = requestCount
+    await changeLocale({ locale: 'zh' })
+    check(await bound(() => page.locator('#workbench-language').inputValue()) === 'zh')
+    check((await boundedText(page.locator('.workbench .intro h1'), 256)).trim() === '证据工作台')
+    check((await boundedText(scope().locator('#followup-title'), 256)).trim() === '有依据的报告后续问答')
+    check((await boundedText(scope().locator('.followup-review'), 256)).trim() === '审阅问题与历史')
+    check(await bound(() => page.locator('#followup-question').inputValue()) === payload.question)
+    check(await bound(() => page.locator('#followup-language').inputValue()) === 'ms')
+    check((await boundedText(page.locator('#followup-language option:checked'), 256)).trim() === 'Bahasa Melayu')
+    check(requestCount === requestsBeforeLocale)
+  }
   const sent = await exchange(followupRoute('plan'), 'POST', () => click(scope().locator('.followup-review')), 262272)
   fields(sent, 'schema_version turn_id report_id report_plan_sha256 question output_language expected_history_sha256')
   uuid(sent.turn_id)

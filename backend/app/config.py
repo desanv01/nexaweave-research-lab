@@ -22,6 +22,7 @@ class Config:
     # Flask配置
     SECRET_KEY = os.environ.get('SECRET_KEY', 'nexaweave-secret-key')
     DEBUG = os.environ.get('FLASK_DEBUG', 'False').lower() == 'true'
+    SCANNED_PDF_OCR_ENABLED = os.environ.get('NEXAWEAVE_SCANNED_PDF_OCR_ENABLED') == '1'
     # Explicit browser Origin policy. The factory reads the environment at
     # startup unless a subclass overrides this attribute.
     NEXAWEAVE_ALLOWED_ORIGINS = ('http://localhost:3000', 'http://127.0.0.1:3000')

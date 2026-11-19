@@ -11,7 +11,7 @@ from typing import Literal
 from unicodedata import category
 from uuid import UUID, uuid5, NAMESPACE_URL
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator, create_model
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer, model_validator, create_model
 
 
 class StrictModel(BaseModel):
@@ -100,6 +100,14 @@ class EntityTypeSpec(StrictModel):
     name: str
     description: str = Field(min_length=1, max_length=500)
     attributes: tuple[AttributeSpec, ...] = Field(default=(), max_length=20)
+    examples: tuple[str, ...] | None = None
+
+    @model_serializer(mode="wrap")
+    def serialize_examples(self, handler):
+        result = handler(self)
+        if self.examples is None:
+            result.pop("examples", None)
+        return result
 
     @field_validator("name")
     @classmethod
@@ -133,10 +141,23 @@ class OntologySpec(StrictModel):
     revision: UUID
     entity_types: tuple[EntityTypeSpec, ...] = Field(min_length=1, max_length=50)
     edge_types: tuple[EdgeTypeSpec, ...] = Field(max_length=50)
+    saved_ontology: Literal["project_revision_v4"] | None = None
+
+    @model_serializer(mode="wrap")
+    def serialize_saved_identity(self, handler):
+        result = handler(self)
+        if self.saved_ontology is None:
+            result.pop("saved_ontology", None)
+        return result
 
     @model_validator(mode="after")
     def validate_types(self):
         names = [item.name for item in self.entity_types]
+        endpoints = set(names)
+        if self.saved_ontology is not None:
+            endpoints.add("Entity")
+        elif any(item.examples is not None for item in self.entity_types):
+            raise ValueError("ontology examples require saved authority")
         edges = [item.name for item in self.edge_types]
         if len(set(names)) != len(names) or len(set(edges)) != len(edges):
             raise ValueError("duplicate type")
@@ -146,7 +167,7 @@ class OntologySpec(StrictModel):
                 raise ValueError("duplicate attribute")
         for edge in self.edge_types:
             for pair in edge.source_targets:
-                if pair.source not in names or pair.target not in names:
+                if pair.source not in endpoints or pair.target not in endpoints:
                     raise ValueError("unknown source/target type pair")
         return self
 
@@ -156,7 +177,10 @@ class OntologySpec(StrictModel):
         edge_map: dict[tuple[str, str], list[str]] = {}
         for item in self.entity_types:
             fields = {a.name: (TYPE_MAP[a.type] | None, Field(default=None, description=a.description)) for a in item.attributes}
-            entity_models[item.name] = create_model(item.name, __doc__=item.description, **fields)
+            description = item.description
+            if item.examples:
+                description += "\nExamples: " + json.dumps(item.examples, ensure_ascii=False)
+            entity_models[item.name] = create_model(item.name, __doc__=description, **fields)
         for item in self.edge_types:
             fields = {a.name: (TYPE_MAP[a.type] | None, Field(default=None, description=a.description)) for a in item.attributes}
             edge_models[item.name] = create_model(item.name, __doc__=item.description, **fields)

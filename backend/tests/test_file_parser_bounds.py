@@ -157,6 +157,80 @@ def test_fifo_rejected_without_opening(tmp_path):
         FileParser.extract_text(pipe)
 
 
+def _scanned_pdf_fixture(samples, content):
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Count 1 /Kids [3 0 R] >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 432 216]"
+        b" /Resources << /XObject << /Im0 4 0 R >> >> /Contents 5 0 R >>",
+        (b"<< /Type /XObject /Subtype /Image /Width 1200 /Height 600"
+         b" /ColorSpace /DeviceGray /BitsPerComponent 8 /Length %d >>\nstream\n"
+         % len(samples)) + samples + b"\nendstream",
+        (b"<< /Length %d >>\nstream\n" % len(content)) + content + b"\nendstream",
+    ]
+    pdf = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+    offsets = []
+    for number, body in enumerate(objects, start=1):
+        offsets.append(len(pdf))
+        pdf.extend(f"{number} 0 obj\n".encode("ascii"))
+        pdf.extend(body)
+        pdf.extend(b"\nendobj\n")
+    xref_offset = len(pdf)
+    pdf.extend(b"xref\n0 6\n0000000000 65535 f \n")
+    for offset in offsets:
+        pdf.extend(f"{offset:010d} 00000 n \n".encode("ascii"))
+    pdf.extend(f"trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n".encode("ascii"))
+    return bytes(pdf)
+
+
+def test_scanned_pdf_preflight_admits_exact_gray_samples_and_checks_bounds(tmp_path, monkeypatch):
+    import fitz
+    import pymupdf
+
+    # Render the two fixture lines separately. Only the resulting pixels go
+    # into the final PDF.
+    with fitz.open() as staging:
+        page = staging.new_page(width=432, height=216)
+        page.insert_text((36, 80), "PUBLIC LIBRARY NOTICE", fontsize=24)
+        page.insert_text((36, 135), "MEETING AT 10 AM", fontsize=24)
+        pixmap = page.get_pixmap(dpi=200, colorspace=fitz.csGRAY, alpha=False)
+        assert (pixmap.width, pixmap.height, pixmap.n) == (1200, 600, 1)
+        samples = pixmap.samples
+    assert len(samples) == 720_000
+
+    content = b"q 432 0 0 216 0 0 cm /Im0 Do Q\n"
+    pdf = _scanned_pdf_fixture(samples, content)
+    limits = ParseLimits(max_file_bytes=len(pdf), max_pdf_pages=1)
+
+    def forbid_native_access(*_args, **_kwargs):
+        pytest.fail("scanned PDF preflight called a native PDF or image entry point")
+
+    with monkeypatch.context() as guard:
+        for module in (fitz, pymupdf):
+            for entrypoint in ("open", "Document", "Pixmap"):
+                guard.setattr(module, entrypoint, forbid_native_access)
+
+        image = parser_module._preflight_scanned_pdf(pdf, limits=limits)
+        assert (image.width, image.height, image.length) == (1200, 600, len(samples))
+        assert image.offset == pdf.index(b"\nstream\n") + len(b"\nstream\n")
+        assert pdf[image.offset:image.offset + image.length] == samples
+
+        with pytest.raises(ParseLimitError):
+            parser_module._preflight_scanned_pdf(pdf, limits=ParseLimits(max_file_bytes=len(pdf) - 1))
+        with pytest.raises(ParseLimitError):
+            parser_module._preflight_scanned_pdf(pdf.replace(b"/Width 1200", b"/Width 9200", 1))
+        with pytest.raises(UnsupportedDocumentError):
+            parser_module._preflight_scanned_pdf(_scanned_pdf_fixture(samples, content + b"q Q\n"))
+        with pytest.raises(MalformedDocumentError):
+            parser_module._preflight_scanned_pdf(pdf.replace(b"/Length 720000", b"/Length 720001", 1))
+        with pytest.raises(MalformedDocumentError):
+            parser_module._preflight_scanned_pdf(pdf.replace(b"0000000000 65535 f", b"0000000001 65535 f", 1))
+
+    source = tmp_path / "image-only.pdf"
+    source.write_bytes(pdf)
+    assert FileParser.extract_text(source, limits=limits) == ""
+
+
 def test_pdf_header_and_valid_fixtures(tmp_path):
     import fitz
     malformed = tmp_path / "bad.pdf"

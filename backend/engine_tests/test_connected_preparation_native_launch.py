@@ -98,14 +98,16 @@ def _checkpoint_http(monkeypatch, host, observations):
     ).test_client()
     headers = {'Authorization': 'Bearer ' + settings.token}
 
-    async def post(method, payload, *, status=200, code=None):
+    async def post(method, payload, *, status=200, code=None, request_headers=None):
         response = await asyncio.to_thread(client.post, f'/api/native-launch/{method}/{host.display_graph_id}',
-                                           json=payload, headers=headers)
+                                           json=payload, headers=headers if request_headers is None else request_headers)
         assert response.status_code == status
         if code is not None:
             assert response.json == {'success': False, 'error': {'code': code}}
             return None
         assert response.headers['Cache-Control'] == 'no-store'
+        if method == 'interview':
+            assert len(response.get_data()) <= 4096
         return response.json['data']
 
     async def page(payload, *, refused=()):
@@ -129,8 +131,15 @@ def _checkpoint_http(monkeypatch, host, observations):
     return post, page
 
 
+def _interview_twitter_backends(**kwargs):
+    from test_durable_native_launch import scripted_native_backends
+
+    return {'twitter': scripted_native_backends(**kwargs)['twitter']}
+
+
 @pytest.mark.asyncio
-async def test_new_inherited_ready_artifacts_run_actual_both_platforms_through_pg_temporal(factory,tmp_path,monkeypatch):
+@pytest.mark.parametrize('interview', [False, True], ids=['paired', 'twitter-interview'])
+async def test_new_inherited_ready_artifacts_run_actual_both_platforms_through_pg_temporal(factory,tmp_path,monkeypatch,interview):
     monkeypatch.chdir(tmp_path)
     migrate_all(factory)
     temporal=await loopback_client()
@@ -139,7 +148,21 @@ async def test_new_inherited_ready_artifacts_run_actual_both_platforms_through_p
     prep_temporal=TemporalPreparationHost(client=temporal,task_queue='mf-connected-prep-'+uuid4().hex,
                                        trusted_host=prep,allow_dispatch=lambda:True)
     loop=asyncio.get_running_loop();prep.scheduler=prep_temporal.scheduler_for(loop)
-    host=launch_host(prep,factory)
+    prompt, answer = 'PRIVATE_TWITTER_QUESTION_20c9', 'PRIVATE_TWITTER_ANSWER_25d8'
+    if interview:
+        from app.services.durable_native_launch_host import DurableNativeLaunchHost
+        from app.services.native_launch_models import BoundedNativeModelFactory
+        from test_durable_native_launch import LIMITS
+
+        model = BoundedNativeModelFactory(('twitter',), dict(LIMITS), _interview_twitter_backends,
+                                          cooperative_transport=True, transport_timeout_seconds=1)
+        host = DurableNativeLaunchHost(preparation_host=prep, connection_factory=factory,
+            runtime_sha256='c'*64, model_label='scripted', limits=LIMITS, model_factory=model,
+            account_id=prep.account_id, ceiling_microusd=4, authorize=lambda: True,
+            audited_scripted_interview=answer)
+        http, _ = _checkpoint_http(monkeypatch, host, None)
+    else:
+        host=launch_host(prep,factory)
     created=[]
     def construct(native_request):
         supervisor=host.supervisor_factory(native_request);created.append(supervisor);return supervisor
@@ -151,6 +174,8 @@ async def test_new_inherited_ready_artifacts_run_actual_both_platforms_through_p
         async with prep_temporal.worker(),native.worker():
             payload=request(retained)
             payload['options'].update(types=['Person','Organization'],max_agents=2,max_rounds=1)
+            if interview:
+                payload['options']['platforms'] = ['twitter']
             planned=await asyncio.to_thread(prep.plan,payload)
             await asyncio.to_thread(prep.start,preparation_reference(planned))
             prep_row=prep.store.get('owner',planned['operation_id'])
@@ -159,15 +184,62 @@ async def test_new_inherited_ready_artifacts_run_actual_both_platforms_through_p
             assert ready['state']=='ready' and len(ready['actors'])==2 and ready['simulation_executed'] is False
             root=prep.root/ready['receipt']['simulation_id']
             original={file['name']:(root/file['name']).read_bytes() for file in ready['receipt']['files']}
-            profiles=json.loads(original['reddit_profiles.json'])
-            assert len(profiles)==2 and all(profile['age']==32 and profile['country']=='MY' for profile in profiles)
+            if not interview:
+                profiles=json.loads(original['reddit_profiles.json'])
+                assert len(profiles)==2 and all(profile['age']==32 and profile['country']=='MY' for profile in profiles)
             dto=await asyncio.to_thread(host.plan,declaration(planned))
             assert dto['preparation']['artifact_sha256']==ready['receipt']['artifact_sha256']
             assert not created and not (root/'.native_prepared_start_claim').exists()
             await asyncio.to_thread(host.start,reference(dto))
             row=host.store.get('owner',dto['request']['run_id'])
-            receipt=await asyncio.wait_for(native.result(row.request,NativeWorkflowRef(**row.workflow)),180)
+            native_end = monotonic() + 180
+            if interview:
+                # Use the actual supervisor's one-shot readiness before the protected post.
+                while not created or not created[0].interview_ready:
+                    assert monotonic() < native_end and (not created or not created[0]._outcome.is_set())
+                    await asyncio.sleep(0.05)
+                local_run = await asyncio.to_thread(NativeRunStore(factory).get, 'owner', row.run_id)
+                assert local_run.state.value == 'running' and local_run.child is not None
+                driver = created[0].coordinator.driver
+                owned = driver._owned
+                assert owned.child == local_run.child and owned.private_reader is not None
+                command = {**reference(dto), 'command_id': str(uuid4()), 'platform': 'twitter',
+                           'agent_id': 0, 'prompt': prompt}
+                await http('interview', command, status=401, code='unauthorized', request_headers={})
+                await http('interview', command, status=403, code='origin_denied',
+                           request_headers={'Origin': 'https://foreign.invalid'})
+                await http('interview', {**command, 'agent_id': 499}, status=400, code='invalid_request')
+                result = await http('interview', command)
+                assert result == {**{key: value for key, value in command.items() if key != 'prompt'},
+                    'display_graph_id': host.display_graph_id, 'scope': host.scope_dto,
+                    'attempt_id': str(local_run.attempt_id), 'instance_id': str(local_run.child.instance_id),
+                    'request_fingerprint': row.request.fingerprint, 'response': answer}
+                # Prove the public response was fenced by durable completion and
+                # ordinary closure before awaiting any Temporal result.
+                visible = NativeRunStore(factory).get('owner', row.run_id)
+                assert visible.state.value == 'completed' and not visible.cancel_requested
+                assert visible.child == local_run.child and visible.attempt_id == local_run.attempt_id
+                visible_receipt = visible.receipt
+                assert visible_receipt.outcome == 'completed'
+                assert visible_receipt.request_fingerprint == row.request.fingerprint
+                saved = NativeLaunchStore(factory).get('owner', row.run_id)
+                assert saved.state == 'completed' and saved.receipt == visible_receipt.to_wire()
+                with factory() as conn:
+                    budget = host.budget._row(conn, host.account_id, row.run_id)
+                assert budget.state.value == 'settled' and budget.attempt_id == row.budget_attempt_id
+                assert budget.receipt.launch_sha256 == row.launch_sha256
+                assert budget.receipt.native_receipt == visible_receipt
+                owner = created[0]._snapshot(refresh=False)
+                assert not owner.cleanup_pending and not owner.thread_alive
+                assert not created[0]._interview_fenced
+                assert driver._closed and driver._owned is None
+                assert owned.pipe.closed and owned.private_pipe.closed
+                assert not owned.reader.thread.is_alive() and not owned.private_reader.thread.is_alive()
+            receipt=await asyncio.wait_for(native.result(row.request,NativeWorkflowRef(**row.workflow)),
+                                           max(0, native_end - monotonic()))
             assert receipt.outcome=='completed'
+            if interview:
+                assert receipt == visible_receipt
             actual=NativeRunStore(factory).get('owner',row.run_id)
             assert actual.receipt==receipt and actual.request==row.request
             final=await asyncio.to_thread(host.status,reference(dto))
@@ -176,7 +248,7 @@ async def test_new_inherited_ready_artifacts_run_actual_both_platforms_through_p
             with factory() as conn:reservation=host.budget._row(conn,host.account_id,row.run_id)
             assert type(reservation.receipt) is NativeBudgetReceipt and reservation.receipt.native_receipt==receipt
             assert host.budget.status('owner',host.account_id).accounted_ceiling_microusd==8
-            for platform in ('twitter','reddit'):
+            for platform in row.request.platforms:
                 with sqlite3.connect(root/(platform+'_simulation.db')) as db:
                     assert db.execute('SELECT COUNT(*) FROM user').fetchone()[0]==2
                     posts=[value[0] for value in db.execute('SELECT content FROM post')]
@@ -187,6 +259,22 @@ async def test_new_inherited_ready_artifacts_run_actual_both_platforms_through_p
             assert (root/'.native_prepared_start_claim').is_file()
             local=await native.retry_cleanup(row.request)
             assert not local.cleanup_pending and not local.owner_thread_alive
+            if interview:
+                assert created[0]._interview_fenced
+                await http('interview', command, status=503, code='native_launch_unavailable')
+                with factory() as conn:
+                    operations = conn.execute(
+                        'SELECT operation_id FROM mf_execution.reservations WHERE account_id=%s',
+                        (host.account_id,),
+                    ).fetchall()
+                assert {str(item[0]) for item in operations} == {str(prep_row.operation_id), str(row.run_id)}
+                history = await temporal.get_workflow_handle(row.workflow['workflow_id'],
+                    run_id=row.workflow['temporal_run_id']).fetch_history()
+                retained = [history.to_json().encode(), repr((actual, reservation,
+                    NativeLaunchStore(factory).get('owner', row.run_id))).encode()]
+                retained += [(root/name).read_bytes() for name in (*original,
+                    'twitter_simulation.db', 'twitter/actions.jsonl')]
+                assert not any(marker.encode() in blob for marker in (prompt, answer) for blob in retained)
             recovered=await asyncio.to_thread(host.start,reference(dto))
             assert recovered['receipt']==receipt.to_wire() and len(created)==1
             assert all((root/name).read_bytes()==data for name,data in original.items())

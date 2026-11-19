@@ -24,6 +24,8 @@ UNIT_TARGETS = tuple(ROOT / 'backend/tests' / name for name in (
 ENGINE_TARGET = ROOT / 'backend/engine_tests/test_connected_report_process.py'
 PG_TARGET = ROOT / 'services/knowledge/tests/test_connected_native_report.py'
 PG_STORE_TARGET = ROOT / 'services/knowledge/tests/test_report_store.py'
+SINGLE_BROWSER_TARGET = ROOT / 'services/knowledge/tests/test_connected_native_single_platform_browser.py'
+SINGLE_BROWSER_NODE = 'test_twitter_only_suggest_ready_and_native_workbench'
 MARKERS = ('postgres: approved disposable PostgreSQL authority\n'
            'connected_report_caller_cancel: opt-in real caller cancellation and PostgreSQL hold\n'
            'connected_report_engine: actual locked connected report\n'
@@ -110,7 +112,7 @@ def require_installed_freshness(package_specs, *, root=None, prefix=None):
 
 
 def child(mode: str, journey: bool = False, actual_graph: bool = False, store_only: bool = False,
-          browser: bool = False, caller_cancel: bool = False) -> int:
+          browser: bool = False, caller_cancel: bool = False, twitter_browser: bool = False) -> int:
     guard = LoopbackOnlySockets()
     guard.install()
     try:
@@ -136,6 +138,8 @@ def child(mode: str, journey: bool = False, actual_graph: bool = False, store_on
             skipped = 0
             paths = {}
             targets = {path.name: 0 for path in (*UNIT_TARGETS, PG_STORE_TARGET, PG_TARGET, ENGINE_TARGET)}
+            if twitter_browser:
+                targets[SINGLE_BROWSER_TARGET.name] = 0
 
             diagnostic_origin = None
             diagnostic_records = 0
@@ -149,6 +153,8 @@ def child(mode: str, journey: bool = False, actual_graph: bool = False, store_on
                                 if fixture else {'schema_version', 'suite', 'nodeid', 'event', 'when', 'outcome',
                                                  'duration_seconds', 'monotonic_seconds', 'elapsed_seconds'})
                     allowed_suites = ('report-ordinary', 'report-cooperative-heartbeat', 'report-caller-cancel') if fixture else ('report',)
+                    if fixture and twitter_browser:
+                        allowed_suites += ('workbench-twitter-ordinary',)
                     if set(record) != expected or type(record['schema_version']) is not int or record['schema_version'] != 1 or record['suite'] not in allowed_suites:
                         return
                     for key in ('monotonic_seconds', 'elapsed_seconds', *(() if fixture else ('duration_seconds',))):
@@ -190,10 +196,12 @@ def child(mode: str, journey: bool = False, actual_graph: bool = False, store_on
                     if Path(item.path).resolve() == PG_TARGET.resolve():
                         item.module._actual_graph_journey = actual_graph
                         item.module._research_browser_journey = browser
+                    elif twitter_browser and Path(item.path).resolve() == SINGLE_BROWSER_TARGET.resolve():
+                        item.module._twitter_browser_journey = True
                 try:
                     self.capture_manager = session.config.pluginmanager.getplugin('capturemanager')
                     for item in session.items:
-                        if Path(item.path).resolve() == PG_TARGET.resolve():
+                        if Path(item.path).resolve() == (SINGLE_BROWSER_TARGET if twitter_browser else PG_TARGET).resolve():
                             item.module._fixture_phase_sink = self.fixture_phase
                 except Exception:
                     pass
@@ -212,7 +220,7 @@ def child(mode: str, journey: bool = False, actual_graph: bool = False, store_on
             selection = 'not postgres'
             required = (ENGINE_TARGET.name,)
         elif mode == 'integration':
-            targets = ((PG_STORE_TARGET,) if store_only else
+            targets = ((SINGLE_BROWSER_TARGET,) if twitter_browser else (PG_STORE_TARGET,) if store_only else
                        (PG_TARGET,) if journey or caller_cancel else (PG_STORE_TARGET, PG_TARGET))
             selection = ('postgres and connected_report_caller_cancel' if caller_cancel else
                          'postgres and not connected_report_caller_cancel')
@@ -230,6 +238,8 @@ def child(mode: str, journey: bool = False, actual_graph: bool = False, store_on
         cancel_node = 'test_actual_native_receipt_to_inherited_report_preserves_inputs_and_disabled_reads[caller-cancel]'
         if caller_cancel:
             selected_targets = [str(PG_TARGET) + '::' + cancel_node]
+        if twitter_browser:
+            selected_targets = [str(SINGLE_BROWSER_TARGET) + '::' + SINGLE_BROWSER_NODE]
         result = int(pytest.main([
             '-q', '--durations=0', '--rootdir', str(ROOT), '-p', 'pytest_asyncio.plugin',
             '-o', 'asyncio_default_fixture_loop_scope=function', '-o', 'markers=' + MARKERS,
@@ -239,8 +249,12 @@ def child(mode: str, journey: bool = False, actual_graph: bool = False, store_on
                     accounting.collected == accounting.passed and accounting.skipped == 0 and
                     all(accounting.targets[name] > 0 for name in required))
         if actual_graph:
+            actual_target = SINGLE_BROWSER_TARGET if twitter_browser else PG_TARGET
             complete = (complete and accounting.collected == accounting.passed == 1
-                        and accounting.targets[PG_TARGET.name] == 1)
+                        and accounting.targets[actual_target.name] == 1)
+        if twitter_browser:
+            complete = (complete and len(accounting.paths) == 1 and
+                        next(iter(accounting.paths)).endswith(SINGLE_BROWSER_TARGET.name + '::' + SINGLE_BROWSER_NODE))
         if caller_cancel:
             complete = (complete and accounting.collected == accounting.passed == 1
                         and accounting.targets[PG_TARGET.name] == 1
@@ -270,6 +284,8 @@ def child(mode: str, journey: bool = False, actual_graph: bool = False, store_on
             complete=complete)
         if caller_cancel:
             result_record['caller_cancel'] = True
+        if twitter_browser:
+            result_record['twitter_browser'] = True
         print(json.dumps(result_record, sort_keys=True))
         if not complete:
             print('connected_report_qualification_incomplete', file=sys.stderr)
@@ -295,6 +311,7 @@ def main() -> int:
                         help='Require the ordinary four-format journey with real co-located Graphiti stores')
     parser.add_argument('--browser', action='store_true',
                         help='Drive the same real graph journey through a fresh isolated research browser')
+    parser.add_argument('--twitter-browser', action='store_true', help='Select the single ordinary Twitter Workbench case')
     args = parser.parse_args()
     mode = 'engine' if args.engine else 'integration' if args.integration else 'unit'
     if args.journey and mode != 'integration':
@@ -309,8 +326,11 @@ def main() -> int:
         parser.error('--store-only is incompatible with --actual-graph')
     if args.browser and (mode != 'integration' or not args.journey or not args.actual_graph):
         parser.error('--browser requires --integration --journey --actual-graph')
+    if args.twitter_browser and not args.browser:
+        parser.error('--twitter-browser requires --browser')
     if args.child:
-        return child(mode, args.journey, args.actual_graph, args.store_only, args.browser, args.caller_cancel)
+        return child(mode, args.journey, args.actual_graph, args.store_only, args.browser, args.caller_cancel,
+                     args.twitter_browser)
     password = os.environ.get('PROJECT_STORE_TEST_PASSWORD')
     if mode == 'integration' and not password:
         parser.error('explicit approved disposable PostgreSQL fixture required')
@@ -359,11 +379,19 @@ def main() -> int:
                 or not chrome.is_file() or not os.access(chrome, os.X_OK)
                 or not (ROOT / 'frontend/node_modules/playwright-core/package.json').is_file()):
             parser.error('explicit installed hosted Node/Chrome/browser runtime required')
-        for path in (ROOT / 'services/knowledge/tests/research_browser_fixture.py',
-                     ROOT / 'frontend/tests/run-research-browser.mjs',
-                     ROOT / 'frontend/tests/research-browser-restart.mjs'):
+        browser_sources = (
+            (ROOT / 'services/knowledge/tests/research_browser_fixture.py', 50000),
+            (ROOT / 'services/knowledge/tests/research_browser_stages.py', 50000),
+            (ROOT / 'frontend/tests/research-browser-ready-configuration.mjs', 50000),
+            (ROOT / 'frontend/tests/run-research-browser.mjs', 50000),
+            (ROOT / 'frontend/tests/research-browser-restart.mjs', 50000),
+            (ROOT / 'frontend/tests/research-browser-ontology.mjs', 16000),
+        )
+        if args.twitter_browser:
+            browser_sources += ((SINGLE_BROWSER_TARGET, 50000),)
+        for path, cap in browser_sources:
             try:
-                _bounded_source_digest(path, 50000)
+                _bounded_source_digest(path, cap)
             except (OSError, ValueError):
                 parser.error('reviewed browser fixture sources required')
         browser_environment = dict(NEXAWEAVE_RESEARCH_BROWSER_NODE=str(node),
@@ -397,7 +425,8 @@ def main() -> int:
             [sys.executable, str(Path(__file__).resolve()), '--child', '--' + mode,
              *(['--journey'] if args.journey else []), *(['--actual-graph'] if args.actual_graph else []),
              *(['--store-only'] if args.store_only else []), *(['--browser'] if args.browser else []),
-             *(['--caller-cancel'] if args.caller_cancel else [])],
+             *(['--caller-cancel'] if args.caller_cancel else []),
+             *(['--twitter-browser'] if args.twitter_browser else [])],
             cwd=directory.name, env=env, stdin=subprocess.DEVNULL, shell=False, close_fds=True,
             creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
         try:
