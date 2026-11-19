@@ -1,4 +1,4 @@
-"""Private fixture for three sequential, independently owned Twitter children."""
+"""Private fixture for independently owned Twitter capture, reference, restore and fork."""
 from __future__ import annotations
 
 import asyncio
@@ -151,7 +151,7 @@ class _RestoredModels:
         genuine_advance = native_twitter_restore._advance_restored_twitter_round
 
         async def observe_advance(child_dir, *, manifest, runner_state, config_bytes, graph,
-                                  expected_post_content, deadline_monotonic):
+                                  expected_post_content, deadline_monotonic, intervention=None):
             try:
                 assert expected_post_content is None
                 assert len(graph.agent_mappings) == len(self.expected_frames) == 2
@@ -175,6 +175,7 @@ class _RestoredModels:
                     child_dir, manifest=manifest, runner_state=runner_state, config_bytes=config_bytes,
                     graph=graph, expected_post_content=expected_post_content,
                     deadline_monotonic=deadline_monotonic,
+                    **({"intervention": intervention} if intervention is not None else {}),
                 )
                 budget.check()
                 step_fields = ("agent_id", "post_id", "after_step")
@@ -357,7 +358,7 @@ def _owned_factory(root, request, model_factory):
     )
 
 
-def _run_child(factory, request, terminal, deadline, prior_pids):
+def _run_child(factory, request, terminal, deadline, prior_pids, *, require_closed=False):
     from nexaweave_execution.native_process_driver import NativeProcessDriver
 
     remaining = deadline - monotonic()
@@ -376,7 +377,9 @@ def _run_child(factory, request, terminal, deadline, prior_pids):
         assert receipt.attempt_id == attempt and receipt.instance_id == child.instance_id
         assert receipt.request_fingerprint == request.fingerprint
     finally:
-        driver.close()
+        closed = driver.close()
+    if require_closed:
+        assert closed is True
     assert monotonic() < deadline
     return child.process_id, receipt.evidence_sha256
 
@@ -546,6 +549,7 @@ def assert_fresh_twitter_continuation(tmp_path, request, original_pid, terminal,
     from nexaweave_execution.native_twitter_checkpoint_binding import (
         NativeRestoredTwitterFactory, NativeTwitterCaptureFactory,
     )
+    from nexaweave_execution.native_run_contracts import SwapActiveActorV1
     from test_native_round_capture import _artifact, _native_rows, _read_bounded
 
     producer, originals, prepared, capture_request = _prepared_twitter(
@@ -664,6 +668,53 @@ def assert_fresh_twitter_continuation(tmp_path, request, original_pid, terminal,
     assert action["action_type"] == "CREATE_POST" and action["agent_id"] == owner and action["success"] is True
     assert action["action_args"]["content"] == content and action["action_args"]["post_id"] == post_id
     assert last == {"round": 2, "event_type": "round_end", "actions_count": 1}
+
+    fork_dir = tmp_path / "fresh-fork"
+    fork_probe_path = tmp_path / "fresh-fork-memory-probe.json"
+    assert not fork_dir.exists() and not fork_probe_path.exists()
+    fork_request = replace(
+        capture_request, run_id=uuid4(), schema_version=3, source_run_id=capture_request.run_id,
+        checkpoint_sha256=producer_evidence,
+        intervention=SwapActiveActorV1("swap_active_actor_v1", lineage["manifest_sha256"],
+                                       manifest["runner_state"]["sha256"]),
+    )
+    fork_prepared = _owned_factory(producer, fork_request, _RestoredModels(expected_frames, str(fork_probe_path)))
+    fork_factory = NativeRestoredTwitterFactory(
+        fork_prepared, str(checkpoint), str(lineage_dir), str(fork_dir),
+        producer_evidence, producer_pid, str(capture_request.run_id), None,
+    )
+    prior_pids.add(restored_pid)
+    fork_pid, fork_evidence = _run_child(
+        fork_factory, fork_request, terminal, deadline, prior_pids, require_closed=True,
+    )
+    fork_proof_raw = _read_bounded(fork_probe_path, _RECEIPT_LIMIT)
+    fork_db = fork_dir / "native.sqlite3"
+    assert {path.name for path in islice(fork_dir.iterdir(), 3)} == set(_RESTORE_OUTPUTS)
+    assert _manifest(fork_dir, _RESTORE_OUTPUTS, _DB_LIMIT) == fork_evidence
+    assert all(not fork_db.samefile(path) for path in (database, producer_db, reference_db, child_db))
+    assert 0 < fork_db.stat().st_size <= _DB_LIMIT
+    fork_log = _read_bounded(fork_dir / "actions.jsonl", _LOG_LIMIT)
+    assert (staged_bytes + reference_db.stat().st_size + child_db.stat().st_size + fork_db.stat().st_size
+            + len(promoted) + len(fork_log) + len(fork_proof_raw)) <= 160 * 1024 * 1024
+
+    fork_owner = 1 - final["selection"]
+    fork_cursor, fork_trace, fork_posts, fork_recommendations = _native_rows(fork_db)
+    assert fork_trace[:len(old_trace)] == old_trace and fork_posts[:len(old_posts)] == old_posts
+    assert fork_recommendations == expected_recommendations
+    assert fork_posts[len(old_posts):] == [(post_id, fork_owner, _NEXT_POST, final["before_step"])]
+    fork_added_trace = fork_trace[len(old_trace):]
+    assert fork_cursor == fork_added_trace[-1][0] and all(row[1] == fork_owner for row in fork_added_trace)
+    (_, _, _, fork_info, fork_tick), = (row for row in fork_added_trace if row[2] == "create_post")
+    assert fork_tick == tick and json.loads(fork_info)["post_id"] == post_id
+    assert json.loads(fork_info)["content"] == _NEXT_POST
+    assert json.loads(fork_proof_raw) == {
+        "pid": fork_pid, "frames": [list(frame) for frame in expected_frames],
+        "step": {"agent_id": fork_owner, "post_id": post_id, "after_step": final["after_step"]},
+    }
+    assert fork_log.startswith(prefix)
+    fork_action = dict(action, agent_id=fork_owner, agent_name=lineage["owners"][fork_owner]["name"])
+    assert _events(fork_log[len(prefix):]) == [first, fork_action, last]
+    assert _manifest(restore_dir, _RESTORE_OUTPUTS, _DB_LIMIT) == restore_evidence
 
     assert {path: _artifact(path, limits[path]) for path in pins} == pins
     for root in (producer, reference):
