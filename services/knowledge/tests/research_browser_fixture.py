@@ -247,9 +247,11 @@ class ResearchBrowserSession:
                     self.requests.discard(threading.get_ident())
                     self.requests_condition.notify_all()
 
-        @app.after_request
+        process_response = app.process_response
+
         def observe(response):
-            # Passive response-only witness: never consumes request streams or changes replies.
+            response = process_response(response)
+            # Observe the finalized response without changing it.
             if not request.path.startswith('/api/'):
                 return response
             try:
@@ -311,6 +313,8 @@ class ResearchBrowserSession:
             except Exception:
                 self._failure('research_browser_witness_refused')
             return response
+
+        app.process_response = observe
         return app
 
     def _start_http(self):
@@ -492,6 +496,8 @@ class ResearchBrowserSession:
 
     def _route(self, stage):
         graph = self.prep.display_graph_id
+        if stage == 'pdf-read-after-restart':
+            return '/api/source/original/' + graph + '/' + self.selected.revisions[0]
         return {
             'ontology-review': '/api/source/ontology/' + graph,
             'ontology-plan': '/api/source/ingestion/plan/' + graph,
@@ -505,7 +511,6 @@ class ResearchBrowserSession:
             'native-ready': '/api/native-launch/status/' + graph,
             'report-start': '/api/connected-report/start/' + graph,
             'report-read': '/api/connected-report/read/' + graph,
-            'pdf-read-after-restart': '/api/source/original/' + graph + '/' + self.selected.revisions[0],
         }.get(stage)
 
     def _reference(self, stage, data, reply):
