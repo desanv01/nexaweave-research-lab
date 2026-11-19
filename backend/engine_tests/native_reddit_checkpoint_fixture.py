@@ -197,10 +197,40 @@ def assert_fresh_reddit_continuation(tmp_path):
     assert prefix[-1][3] == {"content": "Synthetic initial event", "post_id": 1}
 
     control_request = replace(request, run_id=uuid4())
-    control_pid, control_sha = _run_child(
-        _Factory(prepared, control_request.fingerprint, "control", str(control)),
-        control_request, terminal, deadline, pids,
-    )
+    control_driver = None
+    failed_terminal = None
+
+    def fixed_label(value, allowed):
+        return next((label for label in allowed if value == label), "unexpected")
+
+    def observe_control(driver, owner, attempt, child_identity, cutoff):
+        nonlocal control_driver, failed_terminal
+        observed = terminal(driver, owner, attempt, child_identity, cutoff)
+        receipt = observed.receipt
+        if observed.status != "completed" or receipt is None:
+            control_driver = driver
+            failed_terminal = {
+                "status": fixed_label(observed.status, (
+                    "absent", "running", "completed", "failed", "cancelled", "unknown",
+                )),
+                "receipt_present": receipt is not None,
+                "receipt_outcome": "absent" if receipt is None else fixed_label(
+                    receipt.outcome, ("completed", "failed", "cancelled", "unknown"),
+                ),
+            }
+        return observed
+
+    try:
+        control_pid, control_sha = _run_child(
+            _Factory(prepared, control_request.fingerprint, "control", str(control)),
+            control_request, observe_control, deadline, pids,
+        )
+    except AssertionError as error:
+        if failed_terminal is not None:
+            # Inspect the original close result after the helper has unwound.
+            fields = dict(failed_terminal, ordinary_close_finished=control_driver._closed is True)
+            BaseException.add_note(error, "NEXAWEAVE_REDDIT_CONTROL_TERMINAL " + _json(fields).decode("ascii"))
+        raise
     pids.add(control_pid)
     child_request = replace(request, run_id=uuid4())
     child_pid, child_sha = _run_child(
