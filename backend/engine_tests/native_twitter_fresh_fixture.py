@@ -358,6 +358,84 @@ def _owned_factory(root, request, model_factory):
     )
 
 
+_FORK_VALIDATION_SITES = {
+    329: 'request_binding', 330: 'prepared_request', 336: 'producer_authority',
+    337: 'prepared_root', 338: 'checkpoint_directory', 339: 'lineage_directory',
+    340: 'fork_directory', 341: 'directory_overlap', 343: 'lineage_read',
+    345: 'lineage_digest', 346: 'recording_import', 348: 'lineage_decode',
+    352: 'lineage_authority', 353: 'lineage_anchors', 354: 'lineage_body',
+    357: 'fork_manifest',
+}
+
+
+@dataclass
+class _ObservedForkFactory:
+    factory: object
+    marker: Path
+    first_validation: bool = True
+
+    def _mark(self, value, mode):
+        try:
+            with self.marker.open(mode) as stream:
+                stream.write(value.encode('ascii'))
+        except OSError:
+            pass
+
+    def _rejection_site(self, error):
+        binding_file = self.factory.validate.__func__.__code__.co_filename
+        trace = error.__traceback__
+        site = 'unknown'
+        for _ in range(32):
+            if trace is None:
+                break
+            code = trace.tb_frame.f_code
+            if code.co_filename == binding_file:
+                if code.co_name == '_checked_restore':
+                    site = _FORK_VALIDATION_SITES.get(trace.tb_lineno, 'restore_other')
+                elif code.co_name == 'validate' and trace.tb_lineno == 363:
+                    site = 'prepared_files'
+            trace = trace.tb_next
+        return site
+
+    def validate(self, request):
+        if not self.first_validation:
+            return self.factory.validate(request)
+        self.first_validation = False
+        same_pid = int(os.getpid() == self.factory.expected_producer_pid)
+        self._mark(f'entered/{same_pid}\n', 'xb')
+        try:
+            result = self.factory.validate(request)
+        except Exception as error:
+            try:
+                self._mark(f'rejected/{self._rejection_site(error)}\n', 'ab')
+            except Exception:
+                pass
+            raise
+        self._mark('returned\n', 'ab')
+        return result
+
+    def create_session(self, request):
+        return self.factory.create_session(request)
+
+    def evidence(self, request):
+        return self.factory.evidence(request)
+
+    def observation(self):
+        try:
+            with self.marker.open('rb') as stream:
+                lines = stream.read(96).splitlines()
+        except OSError:
+            return 'unobserved'
+        if len(lines) not in (1, 2) or lines[0] not in (b'entered/0', b'entered/1'):
+            return 'invalid'
+        allowed = (*_FORK_VALIDATION_SITES.values(), 'restore_other', 'prepared_files', 'unknown')
+        if len(lines) == 2 and lines[1] != b'returned' and lines[1] not in {
+            f'rejected/{site}'.encode('ascii') for site in allowed
+        }:
+            return 'invalid'
+        return ' '.join(line.decode('ascii') for line in lines)
+
+
 def _run_child(factory, request, terminal, deadline, prior_pids, *, require_closed=False):
     from nexaweave_execution.native_process_driver import NativeProcessDriver
 
@@ -684,9 +762,15 @@ def assert_fresh_twitter_continuation(tmp_path, request, original_pid, terminal,
         producer_evidence, producer_pid, str(capture_request.run_id), None,
     )
     prior_pids.add(restored_pid)
-    fork_pid, fork_evidence = _run_child(
-        fork_factory, fork_request, terminal, deadline, prior_pids, require_closed=True,
-    )
+    observed_factory = _ObservedForkFactory(fork_factory, tmp_path / 'fresh-fork-validation.stage')
+    try:
+        fork_pid, fork_evidence = _run_child(
+            observed_factory, fork_request, terminal, deadline, prior_pids, require_closed=True,
+        )
+    except Exception as error:
+        error.add_note(f'fork_validation={observed_factory.observation()}')
+        raise
+    assert observed_factory.observation() == 'entered/0 returned'
     fork_proof_raw = _read_bounded(fork_probe_path, _RECEIPT_LIMIT)
     fork_db = fork_dir / "native.sqlite3"
     assert {path.name for path in islice(fork_dir.iterdir(), 3)} == set(_RESTORE_OUTPUTS)
