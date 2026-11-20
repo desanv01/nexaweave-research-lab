@@ -1,4 +1,4 @@
-"""Owned ordinary browser proof for one Twitter-only preparation and native run."""
+"""Owned ordinary browser proof for one-platform preparation and native runs."""
 import asyncio
 from contextlib import closing
 from hashlib import sha256
@@ -27,7 +27,7 @@ from test_temporal_connected_launch import loopback_client, temporal_bridge
 
 
 pytestmark = [pytest.mark.postgres, pytest.mark.connected_report_temporal]
-_twitter_browser_journey = False
+_single_browser_platform = None
 _fixture_phase_sink = None
 _ARTIFACT_BYTES = 2097152
 
@@ -38,6 +38,11 @@ def twitter_backends(*, timeout_seconds, max_tokens, max_retries):
     return {'twitter': models['twitter']}
 
 
+def reddit_backends(*, timeout_seconds, max_tokens, max_retries):
+    models = scripted_native_backends(timeout_seconds=timeout_seconds, max_tokens=max_tokens, max_retries=max_retries)
+    return {'reddit': models['reddit']}
+
+
 def _read_artifact(path, limit):
     with path.open('rb') as stream:
         raw = stream.read(limit + 1)
@@ -45,28 +50,39 @@ def _read_artifact(path, limit):
     return raw
 
 
-def _check_outputs(root, inputs):
+def _check_outputs(root, inputs, platform):
     assert all(_read_artifact(root / name, len(raw)) == raw for name, raw in inputs.items())
-    for name in ('reddit_profiles.json', 'reddit_simulation.db', 'reddit'):
+    excluded = ('reddit_profiles.json', 'reddit_simulation.db', 'reddit') if platform == 'twitter' else (
+        'twitter_profiles.csv', 'twitter_simulation.db', 'twitter')
+    for name in excluded:
         path = root / name
         assert not path.exists() and not path.is_symlink()
-    database = root / 'twitter_simulation.db'
+    database = root / f'{platform}_simulation.db'
     assert 0 < database.stat().st_size <= _ARTIFACT_BYTES
     with closing(sqlite3.connect(database.as_uri() + '?mode=ro', uri=True)) as db:
         assert db.execute('SELECT COUNT(*) FROM user').fetchone()[0] == 2
         assert db.execute("SELECT 1 FROM post WHERE content LIKE 'Scripted connected native post %' LIMIT 1").fetchone()
-    actions = _read_artifact(root / 'twitter' / 'actions.jsonl', _ARTIFACT_BYTES).splitlines()
+    actions = _read_artifact(root / platform / 'actions.jsonl', _ARTIFACT_BYTES).splitlines()
     assert actions and all(type(json.loads(line)) is dict for line in actions)
     assert (root / '.native_prepared_start_claim').is_file()
 
 
 @pytest.mark.asyncio
 async def test_twitter_only_suggest_ready_and_native_workbench(factory, tmp_path, monkeypatch):
-    assert _twitter_browser_journey, 'select this case through the guarded Twitter browser runner'
+    await _run_single_platform_workbench(factory, tmp_path, monkeypatch, 'twitter')
+
+
+@pytest.mark.asyncio
+async def test_reddit_only_suggest_ready_and_native_workbench(factory, tmp_path, monkeypatch):
+    await _run_single_platform_workbench(factory, tmp_path, monkeypatch, 'reddit')
+
+
+async def _run_single_platform_workbench(factory, tmp_path, monkeypatch, platform):
+    assert _single_browser_platform == platform, f'select this case through --{platform}-browser'
     monkeypatch.setattr(shared, '_actual_graph_journey', True)
     monkeypatch.setattr(shared, '_research_browser_journey', True)
     monkeypatch.setattr(shared, '_fixture_phase_sink', _fixture_phase_sink)
-    phases = shared.FixturePhases('workbench-twitter-ordinary')
+    phases = shared.FixturePhases(f'workbench-{platform}-ordinary')
     phases.start('setup')
     monkeypatch.chdir(tmp_path)
     migrate_all(factory)
@@ -79,7 +95,8 @@ async def test_twitter_only_suggest_ready_and_native_workbench(factory, tmp_path
         preparation = TemporalPreparationHost(client=temporal, task_queue='mf-workbench-prep-' + uuid4().hex,
                                               trusted_host=prep, allow_dispatch=lambda: True)
         prep.scheduler = preparation.scheduler_for(loop)
-        model = BoundedNativeModelFactory(('twitter',), dict(LIMITS), twitter_backends, cooperative_transport=True)
+        platform_backends = twitter_backends if platform == 'twitter' else reddit_backends
+        model = BoundedNativeModelFactory((platform,), dict(LIMITS), platform_backends, cooperative_transport=True)
         native_host = DurableNativeLaunchHost(
             preparation_host=prep, connection_factory=factory, runtime_sha256='c' * 64,
             model_label='scripted', limits=LIMITS, model_factory=model, account_id=prep.account_id,
@@ -96,7 +113,8 @@ async def test_twitter_only_suggest_ready_and_native_workbench(factory, tmp_path
         native_host.attach_temporal(native, temporal_bridge(native, loop))
         native_row = None
         report_log = tmp_path / 'actual-report-sdk-requests.jsonl'
-        browser = ResearchBrowserSession(tmp_path, prep, native_host, None, selected, report_log, twitter_only=True)
+        browser = ResearchBrowserSession(tmp_path, prep, native_host, None, selected, report_log,
+                                         single_platform=platform)
         try:
             phases.end('setup')
             async with preparation.worker(), native.worker(), browser:
@@ -104,8 +122,9 @@ async def test_twitter_only_suggest_ready_and_native_workbench(factory, tmp_path
                 await asyncio.to_thread(shared._browse_saved_pdf, browser, factory, prep, source_scope, selected)
                 phases.start('preparation-plan-start')
                 payload = dict(request(selected.records[0]), schema_version=2, source_revisions=selected.revisions[:])
-                payload['options'].update(platforms=['twitter'], types=['Person', 'Organization'], max_agents=2,
-                                          seed=7, max_rounds=1, simulation_requirement='Study the retained evidence. Use Twitter.')
+                payload['options'].update(platforms=[platform], types=['Person', 'Organization'], max_agents=2,
+                                          seed=7, max_rounds=1,
+                                          simulation_requirement=f'Study the retained evidence. Use {platform.title()}.')
                 planned = await asyncio.to_thread(browser.perform, 'preparation-plan', payload)
                 assert planned['state'] == 'planned' and len(planned['actors']) == 2 and not owners
                 await asyncio.to_thread(browser.perform, 'preparation-start')
@@ -126,14 +145,19 @@ async def test_twitter_only_suggest_ready_and_native_workbench(factory, tmp_path
                 prepared = ready['receipt']
                 root = prep.root / prepared['simulation_id']
                 files = prepared['files']
+                profile_name = 'twitter_profiles.csv' if platform == 'twitter' else 'reddit_profiles.json'
                 assert [item['name'] for item in files] == [
-                    'state.json', 'simulation_config.json', 'source_grounding.json', 'twitter_profiles.csv']
+                    'state.json', 'simulation_config.json', 'source_grounding.json', profile_name]
                 inputs = {}
                 for entry in files:
                     name = entry['name']
                     raw = _read_artifact(root / name, _ARTIFACT_BYTES)
                     assert (len(raw), sha256(raw).hexdigest()) == (entry['size'], entry['sha256'])
                     inputs[name] = raw
+                if platform == 'reddit':
+                    profiles = json.loads(inputs[profile_name])
+                    assert len(profiles) == 2 and all(
+                        profile['age'] == 32 and profile['country'] == 'MY' for profile in profiles)
                 with factory() as conn:
                     reservation = prep.budget._row(conn, prep.account_id, UUID(planned['operation_id']))
                 assert type(reservation.receipt) is PreparedBudgetReceipt
@@ -152,7 +176,7 @@ async def test_twitter_only_suggest_ready_and_native_workbench(factory, tmp_path
                                simulation_id=prepared['simulation_id'], artifact_sha256=prepared['artifact_sha256'])
                 assert all(started['preparation'][key] == value for key, value in binding.items())
                 wire = started['request']
-                assert wire['platforms'] == ['twitter'] and wire['seed'] == 7 and wire['max_rounds'] == 1
+                assert wire['platforms'] == [platform] and wire['seed'] == 7 and wire['max_rounds'] == 1
                 assert started['ceiling_microusd'] == '2'
                 native_row = native_host.store.get('owner', wire['run_id'])
                 assert native_row.frozen['identity']['preparation'] == started['preparation']
@@ -182,7 +206,7 @@ async def test_twitter_only_suggest_ready_and_native_workbench(factory, tmp_path
                 assert reservation.receipt.fingerprint == reservation.fingerprint
                 assert reservation.attempt_id == settled.budget_attempt_id
                 shared._assert_accounted(prep, 8)
-                _check_outputs(root, inputs)
+                _check_outputs(root, inputs, platform)
                 assert prep.store.get('owner', planned['operation_id']).frozen['sources'] == selected.snapshots
                 sources = SourceStore(factory)
                 for record in selected.records:

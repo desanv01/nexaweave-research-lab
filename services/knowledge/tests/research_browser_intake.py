@@ -134,7 +134,7 @@ def guard_intake(session, request, pairs, wire):
     if intake is None or request.method != 'POST' or not request.path.startswith('/api/source/retain'):
         return
     graph = session.prep.display_graph_id
-    assert session.active == 'connect' and not session.twitter_only
+    assert session.active == 'connect' and session.single_platform is None
     assert request.host == f'127.0.0.1:{session.port}' and not request.query_string
     assert request.headers.getlist('Origin') == ['http://127.0.0.1:4317']
     assert request.headers.getlist('Authorization') == ['Bearer ' + session.token]
