@@ -13,8 +13,7 @@ import subprocess
 import time
 
 import pytest
-from test_native_experiment_http import experiment_python, protected_fixture
-from test_native_experiments import connection_factory, cohort_fixture, hashes
+from test_native_experiments import hashes
 
 pytestmark = pytest.mark.postgres
 ROOT = Path(__file__).resolve().parents[2]
