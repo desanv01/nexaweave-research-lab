@@ -11,7 +11,7 @@ import { checkConnectSources, retainBrowserFiles } from './research-browser-inta
 
 const WIRE = 7200
 const FRONTEND = 'http://127.0.0.1:4317'
-const { stages: STAGES, twitterOnly } = browserMode(process.argv.slice(2))
+const { stages: STAGES, singlePlatform } = browserMode(process.argv.slice(2))
 const UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/
 const HASH = /^[0-9a-f]{64}$/
 const decoder = new TextDecoder('utf-8', { fatal: true })
@@ -342,7 +342,7 @@ async function prepareBrowser(command) {
   requireTrue(/^[A-Za-z0-9_-]{1,128}$/.test(command.connection.graph_id))
   text(command.connection.token, 505)
   requireTrue(command.connection.token.trim() === command.connection.token && /^[\x21-\x7e]+$/.test(command.connection.token))
-  checkConnectSources(command, twitterOnly, { keys, integer, digest, uuid, text, requireTrue })
+  checkConnectSources(command, Boolean(singlePlatform), { keys, integer, digest, uuid, text, requireTrue })
   requireTrue(process.platform === 'linux' && process.versions.node === '24.14.1' && !process.env.DEBUG && !process.env.PWDEBUG && !process.env.NODE_OPTIONS)
   for (const selector of ['NEXAWEAVE_RESEARCH_BROWSER_NODE', 'NEXAWEAVE_RESEARCH_BROWSER_CHROME']) {
     requireTrue(typeof process.env[selector] === 'string' && path.isAbsolute(process.env[selector]))
@@ -526,7 +526,7 @@ async function preparationPlan(command) {
   await scope.locator('#preparation-maximum').fill(String(options.max_agents))
   await scope.locator('#preparation-seed').fill(String(options.seed))
   await scope.locator('#preparation-rounds').fill(String(options.max_rounds))
-  await suggestPlatforms({ scope, options, twitterOnly, requireTrue, same })
+  await suggestPlatforms({ scope, options, singlePlatform, requireTrue, same })
   const observed = await exchange(page, prepRoute('plan'), 'POST', () => scope.locator('.review').click(), 263168)
   requireTrue(observed.request.schema_version === 2 && observed.request.source_revision === pdf.source_revision && same(observed.request.source_revisions, request.source_revisions) && same(observed.request.options, options))
   requireTrue(observed.value.state === 'planned'); boundPreparation(observed.value)
@@ -547,10 +547,10 @@ async function preparationReady(command) {
   boundPreparation(observed.value); requireTrue(observed.value.state === 'ready' && observed.value.receipt)
   preparation = observed.value; digest(preparation.receipt.artifact_sha256)
   const route = prepRoute('profiles')
-  if (!twitterOnly) await inspectPreparedProfiles({ page, preparation, route, url: connection.api_origin + route, exchange, enabled, requireTrue, same, sha })
+  if (!singlePlatform) await inspectPreparedProfiles({ page, preparation, route, url: connection.api_origin + route, exchange, enabled, requireTrue, same, sha })
   const configRoute = prepRoute('configuration')
   await inspectReadyConfiguration({ page, preparation, route: configRoute, url: connection.api_origin + configRoute,
-    graph: connection.graph_id, project: orderedSources[0].project_id, twitterOnly, exchange, enabled, requireTrue, keys, same, sha })
+    graph: connection.graph_id, project: orderedSources[0].project_id, singlePlatform, exchange, enabled, requireTrue, keys, same, sha })
   await enabled(page.locator('.native-launch .review'))
   return { reference: { ...prepReference(preparation), simulation_id: preparation.receipt.simulation_id, artifact_sha256: preparation.receipt.artifact_sha256 }, proof: sourceProof() }
 }
@@ -573,7 +573,7 @@ async function nativeReady(command) {
   const observed = await exchange(page, nativeRoute('status'), 'POST', () => scope.locator('.refresh').click(), 65664)
   boundLaunch(observed.value); requireTrue(observed.value.state === 'completed' && observed.value.receipt?.outcome === 'completed')
   launch = observed.value; digest(launch.receipt.evidence_sha256)
-  if (!twitterOnly) {
+  if (!singlePlatform) {
     await enabled(scope.locator('.use-report')); await scope.locator('.use-report').click()
     await enabled(page.locator('.connected-reports .report-review'))
     requireTrue(await page.locator('.report-source-checkbox').count() === 0)

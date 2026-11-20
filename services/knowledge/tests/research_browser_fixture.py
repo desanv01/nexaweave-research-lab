@@ -87,10 +87,10 @@ def failure_reply(reply, stage):
 
 class ResearchBrowserSession:
     """Same Flask/PG/Temporal hosts; only the actual UI dispatches mutations."""
-    def __init__(self, directory, prep, native_host, reports, selected, report_log, *, twitter_only=False):
-        require(type(twitter_only) is bool)
-        self.twitter_only = twitter_only
-        self.stages, self.seconds = browser_stages(twitter_only)
+    def __init__(self, directory, prep, native_host, reports, selected, report_log, *, single_platform=None):
+        require(single_platform in (None, 'twitter', 'reddit'))
+        self.single_platform = single_platform
+        self.stages, self.seconds = browser_stages(single_platform is not None)
         require(os.name == 'posix' and sys.platform == 'linux')
         self.directory, self.prep = Path(directory), prep
         self.native_host, self.reports, self.selected = native_host, reports, selected
@@ -215,7 +215,7 @@ class ResearchBrowserSession:
                 native_launch_facade=NativeLaunchFacade(self.settings, host=self.native_host),
                 native_observations_facade=NativeObservationsFacade(self.settings,
                     host=NativeObservationsHost(launch_host=self.native_host)),
-                **({} if self.twitter_only else dict(
+                **({} if self.single_platform else dict(
                     connected_report_facade=ConnectedReportFacade(self.settings, host=self.reports))))
         finally:
             for key, value in previous.items():
@@ -456,7 +456,7 @@ class ResearchBrowserSession:
                 require(time.monotonic() < ready, 'research_browser_vite_deadline')
                 time.sleep(.05)
             self.driver = self._spawn([str(self.node), str(ROOT / 'frontend/tests/run-research-browser.mjs')]
-                                      + (['--twitter-only'] if self.twitter_only else []), protocol=True)
+                                      + ([f'--{self.single_platform}-only'] if self.single_platform else []), protocol=True)
             self.profile_root = Path(self.driver['directory'].name) / 'profile'
             self.profile_root.mkdir()
             self.perform('connect')
