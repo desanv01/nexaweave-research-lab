@@ -6,7 +6,6 @@ from dataclasses import dataclass, replace
 from hashlib import sha256
 import json
 from multiprocessing import active_children
-import os
 from pathlib import Path
 import sqlite3
 import sys
@@ -235,12 +234,12 @@ def assert_fresh_reddit_continuation(tmp_path):
     )
     producer, checkpoint, child, control = (private / name for name in ("producer", "cut", "child", "control"))
     deadline = monotonic() + 120
-    pids = {os.getpid()}
-    producer_pid, checkpoint_sha = _run_child(
+    prior_instances = set()
+    producer_identity, checkpoint_sha = _run_child(
         _Factory(prepared, request.fingerprint, "producer", str(producer), str(checkpoint)),
-        request, terminal, deadline, pids,
+        request, terminal, deadline, prior_instances,
     )
-    pids.add(producer_pid)
+    producer_pid = producer_identity.process_id
     raw = _read(checkpoint / _MANIFEST, 7200)
     manifest = json.loads(raw)
     assert raw == _json(manifest) and sha256(raw).hexdigest() == checkpoint_sha
@@ -288,9 +287,9 @@ def assert_fresh_reddit_continuation(tmp_path):
         return observed
 
     try:
-        control_pid, control_sha = _run_child(
+        control_identity, control_sha = _run_child(
             _Factory(prepared, control_request.fingerprint, "control", str(control)),
-            control_request, observe_control, deadline, pids,
+            control_request, observe_control, deadline, prior_instances,
         )
     except AssertionError as error:
         if failed_terminal is not None:
@@ -298,21 +297,20 @@ def assert_fresh_reddit_continuation(tmp_path):
             fields = dict(failed_terminal, ordinary_close_finished=control_driver._closed is True)
             BaseException.add_note(error, "NEXAWEAVE_REDDIT_CONTROL_TERMINAL " + _json(fields).decode("ascii"))
         raise
-    pids.add(control_pid)
     child_request = replace(request, run_id=uuid4())
-    child_pid, child_sha = _run_child(
+    restored_identity, child_sha = _run_child(
         _Factory(prepared, child_request.fingerprint, "restore", str(child), str(checkpoint),
                  request, producer_pid, checkpoint_sha),
-        child_request, terminal, deadline, pids,
+        child_request, terminal, deadline, prior_instances,
     )
-    pids.add(child_pid)
-    for path, pid, owner, evidence in (
-            (control, control_pid, control_request, control_sha), (child, child_pid, child_request, child_sha)):
+    for path, identity, owner, evidence in (
+            (control, control_identity, control_request, control_sha),
+            (child, restored_identity, child_request, child_sha)):
         raw = _read(path / _PROOF, 7200)
         proof = json.loads(raw)
         assert raw == _json(proof) and sha256(raw).hexdigest() == evidence
         expected = {
-            "pid": pid, "owner": _owner(owner), "database": _pin(path / _DB),
+            "pid": identity.process_id, "owner": _owner(owner), "database": _pin(path / _DB),
             "step": {"trace_cursor": 4, "actor_id": 1, "post_id": 1, "comment_id": 1,
                      "clock": {"epoch": _EPOCH, "elapsed_seconds": 120}},
         }
@@ -335,5 +333,6 @@ def assert_fresh_reddit_continuation(tmp_path):
     assert {path.name for path in checkpoint.iterdir()} == {_DB, _MANIFEST}
     for path in (child, control):
         assert {file.name for file in path.iterdir()} == {_DB, _PROOF}
-    assert not (pids - {os.getpid()}) & {process.pid for process in active_children()}
+    pids = {identity.process_id for identity in (producer_identity, control_identity, restored_identity)}
+    assert not pids & {process.pid for process in active_children()}
     assert monotonic() < deadline
