@@ -459,6 +459,24 @@ def test_actual_generated_offline_timing_control_stops_before_work_admission(tmp
     plan.mkdir()
     monkeypatch.setattr(ci, 'ROOT', root)
     generated, _ = ci._write_scripts(plan, Path(sys.executable), 'offline-control-token')
+    expected_commands = [
+        ('native-imports', 'check_engine_imports.py', None),
+        ('native-engine-64', 'run_engine_tests.py', None),
+        ('read-boundary', 'run_read_boundary_tests.py', None),
+        ('preparation-unit', 'run_preparation_tests.py', '--unit'),
+        ('native-launch-unit', 'run_native_launch_tests.py', '--unit'),
+        ('observations-unit', 'run_native_observations_tests.py', '--unit'),
+        ('seed-unit', 'run_native_seed_tests.py', '--unit'),
+        ('seed-engine', 'run_native_seed_tests.py', '--engine'),
+        ('report-unit', 'run_connected_report_tests.py', '--unit'),
+        ('report-engine', 'run_connected_report_tests.py', '--engine'),
+        ('followup-unit', 'run_connected_followup_tests.py', '--unit'),
+        ('pdf-unit', 'run_source_binary_tests.py', '--unit'),
+        ('followup-engine', 'run_connected_followup_tests.py', '--engine'),
+    ]
+    commands = [(gate, str(tools / script), mode) for gate, script, mode in expected_commands]
+    generated_lines = (plan / 'offline.py').read_text(encoding='utf-8').splitlines()
+    assert [line for line in generated_lines if line.startswith('commands=')] == [f'commands={commands!r}']
     bootstrap = tmp_path / 'control-bootstrap.py'
     bootstrap.write_text(
         'import builtins,json,runpy\n'
@@ -468,7 +486,7 @@ def test_actual_generated_offline_timing_control_stops_before_work_admission(tmp
         ' original_print(*values,**kwargs)\n'
         ' if values and isinstance(values[0],str) and values[0].startswith(prefix):\n'
         '  record=json.loads(values[0][len(prefix):])\n'
-        '  if record["gate"]=="read-boundary" and record["phase"]=="start": raise control\n'
+        '  if record["gate"]=="native-imports" and record["phase"]=="start": raise control\n'
         'builtins.print=controlled_print\n'
         'try:\n'
         f' runpy.run_path({str(plan / "offline.py")!r},run_name="__main__")\n'
@@ -486,7 +504,7 @@ def test_actual_generated_offline_timing_control_stops_before_work_admission(tmp
     assert b'exact generated control propagated' in output
     assert not admitted.exists()
     rows = [row for row in timings(output) if row['lane'] == 'offline' and row['gate'] != 'controller']
-    assert [(row['gate'], row['phase']) for row in rows] == [('read-boundary', 'start')]
+    assert [(row['gate'], row['phase']) for row in rows] == [('native-imports', 'start')]
     results = [json.loads(line[len(ci.PREFIX):]) for line in output.decode().splitlines()
                if line.startswith(ci.PREFIX)]
     assert [row['gate'] for row in results] == ['companion']
@@ -542,16 +560,23 @@ def test_real_offline_child_isolates_profile_and_secrets_but_keeps_runtime_selec
     assert b'not-a-real-key' not in output and b'private-fixture-sentinel' not in output
 
 
-@pytest.mark.parametrize(('native_status', 'stop_status', 'offline_status', 'helper_fail', 'interrupt'), (
-    (0, 0, 0, False, False),
-    (7, 0, 0, False, False),
-    (0, 7, 0, False, False),
-    (0, 0, 7, False, False),
-    (0, 0, 0, True, False),
-    (0, 0, 0, False, True),
-))
+@pytest.mark.parametrize(
+    ('native_status', 'temporal_status', 'launch_engine_status', 'stop_status', 'offline_status',
+     'helper_fail', 'interrupt'),
+    (
+        (0, 0, 0, 0, 0, False, False),
+        (7, 0, 0, 0, 0, False, False),
+        pytest.param(0, 7, 0, 0, 0, False, False, id='0-7-0-0-False-False'),
+        pytest.param(0, 0, 7, 0, 0, False, False, id='native-launch-engine-exit-7'),
+        (0, 0, 0, 7, 0, False, False),
+        (0, 0, 0, 0, 7, False, False),
+        (0, 0, 0, 0, 0, True, False),
+        (0, 0, 0, 0, 0, False, True),
+    ),
+)
 def test_actual_generated_nested_helper_returns_with_extra_handle_and_keeps_failure(
-        tmp_path, monkeypatch, native_status, stop_status, offline_status, helper_fail, interrupt):
+        tmp_path, monkeypatch, native_status, temporal_status, launch_engine_status, stop_status,
+        offline_status, helper_fail, interrupt):
     # Capture the actual stdlib ownership class before replacing only the trusted
     # generated plan's ROOT. No production CLI injection or hosted/DB bypass.
     owner_type = ci._owner_type()
@@ -654,6 +679,10 @@ def test_actual_generated_nested_helper_returns_with_extra_handle_and_keeps_fail
             if interrupt:
                 code += f'Path({str(waiting)!r}).write_text("started")\nimport time\ntime.sleep(60)\n'
             code += f'raise SystemExit({native_status})\n'
+        if name == 'run_native_temporal_tests.py' and temporal_status:
+            code += f'raise SystemExit({temporal_status})\n'
+        if name == 'run_native_launch_tests.py' and launch_engine_status:
+            code += f'if sys.argv[1:] == ["--engine"]: raise SystemExit({launch_engine_status})\n'
         if name == 'check_engine_imports.py':
             code += f'raise SystemExit({offline_status})\n'
         if interrupt and name == 'run_read_boundary_tests.py':
@@ -702,7 +731,8 @@ def test_actual_generated_nested_helper_returns_with_extra_handle_and_keeps_fail
         assert all(any(row['lane'] == lane.name and row['phase'] == 'private-cleanup-end' for row in records)
                    for lane in lanes)
         return
-    expected_fixture_exit = int(native_status != 0 or stop_status != 0 or helper_fail)
+    expected_fixture_exit = int(bool(native_status or temporal_status or launch_engine_status
+                                     or stop_status or helper_fail))
     assert exit_codes == {'offline': int(offline_status != 0), 'fixture': expected_fixture_exit}
     assert status == int(expected_fixture_exit != 0 or offline_status != 0)
     assert_controller_lifecycle(output, lanes)
@@ -717,13 +747,27 @@ def test_actual_generated_nested_helper_returns_with_extra_handle_and_keeps_fail
     assert b'private daemon log' in server_log.read_bytes()
     results = [json.loads(line[len(ci.PREFIX):]) for line in output.decode().splitlines()
                if line.startswith(ci.PREFIX)]
-    expected = [gate for lane in lanes for gate in lane.expected]
+    expected_fixture = list(lanes[1].expected)
+    expected_count = 27
     if helper_fail:
-        expected = list(lanes[0].expected) + ['postgres-start', 'temporal-stop', 'postgres-stop']
-    assert [row['gate'] for row in results] == expected
+        expected_fixture = ['postgres-start', 'temporal-stop', 'postgres-stop']
+        expected_count = 16
+    elif temporal_status:
+        expected_fixture = ['postgres-start', 'native-store', 'temporal-start', 'native-temporal',
+                            'temporal-stop', 'postgres-stop']
+        expected_count = 19
+    elif launch_engine_status:
+        expected_fixture = ['postgres-start', 'native-store', 'temporal-start', 'native-temporal',
+                            'preparation', 'native-launch-integration', 'native-launch-engine',
+                            'temporal-stop', 'postgres-stop']
+        expected_count = 22
+    assert [row['gate'] for row in results] == [*lanes[0].expected, *expected_fixture]
     assert all(set(row) == {'token', 'gate', 'status'} and row['token'] == lanes[0].token for row in results)
-    assert len(results) == (16 if helper_fail else 27)
+    assert len(results) == expected_count
     records = timings(output)
+    if temporal_status or launch_engine_status:
+        assert not any(row['lane'] == 'fixture' and row['gate'] in lanes[1].expected
+                       and row['gate'] not in expected_fixture for row in records)
     for lane in lanes:
         gates = [row for row in results if row['gate'] in lane.expected]
         for result in gates:
@@ -740,8 +784,11 @@ def test_actual_generated_nested_helper_returns_with_extra_handle_and_keeps_fail
         return
     assert statuses['postgres-start'] == 0 and statuses['temporal-start'] == 0
     assert statuses['native-store'] == native_status
+    assert statuses['native-temporal'] == temporal_status
+    if 'native-launch-engine' in expected_fixture:
+        assert statuses['native-launch-engine'] == launch_engine_status
     assert statuses['temporal-stop'] == stop_status and statuses['postgres-stop'] == 0
     assert statuses['native-imports'] == offline_status
     assert all(statuses[gate] == 0 for gate in lanes[0].expected if gate != 'native-imports')
-    assert all(statuses[gate] == 0 for gate in lanes[1].expected
-               if gate not in ('native-store', 'temporal-stop'))
+    assert all(statuses[gate] == 0 for gate in expected_fixture
+               if gate not in ('native-store', 'native-temporal', 'native-launch-engine', 'temporal-stop'))
