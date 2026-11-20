@@ -459,6 +459,24 @@ def test_actual_generated_offline_timing_control_stops_before_work_admission(tmp
     plan.mkdir()
     monkeypatch.setattr(ci, 'ROOT', root)
     generated, _ = ci._write_scripts(plan, Path(sys.executable), 'offline-control-token')
+    expected_commands = [
+        ('native-imports', 'check_engine_imports.py', None),
+        ('native-engine-64', 'run_engine_tests.py', None),
+        ('read-boundary', 'run_read_boundary_tests.py', None),
+        ('preparation-unit', 'run_preparation_tests.py', '--unit'),
+        ('native-launch-unit', 'run_native_launch_tests.py', '--unit'),
+        ('observations-unit', 'run_native_observations_tests.py', '--unit'),
+        ('seed-unit', 'run_native_seed_tests.py', '--unit'),
+        ('seed-engine', 'run_native_seed_tests.py', '--engine'),
+        ('report-unit', 'run_connected_report_tests.py', '--unit'),
+        ('report-engine', 'run_connected_report_tests.py', '--engine'),
+        ('followup-unit', 'run_connected_followup_tests.py', '--unit'),
+        ('pdf-unit', 'run_source_binary_tests.py', '--unit'),
+        ('followup-engine', 'run_connected_followup_tests.py', '--engine'),
+    ]
+    commands = [(gate, str(tools / script), mode) for gate, script, mode in expected_commands]
+    generated_lines = (plan / 'offline.py').read_text(encoding='utf-8').splitlines()
+    assert [line for line in generated_lines if line.startswith('commands=')] == [f'commands={commands!r}']
     bootstrap = tmp_path / 'control-bootstrap.py'
     bootstrap.write_text(
         'import builtins,json,runpy\n'
@@ -468,7 +486,7 @@ def test_actual_generated_offline_timing_control_stops_before_work_admission(tmp
         ' original_print(*values,**kwargs)\n'
         ' if values and isinstance(values[0],str) and values[0].startswith(prefix):\n'
         '  record=json.loads(values[0][len(prefix):])\n'
-        '  if record["gate"]=="read-boundary" and record["phase"]=="start": raise control\n'
+        '  if record["gate"]=="native-imports" and record["phase"]=="start": raise control\n'
         'builtins.print=controlled_print\n'
         'try:\n'
         f' runpy.run_path({str(plan / "offline.py")!r},run_name="__main__")\n'
@@ -486,7 +504,7 @@ def test_actual_generated_offline_timing_control_stops_before_work_admission(tmp
     assert b'exact generated control propagated' in output
     assert not admitted.exists()
     rows = [row for row in timings(output) if row['lane'] == 'offline' and row['gate'] != 'controller']
-    assert [(row['gate'], row['phase']) for row in rows] == [('read-boundary', 'start')]
+    assert [(row['gate'], row['phase']) for row in rows] == [('native-imports', 'start')]
     results = [json.loads(line[len(ci.PREFIX):]) for line in output.decode().splitlines()
                if line.startswith(ci.PREFIX)]
     assert [row['gate'] for row in results] == ['companion']

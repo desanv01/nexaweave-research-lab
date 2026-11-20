@@ -21,6 +21,8 @@ ROOT = Path(__file__).resolve().parents[1]
 PREFIX = 'NEXAWEAVE_CI_RESULT '
 TIMING_PREFIX = 'NEXAWEAVE_CI_TIMING '
 OFFLINE_TESTS = (
+    ('native-imports', 'check_engine_imports.py', None),
+    ('native-engine-64', 'run_engine_tests.py', None),
     ('read-boundary', 'run_read_boundary_tests.py', None),
     ('preparation-unit', 'run_preparation_tests.py', '--unit'),
     ('native-launch-unit', 'run_native_launch_tests.py', '--unit'),
@@ -32,8 +34,6 @@ OFFLINE_TESTS = (
     ('followup-unit', 'run_connected_followup_tests.py', '--unit'),
     ('pdf-unit', 'run_source_binary_tests.py', '--unit'),
     ('followup-engine', 'run_connected_followup_tests.py', '--engine'),
-    ('native-imports', 'check_engine_imports.py', None),
-    ('native-engine-64', 'run_engine_tests.py', None),
 )
 EXPERIMENT_SELECTORS = (
     'NEXAWEAVE_EXPERIMENT_TEST_PYTHON',
