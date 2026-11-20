@@ -2,7 +2,8 @@
 from flask import Response, request
 from werkzeug.exceptions import BadRequest
 from .services.native_launch_client import (NativeLaunchError, REQUEST_BYTES, RESULT_BYTES,
-    ENVELOPE_OVERHEAD, encoded, validate_interview_result, validate_payload, validate_result, CODES)
+    ENVELOPE_OVERHEAD, encoded, validate_fork_preview_result, validate_interview_result,
+    validate_payload, validate_result, CODES)
 from .services.native_launch_facade import NativeLaunchFacade
 from .services.knowledge_transport import _json_object
 
@@ -44,6 +45,8 @@ def register_native_launch_routes(app, settings, *, native_launch_facade=None):
             result = facade.execute(method, graph_id, payload)
             if method == 'interview':
                 data = validate_interview_result(result, graph_id, settings.scope, payload)
+            elif method == 'fork_preview':
+                data = validate_fork_preview_result(result, payload)
             else:
                 data = validate_result(result, graph_id, settings.scope, payload, method)
                 if data['request']['principal'] != settings.principal:
@@ -62,3 +65,5 @@ def register_native_launch_routes(app, settings, *, native_launch_facade=None):
     for method in ('plan', 'start', 'status', 'cancel', 'interview'):
         app.add_url_rule('/api/native-launch/' + method + '/<graph_id>', 'native_launch_' + method,
                         lambda graph_id, method=method: run(method, graph_id), methods=['POST'])
+    app.add_url_rule('/api/native-launch/fork-preview/<graph_id>', 'native_launch_fork_preview',
+                     lambda graph_id: run('fork_preview', graph_id), methods=['POST'])

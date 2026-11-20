@@ -14,7 +14,7 @@ from pathlib import Path
 from time import monotonic
 from uuid import UUID, NAMESPACE_URL, uuid5
 from .native_launch_client import (NativeLaunchError, IDENTITY, digest, encoded,
-    validate_payload, validate_result, validate_limits, text)
+     validate_fork_preview_result, validate_payload, validate_result, validate_limits, text)
 from .native_launch_models import BoundedNativeModelFactory
 
 
@@ -297,9 +297,10 @@ class DurableNativeLaunchHost:
         except (ValueError, TypeError, KeyError, OSError, OverflowError):
             raise NativeLaunchError('conflict') from None
 
-    def _fork_archive(self, restoration, request):
+    @staticmethod
+    def _read_fork_archive(restoration, request):
         from nexaweave_execution.native_launch_contracts import (
-            NativeForkArchive, _ARCHIVE_LIMIT, _RUNNER_BYTES, verify_fork_archive,
+            NativeForkArchive, _ARCHIVE_LIMIT, _RUNNER_BYTES,
         )
         from nexaweave_execution.native_owned_binding import _regular_bound_file
         from nexaweave_execution.native_twitter_checkpoint_binding import _read_lineage
@@ -307,15 +308,55 @@ class DurableNativeLaunchHost:
 
         try:
             _, checkpoint, _, _ = restoration._checked_restore(request)
-            archive = NativeForkArchive(
+            return NativeForkArchive(
                 _read_lineage(Path(restoration.lineage_dir)),
                 _regular_bound_file(checkpoint, 'manifest.json', _ARCHIVE_LIMIT),
                 _regular_bound_file(checkpoint, 'native-runner.bin', _RUNNER_BYTES),
             )
         except (RecordingError, ValueError, TypeError, KeyError, OSError, OverflowError):
             raise NativeLaunchError('conflict') from None
+
+    def _fork_archive(self, restoration, request):
+        from nexaweave_execution.native_launch_contracts import verify_fork_archive
+
+        archive = self._read_fork_archive(restoration, request)
         verify_fork_archive(archive, request, self.display_graph_id, restoration.expected_producer_pid)
         return archive
+
+    def fork_preview(self, payload):
+        """Return a verified declaration without admitting a new launch."""
+        from nexaweave_execution.native_launch_contracts import verify_fork_archive
+
+        payload = validate_payload('fork_preview', payload)
+        source_ref = {key: payload[key] for key in ('schema_version', 'launch_id', 'launch_sha256')}
+        source = self._row(source_ref)
+        if (source.state != 'completed' or source.frozen['identity'].get('checkpoint') != {'mode': 'capture'}
+                or source.receipt is None or not source.dispatch_claimed):
+            raise NativeLaunchError('conflict')
+        prep, ref = self._current(source)
+        launch_id = payload['fork_launch_id']
+        selector = {'mode': 'continue', 'source_run_id': source_ref['launch_id'],
+                    'checkpoint_sha256': source.receipt['evidence_sha256']}
+        probe = self._checkpoint_request(prep, launch_id, selector)
+        restoration = self._checkpoint_factory(prep, ref, probe, selector)
+        archive = self._read_fork_archive(restoration, probe)
+        checkpoint = dict(selector, mode='fork', intervention={
+            'kind': 'swap_active_actor_v1',
+            'manifest_sha256': hashlib.sha256(archive.manifest).hexdigest(),
+            'runner_state_sha256': hashlib.sha256(archive.runner_state).hexdigest(),
+        })
+        request = self._checkpoint_request(prep, launch_id, checkpoint)
+        verify_fork_archive(archive, request, self.display_graph_id, restoration.expected_producer_pid)
+        current = self._row(source_ref)
+        if current != source or self._current(current) != (prep, ref):
+            raise NativeLaunchError('conflict')
+        producer = self._checkpoint_producer(request, self._preparation_descriptor(prep))
+        if producer.process_id != restoration.expected_producer_pid:
+            raise NativeLaunchError('conflict')
+        return validate_fork_preview_result({
+            'schema_version': 3, 'launch_id': launch_id, 'checkpoint': checkpoint,
+            'preparation': {key: ref[key] for key in ('operation_id', 'plan_sha256')},
+        }, payload)
 
     def _dto(self,row,method,payload):
         cleanup = {'known':False,'pending':None,'owner_thread_alive':None}
