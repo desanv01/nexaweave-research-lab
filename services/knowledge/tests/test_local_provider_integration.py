@@ -27,11 +27,18 @@ def test_fresh_local_provider_actual_neo4j():
     assert report["synthetic_model"] is True
     assert report["indices_initialized"] is True
     assert report["generation"] == {"answer": "synthetic fixture"}
-    assert report["models"] == ["fixture-generation", "fixture-embedding", "fixture-reranker"]
+    assert [(request["model"], request["path"]) for request in report["model_requests"]] == [
+        ("fixture-generation", "/v1/chat/completions"),
+        ("fixture-embedding", "/v1/embeddings"),
+        ("fixture-reranker", "/v1/chat/completions"),
+    ]
     assert report["denied"] == []
     assert report["http_closed"] and report["driver_closed"]
-    assert report["neo4j_port"] in report["connected_ports"]
-    assert report["http_port"] in report["connected_ports"]
+    model_ports = {request["port"] for request in report["model_requests"]}
+    assert len(model_ports) == 3
+    assert report["neo4j_port"] not in model_ports
+    expected_ports = model_ports | {report["neo4j_port"]}
+    assert expected_ports == set(report["connected_ports"])
 
 
 async def child():
@@ -78,19 +85,44 @@ async def child():
                 allow(address[0], address[1], "proactor_connect")
                 return real_proactor_connect(instance, connection, address)
             IocpProactor.connect = proactor_connect
-        from test_local_provider_http import Answer, local_config, messages, model_server
+        for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+            os.environ[name] = "http://proxy-must-never-resolve.invalid:80"
+        os.environ["NO_PROXY"] = os.environ["no_proxy"] = ""
+        os.environ["OPENAI_API_KEY"] = "unused-cloud-trap"
+        os.environ["OPENAI_BASE_URL"] = "https://cloud-must-never-resolve.invalid/v1"
+        from test_local_provider_http import Answer, messages, model_server
         from nexaweave_knowledge.provider import GraphitiKnowledgeProvider
         from nexaweave_knowledge.local_transport import local_endpoint
         local_endpoint(uri, bolt=True)
-        with model_server() as (server, records, state):
-            allowed_ports.add(server.server_port)
-            for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
-                os.environ[name] = "http://proxy-must-never-resolve.invalid:80"
-            os.environ["NO_PROXY"] = os.environ["no_proxy"] = ""
-            os.environ["OPENAI_API_KEY"] = "unused-cloud-trap"
-            os.environ["OPENAI_BASE_URL"] = "https://cloud-must-never-resolve.invalid/v1"
-            subject = GraphitiKnowledgeProvider(local_config(server.server_port, neo4j_uri=uri,
-                                                            password=os.environ["KNOWLEDGE_TEST_PASSWORD"]))
+        with (
+            model_server() as (generation_server, generation_records, _),
+            model_server() as (embedding_server, embedding_records, _),
+            model_server() as (reranker_server, reranker_records, _),
+        ):
+            routes = (
+                ("LLM", generation_server, generation_records, "fixture-generation"),
+                ("EMBEDDING", embedding_server, embedding_records, "fixture-embedding"),
+                ("RERANKER", reranker_server, reranker_records, "fixture-reranker"),
+            )
+            os.environ.update({
+                "KNOWLEDGE_OPERATING_PROFILE": "local_only",
+                "KNOWLEDGE_NEO4J_URI": uri,
+                "KNOWLEDGE_NEO4J_USER": "neo4j",
+                "KNOWLEDGE_NEO4J_PASSWORD": os.environ["KNOWLEDGE_TEST_PASSWORD"],
+                "KNOWLEDGE_SEARCH_RECIPE": "hybrid_cross_encoder",
+                "KNOWLEDGE_EMBEDDING_DIMENSION": "3",
+                "KNOWLEDGE_STRUCTURED_OUTPUT_MODE": "json_object",
+                "KNOWLEDGE_CALL_TIMEOUT_SECONDS": "3",
+                "KNOWLEDGE_MAX_TOKENS": "4096",
+                "KNOWLEDGE_MAX_COROUTINES": "4",
+                "KNOWLEDGE_TOTAL_LLM_CALL_BUDGET": "4",
+            })
+            for role, server, _, model in routes:
+                allowed_ports.add(server.server_port)
+                os.environ[f"KNOWLEDGE_{role}_BASE_URL"] = f"http://127.0.0.1:{server.server_port}/v1"
+                os.environ[f"KNOWLEDGE_{role}_MODEL"] = model
+                os.environ[f"KNOWLEDGE_{role}_API_KEY"] = f"explicit-local-{role.lower()}"
+            subject = GraphitiKnowledgeProvider()
             try:
                 await subject.initialize()
                 graph = subject.graphiti
@@ -104,16 +136,25 @@ async def child():
                 owned_sdk = list(subject._owned_clients)
             finally:
                 await subject.close()
+            assert len(owned_http) == len(owned_sdk) == len(routes)
             assert all(c.is_closed for c in owned_http)
             assert all(c.is_closed() for c in owned_sdk)
             assert driver.client._closed  # actual pinned Neo4j driver's closure state
             assert denied == []
-            assert len(records) == 3
-            assert all(r["authorization"] == "Bearer explicit-local-dummy" for r in records)
+            model_requests = []
+            for role, server, records, _ in routes:
+                assert len(records) == 1, role
+                request = records[0]
+                assert request["authorization"] == f"Bearer explicit-local-{role.lower()}"
+                model_requests.append({
+                    "port": server.server_port,
+                    "path": request["path"],
+                    "model": request["body"]["model"],
+                })
             report = dict(synthetic_model=True, indices_initialized=True, generation=generation,
-                          models=[r["body"]["model"] for r in records], denied=denied,
+                          model_requests=model_requests, denied=denied,
                           connected_ports=sorted({port for kind, host, port in attempts if kind in {"connect", "connect_ex", "proactor_connect"}}),
-                          neo4j_port=parsed.port, http_port=server.server_port,
+                          neo4j_port=parsed.port,
                           http_closed=True, driver_closed=True)
         print(json.dumps(report, sort_keys=True))
     finally:
