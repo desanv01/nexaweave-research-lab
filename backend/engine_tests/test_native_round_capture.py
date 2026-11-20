@@ -415,6 +415,8 @@ async def _assert_existing_child_writer(child_dir, child_db, receipt, clock, tra
 
 def test_actual_twitter_round_capture_preserves_native_cut(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    from oasis.social_platform.platform import Platform
+
     root = _prepared(tmp_path)
     state_path = root / "state.json"
     state = json.loads(_read_bounded(state_path, _MANIFEST_LIMIT))
@@ -454,6 +456,15 @@ def test_actual_twitter_round_capture_preserves_native_cut(tmp_path, monkeypatch
                        "include_engine_clock": True, "include_recommendation_state": True,
                        "include_topology": True},
     )
+    owner = session._round_capture
+    reddit = Platform(db_path=str(tmp_path / "refused-reddit.db"), recsys_type="reddit")
+    with closing(reddit.db), closing(reddit.db_cursor):
+        original_channel = reddit.channel
+        with pytest.raises(RecordingError):
+            owner.wrap_platform(reddit)
+        assert reddit.channel is original_channel
+        assert owner._platform is None and owner._channel is None
+
     assert session.round_capture_receipt is None and not destination.exists()
     native_database = root / "twitter_simulation.db"
     observed_watermarks = []
@@ -490,7 +501,6 @@ def test_actual_twitter_round_capture_preserves_native_cut(tmp_path, monkeypatch
         return begin_capture_round(result, round_num, active_agents, prior_cursor)
 
     monkeypatch.setattr(session, "begin_capture_round", observe_before_round)
-    owner = session._round_capture
     copy_at_cut = owner._copy_at_cut
     observed = {}
     observed_parent_storage = {}
