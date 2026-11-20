@@ -436,7 +436,7 @@ class _ObservedForkFactory:
         return ' '.join(line.decode('ascii') for line in lines)
 
 
-def _run_child(factory, request, terminal, deadline, prior_pids, *, require_closed=False):
+def _run_child(factory, request, terminal, deadline, prior_instances, *, require_closed=False):
     from nexaweave_execution.native_process_driver import NativeProcessDriver
 
     remaining = deadline - monotonic()
@@ -447,7 +447,8 @@ def _run_child(factory, request, terminal, deadline, prior_pids, *, require_clos
     try:
         child = driver.launch(request, attempt)
         assert type(child.process_id) is int and child.process_id > 0
-        assert child.process_id not in prior_pids
+        assert child.process_id != os.getpid()
+        assert child.instance_id not in prior_instances
         observed = terminal(driver, request, attempt, child, deadline)
         assert observed.status == "completed" and observed.receipt is not None
         receipt = observed.receipt
@@ -459,6 +460,7 @@ def _run_child(factory, request, terminal, deadline, prior_pids, *, require_clos
     if require_closed:
         assert closed is True
     assert monotonic() < deadline
+    prior_instances.add(child.instance_id)
     return child.process_id, receipt.evidence_sha256
 
 
@@ -622,7 +624,7 @@ def _check_reference(reference, checkpoint_rows, captured_owners, manifest, rng_
     return sorted((owner, post_id) for owner, draw in enumerate(draws) for post_id in draw)
 
 
-def assert_fresh_twitter_continuation(tmp_path, request, original_pid, terminal, deadline):
+def assert_fresh_twitter_continuation(tmp_path, request, original_instance_id, terminal, deadline):
     from app.services.native_owned_session import _manifest
     from nexaweave_execution.native_twitter_checkpoint_binding import (
         NativeRestoredTwitterFactory, NativeTwitterCaptureFactory,
@@ -643,10 +645,10 @@ def assert_fresh_twitter_continuation(tmp_path, request, original_pid, terminal,
         "run_id": str(capture_request.run_id), "branch_id": str(uuid4()),
         "project_id": str(capture_request.project_id), "project_revision": capture_request.project_revision,
     }
-    prior_pids = {os.getpid(), original_pid}
+    # Windows may reuse an exited child's PID. The handshake identifies each launch.
+    prior_instances = {original_instance_id}
     capture_factory = NativeTwitterCaptureFactory(prepared, str(checkpoint), str(lineage_dir), anchors)
-    producer_pid, producer_evidence = _run_child(capture_factory, capture_request, terminal, deadline, prior_pids)
-    prior_pids.add(producer_pid)
+    producer_pid, producer_evidence = _run_child(capture_factory, capture_request, terminal, deadline, prior_instances)
     assert list(islice(lineage_dir.iterdir(), 2)) == [lineage_path]
     lineage_raw = _read_bounded(lineage_path, _RECEIPT_LIMIT)
     assert sha256(lineage_raw).hexdigest() == producer_evidence
@@ -681,9 +683,8 @@ def assert_fresh_twitter_continuation(tmp_path, request, original_pid, terminal,
     observation_path = reference / "reference_observation.json"
     reference_factory = _UninterruptedTwitterFactory(reference_prepared, str(observation_path))
     reference_pid, reference_evidence = _run_child(
-        reference_factory, reference_request, terminal, deadline, prior_pids,
+        reference_factory, reference_request, terminal, deadline, prior_instances,
     )
-    prior_pids.add(reference_pid)
     observation_raw = _read_bounded(observation_path, _RECEIPT_LIMIT)
     assert sha256(observation_raw).hexdigest() == reference_evidence
     observation = json.loads(observation_raw)
@@ -707,7 +708,7 @@ def assert_fresh_twitter_continuation(tmp_path, request, original_pid, terminal,
         producer_evidence, producer_pid, str(capture_request.run_id), None,
     )
     assert not restore_dir.exists() and not memory_probe_path.exists()
-    restored_pid, restore_evidence = _run_child(restore_factory, restore_request, terminal, deadline, prior_pids)
+    restored_pid, restore_evidence = _run_child(restore_factory, restore_request, terminal, deadline, prior_instances)
     proof_raw = _read_bounded(memory_probe_path, _RECEIPT_LIMIT)
     proof = json.loads(proof_raw)
     assert set(proof) == {"pid", "frames", "step"} and proof["pid"] == restored_pid
@@ -761,11 +762,10 @@ def assert_fresh_twitter_continuation(tmp_path, request, original_pid, terminal,
         fork_prepared, str(checkpoint), str(lineage_dir), str(fork_dir),
         producer_evidence, producer_pid, str(capture_request.run_id), None,
     )
-    prior_pids.add(restored_pid)
     observed_factory = _ObservedForkFactory(fork_factory, tmp_path / 'fresh-fork-validation.stage')
     try:
         fork_pid, fork_evidence = _run_child(
-            observed_factory, fork_request, terminal, deadline, prior_pids, require_closed=True,
+            observed_factory, fork_request, terminal, deadline, prior_instances, require_closed=True,
         )
     except Exception as error:
         error.add_note(f'fork_validation={observed_factory.observation()}')
