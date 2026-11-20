@@ -9,6 +9,7 @@ from multiprocessing import active_children
 import os
 from pathlib import Path
 import sqlite3
+import sys
 from time import monotonic
 from uuid import uuid4
 
@@ -26,6 +27,57 @@ _COMMENT_TICK = "2026-01-01 00:02:00"
 
 def _json(value):
     return json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("ascii")
+
+
+_CONTROL_SITES = {
+    235: "engine_import", 236: "seed_import", 238: "prepared_inputs",
+    239: "private_directory", 242: "agent_graph", 243: "pre_database_deadline",
+    244: "directory_create", 246: "database_create", 247: "platform_construct",
+    248: "platform_construct", 250: "clock_install", 251: "sqlite_progress",
+    253: "reset_deadline", 254: "reset_signup", 255: "first_idle",
+    257: "seed", 258: "seed_idle", 259: "prefix", 261: "seed_ack",
+    263: "advance", 266: "writer_close", 268: "database_close", 270: "capture",
+}
+_CONTROL_ERROR_KINDS = {
+    TimeoutError: "timeout", asyncio.CancelledError: "cancelled", OSError: "os",
+    FileNotFoundError: "os", PermissionError: "os", sqlite3.OperationalError: "sqlite_operation",
+    sqlite3.DatabaseError: "sqlite", sqlite3.IntegrityError: "sqlite_integrity", ValueError: "value",
+    TypeError: "type", KeyError: "key", AttributeError: "attribute", AssertionError: "assertion",
+    RuntimeError: "runtime", ImportError: "import", ModuleNotFoundError: "import",
+}
+
+
+def _control_cause(error, source, boundary):
+    database = getattr(sys.modules.get("oasis.social_platform.database"), "__file__", None)
+    site = boundary
+    trace = error.__traceback__
+    for _ in range(32):
+        if trace is None:
+            break
+        code = trace.tb_frame.f_code
+        line = trace.tb_lineno
+        if code.co_filename == source and code.co_name == "produce_reddit_checkpoint":
+            site = _CONTROL_SITES.get(line, "control_coroutine")
+        elif code.co_filename == database and code.co_name == "create_db":
+            site = "sqlite_connect" if line == 94 else "sqlite_schema" if 95 <= line <= 201 else "sqlite_other"
+        trace = trace.tb_next
+    return {"site": site, "kind": _CONTROL_ERROR_KINDS.get(type(error), "other")}
+
+
+def _emit_control_failure(error, boundary, source=None, deadline=None):
+    try:
+        result = {"failure": _control_cause(error, source, boundary)}
+        cause = error.__cause__ or error.__context__
+        if cause is not None and cause is not error:
+            result["cause"] = _control_cause(cause, source, boundary)
+        if deadline is not None:
+            now = monotonic()
+            result["deadline_elapsed"] = now >= deadline
+            result["elapsed_ms"] = int(min(25, max(0, now - (deadline - 25))) * 1000)
+        print("NEXAWEAVE_REDDIT_CONTROL_CAUSE " + _json(result).decode("ascii"), file=sys.stderr, flush=True)
+    except Exception:
+        # The fixture must re-raise the original child failure.
+        pass
 
 
 def _model():
@@ -62,9 +114,14 @@ class _Factory:
         return _Session(self, request)
 
     def evidence(self, request):
-        self.validate(request)
-        path = Path(self.checkpoint) / _MANIFEST if self.role == "producer" else Path(self.output) / _PROOF
-        return sha256(_read(path, 7200)).hexdigest()
+        try:
+            self.validate(request)
+            path = Path(self.checkpoint) / _MANIFEST if self.role == "producer" else Path(self.output) / _PROOF
+            return sha256(_read(path, 7200)).hexdigest()
+        except Exception as error:
+            if self.role == "control":
+                _emit_control_failure(error, "terminal_evidence")
+            raise
 
 
 @dataclass(frozen=True)
@@ -73,27 +130,37 @@ class _Session:
     request: object
 
     def start(self):
-        from app.services.native_reddit_checkpoint import produce_reddit_checkpoint, restore_reddit_checkpoint
-
         job = self.factory
-        deadline = monotonic() + 25
-        if job.role == "restore":
-            proof = asyncio.run(restore_reddit_checkpoint(
-                job.prepared, self.request, producer_request=job.producer_request,
-                producer_pid=job.producer_pid, expected_digest=job.checkpoint_digest,
-                checkpoint_dir=job.checkpoint, child_dir=job.output, deadline=deadline,
-            ))
-        else:
-            proof = asyncio.run(produce_reddit_checkpoint(
-                job.prepared, self.request, job.output, checkpoint_dir=job.checkpoint or None, deadline=deadline,
-            ))
-            if job.role == "producer":
-                assert proof == job.evidence(self.request)
-                return
-        data = _json(proof)
-        assert len(data) <= 7200
-        with (Path(job.output) / _PROOF).open("xb") as output:
-            assert output.write(data) == len(data)
+        deadline = source = None
+        boundary = "checkpoint_import"
+        try:
+            from app.services.native_reddit_checkpoint import produce_reddit_checkpoint, restore_reddit_checkpoint
+
+            deadline = monotonic() + 25
+            source = produce_reddit_checkpoint.__code__.co_filename
+            boundary = "control_coroutine"
+            if job.role == "restore":
+                proof = asyncio.run(restore_reddit_checkpoint(
+                    job.prepared, self.request, producer_request=job.producer_request,
+                    producer_pid=job.producer_pid, expected_digest=job.checkpoint_digest,
+                    checkpoint_dir=job.checkpoint, child_dir=job.output, deadline=deadline,
+                ))
+            else:
+                proof = asyncio.run(produce_reddit_checkpoint(
+                    job.prepared, self.request, job.output, checkpoint_dir=job.checkpoint or None, deadline=deadline,
+                ))
+                if job.role == "producer":
+                    assert proof == job.evidence(self.request)
+                    return
+            boundary = "proof_write"
+            data = _json(proof)
+            assert len(data) <= 7200
+            with (Path(job.output) / _PROOF).open("xb") as output:
+                assert output.write(data) == len(data)
+        except Exception as error:
+            if job.role == "control":
+                _emit_control_failure(error, boundary, source, deadline)
+            raise
 
     def close(self):
         # The native coroutine closes the writer and its connection before
