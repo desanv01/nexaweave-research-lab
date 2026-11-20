@@ -29,6 +29,7 @@ MIGRATIONS = {
         "0002_source_evidence.sql",
         "0003_research_imports.sql",
         "0004_source_binaries.sql",
+        "0005_legacy_reports.sql",
     ),
     "nexaweave_knowledge": ("0001_knowledge_operations.sql", "0002_scope_bindings.sql"),
     "nexaweave_execution": (
@@ -39,6 +40,9 @@ MIGRATIONS = {
     ),
 }
 MIGRATION_PINS = {
+    ("nexaweave_storage", "migrations/0005_legacy_reports.sql"): (
+        625, "da7d403a9bfa907a08e951b4b15a3cb24864db4656e69292855552b5cd057b28",
+    ),
     ("nexaweave_execution", "migrations/preparations_0002.sql"): (
         492, "2e8da8a6f5d82519da3cdb245bdfa453140614a87311b3b19c406c99c7e6d24f",
     ),
@@ -51,7 +55,7 @@ MIGRATION_PINS = {
 }
 DRIVERS = {
     "nexaweave_storage": (
-        ("store.py", 13387, "786a1f8161c3f75d38e6ea8156525af4c18452dfedcf8c6b5273306cdb606ec1"),
+        ("store.py", 13449, "64274e975932072686d39d9fbc2568cc50fabb0e079617cbbe16133063548d2e"),
         ("__main__.py", 11634, "401c434163982ebee95aa7c81f761297109cc33c3e339b0c5fc7e20dadb60588"),
     ),
     "nexaweave_knowledge": (
@@ -116,8 +120,10 @@ def _installed_bootstrap():
             _verify_pin(source / driver, size, digest)
             _verify_pin(origin.parent / driver, size, digest)
             names.append(driver)
+        if package == "nexaweave_storage":
+            names.append("legacy_report.py")
         if package == "nexaweave_knowledge":
-            names.extend(("read_bootstrap.py", "source_bootstrap.py"))
+            names.extend(("read_bootstrap.py", "source_bootstrap.py", "source_library.py"))
         if package == "nexaweave_execution":
             names.append("operator_bootstrap.py")
         for name in names:

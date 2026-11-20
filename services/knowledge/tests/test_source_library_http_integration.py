@@ -141,7 +141,7 @@ def _exchange(port, method, route, payload=None, *, token=None, origin=None):
 
 @contextmanager
 def _host(tmp_path, scope, display, *, mode='research_local', allow_ontology=False,
-          discard_save_revision=None):
+          discard_save_revision=None, principal='owner'):
     from tools.run_unit_tests import _unit_environment
     backend=os.environ.get('NEXAWEAVE_WORKBENCH_BACKEND_PYTHON')
     python=os.environ.get('KNOWLEDGE_PYTHON');bootstrap=os.environ.get('KNOWLEDGE_BOOTSTRAP_SCRIPT')
@@ -160,7 +160,7 @@ def _host(tmp_path, scope, display, *, mode='research_local', allow_ontology=Fal
     env.update(SOURCE_HTTP_TEST_ROOT=str(Path(__file__).resolve().parents[3]),
         NEXAWEAVE_APP_MODE=mode,PYTHON_DOTENV_DISABLED='1',FLASK_HOST='127.0.0.1',FLASK_DEBUG='0',
         NEXAWEAVE_ALLOWED_ORIGINS='http://localhost:3000',KNOWLEDGE_READ_TOKEN=token,
-        KNOWLEDGE_PYTHON=python,KNOWLEDGE_BOOTSTRAP_SCRIPT=bootstrap,KNOWLEDGE_PRINCIPAL='owner',
+        KNOWLEDGE_PYTHON=python,KNOWLEDGE_BOOTSTRAP_SCRIPT=bootstrap,KNOWLEDGE_PRINCIPAL=principal,
         KNOWLEDGE_DISPLAY_GRAPH_ID=display,KNOWLEDGE_BOUND_SCOPE_JSON=scope.model_dump_json(),
         KNOWLEDGE_PG_HOST=pg['host'],KNOWLEDGE_PG_PORT=pg['port'],KNOWLEDGE_PG_DATABASE=pg['dbname'],
         KNOWLEDGE_PG_USER=pg['user'],KNOWLEDGE_PG_PASSWORD=pg['password'],
@@ -205,15 +205,15 @@ def _host(tmp_path, scope, display, *, mode='research_local', allow_ontology=Fal
     assert {'event':'shutdown','loopback_blocked':0} in events
 
 
-def _seed(factory, *, ontology=None, evidence=()):
+def _seed(factory, *, ontology=None, evidence=(), principal='owner'):
     workspace,project,graph=uuid4(),uuid4(),uuid4()
     initial = snapshot()
     if ontology is not None:
         initial['ontology'] = ontology
-    before=ProjectStore(factory).create('owner',workspace,project,'proj_1',initial,evidence)
+    before=ProjectStore(factory).create(principal,workspace,project,'proj_1',initial,evidence)
     scope=KnowledgeScope(workspace_id=workspace,project_id=project,graph_id=graph,layer=Layer.source)
     display='source_'+graph.hex
-    ScopeBindingStore(factory).bind('owner',display,scope)
+    ScopeBindingStore(factory).bind(principal,display,scope)
     return scope,display,before
 
 
@@ -414,6 +414,50 @@ def test_actual_http_v2_original_bytes_after_restart(factory, tmp_path):
     from test_pdf_source import pdf_bytes
     from nexaweave_storage.pdf import extract_pdf
     scope, display, _ = _seed(factory)
+    from tools.run_unit_tests import _unit_environment
+
+    report_id = 'report_legacy_fixture'
+    original_root = tmp_path / report_id
+    original_root.mkdir()
+    markdown = '# Historical report 猫\n\nOriginal body 雪.\n'.encode('utf-8')
+    meta = json.dumps(dict(
+        report_id=report_id, simulation_id='sim_legacy_fixture', graph_id='historical_graph',
+        simulation_requirement='Preserved requirement', status='completed', outline=None,
+        markdown_content=markdown.decode('utf-8'), created_at='2026-01-01T00:00:00',
+        completed_at='2026-01-01T00:01:00', error=None,
+    ), ensure_ascii=False, indent=2).encode('utf-8')
+    (original_root / 'meta.json').write_bytes(meta)
+    (original_root / 'full_report.md').write_bytes(markdown)
+    dsn = os.environ['PROJECT_STORE_POSTGRES_TEST_DSN']
+    pg = conninfo_to_dict(dsn)
+    env = {key: value for key, value in _unit_environment(tmp_path).items()
+           if not key.upper().startswith('PG')}
+    env.update(NEXAWEAVE_APPSTORE_DSN=dsn, PYTHON_DOTENV_DISABLED='1')
+    command = [os.environ['KNOWLEDGE_PYTHON'], '-I', '-m', 'nexaweave_execution.operator_bootstrap',
+               'register-legacy-report', '--database', pg['dbname'], '--owner-role', pg['user'],
+               '--principal', 'owner', '--workspace-id', str(scope.workspace_id),
+               '--project-id', str(scope.project_id), '--legacy-report-id', report_id,
+               '--input-dir', str(original_root)]
+    registration = subprocess.run(command, cwd=tmp_path, env=env, capture_output=True,
+                                  timeout=30, check=True)
+    markdown_sha256 = hashlib.sha256(markdown).hexdigest()
+    assert registration.stderr == b''
+    assert json.loads(registration.stdout) == dict(
+        schema_version=1, status='registered', legacy_report_id=report_id,
+        meta_sha256=hashlib.sha256(meta).hexdigest(), markdown_sha256=markdown_sha256,
+    )
+    report_route = f'/api/source/legacy-report/{display}/{report_id}'
+
+    def assert_original_report(port, token):
+        status, headers, reply = _exchange(port, 'GET', report_route, token=token)
+        assert status == 200 and reply['success'] is True
+        assert headers['Cache-Control'] == 'no-store' and headers['X-Content-Type-Options'] == 'nosniff'
+        data = reply['data']
+        assert data == dict(schema_version=1, project_id=str(scope.project_id), legacy_report_id=report_id,
+                            byte_length=len(markdown), sha256=markdown_sha256,
+                            content_base64=base64.b64encode(markdown).decode('ascii'))
+        assert base64.b64decode(data['content_base64'], validate=True) == markdown
+
     binary = pdf_bytes(['Original 猫', '', 'End 雪'])
     revision = uuid4()
     payload = dict(_payload(revision, 'owned original.pdf', binary, 'pdf'), schema_version=2)
@@ -433,19 +477,45 @@ def test_actual_http_v2_original_bytes_after_restart(factory, tmp_path):
         assert receipt['extraction']['ocr_performed'] is False
         assert _exchange(port, 'POST', retained, payload, token=token)[2]['data'] == receipt
         assert _exchange(port, 'POST', retained, dict(payload, source_name='changed'), token=token)[0] == 409
+        assert_original_report(port, token)
+        assert _exchange(port, 'GET', report_route)[0] == 401
     restart = tmp_path / 'original-restart'; restart.mkdir()
     with _host(restart, scope, display) as (port, token, _):
-        status, _, meta = _exchange(port, 'GET', metadata_route, token=token)
-        assert status == 200 and meta['data']['binary'] == receipt['binary']
+        status, _, pdf_meta = _exchange(port, 'GET', metadata_route, token=token)
+        assert status == 200 and pdf_meta['data']['binary'] == receipt['binary']
         status, headers, read = _exchange(port, 'GET', read_route, token=token)
         assert status == 200 and headers['Cache-Control'] == 'no-store'
         assert headers['X-Content-Type-Options'] == 'nosniff'
         assert base64.b64decode(read['data']['content_base64'], validate=True) == binary
-        assert read['data']['binary'] == meta['data']['binary']
+        assert read['data']['binary'] == pdf_meta['data']['binary']
         assert _exchange(port, 'GET', read_route)[0] == 401
         assert _exchange(port, 'GET', read_route, token=token,
                          origin='http://denied.example')[0] == 403
         assert _exchange(port, 'GET', f'/api/source/item/{display}/{revision}', token=token)[2]['data']['text'] == extract_pdf(binary).text
+        assert_original_report(port, token)
+        with factory() as conn:
+            assert conn.execute(
+                "SELECT meta_bytes, markdown_bytes FROM mf_app.legacy_reports "
+                "WHERE project_id=%s AND legacy_report_id=%s", (scope.project_id, report_id),
+            ).fetchone() == (meta, markdown)
+            conn.execute(
+                "UPDATE mf_app.legacy_reports SET markdown_bytes=%s "
+                "WHERE project_id=%s AND legacy_report_id=%s",
+                (b'!' + markdown[1:], scope.project_id, report_id),
+            )
+        status, _, denied = _exchange(port, 'GET', report_route, token=token)
+        assert status == 503 and denied == {'success': False, 'error': {'code': 'source_unavailable'}}
+
+    foreign_root = tmp_path / 'foreign-report-owner'
+    foreign_root.mkdir()
+    foreign_scope, foreign_display, _ = _seed(factory, principal='foreign')
+    with _host(foreign_root, foreign_scope, foreign_display, principal='foreign') as (port, token, _):
+        status, _, denied = _exchange(
+            port, 'GET', f'/api/source/legacy-report/{foreign_display}/{report_id}', token=token,
+        )
+        assert status == 404 and denied == {'success': False, 'error': {'code': 'not_found'}}
+    assert (original_root / 'meta.json').read_bytes() == meta
+    assert (original_root / 'full_report.md').read_bytes() == markdown
 
 
 def test_actual_http_reviewed_ontology_owned_revision_and_restart(factory, tmp_path):
