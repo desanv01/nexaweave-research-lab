@@ -2,7 +2,7 @@
 
 import hashlib
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
@@ -247,6 +247,7 @@ async def test_real_graphiti_entity_metadata_roundtrip(provider):
     edge = next(fact for fact in ingested.facts if fact.kind == "edge")
     assert node.summary is None or isinstance(node.summary, str)
     summary = "研究摘要 — synthetic fixture"
+    valid = datetime(2024, 1, 1, tzinfo=timezone.utc)
     expiry = datetime(2024, 3, 1, tzinfo=timezone.utc)
     invalid = datetime(2024, 2, 1, tzinfo=timezone.utc)
     await provider._driver.execute_query(
@@ -255,8 +256,9 @@ async def test_real_graphiti_entity_metadata_roundtrip(provider):
     )
     await provider._driver.execute_query(
         "MATCH ()-[r:RELATES_TO {uuid: $uuid, group_id: $group_id}]->() "
-        "SET r.invalid_at = datetime($invalid_at), r.expired_at = datetime($expired_at)",
-        params={"uuid": edge.provider_id, "group_id": scope.group_id,
+        "SET r.valid_at = datetime($valid_at), r.invalid_at = datetime($invalid_at), "
+        "r.expired_at = datetime($expired_at)",
+        params={"uuid": edge.provider_id, "group_id": scope.group_id, "valid_at": valid.isoformat(),
                 "invalid_at": invalid.isoformat(), "expired_at": expiry.isoformat()},
     )
     node_page = await provider.page(scope, GraphPageRequest(kind="node", entity_type="Person"))
@@ -273,6 +275,23 @@ async def test_real_graphiti_entity_metadata_roundtrip(provider):
     assert (paged_edge.invalid_at, paged_edge.expired_at) == (invalid, expiry)
     assert paged_edge.expired_at != paged_edge.invalid_at
     assert "expired_at" not in paged_edge.attributes
+    assert detailed_edge.valid_at == paged_edge.valid_at == valid
+
+    query = "Mira Vale works for Harbor Labs"
+    valid_with_offset = valid.astimezone(timezone(timedelta(hours=8)))
+    for cutoff in (valid, valid_with_offset):
+        visible = await provider.search(scope, SearchQuery(text=query, top_k=5, valid_at=cutoff))
+        assert len(visible.facts) == 1
+        historical = visible.facts[0]
+        assert historical.kind == "edge" and historical.provider_id == edge.provider_id
+        assert historical.scope == scope and historical.score is not None
+        assert historical.episode_ids == paged_edge.episode_ids
+        assert historical.evidence_ids == paged_edge.evidence_ids == source.evidence_ids
+
+    invalid_with_offset = invalid.astimezone(timezone(timedelta(hours=-5)))
+    for cutoff in (valid - timedelta(microseconds=1), invalid, invalid_with_offset):
+        outside = await provider.search(scope, SearchQuery(text=query, top_k=5, valid_at=cutoff))
+        assert not outside.facts
 
 
 @pytest.mark.asyncio
