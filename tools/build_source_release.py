@@ -8,7 +8,7 @@ import sys
 
 # Import only the fixed sibling standard-library tool, never application code.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from release.source_bundle import BundleError, build_bundle, verify_bundle
+from release.source_bundle import BundleError, build_bundle, inventory_bundle, verify_bundle
 
 
 class SafeParser(argparse.ArgumentParser):
@@ -24,13 +24,18 @@ def main(argv=None) -> int:
         build.add_argument("--repository", required=True)
         build.add_argument("--revision", required=True)
         build.add_argument("--output", required=True)
-        verify = commands.add_parser("verify", allow_abbrev=False, add_help=False)
-        verify.add_argument("--artifact", required=True)
-        verify.add_argument("--expected-sha256", required=True)
-        verify.add_argument("--revision", required=True)
+        for operation in ("verify", "inventory"):
+            reader = commands.add_parser(operation, allow_abbrev=False, add_help=False)
+            reader.add_argument("--artifact", required=True)
+            reader.add_argument("--expected-sha256", required=True)
+            reader.add_argument("--revision", required=True)
         args = parser.parse_args(argv)
         if args.operation == "build":
             result = build_bundle(args.repository, args.revision, args.output)
+        elif args.operation == "inventory":
+            data = inventory_bundle(args.artifact, args.expected_sha256, args.revision)
+            sys.stdout.buffer.write(data)
+            return 0
         else:
             result = verify_bundle(args.artifact, args.expected_sha256, args.revision)
         print(json.dumps({"ok": True, **result}, sort_keys=True, separators=(",", ":")))
