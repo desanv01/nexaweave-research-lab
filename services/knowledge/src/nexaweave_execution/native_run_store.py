@@ -29,7 +29,7 @@ _SELECT = ("run_id,principal,project_id,project_revision,simulation_id,artifact_
            "runtime_sha256,platforms,seed,max_rounds,request_fingerprint,state,"
            "cancel_requested,attempt_id,owner_id,lease_until,child_instance_id,"
            "process_id,process_fingerprint,receipt,created_at,updated_at,"
-           "source_run_id,checkpoint_sha256")
+           "source_run_id,checkpoint_sha256,intervention")
 _MIGRATION_SELECT = ("SELECT version,sql_sha256,catalog_sha256 "
                      "FROM mf_native_execution.schema_migrations ORDER BY version")
 _MIGRATION_INSERT = ("INSERT INTO mf_native_execution.schema_migrations"
@@ -88,14 +88,36 @@ def _v2_catalog_receipt(connection: psycopg.Connection, v1_receipt: tuple) -> st
     return hashlib.sha256(evidence.encode("ascii")).hexdigest()
 
 
+def _catalog_v3_receipt(conn, schema, previous, base_catalog):
+    # Retain the original receipt format for the first two migrations. Include
+    # enforcement state and new trigger/function definitions in the v3 receipt.
+    queries = (
+        "SELECT c.relname,c.relkind,c.relrowsecurity,c.relforcerowsecurity FROM pg_class c "
+        "JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=%s ORDER BY c.relname",
+        "SELECT x.conname,x.convalidated FROM pg_constraint x JOIN pg_namespace n "
+        "ON n.oid=x.connamespace WHERE n.nspname=%s ORDER BY x.conname,x.conrelid::regclass::text",
+        "SELECT i.relname,x.indisvalid,x.indisready,x.indislive FROM pg_index x JOIN pg_class i "
+        "ON i.oid=x.indexrelid JOIN pg_namespace n ON n.oid=i.relnamespace WHERE n.nspname=%s ORDER BY i.relname",
+        "SELECT c.relname,t.tgname,t.tgenabled,pg_get_triggerdef(t.oid) FROM pg_trigger t "
+        "JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_namespace n ON n.oid=c.relnamespace "
+        "WHERE n.nspname=%s AND NOT t.tgisinternal ORDER BY c.relname,t.tgname",
+        "SELECT p.proname,pg_get_functiondef(p.oid) FROM pg_proc p JOIN pg_namespace n "
+        "ON n.oid=p.pronamespace WHERE n.nspname=%s ORDER BY p.proname,p.oid",
+    )
+    evidence = [previous, base_catalog(conn), [conn.execute(q, (schema,)).fetchall() for q in queries]]
+    return hashlib.sha256(json.dumps(evidence, separators=(",", ":")).encode("ascii")).hexdigest()
+
+
 def migrate_native_runs(connection: psycopg.Connection) -> None:
     """Install or verify only the native execution catalog after mf_app exists."""
     try:
         migrations = files("nexaweave_execution").joinpath("migrations")
         sql_v1 = migrations.joinpath("native_runs_0001.sql").read_text("utf-8")
         sql_v2 = migrations.joinpath("native_runs_0002.sql").read_text("utf-8")
+        sql_v3 = migrations.joinpath("native_runs_0003.sql").read_text("utf-8")
         checksum_v1 = hashlib.sha256(sql_v1.encode("utf-8")).hexdigest()
         checksum_v2 = hashlib.sha256(sql_v2.encode("utf-8")).hexdigest()
+        checksum_v3 = hashlib.sha256(sql_v3.encode("utf-8")).hexdigest()
         with connection.transaction():
             connection.execute("SET LOCAL statement_timeout = '10s'")
             connection.execute("SET LOCAL lock_timeout = '3s'")
@@ -112,7 +134,7 @@ def migrate_native_runs(connection: psycopg.Connection) -> None:
                 raise NativeRunMigrationMismatch()
             rows = connection.execute(_MIGRATION_SELECT).fetchall()
             versions = [row[0] for row in rows]
-            if versions not in ([1], [1, 2]) or rows[0][1] != checksum_v1:
+            if versions not in ([1], [1, 2], [1, 2, 3]) or rows[0][1] != checksum_v1:
                 raise NativeRunMigrationMismatch()
             prior_v1 = rows[0]
             if versions == [1]:
@@ -122,9 +144,18 @@ def migrate_native_runs(connection: psycopg.Connection) -> None:
                 connection.execute(_MIGRATION_INSERT, (2, checksum_v2,
                                                         _v2_catalog_receipt(connection, prior_v1)))
                 rows = connection.execute(_MIGRATION_SELECT).fetchall()
-            if (len(rows) != 2 or rows[0] != prior_v1 or rows[1][0] != 2
-                    or rows[1][1] != checksum_v2
-                    or rows[1][2] != _v2_catalog_receipt(connection, prior_v1)):
+            if rows[0] != prior_v1 or rows[1][:2] != (2, checksum_v2):
+                raise NativeRunMigrationMismatch()
+            previous = rows[:2]
+            if len(rows) == 2:
+                if previous[1][2] != _v2_catalog_receipt(connection, prior_v1):
+                    raise NativeRunMigrationMismatch()
+                connection.execute(sql_v3)
+                chain = _catalog_v3_receipt(connection, 'mf_native_execution', previous, _catalog)
+                connection.execute(_MIGRATION_INSERT, (3, checksum_v3, chain))
+                rows = connection.execute(_MIGRATION_SELECT).fetchall()
+            chain = _catalog_v3_receipt(connection, 'mf_native_execution', previous, _catalog)
+            if rows != [*previous, (3, checksum_v3, chain)]:
                 raise NativeRunMigrationMismatch()
     except (OSError, psycopg.Error):
         raise NativeRunMigrationMismatch() from None
@@ -133,7 +164,7 @@ def migrate_native_runs(connection: psycopg.Connection) -> None:
 def _row(value: tuple) -> NativeRunRecord:
     (run, principal, project, revision, simulation, artifact, runtime, platforms, seed,
      rounds, fingerprint, state, cancel, attempt, owner, lease, instance, pid, process,
-     receipt, created, updated, source_run_id, checkpoint) = value
+     receipt, created, updated, source_run_id, checkpoint, intervention) = value
     try:
         wire = {
             "schema_version": 1, "principal": principal, "project_id": project,
@@ -143,6 +174,8 @@ def _row(value: tuple) -> NativeRunRecord:
         if source_run_id is not None or checkpoint is not None:
             wire.update(schema_version=2, source_run_id=source_run_id,
                         checkpoint_sha256=None if checkpoint is None else checkpoint.strip())
+        if intervention is not None:
+            wire.update(schema_version=3, intervention=intervention)
         request = NativeRunRequest.from_wire(wire)
         if request.fingerprint != fingerprint.strip():
             raise InvalidNativeRun()
@@ -163,6 +196,39 @@ def _lease(value: object) -> int:
     if type(value) is not int or not 5 <= value <= 300:
         raise InvalidNativeRun()
     return value
+
+
+def _verify_fork_dispatch(conn, request):
+    from .native_launch_store import LaunchAuthorityError, verify_fork_dispatch
+
+    try:
+        verify_fork_dispatch(conn, request)
+    except LaunchAuthorityError as error:
+        if error.code in ('native_launch_unavailable', 'native_launch_uncertain'):
+            raise NativeRunUnavailable() from None
+        raise NativeRunDenied() from None
+
+
+def _lock_checkpoint_run_id(conn, run_id):
+    # When a producer lock is needed, take it first. Run IDs are global.
+    conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 72196248041506))", (str(run_id),))
+
+
+def _reject_fork_launch_id(conn, request):
+    has_fork_column = conn.execute(
+        "SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE "
+        "attrelid=to_regclass('mf_native_launch.plans') AND attname='intervention' AND NOT attisdropped)",
+    ).fetchone()[0]
+    if has_fork_column and conn.execute(
+        "SELECT 1 FROM mf_native_launch.plans WHERE run_id=%s AND intervention IS NOT NULL", (request.run_id,),
+    ).fetchone() is not None:
+        # Preserve replay of an ordinary row recorded before the new fence.
+        existing = conn.execute(
+            f"SELECT {_SELECT} FROM mf_native_execution.runs WHERE run_id=%s AND principal=%s",
+            (request.run_id, request.principal),
+        ).fetchone()
+        if existing is None or _row(existing).request != request:
+            raise NativeRunConflict()
 
 
 class NativeRunStore:
@@ -206,17 +272,33 @@ class NativeRunStore:
                 or project.revision != request.project_revision):
             raise NativeRunDenied()
         with _transaction(self._connect) as conn:
-            if request.source_run_id is not None:
-                self._verify_continuation_source(conn, request)
+            intervention = request.intervention
+            if intervention is not None:
+                row = conn.execute(f"SELECT {_SELECT} FROM mf_native_execution.runs WHERE run_id=%s AND principal=%s",
+                                   (request.run_id, request.principal)).fetchone()
+                if row is not None:
+                    existing = _row(row)
+                    if existing.request != request:
+                        raise NativeRunConflict()
+                    return existing
+                _verify_fork_dispatch(conn, request)
+            else:
+                if request.source_run_id is not None:
+                    self._verify_continuation_source(conn, request)
+                _lock_checkpoint_run_id(conn, request.run_id)
+                # A plain read avoids reversing the producer/launch row lock
+                # order. Fork planning holds the same run-ID lock on insertion.
+                _reject_fork_launch_id(conn, request)
             conn.execute("INSERT INTO mf_native_execution.runs (run_id,principal,project_id,"
                          "project_revision,simulation_id,artifact_sha256,runtime_sha256,"
-                         "platforms,seed,max_rounds,request_fingerprint,source_run_id,checkpoint_sha256) VALUES "
-                         "(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
+                         "platforms,seed,max_rounds,request_fingerprint,source_run_id,checkpoint_sha256,intervention) VALUES "
+                         "(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
                          (request.run_id, request.principal, request.project_id,
                           request.project_revision, request.simulation_id,
                           request.artifact_sha256, request.runtime_sha256,
                           list(request.platforms), request.seed, request.max_rounds,
-                          request.fingerprint, request.source_run_id, request.checkpoint_sha256))
+                          request.fingerprint, request.source_run_id, request.checkpoint_sha256,
+                          None if intervention is None else Jsonb(intervention.to_wire())))
             row = conn.execute(f"SELECT {_SELECT} FROM mf_native_execution.runs WHERE run_id=%s AND principal=%s",
                                (request.run_id, request.principal)).fetchone()
             if row is None:
@@ -228,8 +310,9 @@ class NativeRunStore:
                     ).fetchone()
                 else:
                     other = conn.execute(
-                        "SELECT 1 FROM mf_native_execution.runs WHERE source_run_id=%s AND principal=%s",
-                        (request.source_run_id, request.principal),
+                        "SELECT 1 FROM mf_native_execution.runs WHERE source_run_id=%s AND principal=%s "
+                        "AND (intervention IS NOT NULL)=%s",
+                        (request.source_run_id, request.principal, intervention is not None),
                     ).fetchone()
                 if other is not None:
                     raise NativeRunConflict()
@@ -249,6 +332,11 @@ class NativeRunStore:
         principal, run_id, owner_id = principal_id(principal), canonical_uuid(run_id), canonical_uuid(owner_id)
         lease_seconds = _lease(lease_seconds)
         with _transaction(self._connect) as conn:
+            current = self._owned(principal, run_id, conn=conn)
+            if current.request.intervention is not None:
+                if current.state != RunState.declared or current.cancel_requested:
+                    raise NativeRunBusy()
+                _verify_fork_dispatch(conn, current.request)
             row = conn.execute(f"UPDATE mf_native_execution.runs SET state='starting',"
                 "attempt_id=%s,owner_id=%s,lease_until=clock_timestamp()+(%s * interval '1 second'),"
                 "updated_at=clock_timestamp() WHERE run_id=%s AND principal=%s "

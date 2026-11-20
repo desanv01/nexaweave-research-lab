@@ -7,7 +7,7 @@ import { comparisonReportBytes, comparisonReportMedia, experimentSelection, vali
 import { populationOptions, validatePopulationPreview, validatePopulationExport } from './populationWorkbench.js'
 import { preparationPayload, preparationSource, preparationSources, configurationPayload, validateConfigurationResult, validatePreparationResult, PREPARATION_CODES } from './simulationPreparation.js'
 import { preparedProfilePayload, validatePreparedProfiles } from './preparedProfiles.js'
-import { nativeLaunchPayload, validateNativeLaunchResult, NATIVE_LAUNCH_CODES, NATIVE_ERROR_STATUS } from './nativeLaunch.js'
+import { completedCapture, nativeForkPreviewPayload, nativeLaunchPayload, validateNativeForkPreviewResult, validateNativeLaunchResult, NATIVE_LAUNCH_CODES, NATIVE_ERROR_STATUS } from './nativeLaunch.js'
 import { createNativeObservationsChannel } from './nativeObservations.js'
 import { createConnectedReportsChannel } from './connectedReports.js'
 import { createConnectedFollowupsChannel } from './connectedFollowups.js'
@@ -74,6 +74,11 @@ export function awareTimestamp(v) {
   const maxDay = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1]
   if (year < 1 || month < 1 || month > 12 || day < 1 || day > maxDay || Number(v.slice(11, 13)) > 23 || Number(v.slice(14, 16)) > 59 || Number(v.slice(17, 19)) > 59) fail('invalid_request')
   return v
+}
+// Date.parse retains milliseconds. Keep the remaining accepted digits separately.
+const submillisecond = stamp => (stamp.match(/\.(\d+)/)?.[1] || '').padEnd(6, '0').slice(3)
+export function sameAwareTimestamp(a, b) {
+  return a == null && b == null || a != null && b != null && Date.parse(a) === Date.parse(b) && submillisecond(a) === submillisecond(b)
 }
 function scope(v) {
   shape(v, 'schema_version workspace_id project_id graph_id run_id branch_id layer')
@@ -220,6 +225,7 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
   let connection = null, active = null, activeMethod = null, generation = 0, authenticated = false, ingestionScope = null, populationAdmission = null
   const preparationPlans = new Map(), preparationStarted = new Set()
   const nativePlans = new Map(), nativeStarted = new Set()
+  let forkPreview = null
   const observations = createNativeObservationsChannel({ fetchImpl, deadlineMs, connection: () => authenticated && connection ? { ...connection } : null, denied: () => disconnect() })
   const reports = createConnectedReportsChannel({ fetchImpl, deadlineMs, connection: () => authenticated && connection ? { ...connection } : null, denied: () => disconnect() })
   const followups = createConnectedFollowupsChannel({ fetchImpl, deadlineMs, connection: () => authenticated && connection ? { ...connection } : null, denied: () => disconnect() })
@@ -230,9 +236,9 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
     // Child resets must not invalidate another section's transport epoch.
     // Native requests retain the shared controller through digest admission.
     if (active && activeMethod?.startsWith('nativeLaunch')) cancel()
-    nativePlans.clear()
+    nativePlans.clear(); forkPreview = null
   }
-  function disconnect() { reports.clear(); followups.clear(); observations.clear(); cancel(); connection = null; authenticated = false; ingestionScope = null; populationAdmission = null; preparationPlans.clear(); preparationStarted.clear(); nativePlans.clear(); nativeStarted.clear() }
+  function disconnect() { reports.clear(); followups.clear(); observations.clear(); cancel(); connection = null; authenticated = false; ingestionScope = null; populationAdmission = null; preparationPlans.clear(); preparationStarted.clear(); nativePlans.clear(); nativeStarted.clear(); forkPreview = null }
   async function request(method, payload, ingestionContext, options = {}) {
     if (!connection || (method !== 'graph' && !authenticated)) fail('disconnected')
     const population = method.startsWith('population')
@@ -242,23 +248,41 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
     const preparationInspection = profiles || configuration
     // These source operations leave report and follow-up ownership alone.
     if (preparationInspection) cancelShared(true)
-    else if (ontology || ['sourceOriginalMetadata', 'sourceOriginalRead'].includes(method)) cancelShared()
+    else if (ontology || ['sourceOriginalMetadata', 'sourceOriginalRead'].includes(method) ||
+      (method === 'sourceGet' && options.dossierReview)) cancelShared()
     else cancel(method === 'populationExport')
     const source = method.startsWith('source'), ingestion = method.startsWith('ingestion'), experiment = method.startsWith('experiment')
     const original = ['sourceRetainOriginal', 'sourceOriginalMetadata', 'sourceOriginalRead'].includes(method)
     const preparation = method.startsWith('preparation')
     const native = method.startsWith('nativeLaunch')
+    const previewingFork = method === 'nativeLaunchForkPreview'
+    const admittedFork = forkPreview
+    forkPreview = null
     let nativeRaw, nativeContext
     if (native) {
-      nativeRaw = nativeLaunchPayload(payload, method === 'nativeLaunchPlan'); payload = JSON.parse(nativeRaw)
+      nativeRaw = previewingFork ? nativeForkPreviewPayload(payload) : nativeLaunchPayload(payload, method === 'nativeLaunchPlan')
+      payload = JSON.parse(nativeRaw)
       const known = nativePlans.get(payload.launch_id)
-      if (method === 'nativeLaunchPlan') {
+      if (previewingFork) {
+        if (!known || !completedCapture(known.plan) || known.plan.launch_sha256 !== payload.launch_sha256 ||
+            nativePlans.has(payload.fork_launch_id) || nativeStarted.has(payload.fork_launch_id)) fail('invalid_request')
+        const ready = preparationPlans.get(known.plan.preparation.operation_id)
+        if (!ready || JSON.stringify(ready) !== JSON.stringify(known.preparation)) fail('invalid_request')
+        nativeContext = { capture: known.plan }
+      } else if (method === 'nativeLaunchPlan') {
         const ready = preparationPlans.get(payload.preparation.operation_id)
         if (!ready || ready.state !== 'ready' || ready.plan_sha256 !== payload.preparation.plan_sha256 || JSON.stringify(ready) !== JSON.stringify(ingestionContext)) fail('invalid_request')
         if (!known && nativePlans.size >= 100) fail('busy')
         nativeContext = { preparation: JSON.parse(JSON.stringify(ready)), known: known?.plan }
+        if (payload.schema_version === 3) {
+          const parent = nativePlans.get(payload.checkpoint.source_run_id)
+          if (!admittedFork || !parent || parent.plan.launch_sha256 !== admittedFork.capture.launch_sha256 ||
+              JSON.stringify(ready) !== JSON.stringify(parent.preparation) ||
+              JSON.stringify(payload) !== JSON.stringify(admittedFork.declaration)) fail('invalid_request')
+          nativeContext.capture = parent.plan
+        }
       } else {
-        if (!known || known.plan.launch_sha256 !== payload.launch_sha256) fail('invalid_request')
+        if (!known || known.plan.schema_version !== payload.schema_version || known.plan.launch_sha256 !== payload.launch_sha256) fail('invalid_request')
         nativeContext = { preparation: known.preparation, known: known.plan }
       }
       if (method === 'nativeLaunchStart' && (nativeStarted.has(payload.launch_id) || nativeContext.known.state !== 'planned')) fail('conflict')
@@ -360,7 +384,7 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
       }
       const sourcePaths = { sourceList: 'library', sourceGet: 'item', sourceRetain: 'retain', sourceRetainOriginal: 'retain-original', sourceOriginalMetadata: 'original-metadata', sourceOriginalRead: 'original', sourceOntologyLoad: 'ontology', sourceOntologySave: 'ontology' }
       const ingestionPaths = { ingestionPlan: 'plan', ingestionExecute: 'execute', ingestionStatus: 'operation' }
-      const path = native ? `/api/native-launch/${{ nativeLaunchPlan: 'plan', nativeLaunchStart: 'start', nativeLaunchStatus: 'status', nativeLaunchCancel: 'cancel' }[method]}/${current.graph}` : preparation ? `/api/preparation/${current.graph}/${{ preparationPlan: 'plan', preparationStart: 'start', preparationStatus: 'status', preparationProfiles: 'profiles', preparationConfiguration: 'configuration' }[method]}` : population ? `/api/graph/population/${current.graph}/${method === 'populationPreview' ? 'preview' : 'export'}` : experiment ? `/api/experiments/${method === 'experimentCatalog' ? 'catalog' : 'compare'}` : ingestion ? `/api/source/ingestion/${ingestionPaths[method]}/${current.graph}${method === 'ingestionStatus' ? '/' + payload.operation_id : ''}` : source ? `/api/source/${sourcePaths[method]}/${current.graph}${['sourceGet', 'sourceOriginalMetadata', 'sourceOriginalRead'].includes(method) ? '/' + sourceRequest.source_revision : ''}` : `/api/graph/${paths[method]}/${current.graph}`
+      const path = native ? `/api/native-launch/${{ nativeLaunchPlan: 'plan', nativeLaunchForkPreview: 'fork-preview', nativeLaunchStart: 'start', nativeLaunchStatus: 'status', nativeLaunchCancel: 'cancel' }[method]}/${current.graph}` : preparation ? `/api/preparation/${current.graph}/${{ preparationPlan: 'plan', preparationStart: 'start', preparationStatus: 'status', preparationProfiles: 'profiles', preparationConfiguration: 'configuration' }[method]}` : population ? `/api/graph/population/${current.graph}/${method === 'populationPreview' ? 'preview' : 'export'}` : experiment ? `/api/experiments/${method === 'experimentCatalog' ? 'catalog' : 'compare'}` : ingestion ? `/api/source/ingestion/${ingestionPaths[method]}/${current.graph}${method === 'ingestionStatus' ? '/' + payload.operation_id : ''}` : source ? `/api/source/${sourcePaths[method]}/${current.graph}${['sourceGet', 'sourceOriginalMetadata', 'sourceOriginalRead'].includes(method) ? '/' + sourceRequest.source_revision : ''}` : `/api/graph/${paths[method]}/${current.graph}`
       // Fence before invoking fetch, including synchronous throws and lost replies.
       if (method === 'preparationStart') preparationStarted.add(payload.operation_id)
       if (method === 'nativeLaunchStart' || method === 'nativeLaunchCancel') nativeStarted.add(payload.launch_id)
@@ -423,10 +447,12 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
         if (['unauthorized', 'origin_denied'].includes(value.error.code)) disconnect()
         fail(value.error.code)
       }
-      if ((ontology || preparationInspection) && response.status !== 200) fail()
+      if ((ontology || preparationInspection || previewingFork) && response.status !== 200) fail()
       shape(value, 'success data')
       let result
-      if (native) {
+      if (previewingFork) {
+        result = validateNativeForkPreviewResult(value.data, payload, nativeContext.capture)
+      } else if (native) {
         result = await guarded(validateNativeLaunchResult(value.data, { graph: current.graph, payload, ...nativeContext, planning: method === 'nativeLaunchPlan' }))
       } else if (profiles) {
         result = validatePreparedProfiles(value.data, current.graph, preparationContext.known, payload)
@@ -444,12 +470,12 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
       if (method === 'research' && [...result.source_claims, ...result.simulation_observations, ...result.other_claims].length > (payload.top_k ?? 10)) fail()
       if (method === 'dossier') {
         const returned = result.request
-        const submillisecond = stamp => (stamp.match(/\.(\d+)/)?.[1] || '').padEnd(6, '0').slice(3)
-        const sameTime = (a, b) => a == null && b == null || a != null && b != null && Date.parse(a) === Date.parse(b) && submillisecond(a) === submillisecond(b)
-        if (returned.title !== payload.title || returned.sections.length !== payload.sections.length || returned.sections.some((s, i) => s.heading !== payload.sections[i].heading || s.query !== payload.sections[i].query || s.top_k !== (payload.sections[i].top_k ?? 10)) || !sameTime(returned.valid_at, payload.valid_at) || !sameTime(returned.recorded_before, payload.recorded_before)) fail()
+        if (returned.title !== payload.title || returned.sections.length !== payload.sections.length || returned.sections.some((s, i) => s.heading !== payload.sections[i].heading || s.query !== payload.sections[i].query || s.top_k !== (payload.sections[i].top_k ?? 10)) || !sameAwareTimestamp(returned.valid_at, payload.valid_at) || !sameAwareTimestamp(returned.recorded_before, payload.recorded_before)) fail()
       }
       owned()
-      if (native) {
+      if (previewingFork) {
+        forkPreview = { declaration: JSON.parse(JSON.stringify(result)), capture: nativeContext.capture }
+      } else if (native) {
         nativePlans.set(result.request.run_id, { plan: JSON.parse(JSON.stringify(result)), preparation: JSON.parse(JSON.stringify(nativeContext.preparation)) })
         if (result.state !== 'planned') nativeStarted.add(result.request.run_id)
       }
@@ -493,6 +519,7 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
     dossier: payload => request('dossier', payload),
     sourceList: () => request('sourceList'),
     sourceGet: payload => request('sourceGet', payload),
+    sourceReadForDossierReview: payload => request('sourceGet', payload, undefined, { dossierReview: true }),
     sourceRetain: payload => request('sourceRetain', payload),
     sourceRetainOriginal: (payload, options) => request('sourceRetainOriginal', payload, undefined, options),
     sourceOriginalMetadata: (payload, options) => request('sourceOriginalMetadata', payload, undefined, options),
@@ -509,6 +536,7 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
     preparationStatus: payload => request('preparationStatus', payload),
     preparationProfiles: (payload, ready, options = {}) => request('preparationProfiles', payload, ready, options),
     preparationConfiguration: (payload, ready, options = {}) => request('preparationConfiguration', payload, ready, options),
+    nativeLaunchForkPreview: payload => request('nativeLaunchForkPreview', payload),
     nativeLaunchPlan: (payload, ready) => request('nativeLaunchPlan', payload, ready),
     nativeLaunchStart: payload => request('nativeLaunchStart', payload),
     nativeLaunchStatus: payload => request('nativeLaunchStatus', payload),

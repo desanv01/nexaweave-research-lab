@@ -13,6 +13,8 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 CLI = ROOT / "tools/build_source_release.py"
 EXPECTED = re.compile(r"[0-9a-f]{40}\Z")
+sys.path.insert(0, str(CLI.parent))
+from release.source_bundle import MAX_SOURCE_INVENTORY_BYTES
 
 
 def main() -> int:
@@ -35,6 +37,7 @@ def main() -> int:
             directory = Path(folder).resolve()
             command = [sys.executable, "-I", str(CLI)]
             reports = []
+            inventory_bytes = None
             for name in ("first.zip", "second.zip"):
                 artifact = directory / name
                 child = subprocess.run(command + ["build", "--repository", str(ROOT),
@@ -61,11 +64,28 @@ def main() -> int:
                 verified = json.loads(checked.stdout)
                 if verified != dict(report, operation="verify"):
                     raise ValueError
+                inventoried = subprocess.run(command + ["inventory", "--artifact", str(artifact),
+                    "--revision", revision, "--expected-sha256", sha],
+                    cwd=directory, env=env, capture_output=True, timeout=60, check=False)
+                if (inventoried.returncode or inventoried.stderr
+                        or not 0 < len(inventoried.stdout) <= MAX_SOURCE_INVENTORY_BYTES
+                        or not inventoried.stdout.endswith(b"\n") or inventoried.stdout.count(b"\n") != 1):
+                    raise ValueError
+                source_inventory = json.loads(inventoried.stdout)
+                if (not isinstance(source_inventory, dict)
+                        or source_inventory.get("inventory_kind") != "source-archive"
+                        or any(source_inventory.get(key) != value
+                               for key, value in dict(verified, operation="inventory").items())):
+                    raise ValueError
+                if inventory_bytes is not None and inventoried.stdout != inventory_bytes:
+                    raise ValueError
+                inventory_bytes = inventoried.stdout
                 reports.append(report)
             if reports[0] != reports[1]:
                 raise ValueError
             print(json.dumps({"source_artifact_probe": "passed", "revision": revision,
                 "artifact_sha256": reports[0]["artifact_sha256"],
+                "source_inventory_sha256": hashlib.sha256(inventory_bytes).hexdigest(),
                 "source_file_count": reports[0]["source_file_count"],
                 "source_total_bytes": reports[0]["source_total_bytes"],
                 "qualified_release": False, "all44_accepted": False}, sort_keys=True))

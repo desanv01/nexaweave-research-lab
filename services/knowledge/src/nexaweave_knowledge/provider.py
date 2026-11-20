@@ -11,7 +11,7 @@ import hashlib
 import json
 import os
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Literal
 from uuid import UUID
 
@@ -33,6 +33,7 @@ from graphiti_core.embedder.openai import OpenAIEmbedder, OpenAIEmbedderConfig
 from graphiti_core.cross_encoder.openai_reranker_client import OpenAIRerankerClient
 from graphiti_core.nodes import EpisodicNode, EpisodeType
 from graphiti_core.search.search_config_recipes import COMBINED_HYBRID_SEARCH_RRF, COMBINED_HYBRID_SEARCH_CROSS_ENCODER
+from graphiti_core.search.search_filters import ComparisonOperator, DateFilter, SearchFilters
 from openai import AsyncOpenAI
 
 
@@ -396,11 +397,31 @@ class GraphitiKnowledgeProvider(GraphPageProvider):
                                  fingerprint, source.evidence_ids)
 
     async def search(self, scope: KnowledgeScope, query: SearchQuery) -> SearchResult:
-        if query.valid_at is not None or query.recorded_before is not None:
-            raise UnsupportedCapability("temporal search filters require U03 implementation")
+        if query.recorded_before is not None:
+            raise UnsupportedCapability("recorded_before requires retained evidence research")
         config = self.config
         recipe = COMBINED_HYBRID_SEARCH_CROSS_ENCODER if config and config.search_recipe == "hybrid_cross_encoder" else COMBINED_HYBRID_SEARCH_RRF
-        results = await self.graphiti.search_(query.text, config=recipe.model_copy(update={"limit": query.top_k}), group_ids=[scope.group_id])
+        cutoff = query.valid_at
+        if cutoff is None:
+            results = await self.graphiti.search_(query.text, config=recipe.model_copy(update={"limit": query.top_k}), group_ids=[scope.group_id])
+        else:
+            cutoff = cutoff.astimezone(timezone.utc)
+            edge_recipe = recipe.model_copy(update={
+                "limit": query.top_k, "node_config": None, "episode_config": None, "community_config": None,
+            })
+            search_filter = SearchFilters(
+                valid_at=[[DateFilter(date=cutoff, comparison_operator=ComparisonOperator.less_than_equal)]],
+                invalid_at=[
+                    [DateFilter(comparison_operator=ComparisonOperator.is_null)],
+                    [DateFilter(date=cutoff, comparison_operator=ComparisonOperator.greater_than)],
+                ],
+                created_at=[[DateFilter(
+                    date=datetime.now(timezone.utc), comparison_operator=ComparisonOperator.less_than_equal,
+                )]],
+            )
+            results = await self.graphiti.search_(
+                query.text, config=edge_recipe, group_ids=[scope.group_id], search_filter=search_filter,
+            )
         facts: list[FactResult] = []
         for kind, values, scores in (
             ("edge", results.edges, results.edge_reranker_scores),

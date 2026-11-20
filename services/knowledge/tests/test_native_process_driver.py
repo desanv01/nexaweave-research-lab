@@ -306,8 +306,10 @@ def test_malformed_ready_message_is_rejected_on_windows_pipe(tmp_path, monkeypat
     monkeypatch.setattr(driver_module, "child_main", adversarial_child)
     driver = NativeProcessDriver(FileFactory(str(tmp_path / "unused"),
                                              "malformed-ready"))
-    with pytest.raises(NativeRunUnavailable):
+    with pytest.raises(NativeRunUnavailable) as raised:
         driver.launch(request(), uuid4())
+    assert raised.value.code == str(raised.value) == "native_run_unavailable"
+    assert raised.value.__notes__ == ["native_launch_stage=ready_invalid_frame_or_identity"]
     assert driver.close() is True
 
 

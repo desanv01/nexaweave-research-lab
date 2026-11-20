@@ -462,10 +462,10 @@ async def test_fake_graphiti_ingest_preserves_node_metadata_and_edge_expiry(monk
 
 
 @pytest.mark.asyncio
-async def test_temporal_filter_explicit_rejection():
+async def test_recorded_before_filter_explicit_rejection():
     provider = GraphitiKnowledgeProvider(graphiti=object())
     with pytest.raises(UnsupportedCapability):
-        await provider.search(scope(), SearchQuery(text="Mira", valid_at=datetime.now(timezone.utc)))
+        await provider.search(scope(), SearchQuery(text="Mira", recorded_before=datetime.now(timezone.utc)))
 
 
 @pytest.mark.asyncio

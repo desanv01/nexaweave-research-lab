@@ -12,25 +12,48 @@ sys.path.insert(0, str(ROOT))
 from tools.run_unit_tests import LoopbackOnlySockets, _unit_environment
 TARGETS = ('test_source_ingestion_host.py', 'test_source_ingestion_host_postgres.py',
            'test_source_ingestion_http_integration.py')
+LOCAL_EMBEDDING_NODE = 'test_real_protected_http_selected_retained_passage'
+LOCAL_EMBEDDING_PORT = 'NEXAWEAVE_W63_EMBEDDING_PORT'
 
 
-def child():
+def embedding_port():
+    value = os.environ.get(LOCAL_EMBEDDING_PORT, '')
+    if (not 1 <= len(value) <= 5 or not value.isascii() or not value.isdecimal()
+            or not 1 <= int(value) <= 65535 or str(int(value)) != value):
+        raise SystemExit('explicit approved numeric loopback embedding port required')
+    return int(value)
+
+
+def child(*, local_embedding=False):
+    if local_embedding:
+        embedding_port()
     import pytest
     guard = LoopbackOnlySockets(); guard.install()
     class Results:
         passed = {name: 0 for name in TARGETS}
         skipped = 0
+        collected = 0
+        def pytest_collection_finish(self, session):
+            self.collected = len(session.items)
         def pytest_runtest_logreport(self, report):
             self.skipped += int(report.skipped)
             if report.when == 'call' and report.passed:
                 for name in TARGETS:
                     if name + '::' in report.nodeid: self.passed[name] += 1
     results = Results()
+    tests = ROOT/'services/knowledge/tests'
+    targets = [f'{tests / TARGETS[2]}::{LOCAL_EMBEDDING_NODE}'] if local_embedding else [
+        str(tests / name) for name in TARGETS]
     try:
         status = int(pytest.main(['-q','-p','pytest_asyncio.plugin','--tb=short',
-            *(str(ROOT/'services/knowledge/tests'/name) for name in TARGETS)], plugins=[results]))
+            *targets], plugins=[results]))
     finally:
         guard.restore()
+    if local_embedding:
+        if status or guard.blocked_attempts or results.skipped or results.collected != 1 or results.passed[TARGETS[2]] != 1:
+            print('source_ingestion_local_embedding_incomplete', file=sys.stderr)
+            return 1
+        return 0
     if guard.blocked_attempts or results.skipped or not all(results.passed.values()):
         print('source_ingestion_qualification_incomplete', file=sys.stderr)
         return 1
@@ -39,8 +62,15 @@ def child():
 
 
 def main():
-    if sys.argv[1:] == ['--child']: return child()
-    if sys.argv[1:]: raise SystemExit('no user-selected fixture arguments supported')
+    args = sys.argv[1:]
+    if args == ['--child']:
+        os.environ.pop(LOCAL_EMBEDDING_PORT, None)
+        return child()
+    if args == ['--child', '--local-embedding']:
+        return child(local_embedding=True)
+    if args not in ([], ['--local-embedding']):
+        raise SystemExit('only the fixed --local-embedding fixture may be selected')
+    port = embedding_port() if args else None
     password = os.environ.get('PROJECT_STORE_TEST_PASSWORD')
     neo_password = os.environ.get('KNOWLEDGE_TEST_PASSWORD')
     backend = os.environ.get('NEXAWEAVE_WORKBENCH_BACKEND_PYTHON')
@@ -77,7 +107,9 @@ def main():
             KNOWLEDGE_BOOTSTRAP_SCRIPT=installed.stdout.decode().strip(),
             PROJECT_STORE_POSTGRES_TEST_DSN=make_conninfo(host='127.0.0.1',port=15432,
                 dbname='mirofish_operations_test',user='mirofish_fixture',password=password,connect_timeout=5))
-        process = owner.start(subprocess.Popen,[sys.executable,str(Path(__file__).resolve()),'--child'],
+        if port is not None:
+            env[LOCAL_EMBEDDING_PORT] = str(port)
+        process = owner.start(subprocess.Popen,[sys.executable,str(Path(__file__).resolve()),'--child', *args],
             cwd=directory.name, env=env, shell=False, close_fds=True, stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         reader = threading.Thread(target=forward,args=(process.stdout,),daemon=True)
@@ -89,6 +121,11 @@ def main():
             assert owner.closed and (os.name != 'nt' or owner.tree_empty) and not read_errors
         finally:
             owner.cleanup_private_directory(directory)
+    if port is not None and status == 0:
+        if (not owner.closed or (os.name == 'nt' and not owner.tree_empty)
+                or read_errors or Path(directory.name).exists()):
+            raise RuntimeError('source ingestion local embedding cleanup incomplete')
+        print('source_ingestion_local_embedding=1', flush=True)
     return status
 
 

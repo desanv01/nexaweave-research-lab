@@ -21,38 +21,6 @@ from offline_fixture import offline_models, prepared
 pytestmark = pytest.mark.postgres
 
 
-@pytest.fixture(scope="module")
-def connection_factory():
-    import psycopg
-    from psycopg.conninfo import conninfo_to_dict
-    from nexaweave_execution.native_run_store import migrate_native_runs
-    from nexaweave_storage import migrate
-
-    if os.getenv("PROJECT_STORE_POSTGRES_INTEGRATION") != "1":
-        pytest.skip("disposable PostgreSQL integration disabled")
-    dsn = os.getenv("PROJECT_STORE_POSTGRES_TEST_DSN")
-    pg_keys = ("PGHOST", "PGHOSTADDR", "PGPORT", "PGDATABASE", "PGUSER",
-               "PGPASSWORD", "PGSERVICE", "PGSERVICEFILE", "PGPASSFILE")
-    if not dsn or any(os.getenv(key) for key in pg_keys):
-        pytest.fail("approved fixture DSN required")
-    settings = conninfo_to_dict(dsn)
-    if (settings.get("host") != "127.0.0.1"
-            or settings.get("port") != "15432"
-            or settings.get("dbname") != "mirofish_operations_test"
-            or settings.get("user") != "mirofish_fixture"
-            or not settings.get("password")
-            or set(settings) - {"host", "port", "dbname", "user", "password", "connect_timeout"}):
-        pytest.fail("not the approved disposable fixture")
-
-    def connect():
-        return psycopg.connect(dsn, connect_timeout=3)
-
-    with connect() as connection:
-        migrate(connection)
-        migrate_native_runs(connection)
-    return connect
-
-
 def _snapshot():
     return {"project_id": "proj_1", "name": "Native fixture", "status": "created",
         "created_at": "2026-09-29T00:00:00", "updated_at": "2026-09-29T00:00:00",

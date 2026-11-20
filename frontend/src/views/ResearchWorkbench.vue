@@ -69,6 +69,7 @@ const observationMethods = Object.freeze({
 })
 watch([inspectedSource, nativeReady, nativeReset], clearNativeViews, { deep: true, flush: 'sync' })
 const nativeMethods = Object.freeze({
+  forkPreview: payload => operation(() => client.nativeLaunchForkPreview(payload), false, true),
   plan: (payload, ready) => operation(() => client.nativeLaunchPlan(payload, ready), false, true),
   start: payload => operation(() => client.nativeLaunchStart(payload), false, true),
   status: payload => operation(() => client.nativeLaunchStatus(payload), false, true),
@@ -109,10 +110,11 @@ const populationMethods = Object.freeze({
   feedback: code => { populationFeedback.value = ['ready', 'changed', 'prepared', 'requested', 'invalid', 'invalidReply', 'denied', 'cancelled', 'unavailable', 'emptySelection', 'failed'].includes(code) ? code : '' }
 })
 let generation = 0
+const reviewReset = ref(0)
 const graphEntries = computed(() => graphData.value?.[graphKind.value] || [])
 function clearProtected() { clearNativeViews(); sourceCatalog.value = null; sourceReset.value++; populationReset.value++; preparationReset.value++; nativeReset.value++; nativeReady.value = null; inspectedSource.value = null; graphData.value = null; result.value = null; graphPage.value = 0 }
 function disconnect() { generation++; client.disconnect(); token.value = ''; reveal.value = false; connected.value = false; busy.value = false; clearProtected(); errorCode.value = ''; ingestionRequest.value = ''; status.value = 'disconnected' }
-function cancel() { generation++; experimentCancel.value++; populationReset.value++; client.cancel(); busy.value = false; status.value = 'cancelled'; errorCode.value = ''; if (!connected.value) { client.disconnect(); token.value = ''; clearProtected() } }
+function cancel() { generation++; reviewReset.value++; experimentCancel.value++; populationReset.value++; client.cancel(); busy.value = false; status.value = 'cancelled'; errorCode.value = ''; if (!connected.value) { client.disconnect(); token.value = ''; clearProtected() } }
 async function operation(action, connecting = false, source = false, ingestion = '', population = false, preserveProtected = false, graphRefresh = false) {
   const epoch = ++generation
   if (!population) populationReset.value++
@@ -142,6 +144,15 @@ function connect() {
 function refreshGraph() {
   if (!connected.value || busy.value) return
   return operation(() => client.refreshGraph(), false, true, '', false, true, true)
+}
+function verifyDossierSource(payload, dossier) {
+  const graphId = graphData.value?.graph_id
+  if (!connected.value || !graphId || result.value !== dossier || dossier.mode !== 'model_free_evidence_dossier' ||
+      dossier.request.display_graph_ids.length !== 1 || dossier.request.display_graph_ids[0] !== graphId) {
+    throw new WorkbenchError('invalid_request')
+  }
+  if (busy.value) throw new WorkbenchError('busy')
+  return operation(() => client.sourceReadForDossierReview(payload), false, true, '', false, true)
 }
 function submit() {
   return operation(() => {
@@ -192,7 +203,7 @@ onBeforeUnmount(disconnect)
           <button type="button" class="advanced-button" :aria-expanded="advanced" aria-controls="advanced-options" @click="advanced = !advanced">{{ copy.advanced }}</button>
           <div v-show="advanced" id="advanced-options" class="advanced"><label for="top-k">{{ copy.topK }}<input id="top-k" v-model.number="topK" type="number" min="1" max="100" required></label><label for="valid-at">{{ copy.validAt }}<input id="valid-at" v-model="validAt" type="text" placeholder="2026-10-01T00:00:00Z" aria-describedby="utc-help"></label><label for="recorded-before">{{ copy.recordedBefore }}<input id="recorded-before" v-model="recordedBefore" type="text" placeholder="2026-10-01T00:00:00Z" aria-describedby="utc-help"></label><p id="utc-help" class="help">{{ copy.utcHint }}</p></div><div class="actions"><button class="primary" type="submit">{{ copy.submit }}</button></div>
         </fieldset></form>
-      </section><EvidenceResults :result="result" :locale="locale" />
+      </section><EvidenceResults :result="result" :locale="locale" :review-source="verifyDossierSource" :review-reset="reviewReset" :display-graph-id="graphData?.graph_id || ''" />
     </main>
   </div>
 </template>

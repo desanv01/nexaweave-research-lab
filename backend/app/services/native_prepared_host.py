@@ -48,7 +48,7 @@ class NativePreparedHost:
         if version == 1 and factory_type is NativeOwnedSessionFactory:
             prepared = session_factory
         elif ((version == 1 and factory_type is NativeTwitterCaptureFactory)
-              or (version == 2 and factory_type is NativeRestoredTwitterFactory)):
+              or (version in (2, 3) and factory_type is NativeRestoredTwitterFactory)):
             prepared = session_factory.prepared
             if (type(prepared) is not NativeOwnedSessionFactory
                     or bound_request.platforms != ("twitter",) or bound_request.max_rounds != 1):
@@ -67,7 +67,7 @@ class NativePreparedHost:
                 or (factory_type is not NativeOwnedSessionFactory
                     and prepared.runtime_sha256 != bound_request.runtime_sha256)):
             raise NativeRunDenied()
-        if version == 2 and (
+        if version in (2, 3) and (
                 canonical_uuid(session_factory.expected_producer_run) != bound_request.source_run_id
                 or sha256(session_factory.expected_lineage_sha256) != bound_request.checkpoint_sha256):
             raise NativeRunDenied()

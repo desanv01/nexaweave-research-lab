@@ -147,6 +147,8 @@ def _parser():
     imp.add_argument("--input", required=True)
     exp.add_argument("--revision", type=int, default=None,
                      help="selected history revision; default current")
+    exp.add_argument("--legacy-snapshot", action="store_true",
+                     help="write flat MiroFish project metadata")
     exp.add_argument("--output", help="new file only; default stdout")
     src = commands.add_parser("import-source", help="retain explicit UTF-8 extracted text")
     cite = commands.add_parser("resolve-evidence", help="resolve an exact retained-text passage")
@@ -223,7 +225,8 @@ def main(argv=None) -> int:
             record = ProjectStore(connect).get(args.principal, args.project_id, args.revision)
             if record.workspace_id != uuid_value(args.workspace_id) or record.display_id != args.display_id:
                 raise InvalidProject()
-            _output(_export_data(record), args.output)
+            value = record.snapshot if args.legacy_snapshot else _export_data(record)
+            _output(value, args.output)
         elif args.command == "import-source":
             record = SourceStore(connect).ingest_text(args.principal, args.project_id,
                 args.source_revision, args.name, retained_text, declared)

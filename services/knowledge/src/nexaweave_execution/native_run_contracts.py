@@ -15,6 +15,7 @@ _HEX = re.compile(r"[0-9a-f]{64}\Z")
 _REQUEST_KEYS = frozenset({"schema_version", "principal", "project_id", "project_revision",
     "simulation_id", "run_id", "artifact_sha256", "runtime_sha256", "platforms", "seed", "max_rounds"})
 _CONTINUATION_KEYS = frozenset({"source_run_id", "checkpoint_sha256"})
+_FORK_KEYS = frozenset({"intervention"})
 _CHILD_KEYS = frozenset({"instance_id", "process_id", "process_fingerprint"})
 _RECEIPT_KEYS = frozenset({"run_id", "attempt_id", "instance_id", "request_fingerprint",
                            "outcome", "evidence_sha256"})
@@ -92,6 +93,27 @@ def principal_id(value: object) -> str:
 
 
 @dataclass(frozen=True)
+class SwapActiveActorV1:
+    """Swap the scheduler's sole round-two Twitter actor to the other owner."""
+
+    kind: str
+    manifest_sha256: str
+    runner_state_sha256: str
+
+    @classmethod
+    def from_wire(cls, value: object) -> SwapActiveActorV1:
+        if isinstance(value, cls):
+            value = asdict(value)
+        if (type(value) is not dict or set(value) != {"kind", "manifest_sha256", "runner_state_sha256"}
+                or type(value["kind"]) is not str or value["kind"] != "swap_active_actor_v1"):
+            raise InvalidNativeRun()
+        return cls(value["kind"], sha256(value["manifest_sha256"]), sha256(value["runner_state_sha256"]))
+
+    def to_wire(self) -> dict[str, str]:
+        return asdict(self.from_wire(self))
+
+
+@dataclass(frozen=True)
 class NativeRunRequest:
     schema_version: int
     principal: str
@@ -106,11 +128,14 @@ class NativeRunRequest:
     max_rounds: int
     source_run_id: UUID | None = None
     checkpoint_sha256: str | None = None
+    intervention: SwapActiveActorV1 | None = None
 
     @classmethod
     def from_wire(cls, value: object) -> NativeRunRequest:
         if isinstance(value, cls):
             value = asdict(value)
+            if value["schema_version"] in (1, 2) and value["intervention"] is None:
+                del value["intervention"]
             if value["schema_version"] == 1 and all(value[key] is None for key in _CONTINUATION_KEYS):
                 for key in _CONTINUATION_KEYS:
                     del value[key]
@@ -118,9 +143,13 @@ class NativeRunRequest:
             raise InvalidNativeRun()
         try:
             version = value.get("schema_version")
-            if type(version) is not int or version not in (1, 2):
+            if type(version) is not int or version not in (1, 2, 3):
                 raise InvalidNativeRun()
-            expected_keys = _REQUEST_KEYS if version == 1 else _REQUEST_KEYS | _CONTINUATION_KEYS
+            expected_keys = _REQUEST_KEYS
+            if version >= 2:
+                expected_keys |= _CONTINUATION_KEYS
+            if version == 3:
+                expected_keys |= _FORK_KEYS
             if set(value) != expected_keys:
                 raise InvalidNativeRun()
             platforms = value["platforms"]
@@ -136,15 +165,19 @@ class NativeRunRequest:
                 raise InvalidNativeRun()
             run_id = canonical_uuid(value["run_id"])
             source_run_id = checkpoint_sha256 = None
-            if version == 2:
+            intervention = None
+            if version >= 2:
                 source_run_id = canonical_uuid(value["source_run_id"])
                 checkpoint_sha256 = sha256(value["checkpoint_sha256"])
                 if source_run_id == run_id or tuple(platforms) != ("twitter",) or rounds != 1:
                     raise InvalidNativeRun()
+            if version == 3:
+                intervention = SwapActiveActorV1.from_wire(value["intervention"])
             return cls(version, principal_id(value["principal"]), canonical_uuid(value["project_id"]),
                        value["project_revision"], value["simulation_id"], run_id,
                        sha256(value["artifact_sha256"]), sha256(value["runtime_sha256"]),
-                       tuple(platforms), value["seed"], rounds, source_run_id, checkpoint_sha256)
+                       tuple(platforms), value["seed"], rounds, source_run_id, checkpoint_sha256,
+                       intervention)
         except (KeyError, TypeError, ValueError, OverflowError):
             raise InvalidNativeRun() from None
 
@@ -158,6 +191,8 @@ class NativeRunRequest:
                 del value[key]
         else:
             value["source_run_id"] = str(value["source_run_id"])
+        if value["schema_version"] < 3:
+            del value["intervention"]
         return value
 
     @property

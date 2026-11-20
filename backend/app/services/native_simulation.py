@@ -27,6 +27,7 @@ from .knowledge_report_tools import NeutralCapabilityError
 from .native_controls import parse_execution_controls
 from .native_reddit_profiles import (build_reddit_agent_graph,
                                      validate_reddit_profile)
+from .native_startup_diagnostic import observe_startup
 from .zep_tools import AgentInterview, InterviewResult
 
 
@@ -441,6 +442,7 @@ class NativeSimulationSession:
         self._runner = None
         self._closed = False
         self._started = False
+        self.startup_failure = None
         self._models = dict(models)
         self._controls = None
         self._control_network = {}
@@ -748,7 +750,8 @@ class NativeSimulationSession:
                                  else native.run_reddit_simulation)
                     logger = (logs.get_twitter_logger() if platform == "twitter"
                               else logs.get_reddit_logger())
-                    result = await operation(self._config, str(self.simulation_dir),
+                    result = await observe_startup(self, operation, platform,
+                                             self._config, str(self.simulation_dir),
                                              logger, logs, self.max_rounds,
                                              native_dependencies=self)
                     if result.env is None or result.agent_graph is None:

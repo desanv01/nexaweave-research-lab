@@ -20,7 +20,10 @@ import threading
 import time
 
 from app.utils.owned_process import OwnedProcess
-from research_browser_stages import FAILURE_PHASES, LAUNCH_ERRORS, ONTOLOGY, browser_stages
+from research_browser_stages import (
+    FAILURE_PHASES, LAUNCH_ERRORS, ONTOLOGY, browser_mutation, browser_route, browser_stages, fork_result,
+)
+from research_browser_intake import bind_intake, connect_sources, guard_intake, intake_mutation_allowed
 
 ROOT = Path(__file__).resolve().parents[3]
 WIRE_BYTES = 7200
@@ -86,10 +89,10 @@ def failure_reply(reply, stage):
 
 class ResearchBrowserSession:
     """Same Flask/PG/Temporal hosts; only the actual UI dispatches mutations."""
-    def __init__(self, directory, prep, native_host, reports, selected, report_log, *, twitter_only=False):
-        require(type(twitter_only) is bool)
-        self.twitter_only = twitter_only
-        self.stages, self.seconds = browser_stages(twitter_only)
+    def __init__(self, directory, prep, native_host, reports, selected, report_log, *, single_platform=None, fork=False):
+        require(single_platform in (None, 'twitter', 'reddit') and (not fork or single_platform == 'twitter'))
+        self.single_platform, self.fork = single_platform, fork
+        self.stages, self.seconds = browser_stages(single_platform is not None, fork=fork)
         require(os.name == 'posix' and sys.platform == 'linux')
         self.directory, self.prep = Path(directory), prep
         self.native_host, self.reports, self.selected = native_host, reports, selected
@@ -214,7 +217,7 @@ class ResearchBrowserSession:
                 native_launch_facade=NativeLaunchFacade(self.settings, host=self.native_host),
                 native_observations_facade=NativeObservationsFacade(self.settings,
                     host=NativeObservationsHost(launch_host=self.native_host)),
-                **({} if self.twitter_only else dict(
+                **({} if self.single_platform else dict(
                     connected_report_facade=ConnectedReportFacade(self.settings, host=self.reports))))
         finally:
             for key, value in previous.items():
@@ -233,6 +236,11 @@ class ResearchBrowserSession:
             except Exception:
                 self._failure('research_browser_ontology_request_refused')
                 return {'success': False, 'error': {'code': 'conflict'}}, 409
+            try:
+                guard_intake(self, request, pairs, WIRE_BYTES)
+            except Exception:
+                self._failure('research_browser_intake_request_refused')
+                return {'success': False, 'error': {'code': 'conflict'}}, 409
 
         @app.teardown_request
         def left(_error):
@@ -241,9 +249,11 @@ class ResearchBrowserSession:
                     self.requests.discard(threading.get_ident())
                     self.requests_condition.notify_all()
 
-        @app.after_request
+        process_response = app.process_response
+
         def observe(response):
-            # Passive response-only witness: never consumes request streams or changes replies.
+            response = process_response(response)
+            # Observe the finalized response without changing it.
             if not request.path.startswith('/api/'):
                 return response
             try:
@@ -266,25 +276,18 @@ class ResearchBrowserSession:
                 if request.method == 'OPTIONS':
                     return response
                 mutation = (path.startswith('/api/preparation/') and path.rsplit('/', 1)[-1] in {'plan', 'start'}
-                    or path.startswith('/api/native-launch/') and path.split('/')[3] in {'plan', 'start', 'cancel'}
+                    or path.startswith('/api/native-launch/') and path.split('/')[3] in {'plan', 'start', 'cancel', 'fork-preview'}
                     or path.startswith('/api/connected-report/') and path.split('/')[3] in {'plan', 'start', 'cancel'}
                     or path.startswith(('/api/source/retain', '/api/source/ingestion/execute')))
                 if mutation:
-                    allowed = {
-                        'ontology-execute': (self._route('ontology-execute'),),
-                        'preparation-plan': ('/api/preparation/' + self.prep.display_graph_id + '/plan',),
-                        'preparation-start': ('/api/preparation/' + self.prep.display_graph_id + '/start',),
-                        'native-start': tuple('/api/native-launch/' + kind + '/' + self.prep.display_graph_id
-                                              for kind in ('plan', 'start')),
-                        'report-start': tuple('/api/connected-report/' + kind + '/' + self.prep.display_graph_id
-                                              for kind in ('plan', 'start'))}
                     with self.lock:
-                        self.mutations[path] = self.mutations.get(path, 0) + 1
-                        valid = path in allowed.get(self.active, ()) and self.mutations[path] == 1
+                        valid = browser_mutation(self, path) or intake_mutation_allowed(self, path, response)
                     if not valid:
                         self._failure('research_browser_duplicate_or_unexpected_mutation')
                 if response.status_code != 200:
                     return response
+                if self.fork and path.startswith('/api/native-launch/'):
+                    require(response.headers.get('Cache-Control') == 'no-store')
                 raw = response.get_data()
                 require(len(raw) <= 262144, 'research_browser_witness_bytes')
                 value = json.loads(raw, object_pairs_hook=pairs)
@@ -304,6 +307,8 @@ class ResearchBrowserSession:
             except Exception:
                 self._failure('research_browser_witness_refused')
             return response
+
+        app.process_response = observe
         return app
 
     def _start_http(self):
@@ -445,7 +450,8 @@ class ResearchBrowserSession:
                 require(time.monotonic() < ready, 'research_browser_vite_deadline')
                 time.sleep(.05)
             self.driver = self._spawn([str(self.node), str(ROOT / 'frontend/tests/run-research-browser.mjs')]
-                                      + (['--twitter-only'] if self.twitter_only else []), protocol=True)
+                                      + (['--twitter-fork'] if self.fork else
+                                         [f'--{self.single_platform}-only'] if self.single_platform else []), protocol=True)
             self.profile_root = Path(self.driver['directory'].name) / 'profile'
             self.profile_root.mkdir()
             self.perform('connect')
@@ -484,22 +490,7 @@ class ResearchBrowserSession:
         require(not thread.is_alive() and not failures, 'research_browser_command_refused')
 
     def _route(self, stage):
-        graph = self.prep.display_graph_id
-        return {
-            'ontology-review': '/api/source/ontology/' + graph,
-            'ontology-plan': '/api/source/ingestion/plan/' + graph,
-            'ontology-execute': '/api/source/ingestion/execute/' + graph,
-            'ontology-recover': '/api/source/ingestion/operation/' + graph + '/' +
-                (self.ontology_plan or {}).get('operation_id', ''),
-            'preparation-plan': '/api/preparation/' + graph + '/plan',
-            'preparation-start': '/api/preparation/' + graph + '/start',
-            'preparation-ready': '/api/preparation/' + graph + '/status',
-            'native-start': '/api/native-launch/start/' + graph,
-            'native-ready': '/api/native-launch/status/' + graph,
-            'report-start': '/api/connected-report/start/' + graph,
-            'report-read': '/api/connected-report/read/' + graph,
-            'pdf-read-after-restart': '/api/source/original/' + graph + '/' + self.selected.revisions[0],
-        }.get(stage)
+        return browser_route(self, stage)
 
     def _reference(self, stage, data, reply):
         if stage.startswith('preparation-'):
@@ -584,10 +575,7 @@ class ResearchBrowserSession:
         if stage == 'connect':
             command.update(connection=dict(api_origin=f'http://127.0.0.1:{self.port}',
                 graph_id=self.prep.display_graph_id, token=self.token),
-                sources=[dict(source_revision=source['source_revision'], source_name=source['source_name'])
-                         for source in self.selected.snapshots],
-                profile_root=str(self.profile_root), pdf=dict(source_revision=self.selected.revisions[0],
-                    size=len(self.selected.pdf), sha256=hashlib.sha256(self.selected.pdf).hexdigest()))
+                profile_root=str(self.profile_root), **connect_sources(self.selected))
         self._send(command, max(.001, end - time.monotonic()))
         try:
             reply = self.replies.get(timeout=max(.001, end - time.monotonic()))
@@ -603,6 +591,7 @@ class ResearchBrowserSession:
             origin_events = list(self.origin_events)
         self.last_proof = reply['proof']
         if stage == 'connect':
+            bind_intake(self, events, reply['proof'])
             graph = self.prep.display_graph_id
             require(reply['reference'].get('display_graph_id') == graph
                     and reply['reference'].get('project_id') == self.prep.scope_dto['project_id'])
@@ -629,6 +618,8 @@ class ResearchBrowserSession:
                     and reply['proof'].get('private_tree_removed') is True
                     and not any(self.profile_root.iterdir()))
             result = reply['proof']
+        elif stage.startswith('native-fork-'):
+            result = fork_result(self, stage, events, reply, require)
         else:
             candidates = [data for _, path, data in events if path == self._route(stage)]
             require(candidates, 'research_browser_http_witness_missing')
@@ -684,6 +675,8 @@ class ResearchBrowserSession:
                     'pdf-read-after-restart', 'OPTIONS', 'http://localhost:4317',
                     '/api/graph/data/' + self.prep.display_graph_id, 403)],
                     'research_browser_origin_witness_missing')
+                if self.selected.intake is not None:
+                    require(reply['proof'].get('dossier_support_review') is True)
                 self.verify_restart()
         self.step += 1
         return result
