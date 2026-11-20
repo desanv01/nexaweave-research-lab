@@ -26,7 +26,7 @@ UNIT_REGRESSIONS = (
 )
 PG_REGRESSIONS = (ROOT / 'services/knowledge/tests/test_budget_postgres.py',)
 HOSTED_COUNTS = {
-    'test_preparation_store.py': 8,
+    'test_preparation_store.py': 10,
     'test_budget_postgres.py': 10,
     'test_temporal_preparation.py': 1,
 }

@@ -5,6 +5,8 @@ Only a trusted worker invokes generate(); HTTP start only schedules identifiers.
 """
 from __future__ import annotations
 
+from copy import deepcopy
+from dataclasses import replace
 import csv
 import hashlib
 import io
@@ -17,8 +19,9 @@ import tempfile
 import threading
 import time
 from types import SimpleNamespace
-from uuid import UUID
-from nexaweave_execution.preparation_contracts import validate_source_snapshots, document_envelope
+from uuid import NAMESPACE_URL, UUID, uuid5
+from nexaweave_execution.preparation_contracts import (
+    document_envelope, validate_preparation_sources, validate_source_snapshots)
 from nexaweave_execution.native_seed_contracts import (SEED_BRIDGE_INDEX, seed_bridge_index,
     validate_native_seed_plan)
 
@@ -366,6 +369,131 @@ class DurablePreparationHost(PreparationReadAuthority):
         if row.frozen['public']['schema_version'] == 2:
             self._owned_row(row)
         return result
+
+    def seed_pair(self, payload):
+        """Issue one detached READY alternate using only the settled donor's inputs."""
+        payload = validate_payload('seed_pair', payload)
+        donor = self._row(payload)
+        if (donor.state != 'ready' or donor.stage != 'ready' or donor.completed != 100
+                or donor.receipt is None or donor.error_code is not None or not donor.model_calls_started
+                or donor.attempt_id is None or donor.budget_attempt_id is None or self.account_id is None):
+            raise PreparationError('conflict')
+        public = donor.frozen['public']
+        donor_seed = public['options']['seed']
+        if payload['alternate_seed'] == donor_seed:
+            raise PreparationError('conflict')
+        try:
+            validate_receipt(donor.receipt, str(donor.operation_id), public['options']['platforms'])
+        except (KeyError, TypeError, ValueError):
+            raise PreparationError('preparation_uncertain') from None
+
+        deadline = time.monotonic() + 15
+        check = self._source_check(deadline)
+
+        def current_authority():
+            check()
+            scope, _, retained = self._owned_row(donor, expected_revision=donor.project_revision, check=check)
+            if public['schema_version'] == 1 and (
+                    retained.name != public['source']['source_name']
+                    or retained.text_sha256 != public['source']['source_sha256']
+                    or retained.text != donor.frozen['source_text']):
+                raise PreparationError('conflict')
+            check()
+            return scope
+
+        scope = current_authority()
+        alternate_id = uuid5(NAMESPACE_URL, 'nexaweave:prepared-seed-pair:v1:' + digest({
+            'principal': donor.principal, 'donor': str(donor.operation_id),
+            'idempotency_key': payload['idempotency_key'],
+        }))
+        if alternate_id == donor.operation_id:
+            raise PreparationError('conflict')
+        frozen = deepcopy(donor.frozen)
+        alternate_public, alternate_request = frozen['public'], frozen['request']
+        alternate_public['operation_id'] = alternate_request['operation_id'] = str(alternate_id)
+        alternate_public['options']['seed'] = alternate_request['options']['seed'] = payload['alternate_seed']
+        frozen['request'] = validate_payload('plan', alternate_request)
+        frozen['plan_identity'] = {key: value for key, value in alternate_public.items() if key != 'plan_sha256'}
+        alternate_public['plan_sha256'] = digest(frozen['plan_identity'])
+        if alternate_public['schema_version'] == 2:
+            try:
+                validate_preparation_sources(frozen, check)
+            except (KeyError, TypeError, ValueError, UnicodeError):
+                raise PreparationError('preparation_uncertain') from None
+        alternate = replace(donor, operation_id=alternate_id, plan_sha256=alternate_public['plan_sha256'],
+                            request_sha256=digest(frozen['request']), frozen=frozen, receipt=None,
+                            attempt_id=None, budget_attempt_id=None, model_calls_started=False)
+
+        def publish(*, replay):
+            if current_authority() != scope:
+                raise PreparationError('conflict')
+            receipt = self._publish_seed_alternate(donor, alternate, replay=replay, check=check)
+            if current_authority() != scope:
+                raise PreparationError('conflict')
+            result = dict(schema_version=1, display_graph_id=self.display_graph_id, scope=self.scope_dto,
+                project_revision=donor.project_revision, state='ready', idempotency_key=payload['idempotency_key'],
+                platforms=public['options']['platforms'],
+                donor=dict(operation_id=str(donor.operation_id), plan_sha256=donor.plan_sha256,
+                           seed=donor_seed, artifact_sha256=donor.receipt['artifact_sha256']),
+                alternate=dict(operation_id=str(alternate_id), plan_sha256=alternate.plan_sha256,
+                               seed=payload['alternate_seed'], receipt=receipt))
+            return validate_result(result, self.display_graph_id, self.scope_dto, payload, 'seed_pair')
+
+        return self.store.issue_seed_pair(donor, self.account_id, scope, payload, frozen, publish)
+
+    def _publish_seed_alternate(self, donor, alternate, *, replay, check):
+        from nexaweave_execution.native_owned_binding import _regular_bound_file, _safe_ancestors
+
+        if not _safe_ancestors(self.root) or self.root.resolve(strict=True) != self.root or not self.root.is_dir():
+            raise PreparationError('preparation_unavailable')
+        source = self.root / donor.receipt['simulation_id']
+        simulation_id = 'sim_' + alternate.operation_id.hex
+        destination = self.root / simulation_id
+        if self._artifacts(donor, source) != donor.receipt:
+            raise PreparationError('preparation_uncertain')
+        contents = {}
+        for item in donor.receipt['files']:
+            check()
+            name = item['name']
+            raw = _regular_bound_file(source, name, 2097152)
+            if len(raw) != item['size'] or hashlib.sha256(raw).hexdigest() != item['sha256']:
+                raise PreparationError('preparation_uncertain')
+            if name in {'state.json', 'simulation_config.json'}:
+                data = json.loads(raw)
+                data['simulation_id'] = simulation_id
+                raw = encoded(data)
+                if not 1 <= len(raw) <= 2097152:
+                    raise PreparationError('result_too_large')
+            contents[name] = raw
+        manifest = [dict(name=name, sha256=hashlib.sha256(raw).hexdigest(), size=len(raw))
+                    for name, raw in contents.items()]
+        receipt = dict(simulation_id=simulation_id, files=manifest,
+                       artifact_sha256=digest(dict(schema_version=1, files=manifest)))
+        check()
+        if not os.path.lexists(destination):
+            if replay:
+                raise PreparationError('preparation_uncertain')
+            with tempfile.TemporaryDirectory(prefix='.seed-pair-', dir=self.root) as staging:
+                prepared = Path(staging) / simulation_id
+                prepared.mkdir()
+                for name, raw in contents.items():
+                    check()
+                    with (prepared / name).open('xb') as stream:
+                        if stream.write(raw) != len(raw):
+                            raise PreparationError('preparation_uncertain')
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    (prepared / name).chmod(0o444)
+                if self._artifacts(alternate, prepared) != receipt or os.path.lexists(destination):
+                    raise PreparationError('preparation_uncertain')
+                check()
+                prepared.rename(destination)
+        # A complete directory can outlive a rolled-back transaction. Accept it
+        # only when all exact bytes and inherited artifact contracts agree.
+        if self._artifacts(alternate, destination) != receipt:
+            raise PreparationError('preparation_uncertain')
+        check()
+        return receipt
 
     @staticmethod
     def _freeze_seed_bridge(root, opts):
