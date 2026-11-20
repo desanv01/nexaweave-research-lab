@@ -142,7 +142,9 @@ class KnowledgeReadSession(KnowledgeProcessClient):
 
     def _spawn(self):
         self._tick()
-        self._directory = tempfile.TemporaryDirectory(prefix='nexaweave-read-session-')
+        # Leave room for a nested Windows temp root and the random leaf.
+        prefix = '' if os.name == 'nt' else 'nexaweave-read-session-'
+        self._directory = tempfile.TemporaryDirectory(prefix=prefix)
         self._owner.bind_private_directory(self._directory)
         self._process = self._owner.start(subprocess.Popen,
             [self._python, '-I', '-u', self._script], stdin=subprocess.PIPE,
