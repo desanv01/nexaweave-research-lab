@@ -69,8 +69,9 @@ class _ThreadEntry(ctypes.Structure):
 
 
 class OwnedProcessError(RuntimeError):
-    def __init__(self, *, outcome_unknown=False):
+    def __init__(self, *, outcome_unknown=False, cleanup_stage=None):
         self.outcome_unknown = outcome_unknown
+        self._cleanup_stage = cleanup_stage
         super().__init__("owned process failure")
 
 
@@ -256,24 +257,31 @@ class _WindowsJob:
         # alone can precede the process object's kernel signal/pending I/O exit.
         handles = []
         failure = None
+        self._cleanup_stage = None
+        stage = "job_snapshot_pin"
         try:
             try:
                 self._pin_processes(deadline, handles)
             except BaseException as error:
                 failure = error
+                self._cleanup_stage = stage
             # Always terminate, including failed capture or an exited root.
+            stage = "job_terminate"
             if not self.api.TerminateJobObject(self.handle, 1):
                 raise OwnedProcessError()
+            stage = "job_process_wait"
             for handle, verified in handles:
                 if not verified:
                     continue  # never wait a foreign/reused/unproved handle
                 self._wait_process(handle, deadline)
+            stage = "job_active_zero"
             while self.active_count():
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise OwnedProcessError()
                 time.sleep(min(0.01, remaining))
         except BaseException as error:
+            self._cleanup_stage = self._cleanup_stage or stage
             if failure is None or isinstance(error, (KeyboardInterrupt, SystemExit)):
                 failure = error
         finally:
@@ -283,6 +291,7 @@ class _WindowsJob:
                 try:
                     self._close_handle(handle)
                 except BaseException as error:
+                    self._cleanup_stage = self._cleanup_stage or "job_process_handle_close"
                     if failure is None or isinstance(error, (KeyboardInterrupt, SystemExit)):
                         failure = error
         if failure is not None:
@@ -397,7 +406,7 @@ class OwnedProcess:
             # caller's supplied budget by a few ulps immediately after setup.
             return min(timeout, self.cleanup_timeout, max(0, deadline - time.monotonic()))
 
-        failed = False
+        failure_stage = None
         accounting_interrupt = None
         process = self.process
         try:
@@ -405,7 +414,7 @@ class OwnedProcess:
                 try:
                     self.job.terminate_and_wait(deadline)
                 except Exception:
-                    failed = True
+                    failure_stage = getattr(self.job, "_cleanup_stage", None) or "job_teardown"
                 else:
                     self.tree_empty = True
                     if self._verified_job_commit_limit_bytes is not None and remaining_timeout() > 0:
@@ -424,7 +433,7 @@ class OwnedProcess:
                     try:
                         self.job.close()
                     except Exception:
-                        failed = True
+                        failure_stage = failure_stage or "job_close"
                     self.job = None
             if process is not None:
                 try:
@@ -439,14 +448,14 @@ class OwnedProcess:
                             process.kill()
                     process.wait(timeout=remaining_timeout())
                 except (OSError, subprocess.SubprocessError):
-                    failed = True
+                    failure_stage = failure_stage or "root_reap"
             # Termination releases pipe reads/writes. Join before closing buffered
             # streams: close() can otherwise wait forever on a reader's lock.
             for thread in threads:
                 if thread.ident is not None:
                     thread.join(timeout=remaining_timeout())
                     if thread.is_alive():
-                        failed = True
+                        failure_stage = failure_stage or "io_thread_join"
             io_stopped = all(thread.ident is None or not thread.is_alive() for thread in threads)
             if process is not None and io_stopped:
                 for pipe in (process.stdin, process.stdout, process.stderr):
@@ -454,15 +463,15 @@ class OwnedProcess:
                         try:
                             pipe.close()
                         except (OSError, ValueError):
-                            failed = True
+                            failure_stage = failure_stage or "pipe_close"
                 if os.name == "nt" and process.returncode is not None:
                     try:
                         process._handle.Close()
                     except OSError:
-                        failed = True
-            self.closed = not failed
+                        failure_stage = failure_stage or "root_handle_close"
+            self.closed = failure_stage is None
         finally:
             if accounting_interrupt is not None:
                 raise accounting_interrupt
-            if failed:
-                raise OwnedProcessError(outcome_unknown=self.started) from None
+            if failure_stage is not None:
+                raise OwnedProcessError(outcome_unknown=self.started, cleanup_stage=failure_stage) from None
