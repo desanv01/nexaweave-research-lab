@@ -75,3 +75,37 @@ Tests author local temporary Git repositories and commits only when Main execute
 them. Their 128-entry baselines are synthetic and do not prove original-archive
 identity. Main must separately build and verify the actual reviewed repository
 revision and retain exact check evidence. See [fixed limits](source-bundle-limits.md).
+
+## Partial release evidence
+
+The first-main runs below each passed the named browser integration fixture with
+zero skips and ordinary fixture cleanup. Each result applies to its listed commit.
+
+- **C01 — Multi-file PDF, Markdown, and text ingestion.** PR #216, commit
+  `3a747645aa85523b052fc5934349e579f0b28534`. The paired actual-graph browser
+  integration in `test_connected_native_report.py` retained PDF, Markdown, text,
+  and DOCX through Workbench intake and carried the exact revisions through the
+  graph, saved READY state, paired execution, report, and reconnect. Coverage
+  across all supported modes and negative authority cases remains open.
+  [First-main run 44590575579, knowledge-compatibility](https://github.com/desanv01/nexaweave-research-lab/actions/runs/44590575579/job/135795158774)
+- **C11 — Each supported simulation environment running independently.** PR
+  #222, commit `9d30d65d7b56f181341cb3c05bd701c0d48bce45`.
+  `test_connected_native_single_platform_browser.py` passed two separately configured
+  actual-graph browser integration cases, one Twitter-only and one Reddit-only.
+  The Reddit-only case verified Suggest, exact saved READY, native execution,
+  and receipt-bound Reddit outputs. Mode-specific actions, failure handling,
+  and resource isolation remain open, along with the full authority and
+  recovery matrix.
+  [First-main run 44649351818, knowledge-compatibility](https://github.com/desanv01/nexaweave-research-lab/actions/runs/44649351818/job/136000032274)
+- **C19 — Investigative reports using repeated research tools.** PR #220, commit
+  `f0ac0acaa84428c6370e861be2bb3fd0dc72f6af`. The ordinary actual-graph browser
+  integration in `test_connected_native_report.py` verified that cited claims
+  carried their exact retained passages and source provenance through protected
+  Read and downloads, with matching report metadata. Broader research cases,
+  independent semantic-support assessment, and substantive live-model report
+  quality remain open.
+  [First-main run 44633536584, knowledge-compatibility](https://github.com/desanv01/nexaweave-research-lab/actions/runs/44633536584/job/135946151018)
+
+The source-artifact probes passed. The artifacts remain unqualified, with
+`qualified_release` and `all44_accepted` both false. Full release acceptance
+remains open.
