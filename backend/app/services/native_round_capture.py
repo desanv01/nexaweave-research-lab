@@ -209,9 +209,11 @@ class NativeRoundCapture:
 
     def wrap_platform(self, platform):
         from oasis.social_platform.channel import Channel
+        from oasis.social_platform.typing import RecsysType
 
         channel = getattr(platform, "channel", None)
         if (self._platform is not None or self._passthrough
+                or getattr(platform, "recsys_type", None) is RecsysType.REDDIT
                 or type(channel) is not Channel
                 or type(channel.receive_queue) is not asyncio.Queue
                 or channel.receive_queue.maxsize != 0):
@@ -222,7 +224,10 @@ class NativeRoundCapture:
         return platform
 
     def adopt(self, env):
+        from oasis.environment.env import DefaultPlatformType
+
         if (self._env is not None or self._platform is None or self._passthrough
+                or getattr(env, "platform_type", None) is not DefaultPlatformType.TWITTER
                 or getattr(env, "platform", None) is not self._platform
                 or getattr(env, "channel", None) is not self._channel
                 or self._platform.channel is not self._channel):
