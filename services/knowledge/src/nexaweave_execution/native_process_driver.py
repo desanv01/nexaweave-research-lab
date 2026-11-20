@@ -153,6 +153,9 @@ class NativeProcessDriver:
             raise InvalidNativeRun()
         self._spent = True
         instance = uuid4()
+        producer_instance = getattr(self._factory, "expected_producer_instance_id", None)
+        if producer_instance is not None and canonical_uuid(producer_instance) == instance:
+            raise InvalidNativeRun()
         parent = None
         child_pipe = None
         process = None

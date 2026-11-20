@@ -12,6 +12,7 @@ from hashlib import sha256
 from itertools import islice
 from pathlib import Path
 from time import monotonic
+from unittest.mock import patch
 from uuid import UUID, uuid4
 
 
@@ -359,12 +360,12 @@ def _owned_factory(root, request, model_factory):
 
 
 _FORK_VALIDATION_SITES = {
-    329: 'request_binding', 330: 'prepared_request', 336: 'producer_authority',
-    337: 'prepared_root', 338: 'checkpoint_directory', 339: 'lineage_directory',
-    340: 'fork_directory', 341: 'directory_overlap', 343: 'lineage_read',
-    345: 'lineage_digest', 346: 'recording_import', 348: 'lineage_decode',
-    352: 'lineage_authority', 353: 'lineage_anchors', 354: 'lineage_body',
-    357: 'fork_manifest',
+    334: 'request_binding', 335: 'prepared_request', 341: 'producer_authority',
+    342: 'prepared_root', 343: 'checkpoint_directory', 344: 'lineage_directory',
+    345: 'fork_directory', 346: 'directory_overlap', 348: 'lineage_read',
+    350: 'lineage_digest', 351: 'recording_import', 353: 'lineage_decode',
+    357: 'lineage_authority', 358: 'lineage_anchors', 359: 'lineage_body',
+    362: 'fork_manifest',
 }
 
 
@@ -373,6 +374,10 @@ class _ObservedForkFactory:
     factory: object
     marker: Path
     first_validation: bool = True
+
+    @property
+    def expected_producer_instance_id(self):
+        return self.factory.expected_producer_instance_id
 
     def _mark(self, value, mode):
         try:
@@ -392,7 +397,7 @@ class _ObservedForkFactory:
             if code.co_filename == binding_file:
                 if code.co_name == '_checked_restore':
                     site = _FORK_VALIDATION_SITES.get(trace.tb_lineno, 'restore_other')
-                elif code.co_name == 'validate' and trace.tb_lineno == 363:
+                elif code.co_name == 'validate' and trace.tb_lineno == 368:
                     site = 'prepared_files'
             trace = trace.tb_next
         return site
@@ -461,7 +466,23 @@ def _run_child(factory, request, terminal, deadline, prior_instances, *, require
         assert closed is True
     assert monotonic() < deadline
     prior_instances.add(child.instance_id)
-    return child.process_id, receipt.evidence_sha256
+    return child, receipt.evidence_sha256
+
+
+class _ProducerPidView:
+    def __init__(self, pid):
+        self._pid = pid
+
+    def getpid(self):
+        return self._pid
+
+    def __getattr__(self, name):
+        return getattr(os, name)
+
+
+def _simulate_producer_pid(module, pid):
+    # Scope the simulated PID to a validator, keeping the real handshake and evidence PIDs.
+    return patch.object(module, 'os', _ProducerPidView(pid))
 
 
 def _captured_checkpoint(directory, lineage, config_bytes):
@@ -625,6 +646,7 @@ def _check_reference(reference, checkpoint_rows, captured_owners, manifest, rng_
 
 
 def assert_fresh_twitter_continuation(tmp_path, request, original_instance_id, terminal, deadline):
+    from app.services import native_twitter_restore
     from app.services.native_owned_session import _manifest
     from nexaweave_execution.native_twitter_checkpoint_binding import (
         NativeRestoredTwitterFactory, NativeTwitterCaptureFactory,
@@ -648,7 +670,10 @@ def assert_fresh_twitter_continuation(tmp_path, request, original_instance_id, t
     # Windows may reuse an exited child's PID. The handshake identifies each launch.
     prior_instances = {original_instance_id}
     capture_factory = NativeTwitterCaptureFactory(prepared, str(checkpoint), str(lineage_dir), anchors)
-    producer_pid, producer_evidence = _run_child(capture_factory, capture_request, terminal, deadline, prior_instances)
+    producer_child, producer_evidence = _run_child(
+        capture_factory, capture_request, terminal, deadline, prior_instances,
+    )
+    producer_pid = producer_child.process_id
     assert list(islice(lineage_dir.iterdir(), 2)) == [lineage_path]
     lineage_raw = _read_bounded(lineage_path, _RECEIPT_LIMIT)
     assert sha256(lineage_raw).hexdigest() == producer_evidence
@@ -682,13 +707,13 @@ def assert_fresh_twitter_continuation(tmp_path, request, original_instance_id, t
     assert reference_raw == originals and reference_request.artifact_sha256 == capture_request.artifact_sha256
     observation_path = reference / "reference_observation.json"
     reference_factory = _UninterruptedTwitterFactory(reference_prepared, str(observation_path))
-    reference_pid, reference_evidence = _run_child(
+    reference_child, reference_evidence = _run_child(
         reference_factory, reference_request, terminal, deadline, prior_instances,
     )
     observation_raw = _read_bounded(observation_path, _RECEIPT_LIMIT)
     assert sha256(observation_raw).hexdigest() == reference_evidence
     observation = json.loads(observation_raw)
-    assert observation["pid"] == reference_pid
+    assert observation["pid"] == reference_child.process_id
     expected_recommendations = _check_reference(
         observation["rounds"], checkpoint_rows, captured_owners, manifest, rng_at_cut,
     )
@@ -706,12 +731,18 @@ def assert_fresh_twitter_continuation(tmp_path, request, original_instance_id, t
     restore_factory = NativeRestoredTwitterFactory(
         restore_prepared, str(checkpoint), str(lineage_dir), str(restore_dir),
         producer_evidence, producer_pid, str(capture_request.run_id), None,
+        expected_producer_instance_id=producer_child.instance_id,
     )
+    with _simulate_producer_pid(native_twitter_restore, producer_pid):
+        restored_anchors, *_ = native_twitter_restore._checked_twitter_lineage(lineage)
+    assert restored_anchors.wire() == anchors
     assert not restore_dir.exists() and not memory_probe_path.exists()
-    restored_pid, restore_evidence = _run_child(restore_factory, restore_request, terminal, deadline, prior_instances)
+    restored_child, restore_evidence = _run_child(
+        restore_factory, restore_request, terminal, deadline, prior_instances,
+    )
     proof_raw = _read_bounded(memory_probe_path, _RECEIPT_LIMIT)
     proof = json.loads(proof_raw)
-    assert set(proof) == {"pid", "frames", "step"} and proof["pid"] == restored_pid
+    assert set(proof) == {"pid", "frames", "step"} and proof["pid"] == restored_child.process_id
     assert proof["frames"] == [list(frame) for frame in expected_frames]
     assert {path.name for path in islice(restore_dir.iterdir(), 3)} == set(_RESTORE_OUTPUTS)
     assert _manifest(restore_dir, _RESTORE_OUTPUTS, _DB_LIMIT) == restore_evidence
@@ -761,16 +792,18 @@ def assert_fresh_twitter_continuation(tmp_path, request, original_instance_id, t
     fork_factory = NativeRestoredTwitterFactory(
         fork_prepared, str(checkpoint), str(lineage_dir), str(fork_dir),
         producer_evidence, producer_pid, str(capture_request.run_id), None,
+        expected_producer_instance_id=producer_child.instance_id,
     )
     observed_factory = _ObservedForkFactory(fork_factory, tmp_path / 'fresh-fork-validation.stage')
     try:
-        fork_pid, fork_evidence = _run_child(
+        fork_child, fork_evidence = _run_child(
             observed_factory, fork_request, terminal, deadline, prior_instances, require_closed=True,
         )
     except Exception as error:
         error.add_note(f'fork_validation={observed_factory.observation()}')
         raise
-    assert observed_factory.observation() == 'entered/0 returned'
+    fork_pid = fork_child.process_id
+    assert observed_factory.observation() == f'entered/{int(fork_pid == producer_pid)} returned'
     fork_proof_raw = _read_bounded(fork_probe_path, _RECEIPT_LIMIT)
     fork_db = fork_dir / "native.sqlite3"
     assert {path.name for path in islice(fork_dir.iterdir(), 3)} == set(_RESTORE_OUTPUTS)

@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import stat
 import time
+from uuid import UUID
 
 from .native_owned_binding import (
     NativeOwnedSessionFactory,
@@ -318,6 +319,10 @@ class NativeRestoredTwitterFactory:
     expected_producer_pid: int
     expected_producer_run: str
     expected_post_content: str | None
+    expected_producer_instance_id: UUID
+
+    def __post_init__(self):
+        canonical_uuid(self.expected_producer_instance_id)
 
     def _checked_restore(self, request):
         producer_run = canonical_uuid(self.expected_producer_run)
@@ -330,7 +335,7 @@ class NativeRestoredTwitterFactory:
         self.prepared._check_prepared_request(request)
         expected_post_content = self.expected_post_content
         if (producer_run == request.run_id or type(producer_pid) is not int
-                or not 1 <= producer_pid <= 2_147_483_647 or producer_pid == os.getpid()
+                or not 1 <= producer_pid <= 2_147_483_647
                 or (expected_post_content is not None
                     and (type(expected_post_content) is not str or not expected_post_content))):
             raise ValueError("invalid owned Twitter restore authorization")

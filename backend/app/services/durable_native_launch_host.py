@@ -290,6 +290,7 @@ class DurableNativeLaunchHost:
             restoration = NativeRestoredTwitterFactory(
                 prepared, str(checkpoint_dir), str(lineage_dir), str(child_dir),
                 request.checkpoint_sha256, producer_child.process_id, str(producer_id), None,
+                expected_producer_instance_id=producer_child.instance_id,
             )
             if preflight:
                 restoration._checked_restore(request)
@@ -351,7 +352,8 @@ class DurableNativeLaunchHost:
         if current != source or self._current(current) != (prep, ref):
             raise NativeLaunchError('conflict')
         producer = self._checkpoint_producer(request, self._preparation_descriptor(prep))
-        if producer.process_id != restoration.expected_producer_pid:
+        if (producer.process_id != restoration.expected_producer_pid
+                or producer.instance_id != restoration.expected_producer_instance_id):
             raise NativeLaunchError('conflict')
         return validate_fork_preview_result({
             'schema_version': 3, 'launch_id': launch_id, 'checkpoint': checkpoint,
