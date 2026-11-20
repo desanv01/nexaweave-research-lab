@@ -363,6 +363,10 @@ def _write_scripts(directory, python, token):
             lines.append("  if ($preparationSucceeded) { $launchIntegrationMode = '--hosted-integration' }")
             mode = '$launchIntegrationMode'
         lines.append(f"  Invoke-Gate {_quote_ps(gate)} {{ & {_quote_ps(python)} {_quote_ps(ROOT / 'tools' / script)} {mode} }}")
+        if gate == 'native-temporal':
+            lines.append('  if (-not $script:gateSucceeded) { throw \'Native Temporal gate failed\' }')
+        if gate == 'native-launch-engine':
+            lines.append('  if (-not $script:gateSucceeded) { throw \'Native launch engine gate failed\' }')
         if gate == 'preparation':
             # The runner exits zero only after exact selection and owned cleanup.
             lines.append('  $preparationSucceeded = $script:gateSucceeded')
