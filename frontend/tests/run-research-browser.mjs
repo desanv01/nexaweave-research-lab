@@ -615,18 +615,61 @@ async function reportRead(command) {
   const native = await reportDownload('native_evidence', nativeFile)
   return { reference: { ...reportReference(report), receipt_sha256: report.receipt_sha256 }, proof: { ...sourceProof(), native_evidence_sha256: launch.receipt.evidence_sha256, report_download: narrative, native_evidence_download: native } }
 }
+async function checkTwoHop(graph, [start, , end]) {
+  const overview = page.locator('.graph-overview details').first()
+  if (await overview.getAttribute('open') === null) await overview.locator('summary').first().click()
+  await overview.locator('input[value=nodes]').check()
+  let at = 0
+  async function pick(id, name) {
+    const index = graph.nodes.findIndex(node => node.uuid === id)
+    requireTrue(index >= 0)
+    const target = Math.floor(index / 10)
+    while (at !== target) {
+      clock()
+      const forward = at < target
+      await overview.locator('nav button').nth(forward ? 1 : 0).click()
+      at += forward ? 1 : -1
+    }
+    await overview.locator('li').filter({ has: page.getByText(id, { exact: true }) }).getByText(name, { exact: true }).click()
+  }
+  const panel = page.locator('.two-hop-research')
+  async function read(from, to) {
+    await pick(from, 'Use as start')
+    await pick(to, 'Use as destination')
+    const { value, request } = await exchange(page, '/api/graph/two-hop/' + graph.graph_id, 'POST',
+      () => panel.locator('button[type=submit]').click(), 262144)
+    requireTrue(request.source_node_id === from && request.target_node_id === to)
+    return value
+  }
+
+  const found = await read(start, end)
+  const hops = panel.locator('.hops > li')
+  await hops.nth(1).waitFor()
+  requireTrue(same(await hops.locator('p.retained-text').allTextContents(), found.path.hops.map(hop => hop.fact)))
+  for (const [index, hop] of found.path.hops.entries()) {
+    const row = hops.nth(index)
+    await row.locator('summary').click()
+    requireTrue(same(await row.locator('.citation-source dd:first-of-type').allTextContents(), hop.evidence_ids))
+  }
+  await panel.locator('button[type=button]').click()
+  const reverse = await read(end, start)
+  const scan = 'Edges scanned: ' + reverse.scope_coverage.scanned + '.'
+  await panel.getByRole('status').filter({ hasText: 'bounded scan.' }).filter({ hasText: scan }).waitFor()
+  requireTrue(reverse.path === null && await hops.count() === 0)
+}
+
 async function pdfAfterRestart(command) {
-  commandRequest(command)
+  const { nodes, edges } = commandRequest(command, true)
   await page.locator('.connection-form button[type=button]').last().click()
   await enabled(page.locator('.connection-form button[type=submit]'))
-  // This is a real UI GET with a deliberately wrong credential, not an API call.
+  // Exercise the wrong credential through the form.
   const invalid = connection.token === 'research-browser-invalid' ? 'research-browser-invalid-2' : 'research-browser-invalid'
   await connectForm(page, invalid, 401)
   const { value: graph } = await connectForm(page)
-  await inspectDossierSupport({ page, graph, sourceRoute, exchange, enabled, requireTrue, sha })
+  await inspectDossierSupport({ page, graph: { ...graph, edges: graph.edges.filter(e => !edges.includes(e.uuid)) },
+    sourceRoute, exchange, enabled, requireTrue, sha })
   const original = await readPdf()
-  // Use a second ordinary frontend origin to observe actual server refusal.
-  // Do not override Origin headers, disable CORS, or ignore browser security.
+  // Exercise origin denial from a second real frontend origin.
   const denied = await context.newPage(); observe(denied)
   try {
     phase = 'page-load'
@@ -635,7 +678,9 @@ async function pdfAfterRestart(command) {
     await connectForm(denied, connection.token, 403)
   } finally { await denied.close() }
   requireTrue(await page.locator('#bearer-token').inputValue() === '')
-  return { reference: { source_revision: pdf.source_revision }, proof: { pdf: original, auth_denied: true, origin_denied: true, token_cleared: true, dossier_support_review: true } }
+  phase = 'protocol'
+  await checkTwoHop(graph, nodes)
+  return { reference: { source_revision: pdf.source_revision }, proof: { pdf: original, auth_denied: true, origin_denied: true, token_cleared: true, dossier_support_review: true, two_hop: true } }
 }
 async function cleanup() {
   if (closing) return closing
