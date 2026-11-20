@@ -178,48 +178,140 @@ def test_fresh_v4_install_and_sql_checksum_denial(factory):
 
 
 def test_v3_catalog_upgrades_additively_to_v4_without_rewriting_sources(factory, monkeypatch):
-    class RollbackFixture(Exception):
-        pass
-    with factory() as conn:
-        with pytest.raises(RollbackFixture):
-            with conn.transaction():
-                conn.execute("DROP SCHEMA mf_app CASCADE")
-                for version, filename in ((1, "0001_project_revisions.sql"),
-                                          (2, "0002_source_evidence.sql"),
-                                          (3, "0003_research_imports.sql")):
-                    sql = files("nexaweave_storage").joinpath("migrations", filename).read_text("utf-8")
-                    conn.execute(sql)
-                    conn.execute("INSERT INTO mf_app.schema_migrations VALUES (%s,%s,%s)",
-                                 (version, hashlib.sha256(sql.encode()).hexdigest(), _catalog(conn)))
-                owner_project, revision, workspace = uuid4(), uuid4(), uuid4()
-                snap, evidence, digest = canonical_payload(snapshot(), [], "proj_1")
-                conn.execute("INSERT INTO mf_app.projects (project_id,principal,workspace_id,display_id,current_revision) VALUES (%s,'owner',%s,'proj_1',1)",
-                             (owner_project, workspace))
-                conn.execute("INSERT INTO mf_app.project_revisions (project_id,revision,snapshot,evidence,digest) VALUES (%s,1,%s,%s,%s)",
-                             (owner_project, Jsonb(snap), Jsonb(evidence), digest))
-                text = "legacy 猫"
-                conn.execute("INSERT INTO mf_app.source_revisions (source_revision,project_id,name,retained_text,text_sha256,byte_length,codepoint_length) VALUES (%s,%s,'old.pdf',%s,%s,%s,%s)",
-                             (revision, owner_project, text, hashlib.sha256(text.encode()).hexdigest(),
-                              len(text.encode()), len(text)))
-                before = conn.execute("SELECT name,retained_text,text_sha256 FROM mf_app.source_revisions WHERE source_revision=%s", (revision,)).fetchone()
-                original_catalog = store_module._catalog
-                def fail_after_binary_ddl(connection):
-                    if connection.execute("SELECT to_regclass('mf_app.source_binaries')").fetchone()[0] is not None:
-                        raise MigrationMismatch()
-                    return original_catalog(connection)
-                monkeypatch.setattr(store_module, "_catalog", fail_after_binary_ddl)
+    from time import monotonic
+    from test_postgres_backup_restore import Databases
+
+    # The existing factory admits the disposable DSN. This case never resets
+    # its shared database. Databases also pins the scratch database's OID.
+    assert not any(key.upper().startswith("PG") for key in os.environ)
+    settings = conninfo_to_dict(os.environ["PROJECT_STORE_POSTGRES_TEST_DSN"])
+    databases = Databases(settings, monotonic() + 60)
+    table = "SELECT to_regclass('mf_app.source_binaries')"
+    ledger = "SELECT version,sql_sha256,catalog_sha256 FROM mf_app.schema_migrations ORDER BY version"
+    retained = (
+        "SELECT source_revision,project_id,name,convert_to(retained_text,'UTF8'),"
+        "text_sha256,byte_length,codepoint_length,recorded_at FROM mf_app.source_revisions"
+    )
+    project_rows = "SELECT * FROM mf_app.projects"
+    revision_rows = "SELECT * FROM mf_app.project_revisions"
+
+    try:
+        owned = databases.create("nw_w82_migration_" + uuid4().hex)
+        databases.empty(owned)
+        connect_owned = databases.factory(owned)
+        name, oid = owned["name"], owned["oid"]
+        with connect_owned() as conn:
+            for version, filename in ((1, "0001_project_revisions.sql"),
+                                      (2, "0002_source_evidence.sql"),
+                                      (3, "0003_research_imports.sql")):
+                ddl = files("nexaweave_storage").joinpath("migrations", filename).read_text("utf-8")
+                conn.execute(ddl)
+                conn.execute("INSERT INTO mf_app.schema_migrations VALUES (%s,%s,%s)",
+                             (version, hashlib.sha256(ddl.encode("utf-8")).hexdigest(), _catalog(conn)))
+            owner_project, revision, workspace = uuid4(), uuid4(), uuid4()
+            snap, evidence, digest = canonical_payload(snapshot(), [], "proj_1")
+            conn.execute("INSERT INTO mf_app.projects (project_id,principal,workspace_id,display_id,current_revision) VALUES (%s,'owner',%s,'proj_1',1)",
+                         (owner_project, workspace))
+            conn.execute("INSERT INTO mf_app.project_revisions (project_id,revision,snapshot,evidence,digest) VALUES (%s,1,%s,%s,%s)",
+                         (owner_project, Jsonb(snap), Jsonb(evidence), digest))
+            text = "\ufefflegacy 猫😀\r\n"
+            raw = text.encode("utf-8")
+            source_digest = hashlib.sha256(raw).hexdigest()
+            conn.execute("INSERT INTO mf_app.source_revisions (source_revision,project_id,name,retained_text,text_sha256,byte_length,codepoint_length) VALUES (%s,%s,'old.pdf',%s,%s,%s,%s)",
+                         (revision, owner_project, text, source_digest, len(raw), len(text)))
+            before_catalog = _catalog(conn)
+            before_ledger = conn.execute(ledger).fetchall()
+            assert [row[0] for row in before_ledger] == [1, 2, 3]
+            assert before_ledger[-1][2] == before_catalog
+            before_project = conn.execute(project_rows).fetchall()
+            before_revisions = conn.execute(revision_rows).fetchall()
+            before_source = conn.execute(retained).fetchall()
+            assert len(before_source) == 1 and before_source[0][:-1] == (
+                revision, owner_project, "old.pdf", raw, source_digest, len(raw), len(text),
+            )
+        # The v3 ledger, catalog, project and source are now committed.
+
+        with connect_owned() as migrating, connect_owned() as control:
+            migrating.autocommit = True
+            control.autocommit = True
+            control.execute("SET statement_timeout = '4s'")
+            target = migrating.execute(
+                "SELECT pid,backend_start FROM pg_catalog.pg_stat_activity "
+                "WHERE pid=pg_catalog.pg_backend_pid() AND datid=%s AND datname=%s "
+                "AND usename='mirofish_fixture' AND backend_type='client backend'", (oid, name),
+            ).fetchone()
+            assert target is not None
+            pid, started = target
+            assert pid == migrating.info.backend_pid and pid > 0 and pid != control.info.backend_pid
+            assert started is not None
+            session_filter = """
+                FROM pg_catalog.pg_stat_activity AS a
+                JOIN pg_catalog.pg_database AS d ON d.oid=a.datid
+                JOIN pg_catalog.pg_roles AS r ON r.oid=a.usesysid AND r.oid=d.datdba
+                WHERE a.pid=%s AND a.backend_start=%s AND a.pid<>pg_catalog.pg_backend_pid()
+                  AND a.datid=%s AND a.datname=%s AND a.datname=d.datname
+                  AND d.datname=current_database() AND a.usename=r.rolname
+                  AND r.rolname='mirofish_fixture' AND current_user=r.rolname AND session_user=r.rolname
+                  AND a.backend_type='client backend' AND a.state='idle in transaction'
+            """
+            identity = (pid, started, oid, name)
+            terminated = False
+
+            def interrupt_after_v4_ddl(connection):
+                nonlocal terminated
+                assert connection is migrating
+                visible = connection.execute(table).fetchone()
+                assert visible is not None
+                if visible == (None,):
+                    return _catalog(connection)
+                assert not terminated and connection.execute(ledger).fetchall() == before_ledger
+                assert control.execute(table).fetchone() == (None,)
+                assert control.execute(ledger).fetchall() == before_ledger
+                assert control.execute("SELECT a.pid,a.backend_start " + session_filter,
+                                       identity).fetchall() == [target]
+                # Repeat every identity predicate in the only signal statement.
+                outcome = control.execute("SELECT pg_catalog.pg_terminate_backend(a.pid,2000) " + session_filter,
+                                          identity).fetchall()
+                assert outcome == [(True,)]
+                terminated = True
+                assert control.execute("SELECT 1 FROM pg_catalog.pg_stat_activity WHERE pid=%s AND backend_start=%s",
+                                       target).fetchone() is None
+                # Let the installed migration observe the real connection loss.
+                return _catalog(connection)
+
+            with monkeypatch.context() as patch:
+                patch.setattr(store_module, "_catalog", interrupt_after_v4_ddl)
                 with pytest.raises(MigrationMismatch):
-                    migrate(conn)
-                monkeypatch.setattr(store_module, "_catalog", original_catalog)
-                assert conn.execute("SELECT to_regclass('mf_app.source_binaries')").fetchone()[0] is None
-                assert conn.execute("SELECT version FROM mf_app.schema_migrations ORDER BY version").fetchall() == [(1,), (2,), (3,)]
-                assert conn.execute("SELECT name,retained_text,text_sha256 FROM mf_app.source_revisions WHERE source_revision=%s", (revision,)).fetchone() == before
-                migrate(conn)
-                migrate(conn)
-                assert conn.execute("SELECT version FROM mf_app.schema_migrations ORDER BY version").fetchall() == [(1,), (2,), (3,), (4,)]
-                assert conn.execute("SELECT name,retained_text,text_sha256 FROM mf_app.source_revisions WHERE source_revision=%s", (revision,)).fetchone() == before
-                assert conn.execute("SELECT count(*) FROM mf_app.source_binaries").fetchone()[0] == 0
-                raise RollbackFixture()
+                    migrate(migrating)
+            assert terminated and migrating.broken
+
+        with connect_owned() as reopened:
+            reopened.autocommit = True
+            assert reopened.execute(table).fetchone() == (None,)
+            assert _catalog(reopened) == before_catalog
+            assert reopened.execute(ledger).fetchall() == before_ledger
+            assert reopened.execute(project_rows).fetchall() == before_project
+            assert reopened.execute(revision_rows).fetchall() == before_revisions
+            assert reopened.execute(retained).fetchall() == before_source
+
+            migrate(reopened)
+            upgraded = reopened.execute(ledger).fetchall()
+            assert len(upgraded) == 4 and upgraded[:3] == before_ledger
+            v4_ddl = files("nexaweave_storage").joinpath("migrations", "0004_source_binaries.sql").read_text("utf-8")
+            assert upgraded[3] == (4, hashlib.sha256(v4_ddl.encode("utf-8")).hexdigest(), _catalog(reopened))
+            assert upgraded[3][2] != before_catalog
+            assert reopened.execute("SELECT count(*) FROM mf_app.source_binaries").fetchone() == (0,)
+            assert reopened.execute(retained).fetchall() == before_source
+            migrate(reopened)
+            assert reopened.execute(ledger).fetchall() == upgraded
+            assert _catalog(reopened) == upgraded[3][2]
+            assert reopened.execute(project_rows).fetchall() == before_project
+            assert reopened.execute(revision_rows).fetchall() == before_revisions
+            assert reopened.execute(retained).fetchall() == before_source
+            assert reopened.execute("SELECT count(*) FROM mf_app.source_binaries").fetchone() == (0,)
+    finally:
+        failures = databases.cleanup()
+        assert not failures, failures
 
 
 def test_cli_unicode_import_resolve_and_exclusive_output(factory, tmp_path, monkeypatch, capsys):
