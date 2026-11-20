@@ -4,7 +4,7 @@ No injected facade, provider, transport or store. Canned responses prove dispatc
 and provenance controls, not semantic extraction quality or paid-model readiness.
 """
 import asyncio
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from copy import deepcopy
 import hashlib
 import importlib.util
@@ -414,15 +414,18 @@ def test_real_protected_http_selected_retained_passage(factory, tmp_path):
     status_url = f'/api/source/ingestion/operation/{display}/{operation}'
     plan_url, execute_url = (f'/api/source/ingestion/{method}/{display}' for method in ('plan', 'execute'))
     budget = BudgetLedger(factory)
+    ledger = Ledger(factory)
 
     def reservations():
         with factory() as connection:
             return connection.execute(
-                'SELECT operation_id,attempt_id,state FROM mf_execution.reservations WHERE account_id=%s',
+                'SELECT r.operation_id,r.attempt_id,r.state,to_jsonb(r) '
+                'FROM mf_execution.reservations AS r WHERE r.account_id=%s',
                 (account,),
             ).fetchall()
 
-    with neo_scope(scope) as driver, model_server() as (model_port, records, errors, _state):
+    with neo_scope(scope) as driver, ExitStack() as provider:
+        model_port, records, errors, _state = provider.enter_context(model_server())
         with host(tmp_path/'selected', scope, display, account, model_port) as (port, token, _events_path):
             def post(route, body):
                 return _exchange(port, 'POST', route, body, token=token)
@@ -485,6 +488,27 @@ def test_real_protected_http_selected_retained_passage(factory, tmp_path):
             assert status == 409 and reply['error']['code'] == 'conflict'
             assert len(records) == request_count and errors == []
             assert reservations() == settled
+            model_trace = deepcopy(records)
+            operation_record = ledger.get(scope, operation)
+            assert operation_record.receipt is not None
+            budget_status = budget.status('owner', account)
+
+        # The first host has passed its normal stop and child cleanup checks.
+        # Leave the model endpoint closed while a fresh host recovers the receipt.
+        provider.close()
+        with host(tmp_path/'selected-restart', scope, display, account, model_port) as (port, token, events):
+            status, _, reply = _exchange(port, 'GET', status_url)
+            assert status == 401 and reply == {'success': False, 'error': {'code': 'unauthorized'}}
+            assert not [event for event in _events(events) if event['event'] == 'spawn']
+
+            status, _, reply = _exchange(port, 'GET', status_url, token=token)
+            assert status == 200 and reply == {'success': True, 'data': status_expected}
+            status, _, reply = _exchange(port, 'POST', execute_url, payload, token=token)
+            assert status == 200 and reply == {'success': True, 'data': executed}
+
+        assert records == model_trace and errors == []
+        assert ledger.get(scope, operation) == operation_record
+        assert reservations() == settled and budget.status('owner', account) == budget_status
 
         rows, _, _ = driver.execute_query(
             'MATCH (e:Episodic {group_id:$group}), (m:MiroFishIngest {uuid:$episode}) '
