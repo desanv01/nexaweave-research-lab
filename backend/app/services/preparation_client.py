@@ -92,6 +92,16 @@ def options(value):
 
 def validate_payload(method, value):
     try:
+        if method == 'seed_pair':
+            if type(value) is not dict or set(value) != {
+                    'schema_version', 'operation_id', 'plan_sha256', 'idempotency_key', 'alternate_seed'}:
+                raise ValueError
+            integer(value['schema_version'], 1, 1)
+            uuid_string(value['operation_id'])
+            sha(value['plan_sha256'])
+            uuid_string(value['idempotency_key'])
+            integer(value['alternate_seed'], 0, 4294967295)
+            return json.loads(encoded(value))
         keys = {'schema_version', 'operation_id'} | ({'source_revision', 'options'} if method == 'plan' else {'plan_sha256'})
         if method == 'configuration':
             keys |= {'source_revision', 'artifact_sha256'}
@@ -142,8 +152,47 @@ def validate_receipt(value, operation_id, platforms):
         raise ValueError
 
 
+def _seed_pair_result(value, graph_id, scope, payload):
+    if type(value) is not dict or set(value) != {
+            'schema_version', 'display_graph_id', 'scope', 'project_revision', 'state',
+            'idempotency_key', 'platforms', 'donor', 'alternate'}:
+        raise ValueError
+    integer(value['schema_version'], 1, 1)
+    integer(value['project_revision'], 1, 9007199254740991)
+    if (value['state'] != 'ready' or value['display_graph_id'] != graph_id
+            or canonical(value['scope']) != canonical(scope)
+            or scope.get('layer') != 'source' or scope.get('run_id') is not None
+            or scope.get('branch_id') is not None or value['idempotency_key'] != payload['idempotency_key']):
+        raise ValueError
+    platforms = value['platforms']
+    if type(platforms) is not list or platforms not in [['twitter'], ['reddit'], ['twitter', 'reddit']]:
+        raise ValueError
+    donor, alternate = value['donor'], value['alternate']
+    if (type(donor) is not dict or set(donor) != {'operation_id', 'plan_sha256', 'artifact_sha256', 'seed'}
+            or type(alternate) is not dict or set(alternate) != {'operation_id', 'plan_sha256', 'receipt', 'seed'}):
+        raise ValueError
+    if (donor['operation_id'] != payload['operation_id'] or donor['plan_sha256'] != payload['plan_sha256']
+            or alternate['operation_id'] == donor['operation_id'] or alternate['plan_sha256'] == donor['plan_sha256']):
+        raise ValueError
+    uuid_string(alternate['operation_id'])
+    sha(alternate['plan_sha256'])
+    sha(donor['artifact_sha256'])
+    integer(donor['seed'], 0, 4294967295)
+    integer(alternate['seed'], 0, 4294967295)
+    if alternate['seed'] != payload['alternate_seed'] or alternate['seed'] == donor['seed']:
+        raise ValueError
+    validate_receipt(alternate['receipt'], alternate['operation_id'], platforms)
+    if alternate['receipt']['artifact_sha256'] == donor['artifact_sha256']:
+        raise ValueError
+    if len(encoded(value)) > RESULT_BYTES:
+        raise PreparationError('result_too_large')
+    return json.loads(encoded(value))
+
+
 def validate_result(value, graph_id, scope, payload, method):
     try:
+        if method == 'seed_pair':
+            return _seed_pair_result(value, graph_id, scope, payload)
         keys = {'schema_version', 'display_graph_id', 'scope', 'project_revision', 'operation_id',
                 'source', 'options', 'actors', 'projection_sha256', 'plan_sha256', 'state',
                 'progress', 'error_code', 'authorization', 'receipt', 'graph_snapshot_atomic',

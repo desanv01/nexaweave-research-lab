@@ -136,6 +136,143 @@ def test_pg_v2_selected_sources_reload_generation_and_full_snapshot_tamper(facto
             sort_keys=True), flush=True)
 
 
+@pytest.mark.parametrize('version', [1, 2])
+def test_pg_settled_ready_seed_pair_retains_frozen_sources_and_exact_replay(factory, tmp_path, monkeypatch, version):
+    from app.config import Config
+    from app.knowledge_read_app import create_read_app
+    from app.services.durable_preparation_host import DurablePreparationHost
+    from app.services.knowledge_preparation_facade import KnowledgePreparationFacade
+    from app.services.knowledge_read_facade import ReadHostSettings
+    from app.services.preparation_client import digest
+    from nexaweave_storage import SourceStore
+    from psycopg.types.json import Jsonb
+
+    host, scope, first, chat, wires, transport = real_host(factory, tmp_path)
+    declaration = request(first)
+    if version == 2:
+        text = 'Owned second document'
+        second = SourceStore(factory).ingest_text('owner', scope.project_id, uuid4(), 'second', text,
+            [{'evidence_id': str(uuid4()), 'start': 0, 'end': len(text)}])
+        original_call = transport.call
+
+        def projection(raw):
+            reply = json.loads(original_call(raw))
+            for fact in reply['result']['facts']:
+                fact['evidence_ids'].extend(str(p.evidence_id) for p in second.passages)
+            return json.dumps(reply).encode()
+
+        transport.call = projection
+        declaration.update(schema_version=2, source_revisions=[
+            str(first.source_revision), str(second.source_revision)])
+    plan = host.plan(declaration)
+    host.start(reference(plan))
+    host.generate(wires[0])
+    donor = host.store.get('owner', plan['operation_id'], plan['plan_sha256'])
+    assert donor.state == 'ready'
+    root = tmp_path / donor.receipt['simulation_id']
+    originals = {pin['name']: (root / pin['name']).read_bytes() for pin in donor.receipt['files']}
+    seed = (declaration['options']['seed'] + 1) % (2**32)
+    payload = dict(reference(plan), idempotency_key=str(uuid4()), alternate_seed=seed)
+    with factory() as conn:
+        settlement = host.budget._row(conn, host.account_id, donor.operation_id)
+    assert settlement.state == ReservationState.settled
+    assert type(settlement.receipt) is PreparedBudgetReceipt
+    assert settlement.receipt.operation_id == donor.operation_id
+    assert settlement.receipt.attempt_id == donor.budget_attempt_id
+    assert settlement.receipt.fingerprint == settlement.fingerprint
+    assert settlement.receipt.artifact_sha256 == donor.receipt['artifact_sha256']
+    baseline = (len(chat.calls), transport.calls, list(wires))
+
+    class FixtureConfig(Config):
+        DEBUG = False
+        NEXAWEAVE_ALLOWED_ORIGINS = ('http://localhost:3000',)
+
+    monkeypatch.delenv('FLASK_HOST', raising=False)
+    monkeypatch.delenv('NEXAWEAVE_ALLOWED_ORIGINS', raising=False)
+    monkeypatch.setattr(ReadHostSettings, 'from_config', classmethod(lambda cls, config: host.settings))
+
+    def app_for(current):
+        facade = KnowledgePreparationFacade(current.settings, host=current)
+        return create_read_app(FixtureConfig, preparation_facade=facade, mode='research_local')
+
+    route = '/api/preparation/' + host.display_graph_id + '/seed_pair'
+    auth = {'Authorization': 'Bearer ' + host.settings.token}
+
+    def set_budget_receipt(receipt):
+        with factory() as conn:
+            conn.execute('UPDATE mf_execution.reservations SET receipt=%s WHERE account_id=%s AND operation_id=%s',
+                         (Jsonb(receipt), host.account_id, donor.operation_id))
+
+    with app_for(host).test_client() as client:
+        assert client.post(route, json=payload).status_code == 401
+        assert client.post(route.replace(host.display_graph_id, 'foreign-graph'), headers=auth, json=payload).status_code == 404
+        assert client.post(route, headers=auth, json={**payload, 'alternate_seed': True}).status_code == 400
+        assert client.post(route, headers=auth, json={**payload, 'alternate_seed': declaration['options']['seed']}).status_code == 409
+        set_budget_receipt({**settlement.receipt.json_value(), 'artifact_sha256': 'f' * 64})
+        refused = client.post(route, headers=auth, json=payload)
+        assert refused.status_code == 409
+        set_budget_receipt(settlement.receipt.json_value())
+        with factory() as conn:
+            assert conn.execute('SELECT count(*) FROM mf_preparation.seed_pairs WHERE donor_operation_id=%s',
+                                (donor.operation_id,)).fetchone() == (0,)
+        response = client.post(route, headers=auth, json=payload)
+        assert response.status_code == 200
+        pair = response.json['data']
+        assert pair['state'] == 'ready'
+        assert pair['donor'] == dict(operation_id=str(donor.operation_id), plan_sha256=donor.plan_sha256,
+            seed=declaration['options']['seed'], artifact_sha256=donor.receipt['artifact_sha256'])
+        assert client.post(route, headers=auth, json={**payload, 'alternate_seed': (seed + 1) % (2**32)}).status_code == 409
+        assert client.post(route, headers=auth, json={**payload, 'idempotency_key': str(uuid4())}).status_code == 409
+
+    fresh = DurablePreparationHost(settings=host.settings, read_facade=host.reader, artifact_root=tmp_path,
+                                   connection_factory=factory, account_id=host.account_id)
+    alternate = pair['alternate']
+    assert alternate['seed'] == seed
+    with factory() as conn:
+        frozen, saved = conn.execute(
+            'SELECT alternate_frozen,receipt FROM mf_preparation.seed_pairs WHERE donor_operation_id=%s',
+            (donor.operation_id,)).fetchone()
+        assert saved == pair
+        assert host.budget._row(conn, host.account_id, donor.operation_id) == settlement
+        assert host.budget._row(conn, host.account_id, UUID(alternate['operation_id'])) is None
+    expected = deepcopy(donor.frozen)
+    for item in (expected['public'], expected['request'], expected['plan_identity']):
+        item['operation_id'] = alternate['operation_id']
+        item['options']['seed'] = seed
+    expected['public']['plan_sha256'] = digest(expected['plan_identity'])
+    assert frozen == expected and alternate['plan_sha256'] == expected['public']['plan_sha256']
+    with pytest.raises(PreparationAuthorityError) as collision:
+        fresh.store.put('owner', frozen)
+    assert collision.value.code == 'conflict'
+    assert host.store.get('owner', donor.operation_id) == donor
+    assert all((root / name).read_bytes() == raw for name, raw in originals.items())
+    sibling = tmp_path / alternate['receipt']['simulation_id']
+    for name, raw in originals.items():
+        copied = (sibling / name).read_bytes()
+        if name in {'state.json', 'simulation_config.json'}:
+            assert json.loads(copied) == {**json.loads(raw), 'simulation_id': sibling.name}
+        else:
+            assert copied == raw
+    with app_for(fresh).test_client() as client:
+        replay = client.post(route, headers=auth, json=payload)
+        assert replay.status_code == 200 and replay.json == response.json
+        assert replay.data == response.data
+        if version == 2:
+            original_snapshot = fresh._source_snapshot
+            with monkeypatch.context() as revoked:
+                def stale_snapshot(retained, check):
+                    snapshot = original_snapshot(retained, check)
+                    if retained.source_revision == second.source_revision:
+                        snapshot['source_name'] = 'Changed second source'
+                    return snapshot
+
+                revoked.setattr(fresh, '_source_snapshot', stale_snapshot)
+                assert client.post(route, headers=auth, json=payload).status_code == 409
+        ProjectStore(factory).update('owner', scope.project_id, donor.project_revision, snapshot())
+        assert client.post(route, headers=auth, json=payload).status_code == 409
+    assert (len(chat.calls), transport.calls, wires) == baseline
+
+
 def _expected_prepared_profile(host, ready, original, ordinal):
     import csv
     import io
@@ -638,7 +775,16 @@ def test_corrupt_frozen_store_is_quarantined(factory, tmp_path):
 def test_own_migration_checksum_catalog_drift_and_legacy_unchanged(factory):
     with factory() as conn:
         legacy = conn.execute('SELECT version,checksum,schema_checksum FROM mf_execution.schema_migrations').fetchall()
+        preparation_versions = conn.execute(
+            'SELECT version,checksum,schema_checksum FROM mf_preparation.schema_migrations ORDER BY version').fetchall()
+        assert [row[0] for row in preparation_versions] == [1, 2]
+        # Recreate the legacy catalog in this disposable fixture before re-upgrade.
+        conn.execute('DROP TABLE mf_preparation.seed_pairs')
+        conn.execute('DELETE FROM mf_preparation.schema_migrations WHERE version=2')
         migrate(conn)
+        assert conn.execute(
+            'SELECT version,checksum,schema_checksum FROM mf_preparation.schema_migrations ORDER BY version'
+        ).fetchall() == preparation_versions
     with factory() as conn:
         with pytest.raises(PreparationAuthorityError):
             with conn.transaction():
