@@ -727,7 +727,6 @@ def _checked_twitter_lineage(lineage):
                                   "prepared", "owners", "runner"}
             or not _integer(lineage["version"], 1, 1)
             or not _integer(lineage["producer_pid"], 1, 2**63 - 1)
-            or lineage["producer_pid"] == os.getpid()
             or not _is_digest(lineage["manifest_sha256"])
             or type(lineage["anchors"]) is not dict
             or lineage["anchors"].keys() != {"graph_id", "simulation_id", "run_id", "branch_id",
