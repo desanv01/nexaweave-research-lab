@@ -64,6 +64,7 @@ def test_owned_child_runs_real_both_platforms_and_preserves_prepared_inputs(tmp_
         assert not (root / ".native_prepared_start_claim").exists()
         observed = terminal(driver, request, attempt, child, deadline)
         assert observed.status == "completed" and observed.receipt is not None
+        assert observed.receipt.instance_id == child.instance_id
         for platform in ("twitter", "reddit"):
             with sqlite3.connect(root / f"{platform}_simulation.db") as connection:
                 assert connection.execute("SELECT COUNT(*) FROM user").fetchone()[0] == 2
@@ -74,7 +75,7 @@ def test_owned_child_runs_real_both_platforms_and_preserves_prepared_inputs(tmp_
         assert all((root / name).read_bytes() == data for name, data in originals.items())
     finally:
         driver.close()
-    assert_fresh_twitter_continuation(tmp_path, request, child.process_id, terminal, deadline)
+    assert_fresh_twitter_continuation(tmp_path, request, child.instance_id, terminal, deadline)
 
 
 @pytest.mark.parametrize("change", ["artifact", "runtime", "changed-input"])
