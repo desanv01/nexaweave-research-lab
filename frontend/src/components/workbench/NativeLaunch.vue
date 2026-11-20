@@ -1,6 +1,6 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
-import { completedCapture, nativeLaunchIdentity, nativeReadyPreparation, newNativeLaunchId, observableNativeLaunch, validateNativeLaunchResult } from '../../api/nativeLaunch.js'
+import { completedCapture, nativeLaunchIdentity, nativeReadyPreparation, newNativeLaunchId, observableNativeLaunch, validateNativeForkPreviewResult, validateNativeLaunchResult } from '../../api/nativeLaunch.js'
 import { nativeLaunchCopyFor, nativeLaunchError } from '../../i18n/nativeLaunch.js'
 const props = defineProps({ methods: { type: Object, required: true }, ready: { type: Object, default: null }, displayGraphId: { type: String, default: '' }, connected: Boolean, busy: Boolean, resetVersion: { type: Number, default: 0 }, locale: { type: String, default: 'en' } })
 const emit = defineEmits(['inspect', 'report', 'cleared'])
@@ -9,7 +9,7 @@ const plan = ref(null), binding = ref(null), history = ref([]), pending = ref(fa
 const panel = ref(null), unconfirmedCancels = ref(new Set())
 const cancelDenials = new Set(['invalid_request', 'not_found', 'tombstoned', 'model_calls_disabled', 'budget_denied'])
 const started = new Set()
-let declaration = null
+let declaration = null, forkDeclaration = null
 let lifetime = 0, reviewEpoch = 0
 const locked = computed(() => !props.connected || props.busy || pending.value)
 const canStart = computed(() => !locked.value && !attempted.value && plan.value?.state === 'planned' && plan.value.authorization.model_calls_enabled && !!plan.value.ceiling_microusd)
@@ -21,11 +21,11 @@ function retain(value, preparation) {
   const entry = { key: 'durable', value, preparation }, index = history.value.findIndex(record => record.value.request.run_id === value.request.run_id)
   if (index < 0) history.value.push(entry); else history.value[index] = entry
 }
-function clear() { lifetime++; reviewEpoch++; declaration = null; started.clear(); unconfirmedCancels.value.clear(); plan.value = null; binding.value = null; history.value = []; attempted.value = false; pending.value = false; error.value = ''; notice.value = ''; props.methods.clear?.(); emit('cleared') }
+function clear() { lifetime++; reviewEpoch++; declaration = null; forkDeclaration = null; started.clear(); unconfirmedCancels.value.clear(); plan.value = null; binding.value = null; history.value = []; attempted.value = false; pending.value = false; error.value = ''; notice.value = ''; props.methods.clear?.(); emit('cleared') }
 watch(() => props.resetVersion, clear, { flush: 'sync' })
 watch(() => props.connected, value => { if (!value) clear() }, { flush: 'sync' })
 watch(() => props.displayGraphId, clear, { flush: 'sync' })
-watch(() => props.ready, () => { reviewEpoch++; emit('cleared'); declaration = null; if (history.value.length) notice.value = 'changed'; plan.value = null; binding.value = null; attempted.value = false; error.value = '' }, { deep: true, flush: 'sync' })
+watch(() => props.ready, () => { reviewEpoch++; emit('cleared'); declaration = null; forkDeclaration = null; if (history.value.length) notice.value = 'changed'; plan.value = null; binding.value = null; attempted.value = false; error.value = '' }, { deep: true, flush: 'sync' })
 onBeforeUnmount(clear)
 async function announce(runId) {
   const life = lifetime
@@ -87,6 +87,38 @@ async function review(captureMode = false, producer = null) {
   } catch (e) { if (life === lifetime && epoch === reviewEpoch) { if (['unauthorized', 'origin_denied', 'disconnected'].includes(e?.code)) clear(); error.value = e?.code || 'invalid_reply' } }
   finally { if (life === lifetime) { pending.value = false; await announce() } }
 }
+async function reviewFork(record) {
+  if (locked.value || !canContinue(record) || typeof props.methods.forkPreview !== 'function') return
+  if (history.value.length >= 100) { error.value = 'busy'; await announce(); return }
+  const life = lifetime, epoch = ++reviewEpoch, known = JSON.parse(JSON.stringify(record.value))
+  pending.value = true; error.value = ''; notice.value = ''
+  try {
+    const ready = await nativeReadyPreparation(props.ready, props.displayGraphId)
+    if (life !== lifetime || epoch !== reviewEpoch) return
+    const capture = await validateNativeLaunchResult(known, {
+      graph: props.displayGraphId, payload: nativeLaunchIdentity(known), preparation: ready, known,
+    })
+    if (life !== lifetime || epoch !== reviewEpoch) return
+    const parent = nativeLaunchIdentity(capture)
+    if (!forkDeclaration || forkDeclaration.launch_id !== parent.launch_id ||
+        forkDeclaration.launch_sha256 !== parent.launch_sha256) {
+      forkDeclaration = { ...parent, fork_launch_id: newNativeLaunchId() }
+    }
+    const selector = { ...forkDeclaration }
+    const preview = await props.methods.forkPreview({ ...selector })
+    if (life !== lifetime || epoch !== reviewEpoch) return
+    const payload = validateNativeForkPreviewResult(preview, selector, capture)
+    const value = await props.methods.plan(JSON.parse(JSON.stringify(payload)), JSON.parse(JSON.stringify(ready)))
+    if (life !== lifetime || epoch !== reviewEpoch) return
+    const admitted = await validateNativeLaunchResult(value, {
+      graph: props.displayGraphId, payload, preparation: ready, capture, planning: true,
+    })
+    if (life !== lifetime || epoch !== reviewEpoch) return
+    binding.value = ready; plan.value = admitted; declaration = null; forkDeclaration = null
+    attempted.value = started.has(admitted.request.run_id)
+  } catch (e) { if (life === lifetime && epoch === reviewEpoch) { if (['unauthorized', 'origin_denied', 'disconnected'].includes(e?.code)) clear(); error.value = e?.code || 'invalid_reply' } }
+  finally { if (life === lifetime) { pending.value = false; await announce() } }
+}
 async function request(method, record) {
   const target = record?.value || plan.value, targetBinding = record?.preparation || binding.value
   if (locked.value || !target || method === 'start' && (!canStart.value || target.request.run_id !== plan.value?.request.run_id) || method === 'cancel' && !canCancel(target)) return
@@ -127,17 +159,18 @@ async function request(method, record) {
     <p ref="feedback" class="feedback" role="status" aria-live="polite" aria-atomic="true" tabindex="-1"><span v-if="pending">{{ copy.pending }}</span><span v-else-if="error">{{ nativeLaunchError(copy, error) }}</span><span v-if="notice"> {{ copy[notice] }}</span><span v-if="!pending && !error && plan"> {{ copy.states[plan.state] }}</span></p>
     <article v-for="record in records" :key="record.value.request.run_id" class="plan" :data-record="record.key">
       <h3>{{ copy.states[record.value.state] }}</h3>
-      <p v-if="record.value.checkpoint">{{ record.value.checkpoint.mode === 'capture' ? copy.captureMode : copy.continueMode }}</p>
-      <dl v-if="record.value.checkpoint?.mode === 'continue'"><dt>{{ copy.captureRun }}</dt><dd class="mono">{{ record.value.checkpoint.source_run_id }}</dd><dt>{{ copy.lineage }}</dt><dd class="mono">{{ record.value.checkpoint.checkpoint_sha256 }}</dd></dl>
+      <p v-if="record.value.checkpoint">{{ record.value.checkpoint.mode === 'capture' ? copy.captureMode : record.value.checkpoint.mode === 'fork' ? copy.forkMode : copy.continueMode }}</p>
+      <dl v-if="['continue', 'fork'].includes(record.value.checkpoint?.mode)"><dt>{{ copy.captureRun }}</dt><dd class="mono">{{ record.value.checkpoint.source_run_id }}</dd><dt>{{ copy.lineage }}</dt><dd class="mono">{{ record.value.checkpoint.checkpoint_sha256 }}</dd></dl>
+      <dl v-if="record.value.checkpoint?.mode === 'fork'"><dt>{{ copy.intervention }}</dt><dd>{{ copy.swapActiveActor }}</dd><dt>{{ copy.forkManifest }}</dt><dd class="mono">{{ record.value.checkpoint.intervention.manifest_sha256 }}</dd><dt>{{ copy.forkRunner }}</dt><dd class="mono">{{ record.value.checkpoint.intervention.runner_state_sha256 }}</dd></dl>
       <dl><dt>{{ copy.source }}</dt><dd>{{ record.preparation.source.source_name }}<br><span class="mono">{{ record.preparation.source.source_revision }}<br>{{ record.preparation.source.source_sha256 }}</span></dd><dt>{{ copy.project }}</dt><dd class="mono">{{ record.value.request.project_id }}</dd><dt>{{ copy.revision }}</dt><dd>{{ record.value.request.project_revision }}</dd><dt>{{ copy.operation }}</dt><dd class="mono">{{ record.value.preparation.operation_id }}</dd><dt>{{ copy.simulation }}</dt><dd class="mono">{{ record.value.request.simulation_id }}</dd><dt>{{ copy.artifact }}</dt><dd class="mono">{{ record.value.request.artifact_sha256 }}</dd><dt>{{ copy.run }}</dt><dd class="mono">{{ record.value.request.run_id }}</dd><dt>{{ copy.digest }}</dt><dd class="mono">{{ record.value.launch_sha256 }}</dd><dt>{{ copy.runtime }}</dt><dd class="mono">{{ record.value.request.runtime_sha256 }}</dd><dt>{{ copy.model }}</dt><dd>{{ record.value.model_label }}</dd><dt>{{ copy.ceiling }}</dt><dd>{{ record.value.ceiling_microusd || '—' }}</dd><dt>{{ copy.platforms }}</dt><dd>{{ record.value.request.platforms.join(', ') }}</dd><dt>{{ copy.seed }}</dt><dd>{{ record.value.request.seed }}</dd><dt>{{ copy.rounds }}</dt><dd>{{ record.value.request.max_rounds }}</dd><dt>{{ copy.calls }}</dt><dd>{{ record.value.limits.max_calls }}</dd><dt>{{ copy.input }}</dt><dd>{{ record.value.limits.max_input_bytes }}</dd><dt>{{ copy.output }}</dt><dd>{{ record.value.limits.max_output_tokens }}</dd><dt>{{ copy.seconds }}</dt><dd>{{ record.value.limits.max_run_seconds }}</dd></dl>
       <p v-if="record.value.error_code">{{ nativeLaunchError(copy, record.value.error_code) }}</p>
       <p v-if="unconfirmedCancels.has(record.value.request.run_id)" :id="'native-cancel-unconfirmed-' + record.value.request.run_id" class="cancellation-unconfirmed">{{ copy.cancelUnconfirmed }}</p>
       <p v-if="record.value.cancel_requested" class="cancellation">{{ copy.cancellation }}</p>
       <h4>{{ copy.cleanup }}</h4><p class="cleanup">{{ !record.value.cleanup.known ? copy.unknown : record.value.cleanup.pending ? copy.pendingCleanup : copy.observedCleanup }}<span v-if="record.value.cleanup.known"> · {{ record.value.cleanup.owner_thread_alive ? copy.alive : copy.stopped }}</span></p>
       <template v-if="record.value.workflow"><dl><dt>{{ copy.workflow }}</dt><dd class="mono">{{ record.value.workflow.workflow_id }}</dd><dt>{{ copy.temporal }}</dt><dd class="mono">{{ record.value.workflow.temporal_run_id }}</dd></dl></template>
-      <template v-if="record.value.receipt"><h4>{{ copy.receipt }}</h4><dl class="receipt"><dt>{{ copy.attempt }}</dt><dd class="mono">{{ record.value.receipt.attempt_id }}</dd><dt>{{ copy.instance }}</dt><dd class="mono">{{ record.value.receipt.instance_id }}</dd><dt>{{ copy.requestDigest }}</dt><dd class="mono">{{ record.value.receipt.request_fingerprint }}</dd><dt>{{ completedCapture(record.value) ? copy.lineage : record.value.checkpoint?.mode === 'continue' ? copy.restoredEvidence : copy.evidence }}</dt><dd class="mono">{{ record.value.receipt.evidence_sha256 }}</dd></dl></template><p v-else class="no-receipt">{{ copy.noReceipt }}</p>
+      <template v-if="record.value.receipt"><h4>{{ copy.receipt }}</h4><dl class="receipt"><dt>{{ copy.attempt }}</dt><dd class="mono">{{ record.value.receipt.attempt_id }}</dd><dt>{{ copy.instance }}</dt><dd class="mono">{{ record.value.receipt.instance_id }}</dd><dt>{{ copy.requestDigest }}</dt><dd class="mono">{{ record.value.receipt.request_fingerprint }}</dd><dt>{{ completedCapture(record.value) ? copy.lineage : ['continue', 'fork'].includes(record.value.checkpoint?.mode) ? copy.restoredEvidence : copy.evidence }}</dt><dd class="mono">{{ record.value.receipt.evidence_sha256 }}</dd></dl></template><p v-else class="no-receipt">{{ copy.noReceipt }}</p>
       <p v-if="!record.value.authorization.model_calls_enabled || !record.value.ceiling_microusd" class="limitations">{{ copy.disabled }}</p>
-      <div class="actions"><button v-if="record.key === 'plan'" class="start primary" type="button" :disabled="!canStart" @click="request('start', record)">{{ copy.start }}</button><button :id="'native-refresh-' + record.value.request.run_id" class="refresh" type="button" :disabled="locked" :aria-describedby="unconfirmedCancels.has(record.value.request.run_id) ? 'native-cancel-unconfirmed-' + record.value.request.run_id : undefined" @click="request('status', record)">{{ copy.refresh }}</button><button class="cancel" type="button" :disabled="!canCancel(record.value)" @click="request('cancel', record)">{{ copy.cancel }}</button><button v-if="canContinue(record)" class="review-continuation" type="button" :disabled="locked" @click="review(false, record)">{{ copy.reviewContinuation }}</button><button v-if="observableNativeLaunch(record.value)" class="inspect" type="button" :disabled="locked" @click="inspect(record)">{{ copy.inspect }}</button><button v-if="record.value.schema_version === 1 && observableNativeLaunch(record.value)" class="use-report" type="button" :disabled="locked" @click="inspect(record, 'report')">{{ copy.useReport }}</button></div>
+      <div class="actions"><button v-if="record.key === 'plan'" class="start primary" type="button" :disabled="!canStart" @click="request('start', record)">{{ copy.start }}</button><button :id="'native-refresh-' + record.value.request.run_id" class="refresh" type="button" :disabled="locked" :aria-describedby="unconfirmedCancels.has(record.value.request.run_id) ? 'native-cancel-unconfirmed-' + record.value.request.run_id : undefined" @click="request('status', record)">{{ copy.refresh }}</button><button class="cancel" type="button" :disabled="!canCancel(record.value)" @click="request('cancel', record)">{{ copy.cancel }}</button><button v-if="canContinue(record)" class="review-continuation" type="button" :disabled="locked" @click="review(false, record)">{{ copy.reviewContinuation }}</button><button v-if="canContinue(record) && typeof methods.forkPreview === 'function'" class="review-fork" type="button" :disabled="locked" @click="reviewFork(record)">{{ copy.reviewFork }}</button><button v-if="observableNativeLaunch(record.value)" class="inspect" type="button" :disabled="locked" @click="inspect(record)">{{ copy.inspect }}</button><button v-if="record.value.schema_version === 1 && observableNativeLaunch(record.value)" class="use-report" type="button" :disabled="locked" @click="inspect(record, 'report')">{{ copy.useReport }}</button></div>
     </article>
     <div class="actions"><button class="clear" type="button" @click="clear">{{ copy.clear }}</button></div>
   </section>

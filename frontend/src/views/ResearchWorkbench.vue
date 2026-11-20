@@ -69,6 +69,7 @@ const observationMethods = Object.freeze({
 })
 watch([inspectedSource, nativeReady, nativeReset], clearNativeViews, { deep: true, flush: 'sync' })
 const nativeMethods = Object.freeze({
+  forkPreview: payload => operation(() => client.nativeLaunchForkPreview(payload), false, true),
   plan: (payload, ready) => operation(() => client.nativeLaunchPlan(payload, ready), false, true),
   start: payload => operation(() => client.nativeLaunchStart(payload), false, true),
   status: payload => operation(() => client.nativeLaunchStatus(payload), false, true),

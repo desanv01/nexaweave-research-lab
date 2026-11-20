@@ -30,7 +30,7 @@ function launch() {
   const v = { schema_version: 1, display_graph_id: 'graph_1', scope: clone(p.scope), preparation: { operation_id: p.operation_id, plan_sha256: p.plan_sha256, simulation_id: p.receipt.simulation_id, artifact_sha256: p.receipt.artifact_sha256 }, request: { schema_version: 1, principal: 'local-research', project_id: uid(2), project_revision: 1, simulation_id: p.receipt.simulation_id, run_id: uid(10), artifact_sha256: p.receipt.artifact_sha256, runtime_sha256: hash, platforms: ['twitter', 'reddit'], seed: 4294967295, max_rounds: 24 }, limits: { max_calls: 10000, max_input_bytes: 2097152, max_output_tokens: 4096, max_run_seconds: 600 }, ceiling_microusd: '9223372036854775807', model_label: 'scripted 中😀', launch_sha256: null, state: 'planned', error_code: null, authorization: { model_calls_enabled: true }, workflow: null, receipt: null, cancel_requested: false, cleanup: { known: false, pending: null, owner_thread_alive: null } }
   rehash(v); return v
 }
-function rehash(v) { v.launch_sha256 = digest(pick(v, 'schema_version display_graph_id scope preparation request limits ceiling_microusd model_label' + (v.schema_version === 2 ? ' checkpoint' : ''))); return v }
+function rehash(v) { v.launch_sha256 = digest(pick(v, 'schema_version display_graph_id scope preparation request limits ceiling_microusd model_label' + (v.schema_version >= 2 ? ' checkpoint' : ''))); return v }
 const planPayload = () => ({ schema_version: 1, launch_id: uid(10), preparation: { operation_id: uid(9), plan_sha256: ready().plan_sha256 } })
 const context = () => ({ graph: 'graph_1', payload: planPayload(), preparation: ready(), planning: true })
 function observed(state = 'completed') {
@@ -60,20 +60,30 @@ test('strict payloads admit only identifiers, never paths, budgets or model choi
   assert.throws(() => nativeLaunchPayload({ ...nativeLaunchIdentity(launch()), ceiling_microusd: '1' }), code('invalid_request'))
 })
 
-test('protected v2 capture and continuation keep separate exact launch and receipt identities', async () => {
+test('protected capture, continuation and fork keep separate exact launch and receipt identities', async () => {
   const preparationRequest = { ...prepPayload, options: { ...prepPayload.options, platforms: ['twitter'], max_rounds: 1 } }
   const p = ready(preparationRequest.options), plans = new Map()
-  const lineage = 'c'.repeat(64), restored = 'd'.repeat(64)
+  const lineage = 'c'.repeat(64), restored = 'd'.repeat(64), forkOutput = 'e'.repeat(64)
+  const intervention = { kind: 'swap_active_actor_v1', manifest_sha256: hash, runner_state_sha256: restored }
+  const fork = { schema_version: 3, launch_id: uid(30),
+    preparation: { operation_id: p.operation_id, plan_sha256: p.plan_sha256 },
+    checkpoint: { mode: 'fork', source_run_id: uid(10), checkpoint_sha256: lineage, intervention } }
   const { client, calls } = await admitted((url, options) => {
     const input = JSON.parse(options.body)
+    if (url.includes('/fork-preview/')) {
+      assert.equal(options.headers.Authorization, 'Bearer ' + credentials.token)
+      assert.deepEqual(input, { ...nativeLaunchIdentity(plans.get(uid(10))), fork_launch_id: uid(30) })
+      return envelope(fork)
+    }
     if (url.includes('/plan/')) {
       const value = launch()
-      value.schema_version = 2; value.checkpoint = clone(input.checkpoint)
+      value.schema_version = input.schema_version; value.checkpoint = clone(input.checkpoint)
       value.preparation = { ...input.preparation, simulation_id: p.receipt.simulation_id, artifact_sha256: p.receipt.artifact_sha256 }
       Object.assign(value.request, { run_id: input.launch_id, platforms: ['twitter'], max_rounds: 1, artifact_sha256: p.receipt.artifact_sha256 })
-      if (input.checkpoint.mode === 'continue') {
+      if (input.checkpoint.mode !== 'capture') {
         const { source_run_id, checkpoint_sha256 } = input.checkpoint
-        Object.assign(value.request, { schema_version: 2, source_run_id, checkpoint_sha256 })
+        Object.assign(value.request, { schema_version: input.schema_version, source_run_id, checkpoint_sha256 })
+        if (input.schema_version === 3) value.request.intervention = clone(input.checkpoint.intervention)
       }
       plans.set(input.launch_id, rehash(value))
       return envelope(value)
@@ -83,7 +93,7 @@ test('protected v2 capture and continuation keep separate exact launch and recei
     value.state = url.includes('/status/') ? 'completed' : 'running'
     if (value.state === 'completed') value.receipt = {
       run_id: input.launch_id, attempt_id: uid(12), instance_id: uid(13), request_fingerprint: digest(value.request),
-      outcome: 'completed', evidence_sha256: value.checkpoint.mode === 'capture' ? lineage : restored,
+      outcome: 'completed', evidence_sha256: value.checkpoint.mode === 'capture' ? lineage : value.schema_version === 3 ? forkOutput : restored,
     }
     return envelope(value)
   }, {}, preparationRequest)
@@ -113,6 +123,29 @@ test('protected v2 capture and continuation keep separate exact launch and recei
     assert.equal((await client.nativeLaunchStatus(nativeLaunchIdentity(continued))).receipt.evidence_sha256, restored)
     assert.deepEqual(calls.slice(3).map(call => new URL(call.url).pathname.split('/')[3]), ['plan', 'start', 'status', 'plan', 'start', 'status'])
     assert.ok(calls.slice(3).every(call => JSON.parse(call.request.body).schema_version === 2))
+
+    const parent = nativeLaunchIdentity(captured)
+    const previewRequest = { ...parent, fork_launch_id: fork.launch_id }
+    const beforeFork = calls.length
+    await assert.rejects(client.nativeLaunchPlan(fork, p), code('invalid_request'))
+    await assert.rejects(client.nativeLaunchForkPreview({ ...previewRequest, actor_id: 1 }), code('invalid_request'))
+    assert.equal(calls.length, beforeFork)
+
+    const stale = await client.nativeLaunchForkPreview(previewRequest)
+    await client.nativeLaunchStatus(parent)
+    await assert.rejects(client.nativeLaunchPlan(stale, p), code('invalid_request'))
+    const preview = await client.nativeLaunchForkPreview(previewRequest)
+    assert.deepEqual(preview, fork)
+    const child = await client.nativeLaunchPlan(preview, p)
+    assert.equal(child.request.schema_version, 3)
+    assert.deepEqual(child.request.intervention, intervention)
+    const childSelector = nativeLaunchIdentity(child)
+    await client.nativeLaunchStart(childSelector)
+    await assert.rejects(client.nativeLaunchStart(childSelector), code('conflict'))
+    assert.equal((await client.nativeLaunchStatus(childSelector)).receipt.evidence_sha256, forkOutput)
+    assert.deepEqual((await client.nativeLaunchStatus(parent)).receipt, captured.receipt)
+    assert.deepEqual(calls.slice(beforeFork).map(call => new URL(call.url).pathname.split('/')[3]),
+      ['fork-preview', 'status', 'fork-preview', 'plan', 'start', 'status', 'status'])
   } finally { client.disconnect() }
 })
 test('independent ASCII hashes bind Unicode plan and exact native request fingerprints', async () => {

@@ -230,6 +230,7 @@ jobs:
           backend/.venv/bin/python tools/run_connected_followup_tests.py --integration --store-only
           backend/.venv/bin/python tools/run_connected_report_tests.py --integration --journey --actual-graph --browser --twitter-browser
           backend/.venv/bin/python tools/run_connected_report_tests.py --integration --journey --actual-graph --browser --reddit-browser
+          backend/.venv/bin/python tools/run_connected_report_tests.py --integration --journey --actual-graph --browser --twitter-fork-browser
       - name: Qualify restored event dispatch through installed HTTP and graph writer
         env:
           KNOWLEDGE_PYTHON: ${{ github.workspace }}/services/knowledge/.venv/bin/python

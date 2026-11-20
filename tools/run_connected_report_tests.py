@@ -27,6 +27,7 @@ PG_STORE_TARGET = ROOT / 'services/knowledge/tests/test_report_store.py'
 SINGLE_BROWSER_TARGET = ROOT / 'services/knowledge/tests/test_connected_native_single_platform_browser.py'
 SINGLE_BROWSER_NODES = {
     'twitter': 'test_twitter_only_suggest_ready_and_native_workbench',
+    'twitter-fork': 'test_twitter_capture_and_fixed_fork_workbench',
     'reddit': 'test_reddit_only_suggest_ready_and_native_workbench',
 }
 MARKERS = ('postgres: approved disposable PostgreSQL authority\n'
@@ -289,7 +290,7 @@ def child(mode: str, journey: bool = False, actual_graph: bool = False, store_on
         if caller_cancel:
             result_record['caller_cancel'] = True
         if single_browser:
-            result_record[f'{single_browser}_browser'] = True
+            result_record[f"{single_browser.replace('-', '_')}_browser"] = True
         print(json.dumps(result_record, sort_keys=True))
         if not complete:
             print('connected_report_qualification_incomplete', file=sys.stderr)
@@ -320,6 +321,8 @@ def main() -> int:
                                   help='Select the single ordinary Twitter Workbench case')
     platform_browser.add_argument('--reddit-browser', dest='single_browser', action='store_const', const='reddit',
                                   help='Select the single ordinary Reddit Workbench case')
+    platform_browser.add_argument('--twitter-fork-browser', dest='single_browser', action='store_const',
+                                  const='twitter-fork', help='Select the single owned Twitter capture and fork case')
     args = parser.parse_args()
     mode = 'engine' if args.engine else 'integration' if args.integration else 'unit'
     if args.journey and mode != 'integration':

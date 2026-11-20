@@ -6,15 +6,17 @@ const platformFields = ['viral_threshold', 'recency_weight', 'popularity_weight'
 const platformNames = { twitter: 'Twitter', reddit: 'Reddit' }
 
 export function browserMode(args) {
-  if (args.length > 1 || (args.length && !['--twitter-only', '--reddit-only'].includes(args[0]))) {
+  if (args.length > 1 || (args.length && !['--twitter-only', '--reddit-only', '--twitter-fork'].includes(args[0]))) {
     throw new Error('research_browser_mode_refused')
   }
-  const singlePlatform = args.length ? args[0].slice(2, -5) : null
+  const fork = args[0] === '--twitter-fork'
+  const singlePlatform = fork ? 'twitter' : args.length ? args[0].slice(2, -5) : null
   const stages = ['connect', 'ontology-review', 'ontology-plan', 'ontology-execute', 'ontology-recover',
     'preparation-plan', 'preparation-start', 'preparation-ready', 'native-start', 'native-ready']
   if (!singlePlatform) stages.push('report-start', 'report-read', 'pdf-read-after-restart')
+  if (fork) stages.push('native-fork-review', 'native-fork-start', 'native-fork-ready')
   stages.push('close')
-  return { stages, singlePlatform }
+  return fork ? { stages, singlePlatform, fork } : { stages, singlePlatform }
 }
 
 export async function suggestPlatforms({ scope, options, singlePlatform, requireTrue, same }) {
@@ -117,5 +119,140 @@ export async function inspectReadyConfiguration({
     requireTrue(requests === 1 && rendered === sha(JSON.stringify(expected)))
   } finally {
     page.off('request', observe)
+  }
+}
+
+
+export function nativeStages({
+  fork, singlePlatform, wire, commandRequest, keys, uuid, digest, same, requireTrue, enabled,
+  exchange, nativeRoute, prepReference, launchReference, sourceProof, boundLaunch, state, setLaunch,
+}) {
+  let child = null
+
+  function controls(page, value) {
+    const refresh = page.locator('#native-refresh-' + value.request.run_id)
+    const article = page.locator('.native-launch article.plan').filter({ has: refresh })
+    return { refresh, article }
+  }
+
+  function requireComplete(value) {
+    requireTrue(value.state === 'completed' && value.receipt?.outcome === 'completed')
+    digest(value.receipt.evidence_sha256)
+  }
+
+  async function nativeStart(command) {
+    const request = commandRequest(command, true)
+    const { page, preparation } = state()
+    keys(request, ['schema_version', 'launch_id', 'preparation']); uuid(request.launch_id)
+    requireTrue(request.schema_version === 1 && same(request.preparation, prepReference(preparation)))
+    const scope = page.locator('.native-launch')
+    const review = scope.locator(fork ? '.review-capture' : '.review')
+    const planned = await exchange(page, nativeRoute('plan'), 'POST', () => review.click(), 65664)
+    boundLaunch(planned.value)
+    requireTrue(planned.value.state === 'planned' && same(planned.request.preparation, request.preparation))
+    if (fork) {
+      requireTrue(planned.request.schema_version === 2 && same(planned.request.checkpoint, { mode: 'capture' }))
+      requireTrue(same(planned.value.checkpoint, planned.request.checkpoint))
+    }
+    setLaunch(planned.value); await enabled(scope.locator('.start'))
+    const started = await exchange(page, nativeRoute('start'), 'POST', () => scope.locator('.start').click(), 65664)
+    boundLaunch(started.value); requireTrue(!['failed', 'cancelled', 'uncertain'].includes(started.value.state))
+    setLaunch(started.value); await enabled(scope.locator('.refresh'))
+    return { reference: launchReference(started.value), proof: { preparation: prepReference(preparation), state: started.value.state, dispatches: 1 } }
+  }
+
+  async function nativeReady(command) {
+    commandRequest(command)
+    const { page, preparation, launch } = state()
+    const refresh = fork ? controls(page, launch).refresh : page.locator('.native-launch .refresh')
+    const observed = await exchange(page, nativeRoute('status'), 'POST', () => refresh.click(), 65664)
+    boundLaunch(observed.value); requireComplete(observed.value)
+    const parent = observed.value
+    setLaunch(parent)
+    if (!singlePlatform) {
+      const report = page.locator('.native-launch .use-report')
+      await enabled(report); await report.click()
+      await enabled(page.locator('.connected-reports .report-review'))
+      requireTrue(await page.locator('.report-source-checkbox').count() === 0)
+      requireTrue(await page.locator('.report-prepared-sources li').count() === 4)
+    }
+    return { reference: { ...launchReference(parent), evidence_sha256: parent.receipt.evidence_sha256 }, proof: { ...sourceProof(), preparation: prepReference(preparation) } }
+  }
+
+  async function forkReview(command) {
+    commandRequest(command)
+    const { page, launch, origin } = state()
+    const { article } = controls(page, launch)
+    const review = article.locator('.review-fork')
+    const previewUrl = origin + nativeRoute('fork-preview')
+    let selector = null, previewCount = 0
+    const capture = request => {
+      if (request.method() === 'POST' && request.url() === previewUrl) {
+        previewCount++
+        selector = request.postData()
+      }
+    }
+    page.on('request', capture)
+    try {
+      await enabled(review)
+      // Preview and Plan are consequences of one click. Arm the body observer
+      // for Plan before clicking. The Python fixture independently sees both.
+      const plan = await exchange(page, nativeRoute('plan'), 'POST', () => review.click(), 65664)
+      requireTrue(previewCount === 1 && typeof selector === 'string' && Buffer.byteLength(selector) <= wire)
+      const childId = plan.value.request.run_id
+      const parentRef = { schema_version: 2, ...launchReference(launch) }
+      requireTrue(same(JSON.parse(selector), { ...parentRef, fork_launch_id: childId }))
+      requireTrue(childId !== parentRef.launch_id && plan.value.state === 'planned' && !plan.value.receipt)
+      requireTrue(plan.request.schema_version === 3 && plan.request.launch_id === childId
+        && same(plan.request.checkpoint, plan.value.checkpoint)
+        && plan.value.checkpoint.source_run_id === parentRef.launch_id
+        && plan.value.checkpoint.checkpoint_sha256 === launch.receipt.evidence_sha256)
+      boundLaunch(plan.value, null)
+      child = plan.value
+      await enabled(controls(page, child).article.locator('.start'))
+      return { reference: launchReference(child), proof: {} }
+    } finally {
+      page.off('request', capture)
+    }
+  }
+
+  async function forkStart(command) {
+    commandRequest(command)
+    const { page } = state()
+    const { article } = controls(page, child)
+    const start = article.locator('.start')
+    await enabled(start)
+    const observed = await exchange(page, nativeRoute('start'), 'POST', () => start.click(), 65664)
+    requireTrue(same(observed.request, { schema_version: 3, ...launchReference(child) }))
+    requireTrue(!['planned', 'failed', 'cancelled', 'uncertain'].includes(observed.value.state))
+    boundLaunch(observed.value, child)
+    child = observed.value
+    return { reference: launchReference(child), proof: { dispatches: 1 } }
+  }
+
+  async function forkReady(command) {
+    commandRequest(command)
+    const { page, launch } = state()
+    async function refresh(value) {
+      const { refresh: button, article } = controls(page, value)
+      await enabled(button)
+      const observed = await exchange(page, nativeRoute('status'), 'POST', () => button.click(), 65664)
+      requireTrue(same(observed.request, { schema_version: value.schema_version, ...launchReference(value) }))
+      boundLaunch(observed.value, value)
+      requireComplete(observed.value)
+      await article.locator('.receipt').waitFor({ state: 'visible' })
+      return observed.value
+    }
+    const finished = await refresh(child)
+    const parent = await refresh(launch)
+    requireTrue(same(parent.request, launch.request) && same(parent.receipt, launch.receipt))
+    requireTrue(finished.receipt.instance_id !== parent.receipt.instance_id
+      && finished.receipt.evidence_sha256 !== parent.receipt.evidence_sha256)
+    return { reference: launchReference(finished), proof: {} }
+  }
+
+  return {
+    'native-start': nativeStart, 'native-ready': nativeReady,
+    ...(fork ? { 'native-fork-review': forkReview, 'native-fork-start': forkStart, 'native-fork-ready': forkReady } : {}),
   }
 }

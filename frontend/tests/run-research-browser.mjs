@@ -5,13 +5,13 @@ import { lstat, realpath, readdir, mkdtemp, mkdir, rm, open } from 'node:fs/prom
 import path from 'node:path'
 import { installBodyObserver, ontologyStages } from './research-browser-ontology.mjs'
 import { inspectPreparedProfiles } from './research-browser-prepared-profiles.mjs'
-import { browserMode, inspectReadyConfiguration, suggestPlatforms } from './research-browser-ready-configuration.mjs'
+import { browserMode, inspectReadyConfiguration, nativeStages, suggestPlatforms } from './research-browser-ready-configuration.mjs'
 import { inspectDossierSupport } from './research-browser-support-review.mjs'
 import { checkConnectSources, retainBrowserFiles } from './research-browser-intake.mjs'
 
 const WIRE = 7200
 const FRONTEND = 'http://127.0.0.1:4317'
-const { stages: STAGES, singlePlatform } = browserMode(process.argv.slice(2))
+const { stages: STAGES, singlePlatform, fork } = browserMode(process.argv.slice(2))
 const UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/
 const HASH = /^[0-9a-f]{64}$/
 const decoder = new TextDecoder('utf-8', { fatal: true })
@@ -215,7 +215,8 @@ function observe(target) {
     if (!connection || !request.url().startsWith(connection.api_origin + '/api/')) return
     const url = new URL(request.url())
     if (request.method() !== 'POST' || !/\/(plan|start)(?:\/|$)/.test(url.pathname)) return
-    const key = request.method() + ' ' + url.pathname
+    const native = fork && url.pathname.startsWith('/api/native-launch/')
+    const key = (native ? stage + ' ' : '') + request.method() + ' ' + url.pathname
     mutations.set(key, (mutations.get(key) || 0) + 1)
     // A duplicate plan/start is an acceptance failure, never a retry strategy.
     if (mutations.get(key) !== 1) fault = true
@@ -321,10 +322,10 @@ function boundPreparation(value) {
   requireTrue(value.source.source_sha256 === orderedSources[0].text_sha256)
   if (preparation) requireTrue(same(prepReference(value), prepReference(preparation)))
 }
-function boundLaunch(value) {
+function boundLaunch(value, known = launch) {
   requireTrue(same({ operation_id: value.preparation.operation_id, plan_sha256: value.preparation.plan_sha256 }, prepReference(preparation)))
   requireTrue(value.preparation.simulation_id === preparation.receipt.simulation_id && value.preparation.artifact_sha256 === preparation.receipt.artifact_sha256)
-  if (launch) requireTrue(same(launchReference(value), launchReference(launch)))
+  if (known) requireTrue(same(launchReference(value), launchReference(known)))
 }
 function boundReport(value) {
   // V2 is the selection request; the current public report DTO remains V1.
@@ -551,35 +552,8 @@ async function preparationReady(command) {
   const configRoute = prepRoute('configuration')
   await inspectReadyConfiguration({ page, preparation, route: configRoute, url: connection.api_origin + configRoute,
     graph: connection.graph_id, project: orderedSources[0].project_id, singlePlatform, exchange, enabled, requireTrue, keys, same, sha })
-  await enabled(page.locator('.native-launch .review'))
+  await enabled(page.locator(fork ? '.native-launch .review-capture' : '.native-launch .review'))
   return { reference: { ...prepReference(preparation), simulation_id: preparation.receipt.simulation_id, artifact_sha256: preparation.receipt.artifact_sha256 }, proof: sourceProof() }
-}
-async function nativeStart(command) {
-  const request = commandRequest(command, true)
-  keys(request, ['schema_version', 'launch_id', 'preparation']); uuid(request.launch_id)
-  requireTrue(request.schema_version === 1 && same(request.preparation, prepReference(preparation)))
-  const scope = page.locator('.native-launch')
-  const planned = await exchange(page, nativeRoute('plan'), 'POST', () => scope.locator('.review').click(), 65664)
-  boundLaunch(planned.value); requireTrue(planned.value.state === 'planned' && same(planned.request.preparation, request.preparation))
-  launch = planned.value; await enabled(scope.locator('.start'))
-  const started = await exchange(page, nativeRoute('start'), 'POST', () => scope.locator('.start').click(), 65664)
-  boundLaunch(started.value); requireTrue(!['failed', 'cancelled', 'uncertain'].includes(started.value.state)); launch = started.value
-  await enabled(scope.locator('.refresh'))
-  return { reference: launchReference(launch), proof: { preparation: prepReference(preparation), state: launch.state, dispatches: 1 } }
-}
-async function nativeReady(command) {
-  commandRequest(command)
-  const scope = page.locator('.native-launch')
-  const observed = await exchange(page, nativeRoute('status'), 'POST', () => scope.locator('.refresh').click(), 65664)
-  boundLaunch(observed.value); requireTrue(observed.value.state === 'completed' && observed.value.receipt?.outcome === 'completed')
-  launch = observed.value; digest(launch.receipt.evidence_sha256)
-  if (!singlePlatform) {
-    await enabled(scope.locator('.use-report')); await scope.locator('.use-report').click()
-    await enabled(page.locator('.connected-reports .report-review'))
-    requireTrue(await page.locator('.report-source-checkbox').count() === 0)
-    requireTrue(await page.locator('.report-prepared-sources li').count() === 4)
-  }
-  return { reference: { ...launchReference(launch), evidence_sha256: launch.receipt.evidence_sha256 }, proof: { ...sourceProof(), preparation: prepReference(preparation) } }
 }
 async function reportStart(command) {
   const request = commandRequest(command, true)
@@ -757,7 +731,12 @@ const ontology = ontologyStages({
   restoreSource: inspectSelectedSource,
   requireTrue, same, keys, uuid, digest, integer,
 })
-const handlers = { connect, ...ontology, 'preparation-plan': preparationPlan, 'preparation-start': preparationStart, 'preparation-ready': preparationReady, 'native-start': nativeStart, 'native-ready': nativeReady, 'report-start': reportStart, 'report-read': reportRead, 'pdf-read-after-restart': pdfAfterRestart, close: async command => { commandRequest(command); return cleanup() } }
+const native = nativeStages({ fork, singlePlatform, wire: WIRE, commandRequest, keys, uuid, digest, same, requireTrue, enabled,
+  exchange, nativeRoute, prepReference, launchReference, sourceProof, boundLaunch,
+  state: () => ({ page, preparation, launch, origin: connection.api_origin }),
+  setLaunch: value => { launch = value },
+})
+const handlers = { connect, ...ontology, ...native, 'preparation-plan': preparationPlan, 'preparation-start': preparationStart, 'preparation-ready': preparationReady, 'report-start': reportStart, 'report-read': reportRead, 'pdf-read-after-restart': pdfAfterRestart, close: async command => { commandRequest(command); return cleanup() } }
 try {
   for await (const command of commands()) {
     stage = STAGES[index] || 'protocol'; phase = stage === 'close' ? 'close' : 'protocol'
