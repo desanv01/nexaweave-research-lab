@@ -5,7 +5,8 @@ import os
 from hashlib import sha256
 from itertools import islice
 from pathlib import Path
-from uuid import uuid4
+from types import SimpleNamespace
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -16,13 +17,14 @@ from native_twitter_fresh_fixture import (
 from test_native_round_capture import _artifact, _native_rows, _read_bounded
 
 from nexaweave_execution.budget import BudgetDenied, ReservationState
+from nexaweave_execution.native_launch_contracts import LaunchAuthorityError, _ARCHIVE_LIMIT
 from nexaweave_execution.native_run_contracts import NativeRunDenied
 from nexaweave_execution.native_twitter_checkpoint_binding import NativeRestoredTwitterFactory
 from nexaweave_execution.native_owned_binding import _manifest
 
 
 async def qualify_fork(post, launch, remaining, host, planned, capture, producer, continuation, normal, dispatched):
-    """Prove one rejected preflight and one real owned fork within the case budget."""
+    """Prove read-only preview, rejected tamper and one real owned fork."""
     checkpoint = Path(capture.checkpoint_dir)
     lineage_path = Path(capture.lineage_dir) / 'lineage.json'
     prepared = Path(capture.prepared.simulation_dir)
@@ -50,7 +52,33 @@ async def qualify_fork(post, launch, remaining, host, planned, capture, producer
     runner_raw = _read_bounded(runner, 2564)
     assert sha256(runner_raw).hexdigest() == manifest['runner_state']['sha256']
     launch_id = str(uuid4())
-    declaration = {
+    capture_row = host.store.get('owner', producer.request.run_id)
+    preview = {'schema_version': 2, 'launch_id': str(producer.request.run_id),
+               'launch_sha256': capture_row.launch_sha256, 'fork_launch_id': launch_id}
+    account_before = host.budget.status('owner', host.account_id)
+    dispatch_before = list(dispatched)
+    fork_dir = prepared.parent / ('native_child_' + UUID(launch_id).hex)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError('preview must not admit, dispatch or recover a launch')
+
+    with pytest.MonkeyPatch.context() as read_only:
+        read_only.setattr(host.store, 'put', forbidden)
+        read_only.setattr(host.store, 'queue', forbidden)
+        read_only.setattr(host.store, 'queue_fork', forbidden)
+        read_only.setattr(host.budget, 'reserve_native', forbidden)
+        read_only.setattr(host, '_recover', forbidden)
+        read_only.setattr(host, 'temporal_call', forbidden)
+        declaration = await asyncio.wait_for(post('fork-preview', preview), remaining(30))
+        await asyncio.wait_for(post('fork-preview', dict(preview, actor_id=0),
+                                    status=400, code='invalid_request'), remaining(30))
+        with pytest.MonkeyPatch.context() as foreign:
+            private = capture_row.frozen['identity']
+            foreign_identity = dict(private, scope=dict(private['scope'], project_id=str(uuid4())))
+            foreign.setattr(host.store, 'get', lambda *args: SimpleNamespace(frozen={'identity': foreign_identity}))
+            foreign.setattr(host, '_read_fork_archive', forbidden)
+            await asyncio.wait_for(post('fork-preview', preview, status=404, code='not_found'), remaining(30))
+    assert declaration == {
         'schema_version': 3, 'launch_id': launch_id,
         'preparation': {key: planned[key] for key in ('operation_id', 'plan_sha256')},
         'checkpoint': {
@@ -58,11 +86,21 @@ async def qualify_fork(post, launch, remaining, host, planned, capture, producer
             'checkpoint_sha256': producer.receipt.evidence_sha256,
             'intervention': {
                 'kind': 'swap_active_actor_v1',
-                'manifest_sha256': lineage['manifest_sha256'],
-                'runner_state_sha256': manifest['runner_state']['sha256'],
+                'manifest_sha256': sha256(_read_bounded(checkpoint / 'manifest.json', _ARCHIVE_LIMIT)).hexdigest(),
+                'runner_state_sha256': sha256(runner_raw).hexdigest(),
             },
         },
     }
+    with pytest.raises(LaunchAuthorityError) as absent:
+        host.store.get('owner', launch_id)
+    assert absent.value.code == 'not_found'
+    with pytest.raises(NativeRunDenied):
+        host.native.get('owner', launch_id)
+    assert not os.path.lexists(fork_dir)
+    assert dispatched == dispatch_before and host.budget.status('owner', host.account_id) == account_before
+    assert host.store.get('owner', producer.request.run_id) == capture_row
+    assert host.native.get('owner', producer.request.run_id) == producer
+
     dto = await asyncio.wait_for(post('plan', declaration), remaining(30))
     assert dto['state'] == 'planned' and dto['checkpoint'] == declaration['checkpoint']
     assert dto['request']['schema_version'] == 3
@@ -77,6 +115,7 @@ async def qualify_fork(post, launch, remaining, host, planned, capture, producer
         with runner.open('r+b') as stream:
             assert stream.write(bytes((runner_raw[0] ^ 1,))) == 1
         assert _read_bounded(runner, 2564) != runner_raw
+        await asyncio.wait_for(post('fork-preview', preview, status=409, code='conflict'), remaining(30))
         await asyncio.wait_for(post('start', ref, status=409, code='conflict'), remaining(30))
         refused = host.store.get('owner', launch_id)
         assert refused == planned_row and not refused.dispatch_claimed and refused.workflow is None
@@ -101,7 +140,7 @@ async def qualify_fork(post, launch, remaining, host, planned, capture, producer
     assert reservation.receipt.native_receipt == fork.receipt
     assert reservation.receipt.launch_sha256 == dto['launch_sha256']
 
-    fork_dir = Path(restoration.child_dir)
+    assert Path(restoration.child_dir) == fork_dir
     assert fork_dir.parent == normal_dir.parent and fork_dir not in {prepared, checkpoint, normal_dir}
     assert {path.name for path in islice(fork_dir.iterdir(), 3)} == set(_RESTORE_OUTPUTS)
     fork_db, fork_log = (fork_dir / name for name in _RESTORE_OUTPUTS)

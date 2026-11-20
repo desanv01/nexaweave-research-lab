@@ -63,6 +63,16 @@ def validate_payload(method, value):
             if len(encoded(result)) > REQUEST_BYTES:
                 raise ValueError
             return result
+        if method == 'fork_preview':
+            if type(value) is not dict or set(value) != {'schema_version', 'launch_id', 'launch_sha256', 'fork_launch_id'}:
+                raise ValueError
+            integer(value['schema_version'], 2, 2)
+            if uuid_string(value['launch_id']) == uuid_string(value['fork_launch_id']):
+                raise ValueError
+            sha(value['launch_sha256'])
+            if len(encoded(value)) > REQUEST_BYTES:
+                raise ValueError
+            return json.loads(encoded(value))
         if method not in {'plan', 'start', 'status', 'cancel'} or type(value) is not dict:
             raise ValueError
         version = integer(value['schema_version'], 1, 3)
@@ -86,6 +96,17 @@ def validate_payload(method, value):
         return json.loads(encoded(value))
     except (ValueError, TypeError, KeyError, UnicodeError, RecursionError):
         raise NativeLaunchError('invalid_request') from None
+
+
+def validate_fork_preview_result(value, payload):
+    try:
+        declaration = validate_payload('plan', value)
+    except NativeLaunchError:
+        raise NativeLaunchError('invalid_reply') from None
+    if (declaration['schema_version'] != 3 or declaration['launch_id'] != payload['fork_launch_id']
+            or declaration['checkpoint']['source_run_id'] != payload['launch_id']):
+        raise NativeLaunchError('invalid_reply')
+    return declaration
 
 
 def validate_interview_result(value, graph_id, scope, payload):
