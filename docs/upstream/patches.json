@@ -208,8 +208,8 @@
     {
       "imported_path": "backend/run.py",
       "original_sha256": "893a01b2e1881e4eb06bdbc4737e444d72eb374f9f326a1249dbc9aa04274483",
-      "current_sha256": "cc39a7ead1df509de326128801d475d2d70eb00722d94c5a2895df0496d87b26",
-      "reason": "Select explicit graphiti_readonly startup validation and loopback default; preserve legacy startup behavior. U04d recognizes explicit research_local through the protected validator and loopback default; legacy behavior unchanged. NexaWeave canonical package/configuration and ordinary display names; reviewed derived source change preserving legal/provenance and persisted v1 identities.",
+      "current_sha256": "07e6dd51ac86f117ab9f84e8468c1c7b2ac694ea1cd9041a405f829753f6833c",
+      "reason": "Select explicit graphiti_readonly startup validation and loopback default; preserve legacy startup behavior. U04d recognizes explicit research_local through the protected validator and loopback default; legacy behavior unchanged. NexaWeave canonical package/configuration and ordinary display names; reviewed derived source change preserving legal/provenance and persisted v1 identities. W8.1 starts the explicitly configured managed research service with owned preparation and native launch.",
       "phase": "NexaWeave canonical rebrand"
     },
     {

@@ -9,6 +9,7 @@ from importlib.resources import files
 from pathlib import Path
 import re
 import secrets
+import socket
 import subprocess
 import sys
 import time
@@ -24,6 +25,7 @@ from nexaweave_storage import ProjectStore, SourceStore
 from nexaweave_storage.validation import canonical_payload
 from test_project_store import snapshot
 from tools.run_installed_readiness_tests import (
+    MANAGED_ADDRESS, MANAGED_FIXTURE, MANAGED_SELECTION, MANAGED_WITNESS,
     MIGRATIONS, PG_DATABASE, PG_HOST, PG_PORT, PG_USER, ROOT, owned_process,
 )
 from tools.run_unit_tests import _unit_environment
@@ -40,19 +42,34 @@ import os
 from pathlib import Path
 from contextlib import redirect_stdout
 import runpy
+import signal
 import subprocess
 import sys
 import threading
 
+def mark_startup(stage):
+    try:
+        with open("source-http-startup.stage", "ab") as stream:
+            stream.write(stage + b"\n")
+    except OSError:
+        pass
+
+
+mark_startup(b"child_setup")
 root = Path(os.environ.pop("SOURCE_HTTP_TEST_ROOT"))
 sys.path[:0] = [str(root / "backend"), str(root)]
 from tools.run_unit_tests import LoopbackOnlySockets
 
+managed = os.environ.pop("SOURCE_HTTP_TEST_MANAGED", "") == "1"
+if managed:
+    sys.argv.append("--managed-research-local")
 guard = LoopbackOnlySockets()
 guard.install()
 original = builtins.__import__
 blocked = ("nexaweave_knowledge", "graphiti_core", "openai", "neo4j", "camel",
            "oasis", "torch", "transformers", "temporalio", "pymupdf", "fitz")
+if managed:
+    blocked = tuple(name for name in blocked if name not in {"nexaweave_knowledge", "temporalio"})
 
 
 def imports(name, *args, **kwargs):
@@ -85,6 +102,13 @@ def observe(frame, event, _result):
     if event != "return":
         return
     module, name = frame.f_globals.get("__name__", ""), frame.f_code.co_name
+    if managed and module == "app.services.managed_research_startup" and name == "setup":
+        try:
+            peer = frame.f_locals["self"].request.getpeername()
+        except OSError:
+            pass
+        else:
+            emit({"event": "http_accepted", "peer_port": peer[1]})
     if module == "subprocess" and name == "__init__":
         child = frame.f_locals.get("self")
         if isinstance(child, subprocess.Popen):
@@ -118,15 +142,27 @@ shutdown_thread = None
 
 def owned_listener(host, port, *args, **kwargs):
     global server, shutdown_thread
+    mark_startup(b"listener_entered")
     if server is not None or host != "127.0.0.1" or port != 0:
         raise RuntimeError("protected listener admission mismatch")
+    mark_startup(b"listener_admitted")
     server = make_server(host, port, *args, **kwargs)
+    mark_startup(b"listener_bound")
     if server.server_address != ("127.0.0.1", server.server_port) or server.server_port <= 0:
         raise RuntimeError("protected listener identity mismatch")
 
+    managed_stop = signal.getsignal(signal.SIGTERM) if managed else None
+    if managed and not callable(managed_stop):
+        raise RuntimeError("managed launcher did not install its ordinary shutdown handler")
+
     def stop():
         sys.stdin.buffer.read(1)
-        server.shutdown()
+        if managed:
+            # Windows process-delivered SIGTERM kills the child. The fixture
+            # invokes the installed handler to exercise its graceful path.
+            managed_stop(signal.SIGTERM, None)
+        else:
+            server.shutdown()
 
     shutdown_thread = threading.Thread(target=stop, daemon=True)
     shutdown_thread.start()
@@ -137,6 +173,7 @@ def owned_listener(host, port, *args, **kwargs):
 serving.make_server = owned_listener
 try:
     with redirect_stdout(sys.stderr):
+        mark_startup(b"launcher_entered")
         runpy.run_path(str(root / "backend/run.py"), run_name="__main__")
     if server is None or shutdown_thread is None:
         raise RuntimeError("launcher returned without an owned listener")
@@ -156,11 +193,12 @@ _CATALOGS = (
     ("mf_app", "nexaweave_storage", "sql_sha256", "catalog_sha256", MIGRATIONS["nexaweave_storage"]),
     ("mf_knowledge", "nexaweave_knowledge", "checksum", "schema_checksum", MIGRATIONS["nexaweave_knowledge"]),
     ("mf_execution", "nexaweave_execution", "checksum", "schema_checksum", ("0001_budget_admission.sql",)),
-    ("mf_preparation", "nexaweave_execution", "checksum", "schema_checksum", ("preparations_0001.sql",)),
+    ("mf_preparation", "nexaweave_execution", "checksum", "schema_checksum",
+     ("preparations_0001.sql", "preparations_0002.sql")),
     ("mf_native_execution", "nexaweave_execution", "sql_sha256", "catalog_sha256",
-     ("native_runs_0001.sql", "native_runs_0002.sql")),
+     ("native_runs_0001.sql", "native_runs_0002.sql", "native_runs_0003.sql")),
     ("mf_native_launch", "nexaweave_execution", "checksum", "schema_checksum",
-     ("native_launch_0001.sql", "native_launch_0002.sql")),
+     ("native_launch_0001.sql", "native_launch_0002.sql", "native_launch_0003.sql")),
     ("mf_report", "nexaweave_execution", "checksum", "schema_checksum", ("report_0001.sql",)),
     ("mf_followup", "nexaweave_execution", "checksum", "schema_checksum", ("followup_0001.sql",)),
 )
@@ -207,11 +245,15 @@ def _events(path):
         return []
 
 
-def _get(port, route, token=None):
+def _get(port, route, token=None, *, payload=None):
     headers = {"Authorization": "Bearer " + token} if token else {}
+    body = None
+    if payload is not None:
+        body = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=65)
     try:
-        connection.request("GET", route, headers=headers)
+        connection.request("POST" if body is not None else "GET", route, body=body, headers=headers)
         response = connection.getresponse()
         raw = response.read(4 * 1024 * 1024 + 1025)
         assert len(raw) <= 4 * 1024 * 1024 + 1024
@@ -220,13 +262,31 @@ def _get(port, route, token=None):
         connection.close()
 
 
+_HTTP_STARTUP_STAGES = frozenset({
+    b"child_setup", b"launcher_entered", b"listener_entered", b"listener_admitted", b"listener_bound",
+})
+
+
+def _last_http_startup_stage(directory):
+    try:
+        with (directory / "source-http-startup.stage").open("rb") as stream:
+            data = stream.read(128)
+    except OSError:
+        return "no_stage"
+    for stage in reversed(data.split(b"\n")[:-1]):
+        if stage in _HTTP_STARTUP_STAGES:
+            return stage.decode("ascii")
+    return "no_stage"
+
+
 @contextmanager
-def _host(directory, scope, display, pg):
+def _host(directory, scope, display, pg, *, managed=None, refused=False):
     directory.mkdir()
     env = _unit_environment(directory)
     for key in list(env):
         key_upper = key.upper()
-        if key_upper.startswith(("PG", "KNOWLEDGE_", "LLM_", "OPENAI_", "DEEPSEEK_", "ZEP_", "TEMPORAL_")) or key_upper in {
+        if key_upper.startswith(("PG", "KNOWLEDGE_", "LLM_", "OPENAI_", "DEEPSEEK_", "ZEP_", "TEMPORAL_",
+                                 "NEXAWEAVE_MANAGED_")) or key_upper in {
             "PYTHONPATH", "PYTHONHOME", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
             "MIROFISH_APP_MODE", "MIROFISH_ALLOWED_ORIGINS",
         }:
@@ -258,20 +318,40 @@ def _host(directory, scope, display, pg):
         KNOWLEDGE_NEO4J_USER="neo4j",
         KNOWLEDGE_NEO4J_PASSWORD="unused-owned-source-fixture",
     )
+    if managed is not None:
+        env.update(managed, SOURCE_HTTP_TEST_MANAGED="1")
     output = directory / "source-http-events.jsonl"
     errors = directory / "source-http-errors.log"
     command = [os.environ["NEXAWEAVE_WORKBENCH_BACKEND_PYTHON"], "-I", "-u", "-c", _HTTP_CHILD]
     with output.open("wb") as out, errors.open("wb") as err:
         with owned_process(command, cwd=directory, env=env, stdin=subprocess.PIPE, stdout=out, stderr=err) as process:
+            if refused:
+                process.stdin.close()
+                assert process.wait(timeout=20) == 1
+                assert _events(output) == [{"event": "shutdown", "loopback_blocked": 0}]
+                with errors.open("rb") as stream:
+                    assert b"Managed research startup refused" in stream.read(2048)
+                yield None
+                return
             try:
                 deadline = time.monotonic() + 20
-                while time.monotonic() < deadline and process.poll() is None:
+                failure = None
+                while time.monotonic() < deadline:
+                    if process.poll() is not None:
+                        failure = "early_exit"
+                        break
                     ready = [event for event in _events(output) if event["event"] == "ready"]
                     if ready:
                         break
                     time.sleep(0.05)
                 else:
-                    pytest.fail("metadata HTTP readiness failed; private diagnostics retained", pytrace=False)
+                    failure = "deadline"
+                if failure is not None:
+                    label = "managed" if managed is not None else (
+                        "restart" if directory.name == "restart" else "first"
+                    )
+                    stage = _last_http_startup_stage(directory)
+                    pytest.fail(f"metadata HTTP readiness failed ({label}, {failure}, {stage})", pytrace=False)
                 assert len(ready) == 1
                 yield ready[0]["port"], token, output
             finally:
@@ -303,7 +383,78 @@ def _protected_list(directory, pg, scope, display):
         return response["data"]
 
 
-def test_clean_installed_migrations_and_owned_metadata_restart(tmp_path):
+def _qualify_managed_startup(directory, connect, pg, scope, display, expected):
+    from nexaweave_execution.budget import BudgetLedger
+
+    assert os.name == "nt"
+    temporal = os.environ.get(MANAGED_ADDRESS)
+    assert temporal == MANAGED_FIXTURE
+    backend = Path(os.environ["NEXAWEAVE_WORKBENCH_BACKEND_PYTHON"])
+    record = (backend.parent.parent / "Lib" / "site-packages"
+              / "nexaweave_knowledge-0.1.0.dist-info" / "RECORD")
+    bootstrap = Path(os.environ["KNOWLEDGE_BOOTSTRAP_SCRIPT"])
+    knowledge_python = Path(os.environ["KNOWLEDGE_PYTHON"])
+    knowledge_venv = knowledge_python.parent.parent / "pyvenv.cfg"
+    artifact = directory / "managed-artifacts"
+    artifact.mkdir()
+    ledger = BudgetLedger(connect)
+    account = ledger.create_account("owner", scope.project_id, uuid4(), 16)
+    settings = {
+        "NEXAWEAVE_MANAGED_OVERLAY_RECORD_SHA256": hashlib.sha256(record.read_bytes()).hexdigest(),
+        "NEXAWEAVE_MANAGED_KNOWLEDGE_BOOTSTRAP_SHA256": hashlib.sha256(bootstrap.read_bytes()).hexdigest(),
+        "NEXAWEAVE_MANAGED_KNOWLEDGE_PYTHON_SHA256": hashlib.sha256(knowledge_python.read_bytes()).hexdigest(),
+        "NEXAWEAVE_MANAGED_KNOWLEDGE_PYVENV_SHA256": hashlib.sha256(knowledge_venv.read_bytes()).hexdigest(),
+        "NEXAWEAVE_MANAGED_RUNTIME_SHA256": "a" * 64,
+        "NEXAWEAVE_MANAGED_PROJECT_REVISION": "1",
+        "NEXAWEAVE_MANAGED_TEMPORAL_ADDRESS": temporal,
+        "NEXAWEAVE_MANAGED_TEMPORAL_NAMESPACE": "default",
+        "NEXAWEAVE_MANAGED_QUEUE_PREFIX": "w81-managed-" + uuid4().hex,
+        "NEXAWEAVE_MANAGED_BUDGET_ACCOUNT_ID": str(account.account_id),
+        "KNOWLEDGE_PREPARATION_ARTIFACT_ROOT": str(artifact),
+    }
+    for name, overrides in (
+        ("overlay", {"NEXAWEAVE_MANAGED_OVERLAY_RECORD_SHA256": "0" * 64}),
+        ("interpreter", {"NEXAWEAVE_MANAGED_KNOWLEDGE_PYTHON_SHA256": "0" * 64}),
+        ("routed-bolt", {"KNOWLEDGE_NEO4J_URI": "neo4j://127.0.0.1:17687"}),
+        ("nonloopback-bolt", {"KNOWLEDGE_NEO4J_URI": "bolt://192.0.2.1:17687"}),
+    ):
+        invalid = dict(settings, **overrides)
+        with _host(directory / ("managed-refused-" + name), scope, display, pg,
+                   managed=invalid, refused=True):
+            pass
+
+    # Keep the accepted incomplete request open through launcher shutdown.
+    # The harness's 10s process deadline is shorter than the HTTP idle timeout.
+    with socket.socket() as incomplete:
+        with _host(directory / "managed", scope, display, pg, managed=settings) as (port, token, events):
+            assert _get(port, "/health")[2]["mode"] == "research_local"
+            prep_status = "/api/preparation/" + display + "/status"
+            native_status = "/api/native-launch/status/" + display
+            prep = {"schema_version": 1, "operation_id": str(uuid4()), "plan_sha256": "a" * 64}
+            launch = {"schema_version": 1, "launch_id": str(uuid4()), "launch_sha256": "a" * 64}
+            for route, payload in ((prep_status, prep), (native_status, launch)):
+                assert _get(port, route, payload=payload)[0] == 401
+                status, headers, response = _get(port, route, token, payload=payload)
+                assert status == 404 and headers["Cache-Control"] == "no-store"
+                assert response == {"success": False, "error": {"code": "not_found"}}
+            assert [event["event"] for event in _events(events) if event["event"] != "http_accepted"] == ["ready"]
+            status, _, response = _get(port, "/api/source/library/" + display, token)
+            assert status == 200 and response == {"success": True, "data": expected}
+
+            incomplete.settimeout(3)
+            incomplete.connect(("127.0.0.1", port))
+            incomplete.sendall(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\n")
+            accepted = {"event": "http_accepted", "peer_port": incomplete.getsockname()[1]}
+            deadline = time.monotonic() + 3
+            while accepted not in _events(events):
+                assert time.monotonic() < deadline, "incomplete HTTP request never reached the launcher"
+                time.sleep(0.05)
+    assert ledger.status("owner", account.account_id) == account
+    assert list(artifact.iterdir()) == []
+
+
+def test_clean_installed_migrations_and_owned_metadata_restart(tmp_path, record_property):
+    managed = os.environ.get(MANAGED_SELECTION) == "1"
     if os.environ.get("NEXAWEAVE_W81_INSTALLED_READINESS") != "1":
         pytest.skip("requires the guarded installed readiness entry")
     if any(key.upper().startswith("PG") for key in os.environ):
@@ -390,8 +541,12 @@ def test_clean_installed_migrations_and_owned_metadata_restart(tmp_path):
         "recorded_at": retained.recorded_at.isoformat(),
     }]
     assert _protected_list(tmp_path / "restart", pg, scope, display) == first
+    if managed:
+        _qualify_managed_startup(tmp_path, connect, pg, scope, display, first)
     assert projects.get("owner", project) == before
     assert projects.history("owner", project) == [before]
     assert bindings.resolve("owner", display) == binding
     assert sources.get_source("owner", project, source_revision) == retained
     assert _migration_receipts(connect) == receipts
+    if managed:
+        record_property(MANAGED_WITNESS, "passed")

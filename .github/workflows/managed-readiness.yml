@@ -1,0 +1,89 @@
+name: Managed installed readiness
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/managed-readiness.yml'
+      - 'backend/**'
+      - 'services/knowledge/**'
+      - 'tools/apply_native_import_patch.py'
+      - 'tools/native_store_ci_postgres.ps1'
+      - 'tools/native_temporal_ci_server.ps1'
+      - 'tools/run_installed_readiness_tests.py'
+      - 'tools/run_unit_tests.py'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/managed-readiness.yml'
+      - 'backend/**'
+      - 'services/knowledge/**'
+      - 'tools/apply_native_import_patch.py'
+      - 'tools/native_store_ci_postgres.ps1'
+      - 'tools/native_temporal_ci_server.ps1'
+      - 'tools/run_installed_readiness_tests.py'
+      - 'tools/run_unit_tests.py'
+
+permissions:
+  contents: read
+
+jobs:
+  w81-managed-readiness-windows:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      PROJECT_STORE_TEST_PASSWORD: nexaweave-ci-disposable-native-only
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: 'false'
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          version: '0.11.25'
+      - name: Install inherited locked backend runtime
+        run: uv sync --project backend --locked --extra dev --extra native-store --extra native-temporal --python 3.12.13
+      - name: Apply and verify the native optional import correction
+        run: |
+          backend/.venv/Scripts/python.exe tools/apply_native_import_patch.py --apply
+          if ($LASTEXITCODE -ne 0) { throw 'Native optional import correction failed' }
+          backend/.venv/Scripts/python.exe tools/apply_native_import_patch.py --check
+          if ($LASTEXITCODE -ne 0) { throw 'Native optional import fingerprint verification failed' }
+      - name: Install the locked knowledge profile
+        working-directory: services/knowledge
+        run: uv sync --locked --extra test --python 3.12.13
+      - name: Install the candidate knowledge package in both profiles
+        run: |
+          uv pip install --python backend/.venv/Scripts/python.exe --no-deps services/knowledge
+          if ($LASTEXITCODE -ne 0) { throw 'Backend execution overlay installation failed' }
+          uv pip install --python services/knowledge/.venv/Scripts/python.exe --no-deps --reinstall services/knowledge
+          if ($LASTEXITCODE -ne 0) { throw 'Non-editable knowledge installation failed' }
+      - name: Start a fresh disposable PostgreSQL fixture
+        run: ./tools/native_store_ci_postgres.ps1 -Action start
+      - name: Start the owned loopback Temporal fixture
+        run: ./tools/native_temporal_ci_server.ps1 -Action start
+      - name: Qualify one installed managed startup case
+        env:
+          NEXAWEAVE_W81_MANAGED_READINESS: '1'
+          NEXAWEAVE_W81_MANAGED_TEMPORAL_ADDRESS: '127.0.0.1:17233'
+        run: |
+          $env:NEXAWEAVE_WORKBENCH_BACKEND_PYTHON = (Resolve-Path backend/.venv/Scripts/python.exe).Path
+          $knowledgePython = (Resolve-Path services/knowledge/.venv/Scripts/python.exe).Path
+          $witnessLog = Join-Path $env:RUNNER_TEMP ('nexaweave-managed-readiness-' + [Guid]::NewGuid().ToString('N') + '.log')
+          & $knowledgePython -I -u tools/run_installed_readiness_tests.py | Tee-Object -FilePath $witnessLog
+          if ($LASTEXITCODE -ne 0) { throw 'Installed managed readiness qualification failed' }
+          # The runner emits this marker only after one pass, zero skips and owned cleanup.
+          if (@(Select-String -LiteralPath $witnessLog -Pattern '^installed_managed_readiness_passed$').Count -ne 1) {
+            throw 'Missing unique installed managed readiness witness'
+          }
+      - name: Stop only this job's Temporal fixture
+        if: always()
+        run: ./tools/native_temporal_ci_server.ps1 -Action stop
+      - name: Stop only this job's PostgreSQL fixture
+        if: always()
+        run: ./tools/native_store_ci_postgres.ps1 -Action stop
