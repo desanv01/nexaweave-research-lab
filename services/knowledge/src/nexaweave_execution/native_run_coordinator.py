@@ -11,7 +11,7 @@ from uuid import UUID, uuid4
 from .native_run_contracts import (InvalidNativeRun, NativeChildIdentity, NativeRunBusy,
     NativeRunConflict, NativeRunDenied, NativeRunReceipt, NativeRunRequest,
     NativeRunUncertain, RunState, canonical_uuid, principal_id, NativeObservation)
-from .native_run_store import NativeRunRecord, NativeRunStore
+from .native_run_store import NativeRunRecord, NativeRunStore, RedditCheckpointMode
 
 
 class TrustedNativeDriver(Protocol):
@@ -31,17 +31,19 @@ class NativeRunCoordinator:
     def __init__(self, principal: str, store: NativeRunStore, driver: TrustedNativeDriver,
                  *, owner_id: UUID | None = None,
                  dispatch_allowed: Callable[[NativeRunRequest], bool] | None = None,
-                 lease_seconds: int = 30):
+                 lease_seconds: int = 30, reddit_mode: RedditCheckpointMode | None = None):
         self.principal = principal_id(principal)
         if not isinstance(store, NativeRunStore) or driver is None:
             raise InvalidNativeRun()
-        if type(lease_seconds) is not int or not 5 <= lease_seconds <= 300:
+        if ((reddit_mode is not None and type(reddit_mode) is not RedditCheckpointMode)
+                or type(lease_seconds) is not int or not 5 <= lease_seconds <= 300):
             raise InvalidNativeRun()
         self.owner_id = uuid4() if owner_id is None else canonical_uuid(owner_id)
         self.store = store
         self.driver = driver
         self.dispatch_allowed = dispatch_allowed
         self.lease_seconds = lease_seconds
+        self._reddit_mode = reddit_mode
 
     def _fence(self, record: NativeRunRecord) -> None:
         if record.attempt_id is not None and record.owner_id == self.owner_id:
@@ -53,11 +55,17 @@ class NativeRunCoordinator:
                 # of this best-effort transition is unavailable.
                 pass
 
-    def start(self, request: NativeRunRequest) -> NativeRunRecord:
+    def register(self, request: NativeRunRequest) -> NativeRunRecord:
         request = NativeRunRequest.from_wire(request)
         if request.principal != self.principal:
             raise NativeRunDenied()
-        record = self.store.register(request)
+        if self._reddit_mode is None:
+            return self.store.register(request)
+        return self.store.register(request, reddit_mode=self._reddit_mode)
+
+    def start(self, request: NativeRunRequest) -> NativeRunRecord:
+        record = self.register(request)
+        request = record.request
         if record.state in (RunState.completed, RunState.failed, RunState.cancelled):
             return record  # Durable result recovery never invokes the driver.
         if record.state == RunState.uncertain:
@@ -70,8 +78,9 @@ class NativeRunCoordinator:
             allowed = False
         if not allowed:
             raise NativeRunDenied()
+        mode = {} if self._reddit_mode is None else {'reddit_mode': self._reddit_mode}
         claim = self.store.claim_start(self.principal, request.run_id, self.owner_id,
-                                       self.lease_seconds)
+                                       self.lease_seconds, **mode)
         # A cancellation request may race with the claim. The launch permission
         # stays spent even if we can avoid calling the external driver.
         try:

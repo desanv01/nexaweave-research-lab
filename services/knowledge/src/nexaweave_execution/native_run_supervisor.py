@@ -293,7 +293,7 @@ class NativeRunSupervisor:
 
     def _run(self) -> None:
         # Registration lets a prelaunch stop persist without claiming a launch.
-        record = self.coordinator.store.register(self.request)
+        record = self.coordinator.register(self.request)
         self._publish(record=record)
         with self._condition:
             stopping = self._cancel_requested or self._close_requested

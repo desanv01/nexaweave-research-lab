@@ -72,9 +72,12 @@ def labels(value):
     return value
 
 
-def options(value):
+def options(value, schema_version):
+    from .native_reddit_preparation import REDDIT_CHECKPOINT, reddit_checkpoint_option
+
     bridge_key = 'twitter_to_reddit_seed_index'
-    if type(value) is not dict or set(value) - {bridge_key} != {'types', 'max_agents', 'seed', 'platforms', 'max_rounds', 'simulation_requirement'}:
+    optional = {bridge_key, REDDIT_CHECKPOINT} if schema_version == 2 else {bridge_key}
+    if type(value) is not dict or set(value) - optional != {'types', 'max_agents', 'seed', 'platforms', 'max_rounds', 'simulation_requirement'}:
         raise ValueError
     if value['types'] is not None:
         labels(value['types'])
@@ -86,6 +89,7 @@ def options(value):
     if bridge_key in value:
         from nexaweave_execution.native_seed_contracts import seed_bridge_index
         seed_bridge_index(value, value['platforms'])
+    reddit_checkpoint_option(value)
     text(value['simulation_requirement'], 8192, 32768)
     return value
 
@@ -128,7 +132,7 @@ def validate_payload(method, value):
         uuid_string(value['operation_id'])
         if method == 'plan':
             uuid_string(value['source_revision'])
-            options(value['options'])
+            options(value['options'], value['schema_version'])
             if value['schema_version'] == 2:
                 from nexaweave_execution.preparation_contracts import source_revisions
                 source_revisions(value['source_revisions'], value['source_revision'])
@@ -263,7 +267,7 @@ def validate_result(value, graph_id, scope, payload, method):
             source_revisions([item['source_revision'] for item in sources], source['source_revision'])
             if sources[0] != source:
                 raise ValueError
-        options(value['options'])
+        options(value['options'], value['schema_version'])
         if method == 'plan':
             if (value['schema_version'] != payload['schema_version'] or source['source_revision'] != payload['source_revision']
                     or value['options'] != payload['options']

@@ -42,7 +42,7 @@ def _version(value, keys):
     if type(value) is not dict:
         raise ValueError
     version = value.get('schema_version')
-    if type(version) is not int or version not in (1, 2, 3):
+    if type(version) is not int or version not in (1, 2, 3, 4):
         raise ValueError
     expected = keys if version == 1 else keys | {'checkpoint'}
     if set(value) != expected:
@@ -53,7 +53,7 @@ def _version(value, keys):
 def _checkpoint(value, run_id, version):
     if type(value) is not dict or type(value.get('mode')) is not str:
         raise ValueError
-    if version == 2 and value['mode'] == 'capture' and set(value) == {'mode'}:
+    if version in (2, 4) and value['mode'] == 'capture' and set(value) == {'mode'}:
         return None
     keys = {'mode', 'source_run_id', 'checkpoint_sha256'}
     mode = 'continue'
@@ -114,10 +114,11 @@ def validate_identity(value):
         operation = identifier(prep['operation_id']); sha(prep['plan_sha256']); sha(prep['artifact_sha256'])
         req = NativeRunRequest.from_wire(value['request'])
         checkpoint = _checkpoint(value['checkpoint'], req.run_id, version) if version >= 2 else None
+        checkpoint_platform = 'reddit' if version == 4 else 'twitter'
         if (req.schema_version != (1 if checkpoint is None else version)
                 or (checkpoint is not None and checkpoint !=
                     (req.source_run_id, req.checkpoint_sha256, req.intervention))
-                or (version >= 2 and (req.platforms != ('twitter',) or req.max_rounds != 1))
+                or (version >= 2 and (req.platforms != (checkpoint_platform,) or req.max_rounds != 1))
                 or value['request'] != req.to_wire()
                 or req.project_id != scope.project_id
                 or req.simulation_id != 'sim_' + operation.hex or prep['simulation_id'] != req.simulation_id

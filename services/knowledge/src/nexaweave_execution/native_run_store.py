@@ -9,6 +9,7 @@ import json
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
+from enum import Enum
 from importlib.resources import files
 from typing import Callable, Iterator
 from uuid import UUID, uuid4
@@ -34,6 +35,11 @@ _MIGRATION_SELECT = ("SELECT version,sql_sha256,catalog_sha256 "
                      "FROM mf_native_execution.schema_migrations ORDER BY version")
 _MIGRATION_INSERT = ("INSERT INTO mf_native_execution.schema_migrations"
                      "(version,sql_sha256,catalog_sha256) VALUES (%s,%s,%s)")
+
+
+class RedditCheckpointMode(Enum):
+    CAPTURE = "capture"
+    CONTINUE = "continue"
 
 
 @dataclass(frozen=True)
@@ -172,7 +178,7 @@ def _row(value: tuple) -> NativeRunRecord:
             "artifact_sha256": artifact.strip(), "runtime_sha256": runtime.strip(),
             "platforms": tuple(platforms), "seed": seed, "max_rounds": rounds}
         if source_run_id is not None or checkpoint is not None:
-            wire.update(schema_version=2, source_run_id=source_run_id,
+            wire.update(schema_version=4 if tuple(platforms) == ("reddit",) else 2, source_run_id=source_run_id,
                         checkpoint_sha256=None if checkpoint is None else checkpoint.strip())
         if intervention is not None:
             wire.update(schema_version=3, intervention=intervention)
@@ -198,11 +204,11 @@ def _lease(value: object) -> int:
     return value
 
 
-def _verify_fork_dispatch(conn, request):
-    from .native_launch_store import LaunchAuthorityError, verify_fork_dispatch
+def _verify_checkpoint_dispatch(conn, request):
+    from .native_launch_store import LaunchAuthorityError, verify_checkpoint_dispatch
 
     try:
-        verify_fork_dispatch(conn, request)
+        verify_checkpoint_dispatch(conn, request)
     except LaunchAuthorityError as error:
         if error.code in ('native_launch_unavailable', 'native_launch_uncertain'):
             raise NativeRunUnavailable() from None
@@ -214,15 +220,55 @@ def _lock_checkpoint_run_id(conn, run_id):
     conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 72196248041506))", (str(run_id),))
 
 
-def _reject_fork_launch_id(conn, request):
+def _verify_reddit_mode(conn, request, expected):
+    """Keep ordinary V1 runs and typed checkpoint owners disjoint."""
+    if expected is None:
+        if request.schema_version == 4:
+            raise NativeRunDenied()
+        if (request.schema_version == 1 and request.platforms == ("reddit",)
+                and conn.execute("SELECT to_regclass('mf_native_launch.plans') IS NOT NULL").fetchone()[0]
+                and conn.execute(
+                    "SELECT 1 FROM mf_native_launch.plans WHERE run_id=%s "
+                    "AND frozen #> '{identity,schema_version}'='4'::jsonb", (request.run_id,),
+                ).fetchone() is not None):
+            raise NativeRunDenied()
+        return
+    if type(expected) is not RedditCheckpointMode:
+        raise InvalidNativeRun()
+    version = 1 if expected is RedditCheckpointMode.CAPTURE else 4
+    if (request.schema_version != version or request.platforms != ("reddit",) or request.max_rounds != 1
+            or not conn.execute("SELECT to_regclass('mf_native_launch.plans') IS NOT NULL").fetchone()[0]):
+        raise NativeRunDenied()
+
+    from .native_launch_store import LaunchAuthorityError, NativeLaunchStore
+
+    try:
+        launch = NativeLaunchStore._get(conn, request.principal, request.run_id)
+    except LaunchAuthorityError as error:
+        if error.code == 'not_found':
+            raise NativeRunDenied() from None
+        raise NativeRunUnavailable() from None
+    identity = launch.frozen['identity']
+    if (identity['schema_version'] != 4 or identity['checkpoint']['mode'] != expected.value
+            or launch.request != request or not launch.dispatch_claimed or launch.budget_attempt_id is None):
+        raise NativeRunDenied()
+
+
+def _reject_protected_launch_id(conn, request):
     has_fork_column = conn.execute(
         "SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE "
         "attrelid=to_regclass('mf_native_launch.plans') AND attname='intervention' AND NOT attisdropped)",
     ).fetchone()[0]
-    if has_fork_column and conn.execute(
-        "SELECT 1 FROM mf_native_launch.plans WHERE run_id=%s AND intervention IS NOT NULL", (request.run_id,),
-    ).fetchone() is not None:
-        # Preserve replay of an ordinary row recorded before the new fence.
+    if not has_fork_column:
+        return
+    protected = conn.execute(
+        "SELECT frozen #> '{identity,schema_version}'='4'::jsonb FROM mf_native_launch.plans WHERE run_id=%s AND "
+        "(intervention IS NOT NULL OR frozen #> '{identity,schema_version}'='4'::jsonb)", (request.run_id,),
+    ).fetchone()
+    if protected is not None:
+        if protected[0]:
+            raise NativeRunDenied()
+        # Preserve replay of an ordinary row recorded before the fork fence.
         existing = conn.execute(
             f"SELECT {_SELECT} FROM mf_native_execution.runs WHERE run_id=%s AND principal=%s",
             (request.run_id, request.principal),
@@ -259,7 +305,8 @@ class NativeRunStore:
                 or original.max_rounds != request.max_rounds):
             raise NativeRunDenied()
 
-    def register(self, request: NativeRunRequest) -> NativeRunRecord:
+    def register(self, request: NativeRunRequest, *,
+                 reddit_mode: RedditCheckpointMode | None = None) -> NativeRunRecord:
         request = NativeRunRequest.from_wire(request)
         try:
             project = self._projects.get(request.principal, request.project_id,
@@ -272,8 +319,9 @@ class NativeRunStore:
                 or project.revision != request.project_revision):
             raise NativeRunDenied()
         with _transaction(self._connect) as conn:
+            _verify_reddit_mode(conn, request, reddit_mode)
             intervention = request.intervention
-            if intervention is not None:
+            if intervention is not None or reddit_mode is not None:
                 row = conn.execute(f"SELECT {_SELECT} FROM mf_native_execution.runs WHERE run_id=%s AND principal=%s",
                                    (request.run_id, request.principal)).fetchone()
                 if row is not None:
@@ -281,14 +329,14 @@ class NativeRunStore:
                     if existing.request != request:
                         raise NativeRunConflict()
                     return existing
-                _verify_fork_dispatch(conn, request)
+                _verify_checkpoint_dispatch(conn, request)
             else:
                 if request.source_run_id is not None:
                     self._verify_continuation_source(conn, request)
                 _lock_checkpoint_run_id(conn, request.run_id)
                 # A plain read avoids reversing the producer/launch row lock
                 # order. Fork planning holds the same run-ID lock on insertion.
-                _reject_fork_launch_id(conn, request)
+                _reject_protected_launch_id(conn, request)
             conn.execute("INSERT INTO mf_native_execution.runs (run_id,principal,project_id,"
                          "project_revision,simulation_id,artifact_sha256,runtime_sha256,"
                          "platforms,seed,max_rounds,request_fingerprint,source_run_id,checkpoint_sha256,intervention) VALUES "
@@ -328,15 +376,16 @@ class NativeRunStore:
             return self._owned(principal, run_id, conn=conn)
 
     def claim_start(self, principal: str, run_id: UUID, owner_id: UUID,
-                    lease_seconds: int = 30) -> NativeRunRecord:
+                    lease_seconds: int = 30, *, reddit_mode: RedditCheckpointMode | None = None) -> NativeRunRecord:
         principal, run_id, owner_id = principal_id(principal), canonical_uuid(run_id), canonical_uuid(owner_id)
         lease_seconds = _lease(lease_seconds)
         with _transaction(self._connect) as conn:
             current = self._owned(principal, run_id, conn=conn)
-            if current.request.intervention is not None:
+            _verify_reddit_mode(conn, current.request, reddit_mode)
+            if current.request.intervention is not None or reddit_mode is not None:
                 if current.state != RunState.declared or current.cancel_requested:
                     raise NativeRunBusy()
-                _verify_fork_dispatch(conn, current.request)
+                _verify_checkpoint_dispatch(conn, current.request)
             row = conn.execute(f"UPDATE mf_native_execution.runs SET state='starting',"
                 "attempt_id=%s,owner_id=%s,lease_until=clock_timestamp()+(%s * interval '1 second'),"
                 "updated_at=clock_timestamp() WHERE run_id=%s AND principal=%s "

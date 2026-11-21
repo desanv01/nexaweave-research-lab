@@ -36,6 +36,7 @@ MIGRATIONS = {
         "0001_budget_admission.sql", "preparations_0001.sql", "preparations_0002.sql",
         "native_runs_0001.sql", "native_runs_0002.sql", "native_runs_0003.sql",
         "native_launch_0001.sql", "native_launch_0002.sql", "native_launch_0003.sql",
+        "native_launch_0004.sql",
         "report_0001.sql", "followup_0001.sql",
     ),
 }
@@ -52,6 +53,9 @@ MIGRATION_PINS = {
     ("nexaweave_execution", "migrations/native_launch_0003.sql"): (
         4641, "0ab6321d7e3fed751cdaec95b8afd48b7e4f26a1237cb699deef04df07fa1a95",
     ),
+    ("nexaweave_execution", "migrations/native_launch_0004.sql"): (
+        5888, "894c71fd96c46afe00882c6ddbc0d276ae1e8c88f9b14053b6a402bfb061881b",
+    ),
 }
 DRIVERS = {
     "nexaweave_storage": (
@@ -65,8 +69,8 @@ DRIVERS = {
     "nexaweave_execution": (
         ("budget.py", 27827, "6d613d17b5cfce7323e3d015b2b82550273addc008884ceb9b3d611178d0ed7e"),
         ("preparation_store.py", 22042, "c09e205df0d8632e5455d0d633624709ef9bdb793809eec957710db60f31b892"),
-        ("native_run_store.py", 28219, "62b9b60835c7162b319f2d26a75f499c5749b053ba7c63ea5175038ecdaa85f9"),
-        ("native_launch_store.py", 41559, "38abebdb53c9103149b6e233532e0dc49d8085e8e988f7ceebc73f7ffe815419"),
+        ("native_run_store.py", 30654, "6dbc681db64f5c06af279efed5e6d72483c9a55314a4c664b11b8cd336bb8f7c"),
+        ("native_launch_store.py", 44301, "4db3536f85ba472d81ab9ca98cfbd8babe5acf79e40b8dcb11cc5652474529d6"),
         ("report_store.py", 22419, "46ab0e298dd8d47a9e223d5135e86197c8db72d3e2404f6545ffbd4bc36fab46"),
         ("followup_store.py", 30580, "d78548efd8b08bc95c3003b8fc2c42ea7ab358526f21d3f433e6a06c814b0aac"),
     ),
