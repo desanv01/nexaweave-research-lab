@@ -399,7 +399,8 @@ class DurablePreparationHost(PreparationReadAuthority):
 
         public = donor.frozen['public']
         donor_options = public['options']
-        if REDDIT_CHECKPOINT in donor_options or donor_options['seed'] in seeds:
+        donor_seed = donor_options['seed']
+        if REDDIT_CHECKPOINT in donor_options or donor_seed in seeds:
             raise PreparationError('conflict')
         try:
             validate_receipt(donor.receipt, str(donor.operation_id), public['options']['platforms'])

@@ -10,6 +10,7 @@ import os
 import random
 import struct
 import threading
+from types import SimpleNamespace
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 import pytest
 from psycopg.types.json import Jsonb
@@ -652,12 +653,43 @@ def test_pg_distinct_review_start_race_releases_only_permanently_closed_loser(fa
     assert host.budget.native_reservation('owner',host.account_id,loser.request,loser.launch_sha256).state==ReservationState.released
 
 
+class _TwoActorChat:
+    """Scoped fixture for the two actors a Reddit checkpoint requires.
+
+    The shared scripted chat returns one strict agent config, which fits the
+    single-entity cases. A Reddit checkpoint is admitted only with two or more
+    actors, so this case supplies complete deterministic activity configs for
+    both selected actors instead of weakening the strict generator or its
+    production validation.
+    """
+
+    def __init__(self):
+        from test_provider_neutral_preparation import ScriptedChat
+        self._base = ScriptedChat()
+        self.chat = SimpleNamespace(completions=self)
+
+    def create(self, **kwargs):
+        reply = self._base.create(**kwargs)
+        if 'agent_configs' in kwargs['messages'][-1]['content']:
+            reply.choices[0].message.content = json.dumps({'agent_configs': [
+                {'agent_id': 0, 'activity_level': 0.5, 'posts_per_hour': 0.3,
+                 'comments_per_hour': 0.4, 'active_hours': [9, 10],
+                 'response_delay_min': 5, 'response_delay_max': 20,
+                 'sentiment_bias': 0, 'stance': 'neutral', 'influence_weight': 1.0},
+                {'agent_id': 1, 'activity_level': 0.4, 'posts_per_hour': 0.2,
+                 'comments_per_hour': 0.5, 'active_hours': [10, 11],
+                 'response_delay_min': 10, 'response_delay_max': 30,
+                 'sentiment_bias': 0, 'stance': 'neutral', 'influence_weight': 1.0},
+            ]}, ensure_ascii=False)
+        return reply
+
+
 def test_reddit_checkpoint_store_binds_producer_before_budget_and_round_trips(factory, tmp_path, monkeypatch):
     from app.services.preparation_client import PreparationError
     from test_preparation_store import real_host, request, reference
 
     migrate_all(factory)
-    prep, scope, retained, _, wires, _ = real_host(factory, tmp_path, cap=40)
+    prep, scope, retained, _, wires, _ = real_host(factory, tmp_path, cap=40, chat=_TwoActorChat())
     options = {
         'comment': 'Continue the bounded thread.',
         'seed_post': {'poster_agent_id': 0, 'content': 'Open the bounded thread.'},
