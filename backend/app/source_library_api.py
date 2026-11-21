@@ -5,7 +5,7 @@ from flask import Response, request
 from werkzeug.exceptions import BadRequest
 
 from .services.knowledge_source_client import (MAX_BYTES, ENVELOPE_OVERHEAD, ONTOLOGY_METHODS,
-    encoded, validate_ontology_payload, validate_ontology_result)
+    encoded, legacy_report_id, validate_ontology_payload, validate_ontology_result)
 from .services.knowledge_source_facade import (KnowledgeSourceFacade, validate_upload,
     validate_public_result, validate_original_upload, validate_original_public_result)
 from .services.knowledge_transport import KnowledgeTransportError, _json_object, _uuid
@@ -64,7 +64,10 @@ def register_source_routes(app, settings, *, source_facade=None):
             else:
                 if request.content_length not in (None, 0) or request.stream.read(1):
                     raise KnowledgeReadError("invalid_request")
-                payload = {} if method in {"list", "ontology_load"} else {"source_revision": _uuid(revision)}
+                if method == "legacy_report_read":
+                    payload = {"legacy_report_id": legacy_report_id(revision)}
+                else:
+                    payload = {} if method in {"list", "ontology_load"} else {"source_revision": _uuid(revision)}
             data = reader().execute(method, graph_id, payload)
             if method in ONTOLOGY_METHODS:
                 validate_ontology_result(method, data, settings.scope, payload)
@@ -103,6 +106,11 @@ def register_source_routes(app, settings, *, source_facade=None):
                      "source_original_read",
                      lambda graph_id, source_revision: run("binary_read", graph_id, source_revision),
                      methods=["GET"])
+    app.add_url_rule("/api/source/legacy-report/<graph_id>/<report_id>",
+                     "source_legacy_report",
+                     lambda graph_id, report_id: run("legacy_report_read", graph_id, report_id),
+                     methods=["GET"])
+
     def ontology(graph_id):
         operation = "ontology_save" if request.method == "POST" else "ontology_load"
         return run(operation, graph_id)

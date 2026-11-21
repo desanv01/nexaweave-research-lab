@@ -29,11 +29,12 @@ const sources = await compile('../src/components/workbench/SourceLibrary.vue')
 const picker = await compile('../src/components/LanguageSwitcher.vue', { '@/i18n/index.js': localeUrl })
 const empty = dataModule('export default {render(){return null}}')
 const replacements = Object.fromEntries(['EvidenceResults', 'SourceIngestion', 'ExperimentComparison', 'PopulationWorkbench', 'SimulationPreparation', 'NativeLaunch', 'NativeObservations', 'ConnectedReports', 'ConnectedFollowup'].map(name => [`../components/workbench/${name}.vue`, empty]))
-const parent = await compile('../src/views/ResearchWorkbench.vue', { ...replacements, '../i18n/index.js': localeUrl, '../components/workbench/SourceLibrary.vue': sources.url })
+const twoHop = await compile('../src/components/workbench/TwoHopResearch.vue')
+const parent = await compile('../src/views/ResearchWorkbench.vue', { '../components/workbench/TwoHopResearch.vue': twoHop.url, ...replacements, '../i18n/index.js': localeUrl, '../components/workbench/SourceLibrary.vue': sources.url })
 const ingestion = await compile('../src/components/workbench/SourceIngestion.vue')
 const population = await compile('../src/components/workbench/PopulationWorkbench.vue')
 const preparation = await compile('../src/components/workbench/SimulationPreparation.vue')
-const refreshParent = await compile('../src/views/ResearchWorkbench.vue', { ...replacements, '../i18n/index.js': localeUrl,
+const refreshParent = await compile('../src/views/ResearchWorkbench.vue', { '../components/workbench/TwoHopResearch.vue': twoHop.url, ...replacements, '../i18n/index.js': localeUrl,
   '../components/workbench/SourceLibrary.vue': sources.url, '../components/workbench/SourceIngestion.vue': ingestion.url,
   '../components/workbench/PopulationWorkbench.vue': population.url, '../components/workbench/SimulationPreparation.vue': preparation.url })
 function mount(component = parent.component) {

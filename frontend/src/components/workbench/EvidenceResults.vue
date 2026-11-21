@@ -1,15 +1,19 @@
 <script setup>
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, nextTick, ref, shallowRef, watch } from 'vue'
 import { copyFor } from '../../i18n/workbench.js'
 import { temporalClaimCopy } from '../../i18n/temporalClaims.js'
 import DossierExport from './DossierExport.vue'
-const props = defineProps({ result: Object, locale: { type: String, default: 'en' } })
+const DossierSupportReview = defineAsyncComponent(() => import('./DossierSupportReview.vue'))
+const props = defineProps({ result: Object, locale: { type: String, default: 'en' }, reviewSource: Function, reviewReset: Number, displayGraphId: String })
+const reviewLabel = computed(() => ({ zh: '审阅这个段落的支持程度', ms: 'Semak sokongan petikan ini' }[props.locale] || 'Review support from this passage'))
+const reviewOpen = ref(false), selectedClaim = shallowRef(null), selectedSection = shallowRef(null)
 const copy = computed(() => copyFor(props.locale))
 const timeCopy = computed(() => temporalClaimCopy(props.locale))
 const claimTimes = ['created_at', 'valid_at', 'invalid_at', 'expired_at']
-const selected = ref(null), inspector = ref(null), page = ref(0), passagePage = ref(0)
+const selected = shallowRef(null), inspector = ref(null), page = ref(0), passagePage = ref(0)
 let opener = null
-watch(() => props.result, () => { selected.value = null; opener = null; page.value = 0; passagePage.value = 0 })
+watch(() => props.result, () => { selected.value = null; selectedClaim.value = null; selectedSection.value = null; reviewOpen.value = false; opener = null; page.value = 0; passagePage.value = 0 }, { flush: 'sync' })
+watch(() => props.reviewReset, () => { reviewOpen.value = false }, { flush: 'sync' })
 const isDossier = computed(() => props.result?.mode === 'model_free_evidence_dossier')
 const rows = computed(() => {
   if (!props.result) return []
@@ -28,8 +32,16 @@ function references(f) {
   const citations = new Map(f.citations.map(c => [c.evidence_id, c]))
   return f.evidence_ids.map(id => ({ key: id, evidence_id: id, citation: citations.get(id) || null }))
 }
-async function select(reference, event) { opener = event.currentTarget; selected.value = reference; await nextTick(); inspector.value?.focus() }
-function close() { selected.value = null; opener?.focus(); opener = null }
+async function select(reference, claim, section, event) {
+  if (selected.value !== reference || selectedClaim.value !== claim || selectedSection.value !== section) reviewOpen.value = false
+  opener = event.currentTarget
+  selected.value = reference
+  selectedClaim.value = claim
+  selectedSection.value = section
+  await nextTick()
+  if (selected.value === reference && selectedClaim.value === claim && selectedSection.value === section) inspector.value?.focus()
+}
+function close() { reviewOpen.value = false; selectedClaim.value = null; selectedSection.value = null; selected.value = null; opener?.focus(); opener = null }
 </script>
 <template>
   <section class="evidence" :aria-label="copy.results">
@@ -53,7 +65,7 @@ function close() { selected.value = null; opener?.focus(); opener = null }
           </dl>
           <details><summary>{{ copy.identity }}</summary><p class="mono">{{ row.fact.key || row.fact.provider_id }}</p><p class="mono">{{ JSON.stringify(row.fact.scope) }}</p></details>
           <p v-if="!row.fact.evidence_ids.length" class="subtle">{{ copy.noLinks }}</p>
-          <div v-else class="references"><button v-for="reference in references(row.fact)" :key="reference.key" type="button" @click="select(reference, $event)" :aria-expanded="selected?.key === reference.key" aria-controls="passage-inspector">{{ reference.citation ? copy.inspect : copy.unavailable }} · {{ reference.evidence_id }}</button></div>
+          <div v-else class="references"><button v-for="reference in references(row.fact)" :key="reference.key" type="button" @click="select(reference, row.fact, row.section, $event)" :aria-expanded="selected?.key === reference.key && selectedSection?.ordinal === row.section.ordinal" aria-controls="passage-inspector">{{ reference.citation ? copy.inspect : copy.unavailable }} · {{ reference.evidence_id }}</button></div>
         </article>
         <nav v-if="rows.length > 10" class="pagination" :aria-label="copy.results"><button type="button" :disabled="page === 0" @click="page--">{{ copy.previous }}</button><span>{{ copy.range }} {{ page + 1 }} / {{ Math.ceil(rows.length / 10) }}</span><button type="button" :disabled="(page + 1) * 10 >= rows.length" @click="page++">{{ copy.next }}</button></nav>
         <details v-for="(trace, i) in traces" :key="i" class="trace"><summary>{{ copy.trace }} {{ i + 1 }}</summary>
@@ -69,6 +81,11 @@ function close() { selected.value = null; opener?.focus(); opener = null }
       <template v-if="selected"><button type="button" @click="close">{{ copy.close }}</button><p class="mono">{{ selected.key }}</p>
         <template v-if="selected.citation"><h3>{{ selected.citation.source_name }}</h3><p class="excerpt">{{ selected.citation.excerpt }}</p><dl><dt>{{ copy.evidenceId }}</dt><dd class="mono">{{ selected.citation.evidence_id }}</dd><dt>{{ copy.revision }}</dt><dd class="mono">{{ selected.citation.source_revision }}</dd><dt>{{ copy.offsets }}</dt><dd>{{ selected.citation.start }} – {{ selected.citation.end }} · {{ selected.citation.offset_unit }}</dd><template v-if="selected.citation.declared_page !== null"><dt>{{ copy.page }}</dt><dd>{{ selected.citation.declared_page }}</dd></template><dt>{{ copy.digest }}</dt><dd class="mono">{{ selected.citation.source_sha256 }}</dd></dl><p class="subtle">{{ copy.original }}</p></template>
         <p v-else>{{ copy.unavailable }}</p>
+        <template v-if="isDossier && selected.status === 'resolved' && selected.citation && selectedClaim?.claim_class === 'source' && reviewSource">
+          <button type="button" class="open-support-review" :aria-expanded="reviewOpen" aria-controls="retained-support-review" @click="reviewOpen = !reviewOpen">{{ reviewLabel }}</button>
+          <DossierSupportReview v-if="reviewOpen" id="retained-support-review" :key="selected.key" :dossier="result" :claim="selectedClaim"
+            :reference="selected" :section="selectedSection" :display-graph-id="displayGraphId" :load-source="reviewSource" :locale="locale" />
+        </template>
       </template><p v-else class="subtle">{{ copy.inspect }}</p>
     </aside></div>
     <div class="limitations"><h3>{{ copy.limitations }}</h3><p>{{ copy.limitationText }}</p></div>

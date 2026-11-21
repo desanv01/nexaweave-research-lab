@@ -21,38 +21,6 @@ from offline_fixture import offline_models, prepared
 pytestmark = pytest.mark.postgres
 
 
-@pytest.fixture(scope="module")
-def connection_factory():
-    import psycopg
-    from psycopg.conninfo import conninfo_to_dict
-    from nexaweave_execution.native_run_store import migrate_native_runs
-    from nexaweave_storage import migrate
-
-    if os.getenv("PROJECT_STORE_POSTGRES_INTEGRATION") != "1":
-        pytest.skip("disposable PostgreSQL integration disabled")
-    dsn = os.getenv("PROJECT_STORE_POSTGRES_TEST_DSN")
-    pg_keys = ("PGHOST", "PGHOSTADDR", "PGPORT", "PGDATABASE", "PGUSER",
-               "PGPASSWORD", "PGSERVICE", "PGSERVICEFILE", "PGPASSFILE")
-    if not dsn or any(os.getenv(key) for key in pg_keys):
-        pytest.fail("approved fixture DSN required")
-    settings = conninfo_to_dict(dsn)
-    if (settings.get("host") != "127.0.0.1"
-            or settings.get("port") != "15432"
-            or settings.get("dbname") != "mirofish_operations_test"
-            or settings.get("user") != "mirofish_fixture"
-            or not settings.get("password")
-            or set(settings) - {"host", "port", "dbname", "user", "password", "connect_timeout"}):
-        pytest.fail("not the approved disposable fixture")
-
-    def connect():
-        return psycopg.connect(dsn, connect_timeout=3)
-
-    with connect() as connection:
-        migrate(connection)
-        migrate_native_runs(connection)
-    return connect
-
-
 def _snapshot():
     return {"project_id": "proj_1", "name": "Native fixture", "status": "created",
         "created_at": "2026-09-29T00:00:00", "updated_at": "2026-09-29T00:00:00",
@@ -232,11 +200,11 @@ def test_trusted_host_consumes_completed_twitter_checkpoint_once(
     from native_twitter_fresh_fixture import (
         _DB_LIMIT, _LOG_LIMIT, _NEXT_POST, _PROFILE_LIMIT, _RECEIPT_LIMIT, _RESTORE_OUTPUTS,
         _RestoredModels, _captured_checkpoint, _captured_owners, _check_binding, _events,
-        _owned_factory, _prepared_twitter, _producer_models,
+        _owned_factory, _prepared_twitter, _producer_models, _simulate_producer_pid,
     )
-    from nexaweave_execution import native_process_driver
+    from nexaweave_execution import native_process_driver, native_twitter_checkpoint_binding
     from nexaweave_execution.native_owned_binding import _manifest
-    from nexaweave_execution.native_run_contracts import NativeRunDenied, NativeRunRequest, RunState
+    from nexaweave_execution.native_run_contracts import InvalidNativeRun, NativeRunDenied, NativeRunRequest, RunState
     from nexaweave_execution.native_run_store import NativeRunStore
     from nexaweave_execution.native_twitter_checkpoint_binding import (
         NativeRestoredTwitterFactory, NativeTwitterCaptureFactory,
@@ -278,6 +246,8 @@ def test_trusted_host_consumes_completed_twitter_checkpoint_once(
     produced = _completed_checkpoint_host(new_host(capture_request, capture), deadline)
     assert produced.receipt.run_id == capture_request.run_id
     producer_pid = produced.child.process_id
+    producer_instance = produced.child.instance_id
+    assert produced.receipt.instance_id == producer_instance
     assert producer_pid != os.getpid() and not child_dir.exists()
     lineage_raw = _read_bounded(lineage_path, _RECEIPT_LIMIT)
     checkpoint_digest = sha256(lineage_raw).hexdigest()
@@ -306,6 +276,7 @@ def test_trusted_host_consumes_completed_twitter_checkpoint_once(
         _owned_factory(root, request, _RestoredModels(expected_frames, str(probe_path))),
         str(checkpoint), str(lineage_dir), str(child_dir), checkpoint_digest, producer_pid,
         str(produced.receipt.run_id), None,
+        expected_producer_instance_id=producer_instance,
     )
     store = NativeRunStore(connection_factory)
 
@@ -324,10 +295,24 @@ def test_trusted_host_consumes_completed_twitter_checkpoint_once(
                 new_host(invalid, restore)
             with pytest.raises(NativeRunDenied):
                 store.get("owner", invalid.run_id)
+
+    with _simulate_producer_pid(native_twitter_checkpoint_binding, producer_pid):
+        assert restore._checked_restore(request)[3] == lineage
+    with monkeypatch.context() as collision:
+        collision.setattr(native_process_driver, "uuid4", lambda: producer_instance)
+        collision.setattr(native_process_driver.multiprocessing, "get_context", unexpected_dispatch)
+        driver = native_process_driver.NativeProcessDriver(restore)
+        try:
+            with pytest.raises(InvalidNativeRun):
+                driver.launch(request, uuid4())
+        finally:
+            assert driver.close() is True
     assert not child_dir.exists() and not probe_path.exists()
 
     restored = _completed_checkpoint_host(new_host(request, restore), deadline)
-    assert restored.child.process_id not in {os.getpid(), producer_pid}
+    assert type(restored.child.process_id) is int and restored.child.process_id > 0
+    assert restored.child.process_id != os.getpid()
+    assert restored.receipt.instance_id == restored.child.instance_id != producer_instance
     assert restored.receipt.run_id == request.run_id and restored.attempt_id != produced.attempt_id
     assert restored.request.source_run_id == produced.receipt.run_id
     assert restored.request.checkpoint_sha256 == produced.receipt.evidence_sha256

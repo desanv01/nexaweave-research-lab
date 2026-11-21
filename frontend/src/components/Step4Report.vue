@@ -8,8 +8,8 @@
           <!-- Report Header -->
           <div class="report-header-block">
             <div class="report-meta">
-              <span class="report-tag">Prediction Report</span>
-              <span class="report-id">ID: {{ reportId || 'REF-2024-X92' }}</span>
+              <span class="report-tag">{{ progressCopy.reportTag }}</span>
+              <span class="report-id">{{ progressCopy.reportIdLabel }} {{ reportId || 'REF-2024-X92' }}</span>
             </div>
             <h1 class="main-title">{{ reportOutline.title }}</h1>
             <p class="sub-title">{{ reportOutline.summary }}</p>
@@ -72,7 +72,7 @@
             <div class="waiting-ring"></div>
             <div class="waiting-ring"></div>
           </div>
-          <span class="waiting-text">Waiting for Report Agent...</span>
+          <span class="waiting-text">{{ progressCopy.waitingForReport }}</span>
         </div>
       </div>
 
@@ -89,15 +89,15 @@
         <div class="workflow-overview" v-if="agentLogs.length > 0 || reportOutline">
           <div class="workflow-metrics">
             <div class="metric">
-              <span class="metric-label">Sections</span>
+              <span class="metric-label">{{ progressCopy.sections }}</span>
               <span class="metric-value mono">{{ completedSections }}/{{ totalSections }}</span>
             </div>
             <div class="metric">
-              <span class="metric-label">Elapsed</span>
+              <span class="metric-label">{{ progressCopy.elapsed }}</span>
               <span class="metric-value mono">{{ formatElapsedTime }}</span>
             </div>
             <div class="metric">
-              <span class="metric-label">Tools</span>
+              <span class="metric-label">{{ progressCopy.tools }}</span>
               <span class="metric-value mono">{{ totalToolCalls }}</span>
             </div>
             <div class="metric metric-right">
@@ -334,7 +334,7 @@
                         <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path>
                         <polyline points="22 4 12 14.01 9 11.01"></polyline>
                       </svg>
-                      <span>Report Generation Complete</span>
+                      <span>{{ progressCopy.generationComplete }}</span>
                     </div>
                   </template>
                 </div>
@@ -347,17 +347,17 @@
                   <div class="footer-actions">
                     <!-- Tool Call: Show/Hide Params -->
                     <button v-if="log.action === 'tool_call' && log.details?.parameters" class="action-btn" @click.stop="toggleLogExpand(log)">
-                      {{ expandedLogs.has(log.timestamp) ? 'Hide Params' : 'Show Params' }}
+                      {{ expandedLogs.has(log.timestamp) ? progressCopy.hideParams : progressCopy.showParams }}
                     </button>
                     
                     <!-- Tool Result: Raw/Structured View -->
                     <button v-if="log.action === 'tool_result'" class="action-btn" @click.stop="toggleRawResult(log.timestamp, $event)">
-                      {{ showRawResult[log.timestamp] ? 'Structured View' : 'Raw Output' }}
+                      {{ showRawResult[log.timestamp] ? progressCopy.structuredView : progressCopy.rawOutput }}
                     </button>
                     
                     <!-- LLM Response: Show/Hide Response -->
                     <button v-if="log.action === 'llm_response' && log.details?.response" class="action-btn" @click.stop="toggleLogExpand(log)">
-                      {{ expandedLogs.has(log.timestamp) ? 'Hide Response' : 'Show Response' }}
+                      {{ expandedLogs.has(log.timestamp) ? progressCopy.hideResponse : progressCopy.showResponse }}
                     </button>
                   </div>
                 </div>
@@ -368,7 +368,7 @@
           <!-- Empty State -->
           <div v-if="agentLogs.length === 0 && !isComplete" class="workflow-empty">
             <div class="empty-pulse"></div>
-            <span>Waiting for agent activity...</span>
+            <span>{{ progressCopy.waitingForActivity }}</span>
           </div>
         </div>
       </div>
@@ -377,7 +377,7 @@
     <!-- Bottom Console Logs -->
     <div class="console-logs">
       <div class="log-header">
-        <span class="log-title">CONSOLE OUTPUT</span>
+        <span class="log-title">{{ progressCopy.consoleOutput }}</span>
         <span class="log-id">{{ reportId || 'NO_REPORT' }}</span>
       </div>
       <div class="log-content" ref="logContent">
@@ -395,9 +395,11 @@ import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { getAgentLog, getConsoleLog } from '../api/report'
 import { renderSafeMarkdown } from '../utils/safeMarkdown'
+import { reportProgressCopyFor } from '../i18n/reportProgress.js'
 
 const router = useRouter()
-const { t } = useI18n()
+const { t, locale } = useI18n()
+const progressCopy = computed(() => reportProgressCopyFor(locale.value))
 
 const props = defineProps({
   reportId: String,
@@ -1711,11 +1713,7 @@ const statusClass = computed(() => {
   return 'pending'
 })
 
-const statusText = computed(() => {
-  if (isComplete.value) return 'Completed'
-  if (agentLogs.value.length > 0) return 'Generating...'
-  return 'Waiting'
-})
+const statusText = computed(() => progressCopy.value.status[statusClass.value])
 
 const totalSections = computed(() => {
   return reportOutline.value?.sections?.length || 0
@@ -1735,13 +1733,13 @@ const totalToolCalls = computed(() => {
 })
 
 const formatElapsedTime = computed(() => {
-  if (!startTime.value) return '0s'
+  if (!startTime.value) return progressCopy.value.elapsedSeconds(0)
   const lastLog = agentLogs.value[agentLogs.value.length - 1]
   const elapsed = lastLog?.elapsed_seconds || 0
-  if (elapsed < 60) return `${Math.round(elapsed)}s`
+  if (elapsed < 60) return progressCopy.value.elapsedSeconds(Math.round(elapsed))
   const mins = Math.floor(elapsed / 60)
   const secs = Math.round(elapsed % 60)
-  return `${mins}m ${secs}s`
+  return progressCopy.value.elapsedMinutes(mins, secs)
 })
 
 const displayLogs = computed(() => {
@@ -1780,7 +1778,7 @@ const activeStep = computed(() => {
   if (doneSteps.length > 0) return doneSteps[doneSteps.length - 1]
   
   // 否则返回第一个步骤
-  return steps[0] || { noLabel: '--', title: '等待开始', status: 'todo', meta: '' }
+  return steps[0] || { noLabel: '--', title: progressCopy.value.waitingToStart, status: 'todo', meta: '' }
 })
 
 const workflowSteps = computed(() => {
@@ -1791,9 +1789,9 @@ const workflowSteps = computed(() => {
   steps.push({
     key: 'planning',
     noLabel: 'PL',
-    title: 'Planning / Outline',
+    title: progressCopy.value.planning,
     status: planningStatus,
-    meta: planningStatus === 'active' ? 'IN PROGRESS' : ''
+    meta: planningStatus === 'active' ? progressCopy.value.inProgress : ''
   })
 
   // Sections (if outline exists)
@@ -1809,7 +1807,7 @@ const workflowSteps = computed(() => {
       noLabel: String(idx).padStart(2, '0'),
       title: section.title,
       status,
-      meta: status === 'active' ? 'IN PROGRESS' : ''
+      meta: status === 'active' ? progressCopy.value.inProgress : ''
     })
   })
 
@@ -1818,9 +1816,9 @@ const workflowSteps = computed(() => {
   steps.push({
     key: 'complete',
     noLabel: 'OK',
-    title: 'Complete',
+    title: progressCopy.value.complete,
     status: completeStatus,
-    meta: completeStatus === 'active' ? 'FINALIZING' : ''
+    meta: completeStatus === 'active' ? progressCopy.value.finalizing : ''
   })
 
   return steps

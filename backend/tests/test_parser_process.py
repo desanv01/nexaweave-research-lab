@@ -337,7 +337,27 @@ def test_real_pdf_malformed_encrypted_and_limits(tmp_path):
     page.insert_text((72, 72), "hello")
     document.save(source)
     document.close()
-    text = extract_text_isolated(source)
+    try:
+        text = extract_text_isolated(source)
+    except ParserFailedError as error:
+        if os.name == "nt":
+            context = error.__context__
+            # Directory cleanup can add its own error and the earlier public
+            # parser error before the tagged owner.stop() failure.
+            for _ in range(3):
+                if context is None:
+                    break
+                if isinstance(context, parser_process.OwnedProcessError):
+                    stage = context._cleanup_stage
+                    if stage in {
+                        "job_snapshot_pin", "job_terminate", "job_process_wait", "job_active_zero",
+                        "job_process_handle_close", "job_teardown", "job_close", "root_reap",
+                        "io_thread_join", "pipe_close", "root_handle_close",
+                    }:
+                        error.add_note(f"windows_parser_cleanup_stage={stage}")
+                        break
+                context = context.__context__
+        raise
     assert "hello" in text
     assert extract_text_isolated(
         source, limits=ParseLimits(max_text_chars=len(text), max_pdf_pages=1)

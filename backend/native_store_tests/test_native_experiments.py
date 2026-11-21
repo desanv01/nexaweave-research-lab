@@ -20,7 +20,7 @@ from uuid import uuid4
 
 import pytest
 
-from test_native_prepared_host import connection_factory, _snapshot, _close
+from test_native_prepared_host import _snapshot, _close
 from offline_fixture import prepared, offline_models
 
 pytestmark = pytest.mark.postgres
@@ -259,8 +259,7 @@ def cli(cohort, tmp_path, raw, *, principal="owner", pin=None):
     return proc.returncode, json.loads(lines[0])
 
 
-@pytest.fixture(scope="module")
-def cohort_fixture(connection_factory, tmp_path_factory):
+def build_cohort(connection_factory, tmp_path_factory):
     phases = NativeCohortPhases()
     phases.start('cohort-project-create')
     from app.services.native_experiment_contracts import ExperimentCohort

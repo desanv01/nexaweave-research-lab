@@ -4,7 +4,6 @@ import { readFileSync } from 'node:fs'
 import { createHash, webcrypto } from 'node:crypto'
 import { JSDOM } from 'jsdom'
 import { parse, compileScript } from '@vue/compiler-sfc'
-import { createWorkbenchClient } from '../src/api/workbench.js'
 import { nativeEnsembleCopyFor } from '../src/i18n/nativeEnsemble.js'
 
 globalThis.crypto ||= webcrypto
@@ -110,27 +109,31 @@ async function compileMounted(path, replacements = {}) {
 }
 
 async function mountParent() {
-  const locale = dataModule('import { ref } from ' + JSON.stringify(import.meta.resolve('vue')) + '; export const uiLocale = ref("en")')
+  const vue = JSON.stringify(import.meta.resolve('vue'))
+  const locale = dataModule(`import { ref } from ${vue}; export const uiLocale = ref('en')`)
+  const { uiLocale } = await import(locale)
   const empty = dataModule('export default { render() { return null } }')
   const sourceProbe = dataModule(
-    'import { h, ref } from ' + JSON.stringify(import.meta.resolve('vue')) + '\n' +
-    'export default { props: ["methods"], emits: ["inspected"], setup(props, { emit }) {' +
-    'const probe = ref(""); return () => h("div", { "data-probe": probe.value }, [' +
-    'h("button", { class: "select-fixture-source", onClick: () => emit("inspected", { source: ' + JSON.stringify(source) + ' }) }, "Select source"),' +
-    'h("button", { class: "probe-source-list", onClick: async () => {' +
-    'try { await props.methods.list(); probe.value = "sent" } catch (error) { probe.value = error.code }' +
-    '} }, "Read sources")]) } }'
+    `import { h } from ${vue}
+    export default { emits: ['inspected'], setup(props, { emit }) {
+      const source = ${JSON.stringify(source)}
+      return () => h('div', [
+        h('button', { class: 'select-fixture-source', onClick: () => emit('inspected', { source }) }, 'Select source'),
+        h('button', { class: 'select-other-source', onClick: () => emit('inspected', { source: { ...source, source_revision: '${uid(98)}' } }) }, 'Select other source')
+      ])
+    } }`
   )
-  const mountedComponents = {
+  const components = {
     SourceLibrary: sourceProbe,
     SimulationPreparation: await compileMounted('../src/components/workbench/SimulationPreparation.vue'),
     NativeLaunch: await compileMounted('../src/components/workbench/NativeLaunch.vue'),
     NativeEnsemble: moduleUrl,
   }
   const replacements = { '../i18n/index.js': locale }
-  for (const name of ['EvidenceResults', 'SourceLibrary', 'SourceIngestion', 'ExperimentComparison', 'PopulationWorkbench',
-    'SimulationPreparation', 'NativeLaunch', 'NativeEnsemble', 'NativeObservations', 'ConnectedReports', 'ConnectedFollowup']) {
-    replacements['../components/workbench/' + name + '.vue'] = mountedComponents[name] || empty
+  for (const name of ['EvidenceResults', 'TwoHopResearch', 'SourceLibrary', 'SourceIngestion', 'ExperimentComparison',
+    'PopulationWorkbench', 'SimulationPreparation', 'NativeLaunch', 'NativeEnsemble', 'NativeObservations',
+    'ConnectedReports', 'ConnectedFollowup']) {
+    replacements['../components/workbench/' + name + '.vue'] = components[name] || empty
   }
   const { default: parent } = await import(await compileMounted('../src/views/ResearchWorkbench.vue', replacements))
   const root = document.createElement('div')
@@ -138,36 +141,81 @@ async function mountParent() {
   const app = createApp(parent)
   app.component('RouterLink', { render() { return h('a', this.$slots.default?.()) } })
   app.mount(root)
-  return { root, cleanup() { app.unmount(); root.remove() } }
+  return { root, uiLocale, cleanup() { app.unmount(); root.remove() } }
 }
 
-async function exerciseParent(t, { fetchImpl, calls, network, pause, release }) {
-  t.mock.method(globalThis, 'fetch', fetchImpl)
-  const { root, cleanup } = await mountParent()
-  const input = (selector, value) => {
-    const field = root.querySelector(selector)
-    field.value = value
-    field.dispatchEvent(new dom.window.Event('input', { bubbles: true }))
+function declaration(donor, payload) {
+  return {
+    schema_version: 1, display_graph_id: graph, scope, project_revision: donor.project_revision, state: 'ready',
+    idempotency_key: payload.idempotency_key, ensemble_id: uid(30), platforms: donor.options.platforms,
+    donor: { operation_id: donor.operation_id, plan_sha256: donor.plan_sha256, seed: donor.options.seed, artifact_sha256: donor.receipt.artifact_sha256 },
+    members: payload.seeds.map((seed, ordinal) => {
+      const operation_id = uid(40 + ordinal)
+      const variant = { ...donor, operation_id, options: { ...donor.options, seed } }
+      const files = donor.receipt.files.map((file, i) => i < 2 ? { ...file, sha256: digest([operation_id, file.name]) } : clone(file))
+      return { operation_id, seed, launch_id: uid(50 + ordinal), plan_sha256: digest(pick(variant, prepFields)),
+        receipt: { simulation_id: 'sim_' + operation_id.replaceAll('-', ''), artifact_sha256: digest({ schema_version: 1, files }), files } }
+    }),
   }
-  const submit = selector => root.querySelector(selector).dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }))
+}
+
+test('workbench declares one ordered ensemble from its ready donor and recovers member one by Status', async t => {
+  const calls = [], nativePlans = new Map()
+  let donor, members, finishStale, staleSignal
+  let secondAuthorized = false, secondStarted = false
+  t.mock.method(globalThis, 'fetch', async (url, configuration) => {
+    const path = new URL(url).pathname
+    const payload = configuration.body ? JSON.parse(configuration.body) : null
+    calls.push({ path, payload })
+    assert.equal(configuration.headers.Authorization, 'Bearer private-token')
+    if (path.endsWith('/seed_ensemble')) {
+      const result = declaration(donor, payload)
+      members = result.members
+      return response(result)
+    }
+    if (path.startsWith('/api/graph/data/')) return response({ graph_id: graph, nodes: [], edges: [], node_count: 0, edge_count: 0 })
+    if (path.endsWith('/plan')) { donor = reviewed(payload); return response(donor) }
+    if (path.endsWith('/start')) { donor = published(donor); return response(donor) }
+    if (path.includes('/native-launch/plan/')) {
+      const member = members?.find(item => item.launch_id === payload.launch_id)
+      const ready = member ? { ...donor, options: { ...donor.options, seed: member.seed }, receipt: member.receipt } : donor
+      const plan = nativeReview(payload, ready)
+      if (member && member.launch_id === members[1].launch_id) plan.authorization.model_calls_enabled = secondAuthorized
+      nativePlans.set(payload.launch_id, plan)
+      return response(plan)
+    }
+    const plan = nativePlans.get(payload.launch_id)
+    if (path.includes('/native-launch/start/')) {
+      if (payload.launch_id === members[0].launch_id) throw new Error('lost Start reply')
+      secondStarted = true
+      return response(nativeState(plan, 'running'))
+    }
+    if (path.includes('/native-launch/status/') && payload.launch_id === members[1].launch_id) {
+      if (!secondStarted) return response({ ...plan, authorization: { model_calls_enabled: secondAuthorized } })
+      staleSignal = configuration.signal
+      return new Promise(resolve => { finishStale = () => resolve(response(nativeState(plan, 'completed'))) })
+    }
+    return response(nativeState(plan, 'completed'))
+  })
+  const { root, uiLocale, cleanup } = await mountParent()
+  const control = selector => root.querySelector(selector)
+  const input = (selector, value) => {
+    const element = control(selector)
+    element.value = value
+    element.dispatchEvent(new dom.window.Event('input', { bubbles: true }))
+  }
   const click = async selector => {
-    const control = root.querySelector(selector)
-    assert.ok(control && !control.disabled, selector)
-    control.click()
+    const button = control(selector)
+    assert.ok(button && !button.disabled, selector)
+    button.click()
     await settle()
   }
-  const member = '[data-member="1"]'
-  const realDigest = crypto.subtle.digest.bind(crypto.subtle)
-  let blockDigest = false, releaseDigest
-  t.mock.method(crypto.subtle, 'digest', (algorithm, bytes) => {
-    if (!blockDigest) return realDigest(algorithm, bytes)
-    blockDigest = false
-    return new Promise(resolve => { releaseDigest = () => resolve(realDigest(algorithm, bytes)) })
-  })
+  const first = '[data-member="1"]', second = '[data-member="2"]'
+  const start = ' .ensemble-native-start', plan = ' .ensemble-native-review', status = ' .ensemble-native-status'
   try {
     input('#graph-id', graph)
     input('#bearer-token', 'private-token')
-    submit('.connection-form')
+    control('.connection-form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }))
     await settle()
     await click('.select-fixture-source')
     input('#preparation-requirement', 'Retained evidence')
@@ -176,232 +224,69 @@ async function exerciseParent(t, { fetchImpl, calls, network, pause, release }) 
     await click('.preparation-workbench .review')
     await click('.preparation-workbench .start')
     await click('.native-launch .review')
-    const legacyReview = calls.at(-1)
-    assert.match(legacyReview.path, /native-launch\/plan/)
-    assert.ok(root.querySelector('.native-launch article.plan'))
+    const singleId = calls.at(-1).payload.launch_id
 
-    const disclosure = root.querySelector('.ensemble-panel')
+    const disclosure = control('.ensemble-panel')
     disclosure.open = true
     disclosure.dispatchEvent(new dom.window.Event('toggle'))
     await settle()
-    input('#ensemble-seed-1', '7')
+    input('#ensemble-seed-1', '3')
     input('#ensemble-seed-2', '9')
     await nextTick()
+    assert.equal(control('.ensemble-declare').disabled, true)
+    input('#ensemble-seed-1', '7')
+    await nextTick()
+    await click('.ensemble-declare')
+    assert.deepEqual(calls.at(-1).payload.seeds, [7, 9])
+    assert.equal(calls.at(-1).payload.operation_id, donor.operation_id)
+    assert.equal(control(first + ' .artifact-reference').textContent, members[0].receipt.artifact_sha256)
+    assert.equal(control('.derived-origin').textContent, nativeEnsembleCopyFor('en').derived)
+    assert.equal(control('#ensemble-seed-1').disabled, true)
+    assert.equal(calls.filter(call => call.path.endsWith('/preparation/' + graph + '/start')).length, 1)
+    assert.notEqual(singleId, members[0].launch_id)
 
-    // The child starts validating the draft while its parent still has a free transport.
-    blockDigest = true
-    await click(member + ' .ensemble-prep-review')
-    assert.equal(typeof releaseDigest, 'function')
-    pause(path => path.startsWith('/api/graph/data/'))
-    await click('.graph-refresh')
-    const sibling = network.at(-1)
-    assert.match(sibling.path, /api\/graph\/data/)
-    assert.equal(sibling.signal.aborted, false)
-    const beforeClaim = network.length
-    releaseDigest()
+    await click(first + plan)
+    assert.equal(control(first + start).disabled, true)
+    await click(second + plan)
+    assert.equal(control(first + start).disabled, true)
+    assert.equal(control(second + start).disabled, true)
+    control(first + start).click()
+    assert.equal(calls.some(call => call.path.includes('/native-launch/start/')), false)
+    secondAuthorized = true
+    await click(second + status)
+    assert.deepEqual(calls.at(-1), { path: '/api/native-launch/status/' + graph, payload: {
+      schema_version: 1, launch_id: members[1].launch_id, launch_sha256: nativePlans.get(members[1].launch_id).launch_sha256,
+    } })
+    assert.equal(control(first + start).disabled, false)
+    assert.equal(control(second + start).disabled, true)
+    await click(first + start)
+    const startSelector = calls.at(-1).payload
+    assert.equal(startSelector.launch_id, members[0].launch_id)
+    assert.equal(control('.native-ensemble .feedback').textContent, nativeEnsembleCopyFor('en').uncertainStart)
+    assert.equal(control(first + start), null)
+    assert.equal(control(second + start).disabled, true)
+    await click(first + status)
+    assert.deepEqual(calls.at(-1).payload, startSelector)
+    assert.equal(control(first + ' .native-receipt').textContent, digest(['evidence', members[0].launch_id]))
+    assert.ok(control('.native-launch article.plan'))
+    assert.equal(control(second + start).disabled, false)
+    await click(second + start)
+    await click(second + status)
+    assert.equal(staleSignal.aborted, false)
+    await click('.select-other-source')
+    assert.equal(staleSignal.aborted, true)
+    finishStale()
     await settle()
-    assert.equal(network.length, beforeClaim)
-    assert.equal(sibling.signal.aborted, false)
-    assert.equal(root.querySelector(member + ' .preparation-reference'), null)
-    release()
-    await settle()
-
-    await click(member + ' .ensemble-prep-review')
-    await click(member + ' .ensemble-prep-start')
-    await click(member + ' .ensemble-prep-status')
-    await click(member + ' .ensemble-native-review')
-    const review = calls.at(-1)
-    assert.notEqual(review.request.launch_id, legacyReview.request.launch_id)
-    await click(member + ' .ensemble-native-start')
-    const start = calls.at(-1)
-    assert.match(start.path, /native-launch\/start/)
-    assert.equal(start.request.launch_id, review.request.launch_id)
-    assert.match(root.querySelector(member + ' .member-notice').textContent, /Start was not confirmed/)
-
-    // Clear uses the actual legacy component method. The ensemble selector can still recover.
-    await click('.native-launch .clear')
-    assert.equal(root.querySelector('.native-launch article.plan'), null)
-    assert.ok(root.querySelector(member + ' .ensemble-native-status'))
-    pause(path => path.includes('/native-launch/status/'))
-    await click(member + ' .ensemble-native-status')
-    const recovering = network.at(-1)
-    assert.match(recovering.path, /native-launch\/status/)
-    assert.deepEqual(calls.at(-1).request, start.request)
-
-    // A source control attempts a sibling call while the ensemble owns the shared channel.
-    const beforeSibling = network.length
-    await click('.probe-source-list')
-    submit('.query-section form')
-    await settle()
-    assert.equal(root.querySelector('[data-probe]').dataset.probe, 'busy')
-    assert.equal(network.length, beforeSibling)
-    await click('.native-launch .clear')
-    assert.equal(recovering.signal.aborted, false)
-    assert.equal(root.querySelector(member + ' .native-receipt'), null)
-    release()
-    await settle()
-    assert.equal(root.querySelector(member + ' .native-receipt').textContent, digest(['evidence', start.request.launch_id]))
-    assert.equal(calls.filter(call => call.path.includes('/native-launch/start/') && call.request.launch_id === start.request.launch_id).length, 1)
+    assert.equal(control('.native-ensemble .native-receipt'), null)
+    for (const locale of ['zh', 'ms']) {
+      uiLocale.value = locale
+      await nextTick()
+      assert.equal(control('.native-ensemble').lang, locale)
+      assert.equal(control('.native-ensemble .feedback').textContent, nativeEnsembleCopyFor(locale).unsupported)
+      assert.equal(control('.ensemble-panel summary').textContent, nativeEnsembleCopyFor(locale).title)
+    }
   } finally {
-    releaseDigest?.()
+    finishStale?.()
     cleanup()
   }
-}
-
-test('two reviewed seeds serialize protected actions, recover exact Starts and discard stale member results', async t => {
-  const prep = new Map(), launch = new Map(), calls = [], network = []
-  let hold, finish = null
-  const fetchImpl = async (url, configuration) => {
-    assert.equal(configuration.headers.Authorization, 'Bearer private-token')
-    const path = new URL(url).pathname
-    network.push({ path, signal: configuration.signal })
-    const graphRead = path.startsWith('/api/graph/data/')
-    const request = graphRead ? null : JSON.parse(configuration.body)
-    if (!graphRead) calls.push({ path, request })
-    let result
-    if (graphRead) {
-      result = { graph_id: graph, nodes: [], edges: [], node_count: 0, edge_count: 0 }
-    } else if (path.startsWith('/api/preparation/')) {
-      if (path.endsWith('/plan')) {
-        result = reviewed(request)
-        prep.set(request.operation_id, published(result))
-      } else {
-        result = prep.get(request.operation_id)
-        assert.equal(request.plan_sha256, result.plan_sha256)
-        if (path.endsWith('/start') && result.options.seed === 7) throw new Error('private preparation detail')
-      }
-    } else if (path.includes('/native-launch/plan/')) {
-      result = nativeReview(request, prep.get(request.preparation.operation_id))
-      launch.set(request.launch_id, result)
-    } else {
-      const known = launch.get(request.launch_id)
-      assert.equal(request.launch_sha256, known.launch_sha256)
-      const starting = path.includes('/native-launch/start/')
-      if (starting && known.request.seed === 7) throw new Error('private native detail')
-      result = nativeState(known, starting ? 'running' : 'completed')
-    }
-    if (hold?.(path, request)) {
-      hold = null
-      return new Promise(resolve => { finish = () => resolve(response(result)) })
-    }
-    return response(result)
-  }
-  const client = createWorkbenchClient({ fetchImpl })
-  await client.connect({ origin: 'http://127.0.0.1:5001', graph, token: 'private-token' })
-  const base = await client.preparationPlan({ schema_version: 1, operation_id: uid(9), source_revision: source.source_revision, options }, source)
-  const ready = await client.preparationStatus({ schema_version: 1, operation_id: base.operation_id, plan_sha256: base.plan_sha256 })
-  const props = reactive({
-    connected: true, source: clone(source), ready: clone(ready), displayGraphId: graph, locale: 'en',
-    preparationMethods: { plan: client.preparationPlan, start: client.preparationStart, status: client.preparationStatus },
-    nativeMethods: client.ensembleNative,
-  })
-  const root = document.createElement('div')
-  document.body.append(root)
-  const app = createApp({ setup: () => () => h(component, props) })
-  app.mount(root)
-  const member = index => root.querySelector('[data-member="' + index + '"]')
-  const button = (index, action) => member(index).querySelector('.ensemble-' + action)
-  function seed(index, value) {
-    const input = root.querySelector('#ensemble-seed-' + index)
-    input.value = value
-    input.dispatchEvent(new dom.window.Event('input', { bubbles: true }))
-  }
-  async function click(index, action) {
-    const target = button(index, action)
-    assert.ok(target && !target.disabled)
-    target.click()
-    await settle()
-  }
-  try {
-    const baselineCalls = calls.length
-    assert.equal(root.querySelector('[role="status"]').getAttribute('aria-live'), 'polite')
-    seed(1, '7'); seed(2, '7'); await nextTick()
-    assert.equal(button(1, 'prep-review').disabled, true)
-    seed(2, '8'); await nextTick()
-    assert.equal(calls.length, baselineCalls)
-    hold = path => path.endsWith('/plan')
-    await click(1, 'prep-review')
-    assert.equal(button(2, 'prep-review').disabled, true)
-    button(2, 'prep-review').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }))
-    await settle()
-    assert.equal(calls.length, baselineCalls + 1)
-    assert.equal(typeof finish, 'function')
-    finish(); await settle()
-    seed(2, '9'); await nextTick()
-    await click(2, 'prep-review')
-    const [reviewA, reviewB] = calls.slice(baselineCalls, baselineCalls + 2).map(call => call.request)
-    assert.notEqual(reviewA.operation_id, reviewB.operation_id)
-    assert.notEqual(reviewA.operation_id, base.operation_id)
-    assert.deepEqual(reviewA.options, { ...options, seed: 7 })
-    assert.deepEqual(reviewB.options, { ...options, seed: 9 })
-    assert.equal(reviewA.source_revision, source.source_revision)
-    assert.equal(reviewB.source_revision, source.source_revision)
-
-    const bPrepared = member(2).textContent
-    await click(1, 'prep-start')
-    assert.equal(button(1, 'prep-start'), null)
-    assert.match(member(1).textContent, /Start was not confirmed/)
-    await click(1, 'prep-status')
-    const [aStart, aStatus] = calls.slice(-2).map(call => call.request)
-    assert.deepEqual(aStart, aStatus)
-    assert.equal(aStart.operation_id, reviewA.operation_id)
-    assert.equal(member(2).textContent, bPrepared)
-    await click(2, 'prep-start')
-    await click(1, 'native-review')
-    await click(2, 'native-review')
-    const [nativeA, nativeB] = calls.slice(-2).map(call => call.request)
-    assert.notEqual(nativeA.launch_id, nativeB.launch_id)
-    assert.deepEqual(nativeA.preparation, { operation_id: aStart.operation_id, plan_sha256: aStart.plan_sha256 })
-    assert.equal(nativeB.preparation.operation_id, reviewB.operation_id)
-    assert.equal(launch.get(nativeA.launch_id).request.seed, 7)
-    assert.equal(launch.get(nativeB.launch_id).request.seed, 9)
-    assert.notEqual(launch.get(nativeA.launch_id).request.artifact_sha256, launch.get(nativeB.launch_id).request.artifact_sha256)
-
-    const bLaunch = member(2).textContent
-    await click(1, 'native-start')
-    assert.equal(button(1, 'native-start'), null)
-    assert.equal(member(1).querySelector('.native-receipt'), null)
-    assert.match(member(1).textContent, /Start was not confirmed/)
-    await click(1, 'native-status')
-    const [start, status] = calls.slice(-2).map(call => call.request)
-    assert.deepEqual(start, status)
-    assert.equal(start.launch_id, nativeA.launch_id)
-    assert.match(member(1).querySelector('.native-state').textContent, /Completed with receipt/)
-    assert.equal(member(1).querySelector('.native-receipt').textContent, digest(['evidence', nativeA.launch_id]))
-    assert.equal(member(2).textContent, bLaunch)
-    await click(2, 'native-start')
-    assert.equal(member(2).querySelector('.native-receipt'), null)
-
-    props.locale = 'ms'; await nextTick()
-    assert.equal(root.querySelector('.native-ensemble').getAttribute('lang'), 'ms')
-    assert.equal(member(1).querySelector('.native-state').textContent, nativeEnsembleCopyFor('ms').states.completed)
-    hold = path => path.includes('/native-launch/status/')
-    finish = null
-    await click(2, 'native-status')
-    assert.equal(calls.at(-1).request.launch_id, nativeB.launch_id)
-    assert.equal(typeof finish, 'function')
-    const newRevision = { ...clone(ready), project_revision: 2 }
-    newRevision.plan_sha256 = digest(pick(newRevision, prepFields))
-    props.ready = newRevision
-    await nextTick()
-    assert.equal(root.querySelector('.launch-reference, .native-receipt'), null)
-    assert.equal(button(1, 'prep-review').disabled, true)
-    props.source = { ...source, source_revision: uid(6) }; await nextTick()
-    assert.equal(root.querySelector('.member'), null)
-    props.source = clone(source)
-    await nextTick()
-    finish(); await settle()
-    assert.equal(root.querySelector('#ensemble-seed-1').value, '')
-    assert.equal(root.querySelector('.preparation-reference, .launch-reference, .native-receipt'), null)
-    assert.equal(root.textContent.includes('private'), false)
-  } finally {
-    app.unmount()
-    root.remove()
-    client.disconnect()
-  }
-  await exerciseParent(t, {
-    fetchImpl, calls, network,
-    pause: predicate => { hold = predicate; finish = null },
-    release: () => { assert.equal(typeof finish, 'function'); finish(); finish = null },
-  })
 })

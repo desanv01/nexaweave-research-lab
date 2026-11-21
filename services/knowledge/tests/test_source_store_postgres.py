@@ -153,7 +153,7 @@ def test_v1_upgrade_preserves_rows_and_rolls_back_failed_v2(factory, monkeypatch
                 assert conn.execute("SELECT version FROM mf_app.schema_migrations").fetchall() == [(1,)]
                 migrate(conn)
                 migrate(conn)
-                assert conn.execute("SELECT version FROM mf_app.schema_migrations ORDER BY version").fetchall() == [(1,), (2,), (3,), (4,)]
+                assert conn.execute("SELECT version FROM mf_app.schema_migrations ORDER BY version").fetchall() == [(1,), (2,), (3,), (4,), (5,)]
                 assert conn.execute("SELECT count(*) FROM mf_app.projects WHERE project_id=%s", (owner_project,)).fetchone()[0] == 1
                 conn.execute("ALTER TABLE mf_app.source_revisions ADD COLUMN rogue integer")
                 with pytest.raises(MigrationMismatch):
@@ -169,8 +169,21 @@ def test_fresh_v4_install_and_sql_checksum_denial(factory):
             with conn.transaction():
                 conn.execute("DROP SCHEMA mf_app CASCADE")
                 migrate(conn)
-                assert conn.execute("SELECT version FROM mf_app.schema_migrations ORDER BY version").fetchall() == [(1,), (2,), (3,), (4,)]
+                assert conn.execute("SELECT version FROM mf_app.schema_migrations ORDER BY version").fetchall() == [(1,), (2,), (3,), (4,), (5,)]
                 assert conn.execute("SELECT to_regclass('mf_app.passage_evidence')").fetchone()[0] is not None
+                assert conn.execute("""
+                    SELECT fk.confdeltype = 'r'
+                    FROM pg_catalog.pg_constraint AS fk
+                    JOIN pg_catalog.pg_attribute AS source_column
+                      ON source_column.attrelid = fk.conrelid AND source_column.attname = 'project_id'
+                    JOIN pg_catalog.pg_attribute AS project_column
+                      ON project_column.attrelid = fk.confrelid AND project_column.attname = 'project_id'
+                    WHERE fk.contype = 'f'
+                      AND fk.conrelid = 'mf_app.legacy_reports'::regclass
+                      AND fk.confrelid = 'mf_app.projects'::regclass
+                      AND fk.conkey = ARRAY[source_column.attnum]
+                      AND fk.confkey = ARRAY[project_column.attnum]
+                """).fetchall() == [(True,)]
                 conn.execute("UPDATE mf_app.schema_migrations SET sql_sha256=%s WHERE version=1", ("0" * 64,))
                 with pytest.raises(MigrationMismatch):
                     migrate(conn)
@@ -216,7 +229,7 @@ def test_v3_catalog_upgrades_additively_to_v4_without_rewriting_sources(factory,
                 assert conn.execute("SELECT name,retained_text,text_sha256 FROM mf_app.source_revisions WHERE source_revision=%s", (revision,)).fetchone() == before
                 migrate(conn)
                 migrate(conn)
-                assert conn.execute("SELECT version FROM mf_app.schema_migrations ORDER BY version").fetchall() == [(1,), (2,), (3,), (4,)]
+                assert conn.execute("SELECT version FROM mf_app.schema_migrations ORDER BY version").fetchall() == [(1,), (2,), (3,), (4,), (5,)]
                 assert conn.execute("SELECT name,retained_text,text_sha256 FROM mf_app.source_revisions WHERE source_revision=%s", (revision,)).fetchone() == before
                 assert conn.execute("SELECT count(*) FROM mf_app.source_binaries").fetchone()[0] == 0
                 raise RollbackFixture()

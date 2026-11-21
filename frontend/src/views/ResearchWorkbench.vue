@@ -3,6 +3,7 @@ import { computed, defineAsyncComponent, onBeforeUnmount, ref, watch } from 'vue
 import { createWorkbenchClient, WorkbenchError, awareTimestamp } from '../api/workbench.js'
 import { copyFor, safeError } from '../i18n/workbench.js'
 import EvidenceResults from '../components/workbench/EvidenceResults.vue'
+import TwoHopResearch from '../components/workbench/TwoHopResearch.vue'
 import SourceLibrary from '../components/workbench/SourceLibrary.vue'
 import SourceIngestion from '../components/workbench/SourceIngestion.vue'
 import ExperimentComparison from '../components/workbench/ExperimentComparison.vue'
@@ -31,7 +32,7 @@ const bannerError = computed(() => {
 })
 const graphData = ref(null), result = ref(null), mode = ref('research'), query = ref(''), title = ref('')
 const sections = ref([{ heading: '', query: '' }]), advanced = ref(false), topK = ref(10), validAt = ref(''), recordedBefore = ref('')
-const graphPage = ref(0), graphKind = ref('nodes')
+const graphPage = ref(0), graphKind = ref('nodes'), twoHopReset = ref(0)
 const client = createWorkbenchClient()
 const sourceReset = ref(0)
 const experimentCancel = ref(0)
@@ -70,10 +71,15 @@ const observationMethods = Object.freeze({
     try { return await client.nativeObservationsPage(payload, selection, knownPage) }
     catch (e) { if (['unauthorized', 'origin_denied', 'disconnected'].includes(e?.code)) disconnect(); throw e }
   },
+  eventStatus: async (payload, selection, knownPage) => {
+    try { return await client.nativeObservationsEventStatus(payload, selection, knownPage) }
+    catch (e) { if (['unauthorized', 'origin_denied', 'disconnected'].includes(e?.code)) disconnect(); throw e }
+  },
   clear: () => client.clearNativeObservations()
 })
 watch([inspectedSource, nativeReady, nativeReset], clearNativeViews, { deep: true, flush: 'sync' })
 const nativeMethods = Object.freeze({
+  forkPreview: payload => operation(() => client.nativeLaunchForkPreview(payload), false, true),
   plan: (payload, ready) => operation(() => client.nativeLaunchPlan(payload, ready), false, true),
   start: payload => operation(() => client.nativeLaunchStart(payload), false, true),
   status: payload => operation(() => client.nativeLaunchStatus(payload), false, true),
@@ -87,18 +93,22 @@ const preparationMethods = Object.freeze({
   profiles: (payload, ready, options) => operation(() => client.preparationProfiles(payload, ready, options), false, true, '', false, true),
   configuration: (payload, ready, options) => operation(() => client.preparationConfiguration(payload, ready, options), false, true, '', false, true)
 })
-const ensembleRequest = action => operation(action, false, true, '', false, false, false, true)
-const ensemblePreparationMethods = Object.freeze({
-  plan: (payload, source) => ensembleRequest(() => client.preparationPlan(payload, source)),
-  start: payload => ensembleRequest(() => client.preparationStart(payload)),
-  status: payload => ensembleRequest(() => client.preparationStatus(payload))
+const ensembleMethods = Object.freeze({
+  declare: (seeds, ready) => ensembleRequest(() => client.ensemble.declare(seeds, ready)),
+  launch: (action, index, ready) => ensembleRequest(() => client.ensemble.launch(action, index, ready)),
+  pendingSeeds: ready => client.ensemble.pendingSeeds(ready),
+  cancel: () => client.ensemble.cancel(),
 })
-const ensembleNativeMethods = Object.freeze({
-  plan: (payload, ready) => ensembleRequest(() => client.ensembleNative.plan(payload, ready)),
-  start: payload => ensembleRequest(() => client.ensembleNative.start(payload)),
-  status: payload => ensembleRequest(() => client.ensembleNative.status(payload)),
-  clear: () => client.ensembleNative.clear()
-})
+async function ensembleRequest(action) {
+  try { return await action() }
+  catch (error) {
+    if (['unauthorized', 'origin_denied', 'disconnected'].includes(error?.code)) {
+      disconnect()
+      if (error.code !== 'disconnected') { errorCode.value = error.code; status.value = 'denied' }
+    }
+    throw error
+  }
+}
 const ingestionMethods = Object.freeze({
   plan: (payload, inspected, saved) => operation(() => client.ingestionPlan(payload, inspected, saved?.scope, saved), false, true, 'plan'),
   execute: (payload, known) => operation(() => client.ingestionExecute(payload, known), false, true, 'execute'),
@@ -125,27 +135,18 @@ const populationMethods = Object.freeze({
   export: (platform, options, preview) => operation(() => client.populationExport(platform, options, preview), false, true, '', true),
   feedback: code => { populationFeedback.value = ['ready', 'changed', 'prepared', 'requested', 'invalid', 'invalidReply', 'denied', 'cancelled', 'unavailable', 'emptySelection', 'failed'].includes(code) ? code : '' }
 })
-let generation = 0, ensembleOperation = null
+let generation = 0
+const reviewReset = ref(0)
 const graphEntries = computed(() => graphData.value?.[graphKind.value] || [])
 function clearProtected() { clearNativeViews(); sourceCatalog.value = null; sourceReset.value++; populationReset.value++; preparationReset.value++; nativeReset.value++; nativeReady.value = null; inspectedSource.value = null; graphData.value = null; result.value = null; graphPage.value = 0 }
-function disconnect() { generation++; ensembleOperation = null; client.disconnect(); token.value = ''; reveal.value = false; connected.value = false; busy.value = false; clearProtected(); errorCode.value = ''; ingestionRequest.value = ''; status.value = 'disconnected' }
-function cancel() { generation++; ensembleOperation = null; experimentCancel.value++; populationReset.value++; client.cancel(); busy.value = false; status.value = 'cancelled'; errorCode.value = ''; if (!connected.value) { client.disconnect(); token.value = ''; clearProtected() } }
-async function operation(action, connecting = false, source = false, ingestion = '', population = false, preserveProtected = false, graphRefresh = false, ensemble = false) {
-  if (ensemble ? busy.value : ensembleOperation !== null) {
-    if (source && !graphRefresh) {
-      const error = new WorkbenchError('busy')
-      if (ensemble) error.beforeDispatch = true
-      throw error
-    }
-    return
-  }
+function disconnect() { generation++; client.disconnect(); token.value = ''; reveal.value = false; connected.value = false; busy.value = false; clearProtected(); errorCode.value = ''; ingestionRequest.value = ''; status.value = 'disconnected' }
+function cancel() { generation++; twoHopReset.value++; reviewReset.value++; experimentCancel.value++; populationReset.value++; client.ensemble.cancel(); client.cancel(); busy.value = false; status.value = 'cancelled'; errorCode.value = ''; if (!connected.value) { client.disconnect(); token.value = ''; clearProtected() } }
+async function operation(action, connecting = false, source = false, ingestion = '', population = false, preserveProtected = false, graphRefresh = false) {
   const epoch = ++generation
-  if (ensemble) ensembleOperation = epoch
-  busy.value = true
   if (!population) populationReset.value++
   if (preserveProtected) client.cancelShared(population)
   else client.cancel(population)
-  errorCode.value = ''; ingestionRequest.value = ingestion; status.value = connecting ? 'connecting' : 'loading'
+  busy.value = true; errorCode.value = ''; ingestionRequest.value = ingestion; status.value = connecting ? 'connecting' : 'loading'
   if (connecting) { connected.value = false; clearProtected() } else if (!source) result.value = null
   try {
     const data = await action()
@@ -159,10 +160,7 @@ async function operation(action, connecting = false, source = false, ingestion =
     status.value = errorCode.value === 'cancelled' ? 'cancelled' : ['unauthorized', 'origin_denied'].includes(errorCode.value) ? 'denied' : 'error'
     if (connecting || ['unauthorized', 'origin_denied'].includes(errorCode.value) || graphRefresh && errorCode.value === 'disconnected') { client.disconnect(); connected.value = false; token.value = ''; reveal.value = false; clearProtected() }
     if (source && !graphRefresh) throw e
-  } finally {
-    if (ensembleOperation === epoch) ensembleOperation = null
-    if (epoch === generation) busy.value = false
-  }
+  } finally { if (epoch === generation) busy.value = false }
 }
 function connect() {
   const credentials = { origin: origin.value, graph: graph.value, token: token.value }
@@ -171,7 +169,20 @@ function connect() {
 }
 function refreshGraph() {
   if (!connected.value || busy.value) return
+  twoHopReset.value++
   return operation(() => client.refreshGraph(), false, true, '', false, true, true)
+}
+function readTwoHop(payload, signal) {
+  return operation(() => client.twoHop(payload, { signal }), false, true, '', false, true)
+}
+function verifyDossierSource(payload, dossier) {
+  const graphId = graphData.value?.graph_id
+  if (!connected.value || !graphId || result.value !== dossier || dossier.mode !== 'model_free_evidence_dossier' ||
+      dossier.request.display_graph_ids.length !== 1 || dossier.request.display_graph_ids[0] !== graphId) {
+    throw new WorkbenchError('invalid_request')
+  }
+  if (busy.value) throw new WorkbenchError('busy')
+  return operation(() => client.sourceReadForDossierReview(payload), false, true, '', false, true)
 }
 function submit() {
   return operation(() => {
@@ -204,7 +215,37 @@ onBeforeUnmount(disconnect)
       </section>
       <section v-if="graphData" class="graph-overview"><h2>{{ copy.graphOverview }} <span class="mono">{{ graphData.graph_id }}</span></h2><p>{{ copy.nodes }}: {{ graphData.node_count }} · {{ copy.edges }}: {{ graphData.edge_count }}</p>
         <button class="graph-refresh" type="button" :disabled="!connected || busy" aria-describedby="graph-refresh-help" @click="refreshGraph">{{ copy.refreshGraph }}</button><p id="graph-refresh-help" class="help">{{ copy.refreshGraphHint }}</p>
-        <details><summary>{{ copy.overview }}</summary><div class="choices"><label><input v-model="graphKind" value="nodes" type="radio" @change="graphPage = 0">{{ copy.nodes }}</label><label><input v-model="graphKind" value="edges" type="radio" @change="graphPage = 0">{{ copy.edges }}</label></div><ul><li v-for="entry in graphEntries.slice(graphPage * 10, (graphPage + 1) * 10)" :key="entry.uuid"><details><summary>{{ entry.name || entry.uuid }}</summary><p class="mono">{{ entry.uuid }}</p><p>{{ entry.summary }}</p><p>{{ entry.fact }}</p><p v-if="graphKind === 'edges'">{{ entry.source_node_name }} → {{ entry.target_node_name }}</p></details></li></ul><nav v-if="graphEntries.length > 10" class="actions" :aria-label="copy.graphOverview"><button type="button" :disabled="!graphPage" @click="graphPage--">{{ copy.previous }}</button><span>{{ copy.range }} {{ graphPage + 1 }} / {{ Math.ceil(graphEntries.length / 10) }}</span><button type="button" :disabled="(graphPage + 1) * 10 >= graphEntries.length" @click="graphPage++">{{ copy.next }}</button></nav></details>
+        <TwoHopResearch :graph-data="graphData" :read-path="readTwoHop" :disabled="!connected || busy" :reset-version="twoHopReset" :locale="locale">
+          <template #nodes="{ choose, source, target, copy: pathCopy, locked }">
+            <details>
+              <summary>{{ copy.overview }}</summary>
+              <div class="choices">
+                <label><input v-model="graphKind" value="nodes" type="radio" @change="graphPage = 0">{{ copy.nodes }}</label>
+                <label><input v-model="graphKind" value="edges" type="radio" @change="graphPage = 0">{{ copy.edges }}</label>
+              </div>
+              <ul>
+                <li v-for="entry in graphEntries.slice(graphPage * 10, (graphPage + 1) * 10)" :key="entry.uuid">
+                  <details>
+                    <summary>{{ entry.name || entry.uuid }}</summary>
+                    <p class="mono">{{ entry.uuid }}</p>
+                    <p>{{ entry.summary }}</p>
+                    <p>{{ entry.fact }}</p>
+                    <p v-if="graphKind === 'edges'">{{ entry.source_node_name }} → {{ entry.target_node_name }}</p>
+                  </details>
+                  <div v-if="graphKind === 'nodes'" class="two-hop-node-actions" role="group" :aria-label="entry.name || entry.uuid">
+                    <button type="button" :aria-pressed="source === entry.uuid" :disabled="locked || target === entry.uuid" @click="choose('source', entry.uuid)">{{ pathCopy.chooseStart }}</button>
+                    <button type="button" :aria-pressed="target === entry.uuid" :disabled="locked || source === entry.uuid" @click="choose('target', entry.uuid)">{{ pathCopy.chooseDestination }}</button>
+                  </div>
+                </li>
+              </ul>
+              <nav v-if="graphEntries.length > 10" class="actions" :aria-label="copy.graphOverview">
+                <button type="button" :disabled="!graphPage" @click="graphPage--">{{ copy.previous }}</button>
+                <span>{{ copy.range }} {{ graphPage + 1 }} / {{ Math.ceil(graphEntries.length / 10) }}</span>
+                <button type="button" :disabled="(graphPage + 1) * 10 >= graphEntries.length" @click="graphPage++">{{ copy.next }}</button>
+              </nav>
+            </details>
+          </template>
+        </TwoHopResearch>
       </section>
       <SourceLibrary :methods="sourceMethods" :connected="connected" :busy="busy" :reset-version="sourceReset" :locale="locale" @inspected="inspectedSource = $event" @catalog="sourceCatalog = $event" />
       <SourceIngestion :methods="ingestionMethods" :inspected="inspectedSource" :connected="connected" :busy="busy" :reset-version="sourceReset" :locale="locale" />
@@ -214,9 +255,9 @@ onBeforeUnmount(disconnect)
       <NativeLaunch :methods="nativeMethods" :ready="nativeReady" :connected="connected" :busy="busy" :reset-version="nativeReset" :locale="locale" :display-graph-id="graphData?.graph_id || ''" @inspect="observationSelection = $event" @report="reportSelection = $event" @cleared="clearNativeViews" />
       <details class="ensemble-panel" @toggle="openEnsemble">
         <summary>{{ ensembleCopy.title }}</summary>
-        <NativeEnsemble v-if="ensembleOpened" :preparation-methods="ensemblePreparationMethods" :native-methods="ensembleNativeMethods"
-          :ready="nativeReady" :source="inspectedSource?.source || null" :display-graph-id="graphData?.graph_id || ''"
-          :connected="connected" :busy="busy" :locale="locale" />
+        <NativeEnsemble v-if="ensembleOpened" :methods="ensembleMethods" :ready="nativeReady"
+          :source="inspectedSource?.source || null" :display-graph-id="graphData?.graph_id || ''"
+          :connected="connected" :busy="busy" :reset-version="nativeReset" :locale="locale" />
       </details>
       <NativeObservations :methods="observationMethods" :selection="observationSelection" :connected="connected" :busy="busy" :reset-version="observationReset" :locale="locale" :display-graph-id="graphData?.graph_id || ''" />
       <ConnectedReports :methods="reportMethods" :selection="reportSelection" :source-catalog="sourceCatalog" :connected="connected" :busy="busy" :reset-version="reportReset" :locale="locale" :display-graph-id="graphData?.graph_id || ''" @followup="followupSelection = $event" />
@@ -228,11 +269,14 @@ onBeforeUnmount(disconnect)
           <button type="button" class="advanced-button" :aria-expanded="advanced" aria-controls="advanced-options" @click="advanced = !advanced">{{ copy.advanced }}</button>
           <div v-show="advanced" id="advanced-options" class="advanced"><label for="top-k">{{ copy.topK }}<input id="top-k" v-model.number="topK" type="number" min="1" max="100" required></label><label for="valid-at">{{ copy.validAt }}<input id="valid-at" v-model="validAt" type="text" placeholder="2026-10-01T00:00:00Z" aria-describedby="utc-help"></label><label for="recorded-before">{{ copy.recordedBefore }}<input id="recorded-before" v-model="recordedBefore" type="text" placeholder="2026-10-01T00:00:00Z" aria-describedby="utc-help"></label><p id="utc-help" class="help">{{ copy.utcHint }}</p></div><div class="actions"><button class="primary" type="submit">{{ copy.submit }}</button></div>
         </fieldset></form>
-      </section><EvidenceResults :result="result" :locale="locale" />
+      </section><EvidenceResults :result="result" :locale="locale" :review-source="verifyDossierSource" :review-reset="reviewReset" :display-graph-id="graphData?.graph_id || ''" />
     </main>
   </div>
 </template>
 <style scoped>
 .workbench{--canvas:#f4f6f9;--surface:#fff;--ink:#172638;--muted:#526174;--primary:#174d96;--border:#b9c4d2;--control-border:#7b8797;--accent:#a9650c;background:var(--canvas);color:var(--ink);min-height:100vh;font:16px/1.5 system-ui,sans-serif;overflow-wrap:anywhere}.workbench *{box-sizing:border-box}.header{background:var(--surface);border-bottom:1px solid var(--border);padding:16px clamp(16px,4vw,48px);display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:16px}.brand{font-weight:750;letter-spacing:.08em;text-decoration:none;color:var(--ink);min-height:44px;display:flex;align-items:center;flex-wrap:wrap;gap:16px}.brand span{letter-spacing:0;font-weight:500;color:var(--primary)}main{max-width:1320px;margin:0 auto;padding:32px clamp(16px,4vw,48px) 64px}.intro{margin-bottom:24px}h1{font-size:clamp(1.7rem,4vw,2.4rem);line-height:1.2;margin:8px 0 12px}h2{font-size:1.25rem;margin:0 0 16px}p{margin:8px 0}.eyebrow{font-size:.8rem;letter-spacing:.1em;color:var(--muted)}.connection,.query-section,.graph-overview{background:var(--surface);padding:24px;border:1px solid var(--border);border-radius:8px;margin-bottom:24px;min-width:0}label{display:flex;flex-direction:column;gap:6px;font-weight:550;min-width:0}input,textarea,select{width:100%;min-width:0;background:var(--surface);color:var(--ink);border:1px solid var(--control-border);border-radius:5px;font:inherit;padding:10px 12px;min-height:44px}textarea{resize:vertical}button{min-height:44px;max-width:100%;padding:10px 16px;border:1px solid var(--border);border-radius:5px;background:var(--surface);color:var(--primary);font:inherit;font-weight:550;cursor:pointer;overflow-wrap:anywhere}.primary{background:var(--primary);color:white;border-color:var(--primary)}button:hover:not(:disabled){filter:brightness(.92)}button:disabled,fieldset:disabled{opacity:.65}button:disabled{cursor:default}input:disabled,textarea:disabled{background:var(--canvas)}button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible,a:focus-visible,summary:focus-visible{outline:3px solid var(--primary);outline-offset:3px}.connection-form{display:grid;gap:12px;align-items:end}.help{font-size:.875rem;color:var(--muted);margin-top:12px}.status{border-left:3px solid var(--primary);padding:8px 12px;margin-top:16px}fieldset{border:0;padding:0;margin:0;min-width:0}legend{color:var(--muted);font-size:.875rem}.choices{display:flex;flex-wrap:wrap;gap:16px;margin:12px 0 20px}.choices label{flex-direction:row;align-items:center;min-height:44px}.choices input{width:20px;min-height:20px;margin-right:4px}.actions{display:flex;flex-wrap:wrap;align-items:center;gap:12px;margin-top:20px}.advanced-button{display:block;margin:20px 0 12px}.advanced{display:grid;gap:12px}.dossier-section{border-top:1px solid var(--border);margin-top:16px;padding:16px 0;display:grid;gap:12px}.dossier-section button{justify-self:start}.mono{font:.875rem/1.6 ui-monospace,Consolas,monospace}summary{cursor:pointer;min-height:44px;padding:10px 0}ul{padding-left:20px}.skip{position:absolute;left:16px;top:-100px;padding:12px;background:var(--surface);color:var(--primary);z-index:2}.skip:focus{top:8px}@media(min-width:768px){.connection-form{grid-template-columns:repeat(3,minmax(0,1fr))}.advanced{grid-template-columns:repeat(3,minmax(0,1fr))}.advanced .help{grid-column:1/-1}}@media(max-width:480px){.connection,.query-section,.graph-overview{padding:16px}}@media(prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;transition:none!important;animation:none!important}}
-.ensemble-panel{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px clamp(16px,3vw,24px);margin-bottom:24px}.ensemble-panel>summary{font-weight:650}
+.two-hop-node-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.two-hop-node-actions [aria-pressed="true"] { background: var(--primary); color: white; }
+.ensemble-panel { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 12px clamp(16px, 3vw, 24px); margin-bottom: 24px; }
+.ensemble-panel > summary { font-weight: 650; }
 </style>

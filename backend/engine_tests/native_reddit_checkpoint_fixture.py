@@ -6,9 +6,9 @@ from dataclasses import dataclass, replace
 from hashlib import sha256
 import json
 from multiprocessing import active_children
-import os
 from pathlib import Path
 import sqlite3
+import sys
 from time import monotonic
 from uuid import uuid4
 
@@ -26,6 +26,57 @@ _COMMENT_TICK = "2026-01-01 00:02:00"
 
 def _json(value):
     return json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("ascii")
+
+
+_CONTROL_SITES = {
+    235: "engine_import", 236: "seed_import", 238: "prepared_inputs",
+    239: "private_directory", 242: "agent_graph", 243: "pre_database_deadline",
+    244: "directory_create", 246: "database_create", 247: "platform_construct",
+    248: "platform_construct", 250: "clock_install", 251: "sqlite_progress",
+    253: "reset_deadline", 254: "reset_signup", 255: "first_idle",
+    257: "seed", 258: "seed_idle", 259: "prefix", 261: "seed_ack",
+    263: "advance", 266: "writer_close", 268: "database_close", 270: "capture",
+}
+_CONTROL_ERROR_KINDS = {
+    TimeoutError: "timeout", asyncio.CancelledError: "cancelled", OSError: "os",
+    FileNotFoundError: "os", PermissionError: "os", sqlite3.OperationalError: "sqlite_operation",
+    sqlite3.DatabaseError: "sqlite", sqlite3.IntegrityError: "sqlite_integrity", ValueError: "value",
+    TypeError: "type", KeyError: "key", AttributeError: "attribute", AssertionError: "assertion",
+    RuntimeError: "runtime", ImportError: "import", ModuleNotFoundError: "import",
+}
+
+
+def _control_cause(error, source, boundary):
+    database = getattr(sys.modules.get("oasis.social_platform.database"), "__file__", None)
+    site = boundary
+    trace = error.__traceback__
+    for _ in range(32):
+        if trace is None:
+            break
+        code = trace.tb_frame.f_code
+        line = trace.tb_lineno
+        if code.co_filename == source and code.co_name == "produce_reddit_checkpoint":
+            site = _CONTROL_SITES.get(line, "control_coroutine")
+        elif code.co_filename == database and code.co_name == "create_db":
+            site = "sqlite_connect" if line == 94 else "sqlite_schema" if 95 <= line <= 201 else "sqlite_other"
+        trace = trace.tb_next
+    return {"site": site, "kind": _CONTROL_ERROR_KINDS.get(type(error), "other")}
+
+
+def _emit_control_failure(error, boundary, source=None, deadline=None):
+    try:
+        result = {"failure": _control_cause(error, source, boundary)}
+        cause = error.__cause__ or error.__context__
+        if cause is not None and cause is not error:
+            result["cause"] = _control_cause(cause, source, boundary)
+        if deadline is not None:
+            now = monotonic()
+            result["deadline_elapsed"] = now >= deadline
+            result["elapsed_ms"] = int(min(25, max(0, now - (deadline - 25))) * 1000)
+        print("NEXAWEAVE_REDDIT_CONTROL_CAUSE " + _json(result).decode("ascii"), file=sys.stderr, flush=True)
+    except Exception:
+        # The fixture must re-raise the original child failure.
+        pass
 
 
 def _model():
@@ -62,9 +113,14 @@ class _Factory:
         return _Session(self, request)
 
     def evidence(self, request):
-        self.validate(request)
-        path = Path(self.checkpoint) / _MANIFEST if self.role == "producer" else Path(self.output) / _PROOF
-        return sha256(_read(path, 7200)).hexdigest()
+        try:
+            self.validate(request)
+            path = Path(self.checkpoint) / _MANIFEST if self.role == "producer" else Path(self.output) / _PROOF
+            return sha256(_read(path, 7200)).hexdigest()
+        except Exception as error:
+            if self.role == "control":
+                _emit_control_failure(error, "terminal_evidence")
+            raise
 
 
 @dataclass(frozen=True)
@@ -73,27 +129,37 @@ class _Session:
     request: object
 
     def start(self):
-        from app.services.native_reddit_checkpoint import produce_reddit_checkpoint, restore_reddit_checkpoint
-
         job = self.factory
-        deadline = monotonic() + 25
-        if job.role == "restore":
-            proof = asyncio.run(restore_reddit_checkpoint(
-                job.prepared, self.request, producer_request=job.producer_request,
-                producer_pid=job.producer_pid, expected_digest=job.checkpoint_digest,
-                checkpoint_dir=job.checkpoint, child_dir=job.output, deadline=deadline,
-            ))
-        else:
-            proof = asyncio.run(produce_reddit_checkpoint(
-                job.prepared, self.request, job.output, checkpoint_dir=job.checkpoint or None, deadline=deadline,
-            ))
-            if job.role == "producer":
-                assert proof == job.evidence(self.request)
-                return
-        data = _json(proof)
-        assert len(data) <= 7200
-        with (Path(job.output) / _PROOF).open("xb") as output:
-            assert output.write(data) == len(data)
+        deadline = source = None
+        boundary = "checkpoint_import"
+        try:
+            from app.services.native_reddit_checkpoint import produce_reddit_checkpoint, restore_reddit_checkpoint
+
+            deadline = monotonic() + 25
+            source = produce_reddit_checkpoint.__code__.co_filename
+            boundary = "control_coroutine"
+            if job.role == "restore":
+                proof = asyncio.run(restore_reddit_checkpoint(
+                    job.prepared, self.request, producer_request=job.producer_request,
+                    producer_pid=job.producer_pid, expected_digest=job.checkpoint_digest,
+                    checkpoint_dir=job.checkpoint, child_dir=job.output, deadline=deadline,
+                ))
+            else:
+                proof = asyncio.run(produce_reddit_checkpoint(
+                    job.prepared, self.request, job.output, checkpoint_dir=job.checkpoint or None, deadline=deadline,
+                ))
+                if job.role == "producer":
+                    assert proof == job.evidence(self.request)
+                    return
+            boundary = "proof_write"
+            data = _json(proof)
+            assert len(data) <= 7200
+            with (Path(job.output) / _PROOF).open("xb") as output:
+                assert output.write(data) == len(data)
+        except Exception as error:
+            if job.role == "control":
+                _emit_control_failure(error, boundary, source, deadline)
+            raise
 
     def close(self):
         # The native coroutine closes the writer and its connection before
@@ -168,12 +234,12 @@ def assert_fresh_reddit_continuation(tmp_path):
     )
     producer, checkpoint, child, control = (private / name for name in ("producer", "cut", "child", "control"))
     deadline = monotonic() + 120
-    pids = {os.getpid()}
-    producer_pid, checkpoint_sha = _run_child(
+    prior_instances = set()
+    producer_identity, checkpoint_sha = _run_child(
         _Factory(prepared, request.fingerprint, "producer", str(producer), str(checkpoint)),
-        request, terminal, deadline, pids,
+        request, terminal, deadline, prior_instances,
     )
-    pids.add(producer_pid)
+    producer_pid = producer_identity.process_id
     raw = _read(checkpoint / _MANIFEST, 7200)
     manifest = json.loads(raw)
     assert raw == _json(manifest) and sha256(raw).hexdigest() == checkpoint_sha
@@ -197,25 +263,54 @@ def assert_fresh_reddit_continuation(tmp_path):
     assert prefix[-1][3] == {"content": "Synthetic initial event", "post_id": 1}
 
     control_request = replace(request, run_id=uuid4())
-    control_pid, control_sha = _run_child(
-        _Factory(prepared, control_request.fingerprint, "control", str(control)),
-        control_request, terminal, deadline, pids,
-    )
-    pids.add(control_pid)
+    control_driver = None
+    failed_terminal = None
+
+    def fixed_label(value, allowed):
+        return next((label for label in allowed if value == label), "unexpected")
+
+    def observe_control(driver, owner, attempt, child_identity, cutoff):
+        nonlocal control_driver, failed_terminal
+        observed = terminal(driver, owner, attempt, child_identity, cutoff)
+        receipt = observed.receipt
+        if observed.status != "completed" or receipt is None:
+            control_driver = driver
+            failed_terminal = {
+                "status": fixed_label(observed.status, (
+                    "absent", "running", "completed", "failed", "cancelled", "unknown",
+                )),
+                "receipt_present": receipt is not None,
+                "receipt_outcome": "absent" if receipt is None else fixed_label(
+                    receipt.outcome, ("completed", "failed", "cancelled", "unknown"),
+                ),
+            }
+        return observed
+
+    try:
+        control_identity, control_sha = _run_child(
+            _Factory(prepared, control_request.fingerprint, "control", str(control)),
+            control_request, observe_control, deadline, prior_instances,
+        )
+    except AssertionError as error:
+        if failed_terminal is not None:
+            # Inspect the original close result after the helper has unwound.
+            fields = dict(failed_terminal, ordinary_close_finished=control_driver._closed is True)
+            BaseException.add_note(error, "NEXAWEAVE_REDDIT_CONTROL_TERMINAL " + _json(fields).decode("ascii"))
+        raise
     child_request = replace(request, run_id=uuid4())
-    child_pid, child_sha = _run_child(
+    restored_identity, child_sha = _run_child(
         _Factory(prepared, child_request.fingerprint, "restore", str(child), str(checkpoint),
                  request, producer_pid, checkpoint_sha),
-        child_request, terminal, deadline, pids,
+        child_request, terminal, deadline, prior_instances,
     )
-    pids.add(child_pid)
-    for path, pid, owner, evidence in (
-            (control, control_pid, control_request, control_sha), (child, child_pid, child_request, child_sha)):
+    for path, identity, owner, evidence in (
+            (control, control_identity, control_request, control_sha),
+            (child, restored_identity, child_request, child_sha)):
         raw = _read(path / _PROOF, 7200)
         proof = json.loads(raw)
         assert raw == _json(proof) and sha256(raw).hexdigest() == evidence
         expected = {
-            "pid": pid, "owner": _owner(owner), "database": _pin(path / _DB),
+            "pid": identity.process_id, "owner": _owner(owner), "database": _pin(path / _DB),
             "step": {"trace_cursor": 4, "actor_id": 1, "post_id": 1, "comment_id": 1,
                      "clock": {"epoch": _EPOCH, "elapsed_seconds": 120}},
         }
@@ -238,5 +333,6 @@ def assert_fresh_reddit_continuation(tmp_path):
     assert {path.name for path in checkpoint.iterdir()} == {_DB, _MANIFEST}
     for path in (child, control):
         assert {file.name for file in path.iterdir()} == {_DB, _PROOF}
-    assert not (pids - {os.getpid()}) & {process.pid for process in active_children()}
+    pids = {identity.process_id for identity in (producer_identity, control_identity, restored_identity)}
+    assert not pids & {process.pid for process in active_children()}
     assert monotonic() < deadline

@@ -11,7 +11,7 @@ import signal
 import time
 from types import SimpleNamespace
 from .connected_report_client import (ReportError, BASE_NAMES, FILE_BYTES, TOTAL_BYTES, digest,
-    encoded, strict_json, validate_identity, validate_manifest)
+    artifact_name, encoded, strict_json, validate_identity, validate_manifest)
 from .connected_report_context import validate_context, validate_references
 from .report_models import BoundedReportModelFactory
 
@@ -63,11 +63,14 @@ def report_files(root, manifest):
         raise ReportError('conflict') from None
 
 
+def _output_names(sections):
+    return BASE_NAMES + ['section_%02d.md' % i for i in range(1, sections + 1)]
+
+
 def output_manifest(root, sections):
     from .native_observation_reader import _safe
-    names = BASE_NAMES + ['section_%02d.md' % i for i in range(1, sections + 1)]
     files = []
-    for name in names:
+    for name in _output_names(sections):
         path = Path(root) / name
         details = _safe(path)
         if not 1 <= details.st_size <= FILE_BYTES:
@@ -78,6 +81,59 @@ def output_manifest(root, sections):
             raise ReportError('conflict')
         files.append(dict(name=name, size=len(raw), sha256=hashlib.sha256(raw).hexdigest()))
     return validate_manifest(dict(schema_version=1, files=files))
+
+
+def _append_claim_review(root, sections, context):
+    from .native_observation_reader import _identity, _safe
+    from .report_claim_passages import claim_review_block
+    paths = [root / name for name in _output_names(sections)]
+    before = {path: _identity(_safe(path)) for path in paths}
+    report_path = root / 'full_report.md'
+    metadata_path = root / artifact_name('metadata', None)
+    report_size, metadata_size = before[report_path][2], before[metadata_path][2]
+    total = sum(stamp[2] for stamp in before.values())
+    budget = min(FILE_BYTES - report_size, FILE_BYTES - metadata_size, (TOTAL_BYTES - total) // 2)
+    if budget <= 0 or min(report_size, metadata_size) < 1:
+        return
+
+    flags = os.O_RDWR | getattr(os, 'O_BINARY', 0) | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0)
+    opened = {}
+    with ExitStack() as stack:
+        def read(path):
+            handle = stack.enter_context(os.fdopen(os.open(path, flags), 'r+b'))
+            appeared = _identity(os.fstat(handle.fileno()))
+            if appeared[:3] != before[path][:3] or appeared[-1] != 1:
+                raise ReportError('conflict')
+            size = before[path][2]
+            raw = handle.read(size + 1)
+            if len(raw) != size:
+                raise ReportError('conflict')
+            opened[path] = (handle, appeared)
+            return handle, raw
+
+        report, raw_report = read(report_path)
+        markdown = raw_report.decode('utf-8')
+        block = claim_review_block(markdown, context, budget)
+        if not block:
+            return
+        metadata, raw_metadata = read(metadata_path)
+        saved = strict_json(raw_metadata)
+        embedded = saved.get('markdown_content') if isinstance(saved, dict) else None
+        # The inherited text-mode writer can expand LF on Windows.
+        if not isinstance(embedded, str) or markdown not in (embedded, embedded.replace('\n', os.linesep)):
+            raise ReportError('conflict')
+        saved['markdown_content'] = markdown + block.decode('utf-8')
+        new_metadata = json.dumps(saved, ensure_ascii=False, indent=2).replace('\n', os.linesep).encode('utf-8')
+        if len(new_metadata) > FILE_BYTES or total - metadata_size + len(new_metadata) + len(block) > TOTAL_BYTES:
+            return
+        if any(_identity(_safe(path)) != stamp for path, stamp in before.items()) or any(
+                _identity(os.fstat(handle.fileno())) != stamp for handle, stamp in opened.values()):
+            raise ReportError('conflict')
+        metadata.seek(0)
+        metadata.write(new_metadata)
+        metadata.truncate()
+        report.seek(report_size)
+        report.write(block)
 
 
 def _await_control(connection, cancelled, action, deadline):
@@ -157,7 +213,7 @@ def _child(connection, cancelled, frozen, factory, operation, deadline):
         checkpoint()
         model = factory.create(deadline=deadline, checkpoint=checkpoint, first_call=first_call)
         agent = create_connected_report_agent(context, requirement=identity['options']['requirement'],
-            output_language=identity['options']['output_language'], model_client=model)
+            output_language=identity['options']['output_language'], model_client=model, include_claim_review=True)
         report_id = identity['report_id']
 
         def progress(stage, percent, _message):
@@ -184,6 +240,8 @@ def _child(connection, cancelled, frozen, factory, operation, deadline):
                     ('source_revision', 'source_name', 'source_sha256', 'passages')}
                     for source in context['sources']])
         (root / 'native_evidence.json').write_bytes(encoded(native_evidence))
+        _append_claim_review(root, len(report.outline.sections), context)
+        checkpoint()
         manifest = output_manifest(root, len(report.outline.sections))
         with report_files(root, manifest) as content:
             validate_references(content['full_report.md'].decode('utf-8'), context)

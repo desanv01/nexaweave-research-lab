@@ -7,15 +7,19 @@ from hashlib import sha256
 from importlib.resources import files
 import json
 import os
+import random
+import struct
 import threading
-from uuid import UUID, uuid4
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 import pytest
 from psycopg.types.json import Jsonb
 from nexaweave_execution.native_launch_store import NativeLaunchStore,migrate
-from nexaweave_execution.native_launch_contracts import LaunchAuthorityError,canonical
-from nexaweave_execution.native_run_contracts import NativeChildIdentity,NativeRunConflict,NativeRunReceipt
+from nexaweave_execution.native_launch_contracts import (LaunchAuthorityError, NativeForkArchive, canonical,
+    native_budget_episode, native_budget_fingerprint)
+from nexaweave_execution.native_run_contracts import (NativeChildIdentity, NativeRunConflict,
+    NativeRunBusy, NativeRunDenied, NativeRunReceipt, NativeRunRequest, RunState, SwapActiveActorV1)
 from nexaweave_execution.native_run_store import NativeRunStore,migrate_native_runs
-from nexaweave_execution.budget import migrate as migrate_budget
+from nexaweave_execution.budget import BudgetDenied, migrate as migrate_budget
 from nexaweave_execution.preparation_store import migrate as migrate_preparation
 from test_source_bridge_postgres import factory as original_factory
 
@@ -140,6 +144,7 @@ def _legacy_frozen_launch():
 def test_own_migration_catalog_drift_and_previous_checksums(factory):
     migrate_all(factory)
     sql=files('nexaweave_execution').joinpath('migrations/native_launch_0001.sql').read_text('utf-8')
+    v2_sql=files('nexaweave_execution').joinpath('migrations/native_launch_0002.sql').read_text('utf-8')
     checksum=sha256(sql.encode('utf-8')).hexdigest()
     assert checksum=='5ae871d5d7f8824d357f6a8019ed2a12ab77ac7e5522886516d1594b2196218d'
     frozen=_legacy_frozen_launch();identity=frozen['identity'];native=identity['request'];run_id=UUID(native['run_id'])
@@ -150,7 +155,7 @@ def test_own_migration_catalog_drift_and_previous_checksums(factory):
     with factory() as conn:
         old=conn.execute('SELECT checksum FROM mf_execution.schema_migrations').fetchall()
         upgraded=conn.execute(migrations).fetchall()
-        assert [row[0] for row in upgraded]==[1,2] and upgraded[0][1]==checksum
+        assert [row[0] for row in upgraded]==[1,2,3] and upgraded[0][1]==checksum
         with conn.transaction(force_rollback=True):
             conn.execute("SET LOCAL statement_timeout='10s'")
             conn.execute("SET LOCAL lock_timeout='5s'")
@@ -165,9 +170,21 @@ def test_own_migration_catalog_drift_and_previous_checksums(factory):
                  UUID(native['project_id']),1,declared_sha,identity_sha,Jsonb(frozen)))
             original=conn.execute(select_row,(run_id,)).fetchone()
             assert original is not None and conn.execute(migrations).fetchall()==upgraded[:1]
+            conn.execute(v2_sql)
+            conn.execute('INSERT INTO mf_native_launch.schema_migrations VALUES(%s,%s,%s)',upgraded[1])
+            assert conn.execute(select_row,(run_id,)).fetchone()==(*original,None)
+            for drift in (
+                'CREATE TABLE mf_native_launch.unexpected_v2(id integer)',
+                "UPDATE mf_native_launch.schema_migrations SET checksum=repeat('0',64) WHERE version=2",
+            ):
+                with conn.transaction(force_rollback=True):
+                    conn.execute(drift)
+                    with pytest.raises(LaunchAuthorityError):
+                        migrate(conn)
+                    assert len(conn.execute(migrations).fetchall())==2
             migrate(conn);migrate(conn)
             assert conn.execute(migrations).fetchall()==upgraded
-            assert conn.execute(select_row,(run_id,)).fetchone()==(*original,None)
+            assert conn.execute(select_row,(run_id,)).fetchone()==(*original,None,None)
             row=NativeLaunchStore(lambda:nullcontext(conn)).get('owner',run_id,identity_sha)
             assert row.frozen==frozen and row.request.to_wire()==native
             assert canonical(row.frozen['declaration'])==declared_bytes
@@ -185,6 +202,10 @@ def test_own_migration_catalog_drift_and_previous_checksums(factory):
         with pytest.raises(LaunchAuthorityError):
             with conn.transaction():
                 conn.execute('CREATE TABLE mf_native_launch.unexpected(id integer)');migrate(conn)
+        with conn.transaction(force_rollback=True):
+            conn.execute('ALTER TABLE mf_native_launch.plans DISABLE TRIGGER native_launch_fork_identity_guard')
+            with pytest.raises(LaunchAuthorityError):
+                migrate(conn)
         assert conn.execute('SELECT checksum FROM mf_execution.schema_migrations').fetchall()==old
 
 
@@ -195,19 +216,23 @@ def _twitter_authority(template, checkpoint=None):
     declaration['launch_id']=request['run_id']=str(uuid4())
     assert request['platforms']==['twitter'] and request['max_rounds']==1
     if checkpoint is not None:
-        declaration.update(schema_version=2,checkpoint=deepcopy(checkpoint))
-        identity.update(schema_version=2,checkpoint=deepcopy(checkpoint))
-        if checkpoint['mode']=='continue':
-            request.update(schema_version=2,source_run_id=checkpoint['source_run_id'],
+        version=3 if checkpoint['mode']=='fork' else 2
+        declaration.update(schema_version=version,checkpoint=deepcopy(checkpoint))
+        identity.update(schema_version=version,checkpoint=deepcopy(checkpoint))
+        if checkpoint['mode']!='capture':
+            request.update(schema_version=version,source_run_id=checkpoint['source_run_id'],
                            checkpoint_sha256=checkpoint['checkpoint_sha256'])
+        if version==3:
+            request['intervention']=deepcopy(checkpoint['intervention'])
     return frozen
 
 
-def _put_authority(store, frozen):
-    return store.put('owner',frozen['declaration'],frozen['identity'],configuration=frozen['configuration'])
+def _put_authority(store, frozen, archive=None):
+    return store.put('owner',frozen['declaration'],frozen['identity'],configuration=frozen['configuration'],
+                     fork_archive=archive)
 
 
-def _terminal_source(factory, prep, scope, host, template, *, capture):
+def _terminal_source(factory, prep, scope, host, template, *, capture, archive_out=None):
     frozen=_twitter_authority(template,{'mode':'capture'} if capture else None)
     row=_put_authority(host.store,frozen)
     assert row.frozen==frozen and row.request.schema_version==1
@@ -223,8 +248,13 @@ def _terminal_source(factory, prep, scope, host, template, *, capture):
     started=native.claim_start('owner',row.run_id,owner_id)
     child=NativeChildIdentity(uuid4(),12345,'f'*64)
     native.attach('owner',row.run_id,started.attempt_id,owner_id,child)
+    evidence='e'*64
+    if archive_out is not None:
+        archive=_fork_archive(row,child)
+        archive_out.append(archive)
+        evidence=sha256(archive.lineage).hexdigest()
     receipt=NativeRunReceipt(row.run_id,started.attempt_id,child.instance_id,
-        row.request.fingerprint,'completed','e'*64)
+        row.request.fingerprint,'completed',evidence)
     terminal=native.settle('owner',row.run_id,started.attempt_id,owner_id,receipt)
     completed=host.store.observe('owner',row.run_id,row.launch_sha256,terminal)
     assert completed.state=='completed' and completed.receipt==receipt.to_wire()
@@ -240,9 +270,43 @@ def _continuation(source):
         'checkpoint_sha256':source.receipt['evidence_sha256']}
 
 
-def _refused_authority(store, frozen):
+def _fork_archive(source, child):
+    request=source.request
+    anchors=dict(graph_id=source.frozen['identity']['display_graph_id'],simulation_id=request.simulation_id,
+        run_id=str(request.run_id),project_id=str(request.project_id),project_revision=request.project_revision,
+        branch_id=str(uuid5(NAMESPACE_URL,'mirofish:native-checkpoint:v1:'+str(request.run_id))))
+    position=dict(completed_round=1,horizon=2,minutes_per_round=60,simulated_minutes=0,total_actions=2)
+    config_digest=bytes.fromhex('1'*64)
+    rng_version,vector,cache=random.Random(request.seed).getstate()
+    assert cache is None
+    runner=struct.pack('>4sB5I32s624IHBd',b'NWR1',rng_version,*position.values(),config_digest,
+        *vector,0,0.0)
+    manifest=canonical(dict(anchors=anchors,platform='twitter',version=1,round=1,post_count=1,
+        prior_cursor=3,prior_post_id=1,cursor=5,source_journal_mode='delete',manifest='manifest.json',
+        database_bytes=8192,database_sha256='5'*64,log_bytes=1024,log_sha256='6'*64,
+        full_checkpoint=False,continuation_supported=False,memory=dict(version=1,filename='native-memory.bin',
+            coverage='all_registered_agents',agent_count=2,bytes=1024,sha256='7'*64),
+        topology=dict(version=1,directed=True,vertex_count=2,edge_count=0,sha256='8'*64),
+        engine_clock=dict(version=1,before_step=1,after_step=2),
+        recommendation_state=dict(version=1,mode='random',use_openai_embedding=False,max_rec_post_len=2,
+            refresh_rec_post_count=2,following_post_count=3,users=2,rows=2,sha256='9'*64),
+        runner_state=dict(version=1,file='native-runner.bin',bytes=len(runner),sha256=sha256(runner).hexdigest())))
+    lineage=canonical(dict(version=1,anchors=anchors,producer_pid=child.process_id,
+        manifest_sha256=sha256(manifest).hexdigest(),prepared=dict(artifact_sha256=request.artifact_sha256,
+        config_sha256=config_digest.hex(),source_grounding_sha256='2'*64,profile_sha256='3'*64),
+        owners=[dict(platform_id=index,name=f'Actor {index}',camel_id=f'actor-{index}',token_limit=4096)
+                for index in range(2)],runner=position))
+    return NativeForkArchive(lineage,manifest,runner)
+
+
+def _fork_checkpoint(source, archive):
+    return {**_continuation(source),'mode':'fork','intervention':dict(kind='swap_active_actor_v1',
+        manifest_sha256=sha256(archive.manifest).hexdigest(),runner_state_sha256=sha256(archive.runner_state).hexdigest())}
+
+
+def _refused_authority(store, frozen, archive=None):
     with pytest.raises(LaunchAuthorityError):
-        _put_authority(store,frozen)
+        _put_authority(store,frozen,archive)
     with pytest.raises(LaunchAuthorityError) as error:
         store.get('owner',frozen['declaration']['launch_id'])
     assert error.value.code=='not_found'
@@ -258,7 +322,9 @@ def test_explicit_checkpoint_capture_authorizes_one_continuation(factory,tmp_pat
     changed_seed=_twitter_authority(template,{'mode':'capture'})
     changed_seed['identity']['request']['seed']+=1
     _refused_authority(store,changed_seed)
-    source=_terminal_source(factory,prep,scope,host,template,capture=True)
+    archive_out=[]
+    source=_terminal_source(factory,prep,scope,host,template,capture=True,archive_out=archive_out)
+    archive,=archive_out
     checkpoint=_continuation(source)
     assert source.frozen['identity']['checkpoint']==source.frozen['declaration']['checkpoint']=={'mode':'capture'}
 
@@ -328,6 +394,141 @@ def test_explicit_checkpoint_capture_authorizes_one_continuation(factory,tmp_pat
     }
     assert not (prep.root/source.simulation_id/'.native_prepared_start_claim').exists()
 
+    fork_checkpoint=_fork_checkpoint(source,archive)
+    fork=_twitter_authority(template,fork_checkpoint)
+    _refused_authority(store,fork)
+    for bad_archive in (replace(archive, lineage=archive.lineage+b' '),
+                        replace(archive, manifest=archive.manifest+b' '),
+                        replace(archive, runner_state=archive.runner_state[:-1]+b'!')):
+        _refused_authority(store,fork,bad_archive)
+    altered=_twitter_authority(template,fork_checkpoint)
+    altered['identity']['request']['intervention']['runner_state_sha256']='d'*64
+    _refused_authority(store,altered,archive)
+    crossed=_twitter_authority(legacy_template,fork_checkpoint)
+    _refused_authority(store,crossed,archive)
+    wrong_owner_fork=deepcopy(fork)
+    wrong_owner_fork['identity']['request']['principal']='other'
+    _refused_authority(store,wrong_owner_fork,archive)
+    changed_factory=deepcopy(fork)
+    changed_factory['configuration']['factory_sha256']='0'*64
+    _refused_authority(store,changed_factory,archive)
+
+    native_store=NativeRunStore(factory)
+    producer=native_store.get('owner',source.run_id)
+    fork_request=NativeRunRequest.from_wire(fork['identity']['request'])
+    colliding_v2=replace(fork_request,schema_version=2,intervention=None)
+    # A standalone v2 run can claim the ID before fork planning.
+    with factory() as conn, conn.transaction(force_rollback=True):
+        local_factory=lambda:nullcontext(conn)
+        assert NativeRunStore(local_factory).register(colliding_v2).request==colliding_v2
+        _refused_authority(NativeLaunchStore(local_factory),fork,archive)
+    planned_fork=_put_authority(store,fork,archive)
+    assert planned_fork.request==fork_request
+    assert fork_request.intervention == SwapActiveActorV1.from_wire(fork_checkpoint['intervention'])
+    assert fork_request.to_wire() == fork['identity']['request']
+    assert fork_request.fingerprint == sha256(_wire_bytes(fork_request.to_wire())).hexdigest()
+    assert planned_fork.launch_sha256 == sha256(_wire_bytes(fork['identity'])).hexdigest()
+    assert _put_authority(store,fork)==planned_fork
+    assert _put_authority(store,fork,archive)==planned_fork
+    assert all(secret not in canonical(planned_fork.frozen) for secret in (archive.lineage,archive.manifest,archive.runner_state))
+    with pytest.raises(NativeRunDenied):
+        native_store.register(fork_request)
+    v1=replace(source.request,run_id=fork_request.run_id,simulation_id='ordinary_v1')
+    for collision in (v1,colliding_v2):
+        with pytest.raises(NativeRunConflict):
+            native_store.register(collision)
+    with factory() as conn, conn.transaction(force_rollback=True):
+        conn.execute('INSERT INTO mf_native_execution.runs (run_id,principal,project_id,project_revision,'
+            'simulation_id,artifact_sha256,runtime_sha256,platforms,seed,max_rounds,request_fingerprint,'
+            'source_run_id,checkpoint_sha256) SELECT %s,principal,project_id,project_revision,simulation_id,'
+            'artifact_sha256,runtime_sha256,platforms,seed,max_rounds,%s,run_id,%s '
+            'FROM mf_native_execution.runs WHERE run_id=%s',
+            (colliding_v2.run_id,colliding_v2.fingerprint,colliding_v2.checkpoint_sha256,source.run_id))
+        local_store=NativeLaunchStore(lambda:nullcontext(conn))
+        with pytest.raises(LaunchAuthorityError,match='^conflict$'):
+            local_store.queue_fork('owner',planned_fork.run_id,planned_fork.launch_sha256)
+        assert local_store.get('owner',planned_fork.run_id)==planned_fork
+        assert conn.execute('SELECT 1 FROM mf_execution.reservations WHERE operation_id=%s',
+                            (planned_fork.run_id,)).fetchone() is None
+    with pytest.raises(LaunchAuthorityError):
+        store.queue('owner',planned_fork.run_id,planned_fork.launch_sha256,winner.budget_attempt_id)
+    extra=_twitter_authority(template,fork_checkpoint)
+    _refused_authority(store,extra,archive)
+    extra_request=NativeRunRequest.from_wire(extra['identity']['request'])
+    with pytest.raises(NativeRunDenied):
+        native_store.register(extra_request)
+    with pytest.raises(BudgetDenied):
+        host.budget.native_reservation('owner',prep.account_id,extra_request,
+                                      sha256(_wire_bytes(extra['identity'])).hexdigest())
+
+    queued_fork,won=store.queue_fork('owner',planned_fork.run_id,planned_fork.launch_sha256)
+    assert won and queued_fork.state=='queued' and queued_fork.dispatch_claimed
+    assert queued_fork.budget_attempt_id not in {source.budget_attempt_id,winner.budget_attempt_id}
+    assert store.queue_fork('owner',queued_fork.run_id,queued_fork.launch_sha256)==(queued_fork,False)
+    with pytest.raises(NativeRunConflict):
+        native_store.register(colliding_v2)
+    reserved=host.budget.native_reservation('owner',prep.account_id,fork_request,queued_fork.launch_sha256)
+    assert reserved.attempt_id == queued_fork.budget_attempt_id and reserved.state == 'reserved'
+    assert reserved.fingerprint == native_budget_fingerprint(queued_fork.launch_sha256)
+    assert reserved.episode_id == native_budget_episode(scope.group_id,queued_fork.run_id)
+    with pytest.raises(NativeRunDenied):
+        native_store.register(fork_request)
+    host.budget.start('owner',prep.account_id,queued_fork.run_id,queued_fork.budget_attempt_id)
+    assert native_store.register(winner.request).request == winner.request
+    registered=native_store.register(fork_request)
+    assert registered.request == fork_request and native_store.register(fork_request) == registered
+    assert _put_authority(store,fork)==queued_fork
+    with pytest.raises(NativeRunConflict):
+        native_store.register(replace(fork_request, intervention=replace(fork_request.intervention,
+                                      runner_state_sha256='4'*64)))
+    with factory() as conn:
+        for schema,table in (('mf_native_execution','runs'),('mf_native_launch','plans')):
+            with pytest.raises(Exception) as refused:
+                with conn.transaction():
+                    conn.execute(f'UPDATE {schema}.{table} SET intervention=NULL WHERE run_id=%s',
+                                 (fork_request.run_id,))
+            assert getattr(refused.value,'sqlstate',None)=='23514'
+    fork_owner=uuid4()
+    with factory() as conn, conn.transaction(force_rollback=True):
+        local_factory=lambda:nullcontext(conn)
+        local_store=NativeLaunchStore(local_factory)
+        cancelled=local_store.cancel('owner',queued_fork.run_id,queued_fork.launch_sha256)
+        assert cancelled.cancel_requested and cancelled.state=='queued'
+        with pytest.raises(Exception) as refused:
+            with conn.transaction():
+                conn.execute('UPDATE mf_native_launch.plans SET cancel_requested=false WHERE run_id=%s',
+                             (queued_fork.run_id,))
+        assert getattr(refused.value,'sqlstate',None)=='23514'
+        assert local_store.get('owner',queued_fork.run_id)==cancelled
+        with pytest.raises(NativeRunDenied):
+            NativeRunStore(local_factory).claim_start('owner',fork_request.run_id,fork_owner)
+
+    claimed=native_store.claim_start('owner',fork_request.run_id,fork_owner)
+    assert claimed.state=='starting' and claimed.attempt_id not in {None,producer.attempt_id}
+    with pytest.raises(NativeRunBusy):
+        native_store.claim_start('owner',fork_request.run_id,uuid4())
+    fork_child=NativeChildIdentity(uuid4(),12346,'f'*64)
+    running=native_store.attach('owner',fork_request.run_id,claimed.attempt_id,fork_owner,fork_child)
+    with factory() as conn, conn.transaction(force_rollback=True):
+        local_store=NativeLaunchStore(lambda:nullcontext(conn))
+        observed=local_store.observe('owner',queued_fork.run_id,queued_fork.launch_sha256,running)
+        assert observed.state=='running'
+        assert local_store.observe('owner',queued_fork.run_id,queued_fork.launch_sha256,claimed)==observed
+    uncertain=store.scheduling_uncertain('owner',queued_fork.run_id,queued_fork.launch_sha256)
+    assert uncertain.state=='uncertain' and uncertain.receipt is None
+    fork_receipt=NativeRunReceipt(fork_request.run_id,claimed.attempt_id,fork_child.instance_id,
+                                  fork_request.fingerprint,'completed','a'*64)
+    unconfirmed=replace(running,state=RunState.completed,receipt=fork_receipt)
+    for stale in (running,unconfirmed):
+        assert store.observe('owner',queued_fork.run_id,queued_fork.launch_sha256,stale)==uncertain
+    finished=native_store.settle('owner',fork_request.run_id,claimed.attempt_id,fork_owner,fork_receipt)
+    completed=store.observe('owner',queued_fork.run_id,queued_fork.launch_sha256,finished)
+    assert completed.state=='completed' and completed.receipt==fork_receipt.to_wire()
+    for replay in (registered,claimed,running,finished):
+        assert store.observe('owner',queued_fork.run_id,queued_fork.launch_sha256,replay)==completed
+    assert native_store.get('owner',source.run_id)==producer
+    assert store.get('owner',source.run_id,source.launch_sha256)==source
+
     # Recheck current project authority while an otherwise eligible source has no continuation claim.
     from nexaweave_storage import ProjectStore
     from test_project_store import snapshot
@@ -335,9 +536,14 @@ def test_explicit_checkpoint_capture_authorizes_one_continuation(factory,tmp_pat
     stale_prep,stale_scope,stale_plan=ready_host(factory,stale_path,checkpoint=True)
     stale_host=launch_host(stale_prep,factory)
     stale_template=stale_host.store.get('owner',stale_host.plan(declaration(stale_plan))['request']['run_id'])
-    stale_source=_terminal_source(factory,stale_prep,stale_scope,stale_host,stale_template,capture=True)
+    stale_archives=[]
+    stale_source=_terminal_source(factory,stale_prep,stale_scope,stale_host,stale_template,
+                                  capture=True,archive_out=stale_archives)
     stale_frozen=_twitter_authority(stale_template,_continuation(stale_source))
     stale=_put_authority(store,stale_frozen)
+    stale_archive,=stale_archives
+    stale_fork=_put_authority(store,_twitter_authority(stale_template,
+        _fork_checkpoint(stale_source,stale_archive)),stale_archive)
     stale_attempt=uuid4()
     changed=snapshot();changed['name']='updated after checkpoint authorization'
     ProjectStore(factory).update('owner',stale_scope.project_id,1,changed)
@@ -347,6 +553,11 @@ def test_explicit_checkpoint_capture_authorizes_one_continuation(factory,tmp_pat
     with pytest.raises(LaunchAuthorityError):
         store.queue('owner',stale.run_id,stale.launch_sha256,stale_attempt)
     assert store.get('owner',stale.run_id)==stale
+    with pytest.raises(LaunchAuthorityError):
+        store.queue_fork('owner',stale_fork.run_id,stale_fork.launch_sha256)
+    assert store.get('owner',stale_fork.run_id)==stale_fork
+    with pytest.raises(BudgetDenied):
+        stale_host.budget.native_reservation('owner',stale_prep.account_id,stale_fork.request,stale_fork.launch_sha256)
 
 
 def configure_offline_scheduler(host):

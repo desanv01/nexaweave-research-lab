@@ -323,7 +323,9 @@ class KnowledgeProcessClient:
             try:
                 if self._cooperative_tick is not None:
                     self._cooperative_tick()
-                private_directory = tempfile.TemporaryDirectory(prefix="nexaweave-knowledge-")
+                # Windows process creation has a tighter cwd limit than file I/O.
+                prefix = "" if os.name == "nt" else "nexaweave-knowledge-"
+                private_directory = tempfile.TemporaryDirectory(prefix=prefix)
                 owner.bind_private_directory(private_directory)
                 directory = private_directory.name
                 events = queue.Queue()

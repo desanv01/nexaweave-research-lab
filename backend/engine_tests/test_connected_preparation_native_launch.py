@@ -74,8 +74,8 @@ class CheckpointConnectedChat(RichConnectedChat):
 
 
 def _checkpoint_reference(dto):
-    assert dto['schema_version'] == 2
-    return {'schema_version': 2, 'launch_id': dto['request']['run_id'], 'launch_sha256': dto['launch_sha256']}
+    assert dto['schema_version'] in (2, 3)
+    return {'schema_version': dto['schema_version'], 'launch_id': dto['request']['run_id'], 'launch_sha256': dto['launch_sha256']}
 
 
 def _checkpoint_http(monkeypatch, host, observations):
@@ -435,11 +435,28 @@ async def test_generated_twitter_checkpoint_and_continuation_through_protected_h
         assert row.request.source_run_id == producer.request.run_id
         assert dispatched == [producer.request.run_id, row.run_id]
 
+        stages = ('no-supervisor', 'no-owned-child', 'pre-GO',
+                  'post-GO', 'post-GO-live', 'post-GO-exited')
+        stage = 0
+
         async def wait_for_gate():
+            nonlocal stage
             while True:
                 supervisor = created.get(row.run_id)
                 if supervisor is not None:
-                    continuation = supervisor.coordinator.driver._factory
+                    stage = max(stage, 1)
+                    driver = supervisor.coordinator.driver
+                    try:
+                        owned = driver._owned
+                        if owned is not None:
+                            stage = max(stage, 2)
+                            if owned.sent_go:
+                                stage = max(stage, 3)
+                                stage = max(stage, 4 if owned.process.exitcode is None else 5)
+                    except Exception:
+                        # Teardown can race sampling. Keep the furthest observation.
+                        pass
+                    continuation = driver._factory
                     marker = _restored_wait_marker(Path(continuation.child_dir))
                     try:
                         with marker.open('rb') as stream:
@@ -450,7 +467,11 @@ async def test_generated_twitter_checkpoint_and_continuation_through_protected_h
                         return token
                 await asyncio.sleep(0.025)
 
-        token = await asyncio.wait_for(wait_for_gate(), remaining(180))
+        try:
+            token = await asyncio.wait_for(wait_for_gate(), remaining(180))
+        except asyncio.TimeoutError as error:
+            error.add_note(f'checkpoint_restore_stage={stages[stage]}')
+            raise
         active = NativeRunStore(factory).get('owner', row.run_id)
         assert active.state == RunState.running and active.request == row.request
         assert active.attempt_id is not None and active.child is not None and active.receipt is None
@@ -745,6 +766,11 @@ async def test_generated_twitter_checkpoint_and_continuation_through_protected_h
             assert _read_bounded(child_log, _LOG_LIMIT) == child_raw_log
             assert reader_roots == [child_dir, child_dir]
 
+            from native_twitter_fork_witness import qualify_fork
+            fork_id = await qualify_fork(
+                post, launch, remaining, host, planned, capture, producer, continuation, restored, dispatched,
+            )
+
             projects = ProjectStore(factory)
             project = projects.get('owner', scope.project_id)
             assert project.revision == restored.request.project_revision
@@ -770,14 +796,14 @@ async def test_generated_twitter_checkpoint_and_continuation_through_protected_h
             await read_page(continue_ref, offset=offset, refused=stale_refusal)
             assert reader_roots == [child_dir, child_dir, child_dir]
 
-            assert dispatched == run_ids
+            assert dispatched == [*run_ids, fork_id]
             assert set(created) == set(exited) == set(dispatched) and not reaped
             assert [host.native.get('owner', run_id) for run_id in run_ids] == native_before
             assert [host.store.get('owner', run_id) for run_id in run_ids] == launches_before
             with factory() as conn:
                 assert host.budget._row(conn, host.account_id, producer.request.run_id) == capture_budget
                 assert host.budget._row(conn, host.account_id, restored.request.run_id) == restore_budget
-            assert host.budget.status('owner', host.account_id).accounted_ceiling_microusd == 12
+            assert host.budget.status('owner', host.account_id).accounted_ceiling_microusd == 16
             assert monotonic() < deadline
     finally:
         for supervisor in created.values():

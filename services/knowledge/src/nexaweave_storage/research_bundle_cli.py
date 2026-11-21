@@ -46,7 +46,7 @@ def parse_request(raw):
             version = 1
             if "schema_version" in data:
                 version = data["schema_version"]
-                if type(version) is not int or version != 2:
+                if type(version) is not int or version not in (2, 3):
                     raise ValueError()
                 fields.add("schema_version")
             if set(data) != fields:
@@ -58,7 +58,7 @@ def parse_request(raw):
             if type(data["revision"]) is not int or not 1 <= data["revision"] <= 2_147_483_647:
                 raise ValueError()
             selected = data["source_revisions"]
-            if type(selected) is not list or not 1 <= len(selected) <= (1 if version == 2 else 16):
+            if type(selected) is not list or not 1 <= len(selected) <= (1 if version >= 2 else 16):
                 raise ValueError()
             for item in selected:
                 if type(item) is not str:

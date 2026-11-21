@@ -4,11 +4,12 @@ No injected facade, provider, transport or store. Canned responses prove dispatc
 and provenance controls, not semantic extraction quality or paid-model readiness.
 """
 import asyncio
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from copy import deepcopy
 import hashlib
 import importlib.util
 import json
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -57,7 +58,7 @@ def canned(schema):
 
 
 @contextmanager
-def model_server():
+def model_server(*, generation_only=False):
     records, errors, state = [], [], {'fail': False}
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -69,6 +70,8 @@ def model_server():
                 body = json.loads(self.rfile.read(length))
                 assert self.headers.get('Authorization') == 'Bearer explicit-local-dummy'
                 assert body['model'] in {'fixture-generation', 'fixture-embedding'}
+                if generation_only:
+                    assert self.path == '/v1/chat/completions' and body['model'] == 'fixture-generation'
                 records.append({'path': self.path, 'model': body['model']})
                 if state['fail']:
                     self.send_error(500, 'synthetic unavailable')
@@ -123,7 +126,8 @@ def model_server():
 
 
 @contextmanager
-def host(directory, scope, display, account, model_port, *, enabled=True, ceiling=4):
+def host(directory, scope, display, account, model_port, *, enabled=True, ceiling=4,
+         embedding_port=None, omit_embedding_endpoint=False, closed_model_endpoints=False):
     from tools.run_unit_tests import _unit_environment
     assert type(ceiling) is int and 1 <= ceiling <= 4
     backend, python, bootstrap = (os.environ[k] for k in
@@ -161,6 +165,16 @@ def host(directory, scope, display, account, model_port, *, enabled=True, ceilin
         KNOWLEDGE_EMBEDDING_DIMENSION='1024', KNOWLEDGE_STRUCTURED_OUTPUT_MODE='json_schema',
         KNOWLEDGE_CALL_TIMEOUT_SECONDS='5', KNOWLEDGE_MAX_TOKENS='512',
         KNOWLEDGE_MAX_COROUTINES='1', KNOWLEDGE_TOTAL_LLM_CALL_BUDGET='32')
+    if embedding_port is not None:
+        assert type(embedding_port) is int and 1 <= embedding_port <= 65535
+        assert (embedding_port == model_port) == closed_model_endpoints
+        env.update(KNOWLEDGE_EMBEDDING_BASE_URL=f'http://127.0.0.1:{embedding_port}/v1',
+                   KNOWLEDGE_EMBEDDING_MODEL='qwen3-embedding-0.6b-q8',
+                   KNOWLEDGE_SEARCH_RECIPE='hybrid_rrf')
+        if omit_embedding_endpoint:
+            env.pop('KNOWLEDGE_EMBEDDING_BASE_URL')
+    else:
+        assert not omit_embedding_endpoint and not closed_model_endpoints
     # Observe the real fixed child; no facade/provider injection or script override.
     extra = {key for key in env if key.startswith('KNOWLEDGE_')} - {
         'KNOWLEDGE_PYTHON', 'KNOWLEDGE_BOOTSTRAP_SCRIPT', 'KNOWLEDGE_READ_TOKEN'}
@@ -220,6 +234,91 @@ def neo_scope(scope):
             rows, _, _ = driver.execute_query('MATCH (n) WHERE n.group_id=$group RETURN count(n) AS n',
                                               group=scope.group_id, routing_='r')
             assert rows[0]['n'] == 0
+
+
+
+@contextmanager
+def browser_two_hop_seed(scope_dto, ingestion):
+    from nexaweave_knowledge.contracts import KnowledgeScope
+    from neo4j import Query
+
+    scope = KnowledgeScope.model_validate_json(json.dumps(scope_dto))
+    assert os.environ.get('KNOWLEDGE_INTEGRATION') == '1'
+    password = os.environ['KNOWLEDGE_TEST_PASSWORD']
+    assert password and password.lower() not in {'password', 'neo4j', 'test', 'changeme'}
+    first, second = ingestion[:2]
+    assert all(item['state'] == 'completed' and item['scope'] == scope_dto for item in (first, second))
+    episodes = [item['episode_id'] for item in (first, second)]
+    evidence = [sorted(item['evidence_ids']) for item in (first, second)]
+    assert len(set(episodes)) == 2 and all(1 <= len(ids) <= 100 for ids in evidence)
+    nodes = [str(uuid4()) for _ in range(3)]
+    edges = [str(uuid4()) for _ in range(2)]
+    mentions = [str(uuid4()) for _ in range(4)]
+    with GraphDatabase.driver('bolt://127.0.0.1:17687', auth=('neo4j', password), connection_timeout=3,
+                              connection_acquisition_timeout=3, max_transaction_retry_time=0) as driver:
+        def run(query, **parameters):
+            return driver.execute_query(Query(query, timeout=3), group=scope.group_id, **parameters)
+
+        try:
+            rows, _, _ = run(
+                "MATCH (e0:Episodic {uuid:$episodes[0],group_id:$group}), "
+                "(e1:Episodic {uuid:$episodes[1],group_id:$group}), "
+                "(:MiroFishIngest {uuid:$episodes[0],group_id:$group,status:'complete'}), "
+                "(:MiroFishIngest {uuid:$episodes[1],group_id:$group,status:'complete'}) "
+                "CREATE (a:Entity {uuid:$nodes[0],group_id:$group,name:'Cited path start',"
+                "summary:'',created_at:datetime()}), "
+                "(b:Entity {uuid:$nodes[1],group_id:$group,name:'Cited path midpoint',"
+                "summary:'',created_at:datetime()}), "
+                "(c:Entity {uuid:$nodes[2],group_id:$group,name:'Cited path destination',"
+                "summary:'',created_at:datetime()}) "
+                "CREATE (a)-[:RELATES_TO {uuid:$edges[0],group_id:$group,name:'RELATES_TO',"
+                "fact:'The start leads to the midpoint.',episodes:[$episodes[0]],"
+                "created_at:datetime(),valid_at:datetime()}]->(b), "
+                "(b)-[:RELATES_TO {uuid:$edges[1],group_id:$group,name:'RELATES_TO',"
+                "fact:'The midpoint leads to the destination.',episodes:[$episodes[1]],"
+                "created_at:datetime(),valid_at:datetime()}]->(c) "
+                "CREATE (e0)-[:MENTIONS {uuid:$mentions[0],group_id:$group,created_at:datetime()}]->(a), "
+                "(e0)-[:MENTIONS {uuid:$mentions[1],group_id:$group,created_at:datetime()}]->(b), "
+                "(e1)-[:MENTIONS {uuid:$mentions[2],group_id:$group,created_at:datetime()}]->(b), "
+                "(e1)-[:MENTIONS {uuid:$mentions[3],group_id:$group,created_at:datetime()}]->(c) "
+                "RETURN [a.uuid,b.uuid,c.uuid] AS created",
+                nodes=nodes, edges=edges, episodes=episodes, mentions=mentions,
+            )
+            assert len(rows) == 1 and rows[0]['created'] == nodes, 'cited browser seeds were not created once'
+            yield {'nodes': nodes, 'edges': edges, 'evidence': evidence}
+        finally:
+            try:
+                run('MATCH ()-[r:RELATES_TO]->() WHERE r.group_id=$group AND r.uuid IN $ids DELETE r', ids=edges)
+            finally:
+                try:
+                    run("MATCH (e:Episodic {group_id:$group})-[m:MENTIONS]->(n:Entity {group_id:$group}) "
+                        "WHERE e.uuid IN $episodes AND n.uuid IN $nodes "
+                        "AND m.group_id=$group AND m.uuid IN $mentions DELETE m",
+                        episodes=episodes, nodes=nodes, mentions=mentions)
+                finally:
+                    run('MATCH (n:Entity) WHERE n.group_id=$group AND n.uuid IN $ids DELETE n', ids=nodes)
+
+
+def verify_browser_two_hop(outputs, seed, graph, scope):
+    assert len(outputs) == 2, 'expected exactly two successful protected two-hop reads'
+    found, reverse = outputs
+    source, middle, target = seed['nodes']
+    for result in outputs:
+        scan = result['scope_coverage']
+        assert result['schema_version'] == 2 and result['operation'] == 'two_hop'
+        assert result['historical'] is False and scan['display_graph_id'] == graph and scan['scope'] == scope
+        assert 2 <= scan['scanned'] <= 500 and type(scan['truncated']) is bool
+    assert (found['source_node_id'], found['target_node_id']) == (source, target)
+    assert found['path_status'] == 'found' and found['scope_coverage']['returned'] == 2
+    assert found['path']['intermediate_node_id'] == middle
+    hops = found['path']['hops']
+    assert [(hop['source_node_id'], hop['target_node_id']) for hop in hops] == [(source, middle), (middle, target)]
+    assert [hop['provider_id'] for hop in hops] == seed['edges']
+    for hop, evidence in zip(hops, seed['evidence'], strict=True):
+        assert hop['evidence_ids'] == evidence == [item['evidence_id'] for item in hop['citations']]
+    assert (reverse['source_node_id'], reverse['target_node_id']) == (target, source)
+    assert reverse['path_status'] == 'no_path_in_scan' and reverse['path'] is None
+    assert reverse['scope_coverage']['returned'] == 0 and reverse['passage_coverage'] == []
 
 
 def seed(factory):
@@ -381,6 +480,11 @@ def test_real_protected_http_selected_retained_passage(factory, tmp_path):
     from backend.app.services.knowledge_ingestion_client import (
         KnowledgeTransportFailure, validate_result,
     )
+    native_port = None
+    if 'NEXAWEAVE_W63_EMBEDDING_PORT' in os.environ:
+        from tools.run_source_ingestion_tests import embedding_port
+        native_port = embedding_port()
+    local_embedding = native_port is not None
 
     display, scope, other_source, account, v1 = seed(factory)
     prefix = 'a' * 32765 + '猫'
@@ -414,16 +518,29 @@ def test_real_protected_http_selected_retained_passage(factory, tmp_path):
     status_url = f'/api/source/ingestion/operation/{display}/{operation}'
     plan_url, execute_url = (f'/api/source/ingestion/{method}/{display}' for method in ('plan', 'execute'))
     budget = BudgetLedger(factory)
+    ledger = Ledger(factory)
 
     def reservations():
         with factory() as connection:
             return connection.execute(
-                'SELECT operation_id,attempt_id,state FROM mf_execution.reservations WHERE account_id=%s',
+                'SELECT r.operation_id,r.attempt_id,r.state,to_jsonb(r) '
+                'FROM mf_execution.reservations AS r WHERE r.account_id=%s',
                 (account,),
             ).fetchall()
 
-    with neo_scope(scope) as driver, model_server() as (model_port, records, errors, _state):
-        with host(tmp_path/'selected', scope, display, account, model_port) as (port, token, _events_path):
+    with neo_scope(scope) as driver, ExitStack() as provider:
+        model_port, records, errors, _state = provider.enter_context(model_server(generation_only=local_embedding))
+        if local_embedding:
+            before = budget.status('owner', account)
+            with host(tmp_path/'missing-embedding', scope, display, account, model_port,
+                      embedding_port=native_port, omit_embedding_endpoint=True) as (port, token, _):
+                assert _exchange(port, 'POST', plan_url, payload, token=token)[0] == 200
+                status, _, reply = _exchange(port, 'POST', execute_url, payload, token=token)
+                assert status >= 400 and reply == {'success': False, 'error': {'code': 'model_calls_disabled'}}
+            assert records == [] and errors == [] and reservations() == []
+            assert budget.status('owner', account) == before
+        with host(tmp_path/'selected', scope, display, account, model_port,
+                  embedding_port=native_port) as (port, token, _events_path):
             def post(route, body):
                 return _exchange(port, 'POST', route, body, token=token)
 
@@ -485,6 +602,37 @@ def test_real_protected_http_selected_retained_passage(factory, tmp_path):
             assert status == 409 and reply['error']['code'] == 'conflict'
             assert len(records) == request_count and errors == []
             assert reservations() == settled
+            model_trace = deepcopy(records)
+            operation_record = ledger.get(scope, operation)
+            assert operation_record.receipt is not None
+            budget_status = budget.status('owner', account)
+            if local_embedding:
+                assert all(call['path'] == '/v1/chat/completions' and call['model'] == 'fixture-generation'
+                           and call['schema'] for call in model_trace)
+                with factory() as connection:
+                    reservation = budget._row(connection, account, operation)
+                assert reservation.receipt == operation_record.receipt
+                assert reservation.receipt.json_value() == executed['receipt']
+
+        # The first host has passed its normal stop and child cleanup checks.
+        # Route both providers to the closed fixture port during exact replay.
+        # Keep the explicit local policy and model identities valid at admission.
+        provider.close()
+        with host(tmp_path/'selected-restart', scope, display, account, model_port,
+                  embedding_port=model_port if local_embedding else None,
+                  closed_model_endpoints=local_embedding) as (port, token, events):
+            status, _, reply = _exchange(port, 'GET', status_url)
+            assert status == 401 and reply == {'success': False, 'error': {'code': 'unauthorized'}}
+            assert not [event for event in _events(events) if event['event'] == 'spawn']
+
+            status, _, reply = _exchange(port, 'GET', status_url, token=token)
+            assert status == 200 and reply == {'success': True, 'data': status_expected}
+            status, _, reply = _exchange(port, 'POST', execute_url, payload, token=token)
+            assert status == 200 and reply == {'success': True, 'data': executed}
+
+        assert records == model_trace and errors == []
+        assert ledger.get(scope, operation) == operation_record
+        assert reservations() == settled and budget.status('owner', account) == budget_status
 
         rows, _, _ = driver.execute_query(
             'MATCH (e:Episodic {group_id:$group}), (m:MiroFishIngest {uuid:$episode}) '
@@ -498,6 +646,18 @@ def test_real_protected_http_selected_retained_passage(factory, tmp_path):
         }]
         assert sources.get_source('owner', scope.project_id, retained.source_revision) == retained
         assert budget.status('owner', account).accounted_ceiling_microusd == 4
+        if local_embedding:
+            # The synthetic server rejected all embedding requests. The installed
+            # local-only path had exactly one embedding route for this scoped graph.
+            vectors, _, _ = driver.execute_query(
+                'MATCH ()-[r:RELATES_TO]->() WHERE r.group_id=$group AND $episode IN r.episodes '
+                'AND r.fact=$fact AND r.fact_embedding IS NOT NULL RETURN r.fact_embedding AS vector LIMIT 2',
+                group=scope.group_id, episode=episode, fact='Mira Vale works for Harbor Labs', routing_='r',
+            )
+            assert 1 <= len(vectors) <= 2
+            for row in vectors:
+                vector = row['vector']
+                assert len(vector) == 1024 and all(math.isfinite(value) for value in vector) and any(vector)
 
 
 def test_real_sdk_failure_holds_money_and_never_retries(factory, tmp_path):

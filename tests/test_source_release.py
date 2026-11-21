@@ -121,14 +121,25 @@ class SourceBundleTests(unittest.TestCase):
         return modified, hashlib.sha256(modified.read_bytes()).hexdigest()
 
     def test_exact_blobs_and_determinism(self):
+        notices = {
+            ".github/star-history/THIRD_PARTY_NOTICES.md": b"Synthetic retained component notice\n",
+            "THIRD_PARTY_NOTICES.md": b"Synthetic root notices\n",
+            "docs/licenses/camel-oasis-0.2.5-LICENSE.txt": b"Synthetic CAMEL license notice\n",
+            "docs/licenses/graphiti-core-0.30.2-LICENSE.txt": b"Synthetic Graphiti license notice\n",
+        }
+        for name, data in notices.items():
+            self.repo.write(name, data)
+        self.repo.files.update(notices)
+        self.repo.commit()
         self.repo.write("untracked-secret.txt", b"do not ship")
         self.repo.write("ignored.txt", b"do not ship")
         before = self.repo.git("rev-parse", "HEAD")
         original = dict(self.repo.files)
         first = self.build()
-        second = self.build(self.folder / "second.zip")
+        second_path = self.folder / "second.zip"
+        second = self.build(second_path)
         self.assertEqual(first["artifact_sha256"], second["artifact_sha256"])
-        self.assertEqual(self.output.read_bytes(), (self.folder / "second.zip").read_bytes())
+        self.assertEqual(self.output.read_bytes(), second_path.read_bytes())
         with zipfile.ZipFile(self.output) as archive:
             self.assertNotIn("untracked-secret.txt", archive.namelist())
             self.assertNotIn("ignored.txt", archive.namelist())
@@ -140,6 +151,56 @@ class SourceBundleTests(unittest.TestCase):
             self.assertFalse(manifest["all44_accepted"])
             inventory = json.loads(archive.read(bundle.INVENTORY_PATH))
             self.assertTrue(all(p["license"] == "NOASSERTION" for p in inventory["packages"]))
+            expected_members = [{"path": item.filename,
+                "mode": format(item.external_attr >> 16, "06o"), "size": item.file_size,
+                "sha256": hashlib.sha256(archive.read(item)).hexdigest()}
+                for item in sorted(archive.infolist(), key=lambda entry: entry.filename)]
+
+        def inventory_cli(path, sha, revision):
+            return subprocess.run(
+                [sys.executable, "-I", str(ROOT / "tools/build_source_release.py"), "inventory",
+                 "--artifact", str(path), "--revision", revision, "--expected-sha256", sha],
+                capture_output=True, timeout=60, check=False)
+
+        first_inventory = inventory_cli(self.output, first["artifact_sha256"], self.repo.revision)
+        second_inventory = inventory_cli(second_path, second["artifact_sha256"], self.repo.revision)
+        for response in (first_inventory, second_inventory):
+            self.assertEqual(response.returncode, 0, response.stderr)
+            self.assertEqual(response.stderr, b"")
+        self.assertEqual(first_inventory.stdout, second_inventory.stdout)
+        source_inventory = json.loads(first_inventory.stdout)
+        canonical = json.dumps(source_inventory, ensure_ascii=False, sort_keys=True,
+                               separators=(",", ":"), allow_nan=False) + "\n"
+        self.assertEqual(first_inventory.stdout, canonical.encode("utf-8"))
+        self.assertIs(source_inventory["ok"], True)
+        self.assertEqual(source_inventory["operation"], "inventory")
+        self.assertEqual(source_inventory["inventory_kind"], "source-archive")
+        self.assertEqual(source_inventory["artifact_sha256"], hashlib.sha256(self.output.read_bytes()).hexdigest())
+        self.assertEqual(source_inventory["source_revision"], self.repo.revision)
+        self.assertEqual(source_inventory["git_tree_id"], manifest["git_tree_id"])
+        self.assertEqual(source_inventory["shipped_members"], expected_members)
+        members = {item["path"]: item for item in expected_members}
+        self.assertEqual(source_inventory["root_license"], members["LICENSE"])
+        self.assertEqual(source_inventory["retained_notices"], [members[name] for name in sorted(notices)])
+        self.assertEqual(source_inventory["published_dependency_digests"], {
+            "kind": "lock-derived",
+            "inventory_path": bundle.INVENTORY_PATH,
+            "inventory_sha256": members[bundle.INVENTORY_PATH]["sha256"],
+            "packages": [{"ecosystem": "npm", "lock_path": "frontend/package-lock.json",
+                          "lock_package_path": "node_modules/pkg", "name": "pkg", "version": "2",
+                          "artifact_hashes": ["sha512-YWJjZA=="]}],
+        })
+        for sha, revision, error in (
+            ("0" * 64, self.repo.revision, "artifact_hash_mismatch"),
+            (first["artifact_sha256"], "0" * 40, "metadata_mismatch"),
+        ):
+            refused = inventory_cli(self.output, sha, revision)
+            self.assertEqual(refused.returncode, 2)
+            self.assertEqual(refused.stderr, b"")
+            self.assertEqual(len(refused.stdout.splitlines()), 1)
+            self.assertEqual(json.loads(refused.stdout), dict(
+                ok=False, error=error, qualified_release=False, all44_accepted=False))
+
         result = bundle.verify_bundle(self.output, first["artifact_sha256"], self.repo.revision)
         self.assertEqual(result["source_file_count"], len(original))
         self.assertEqual(self.repo.git("rev-parse", "HEAD"), before)

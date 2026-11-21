@@ -1,4 +1,4 @@
-"""Private fixture for three sequential, independently owned Twitter children."""
+"""Private fixture for independently owned Twitter capture, reference, restore and fork."""
 from __future__ import annotations
 
 import asyncio
@@ -12,6 +12,7 @@ from hashlib import sha256
 from itertools import islice
 from pathlib import Path
 from time import monotonic
+from unittest.mock import patch
 from uuid import UUID, uuid4
 
 
@@ -151,7 +152,7 @@ class _RestoredModels:
         genuine_advance = native_twitter_restore._advance_restored_twitter_round
 
         async def observe_advance(child_dir, *, manifest, runner_state, config_bytes, graph,
-                                  expected_post_content, deadline_monotonic):
+                                  expected_post_content, deadline_monotonic, intervention=None):
             try:
                 assert expected_post_content is None
                 assert len(graph.agent_mappings) == len(self.expected_frames) == 2
@@ -175,6 +176,7 @@ class _RestoredModels:
                     child_dir, manifest=manifest, runner_state=runner_state, config_bytes=config_bytes,
                     graph=graph, expected_post_content=expected_post_content,
                     deadline_monotonic=deadline_monotonic,
+                    **({"intervention": intervention} if intervention is not None else {}),
                 )
                 budget.check()
                 step_fields = ("agent_id", "post_id", "after_step")
@@ -357,7 +359,89 @@ def _owned_factory(root, request, model_factory):
     )
 
 
-def _run_child(factory, request, terminal, deadline, prior_pids):
+_FORK_VALIDATION_SITES = {
+    334: 'request_binding', 335: 'prepared_request', 341: 'producer_authority',
+    342: 'prepared_root', 343: 'checkpoint_directory', 344: 'lineage_directory',
+    345: 'fork_directory', 346: 'directory_overlap', 348: 'lineage_read',
+    350: 'lineage_digest', 351: 'recording_import', 353: 'lineage_decode',
+    357: 'lineage_authority', 358: 'lineage_anchors', 359: 'lineage_body',
+    362: 'fork_manifest',
+}
+
+
+@dataclass
+class _ObservedForkFactory:
+    factory: object
+    marker: Path
+    first_validation: bool = True
+
+    @property
+    def expected_producer_instance_id(self):
+        return self.factory.expected_producer_instance_id
+
+    def _mark(self, value, mode):
+        try:
+            with self.marker.open(mode) as stream:
+                stream.write(value.encode('ascii'))
+        except OSError:
+            pass
+
+    def _rejection_site(self, error):
+        binding_file = self.factory.validate.__func__.__code__.co_filename
+        trace = error.__traceback__
+        site = 'unknown'
+        for _ in range(32):
+            if trace is None:
+                break
+            code = trace.tb_frame.f_code
+            if code.co_filename == binding_file:
+                if code.co_name == '_checked_restore':
+                    site = _FORK_VALIDATION_SITES.get(trace.tb_lineno, 'restore_other')
+                elif code.co_name == 'validate' and trace.tb_lineno == 368:
+                    site = 'prepared_files'
+            trace = trace.tb_next
+        return site
+
+    def validate(self, request):
+        if not self.first_validation:
+            return self.factory.validate(request)
+        self.first_validation = False
+        same_pid = int(os.getpid() == self.factory.expected_producer_pid)
+        self._mark(f'entered/{same_pid}\n', 'xb')
+        try:
+            result = self.factory.validate(request)
+        except Exception as error:
+            try:
+                self._mark(f'rejected/{self._rejection_site(error)}\n', 'ab')
+            except Exception:
+                pass
+            raise
+        self._mark('returned\n', 'ab')
+        return result
+
+    def create_session(self, request):
+        return self.factory.create_session(request)
+
+    def evidence(self, request):
+        return self.factory.evidence(request)
+
+    def observation(self):
+        try:
+            with self.marker.open('rb') as stream:
+                lines = stream.read(96).splitlines()
+        except OSError:
+            return 'unobserved'
+        if len(lines) not in (1, 2) or lines[0] not in (b'entered/0', b'entered/1'):
+            return 'invalid'
+        allowed = (*_FORK_VALIDATION_SITES.values(), 'restore_other', 'prepared_files', 'unknown')
+        if len(lines) == 2 and lines[1] != b'returned' and lines[1] not in {
+            f'rejected/{site}'.encode('ascii') for site in allowed
+        }:
+            return 'invalid'
+        return ' '.join(line.decode('ascii') for line in lines)
+
+
+def _run_child(factory, request, terminal, deadline, prior_instances, *, require_closed=False):
     from nexaweave_execution.native_process_driver import NativeProcessDriver
 
     remaining = deadline - monotonic()
@@ -368,7 +452,8 @@ def _run_child(factory, request, terminal, deadline, prior_pids):
     try:
         child = driver.launch(request, attempt)
         assert type(child.process_id) is int and child.process_id > 0
-        assert child.process_id not in prior_pids
+        assert child.process_id != os.getpid()
+        assert child.instance_id not in prior_instances
         observed = terminal(driver, request, attempt, child, deadline)
         assert observed.status == "completed" and observed.receipt is not None
         receipt = observed.receipt
@@ -376,9 +461,28 @@ def _run_child(factory, request, terminal, deadline, prior_pids):
         assert receipt.attempt_id == attempt and receipt.instance_id == child.instance_id
         assert receipt.request_fingerprint == request.fingerprint
     finally:
-        driver.close()
+        closed = driver.close()
+    if require_closed:
+        assert closed is True
     assert monotonic() < deadline
-    return child.process_id, receipt.evidence_sha256
+    prior_instances.add(child.instance_id)
+    return child, receipt.evidence_sha256
+
+
+class _ProducerPidView:
+    def __init__(self, pid):
+        self._pid = pid
+
+    def getpid(self):
+        return self._pid
+
+    def __getattr__(self, name):
+        return getattr(os, name)
+
+
+def _simulate_producer_pid(module, pid):
+    # Scope the simulated PID to a validator, keeping the real handshake and evidence PIDs.
+    return patch.object(module, 'os', _ProducerPidView(pid))
 
 
 def _captured_checkpoint(directory, lineage, config_bytes):
@@ -541,11 +645,13 @@ def _check_reference(reference, checkpoint_rows, captured_owners, manifest, rng_
     return sorted((owner, post_id) for owner, draw in enumerate(draws) for post_id in draw)
 
 
-def assert_fresh_twitter_continuation(tmp_path, request, original_pid, terminal, deadline):
+def assert_fresh_twitter_continuation(tmp_path, request, original_instance_id, terminal, deadline):
+    from app.services import native_twitter_restore
     from app.services.native_owned_session import _manifest
     from nexaweave_execution.native_twitter_checkpoint_binding import (
         NativeRestoredTwitterFactory, NativeTwitterCaptureFactory,
     )
+    from nexaweave_execution.native_run_contracts import SwapActiveActorV1
     from test_native_round_capture import _artifact, _native_rows, _read_bounded
 
     producer, originals, prepared, capture_request = _prepared_twitter(
@@ -561,10 +667,13 @@ def assert_fresh_twitter_continuation(tmp_path, request, original_pid, terminal,
         "run_id": str(capture_request.run_id), "branch_id": str(uuid4()),
         "project_id": str(capture_request.project_id), "project_revision": capture_request.project_revision,
     }
-    prior_pids = {os.getpid(), original_pid}
+    # Windows may reuse an exited child's PID. The handshake identifies each launch.
+    prior_instances = {original_instance_id}
     capture_factory = NativeTwitterCaptureFactory(prepared, str(checkpoint), str(lineage_dir), anchors)
-    producer_pid, producer_evidence = _run_child(capture_factory, capture_request, terminal, deadline, prior_pids)
-    prior_pids.add(producer_pid)
+    producer_child, producer_evidence = _run_child(
+        capture_factory, capture_request, terminal, deadline, prior_instances,
+    )
+    producer_pid = producer_child.process_id
     assert list(islice(lineage_dir.iterdir(), 2)) == [lineage_path]
     lineage_raw = _read_bounded(lineage_path, _RECEIPT_LIMIT)
     assert sha256(lineage_raw).hexdigest() == producer_evidence
@@ -598,14 +707,13 @@ def assert_fresh_twitter_continuation(tmp_path, request, original_pid, terminal,
     assert reference_raw == originals and reference_request.artifact_sha256 == capture_request.artifact_sha256
     observation_path = reference / "reference_observation.json"
     reference_factory = _UninterruptedTwitterFactory(reference_prepared, str(observation_path))
-    reference_pid, reference_evidence = _run_child(
-        reference_factory, reference_request, terminal, deadline, prior_pids,
+    reference_child, reference_evidence = _run_child(
+        reference_factory, reference_request, terminal, deadline, prior_instances,
     )
-    prior_pids.add(reference_pid)
     observation_raw = _read_bounded(observation_path, _RECEIPT_LIMIT)
     assert sha256(observation_raw).hexdigest() == reference_evidence
     observation = json.loads(observation_raw)
-    assert observation["pid"] == reference_pid
+    assert observation["pid"] == reference_child.process_id
     expected_recommendations = _check_reference(
         observation["rounds"], checkpoint_rows, captured_owners, manifest, rng_at_cut,
     )
@@ -623,12 +731,18 @@ def assert_fresh_twitter_continuation(tmp_path, request, original_pid, terminal,
     restore_factory = NativeRestoredTwitterFactory(
         restore_prepared, str(checkpoint), str(lineage_dir), str(restore_dir),
         producer_evidence, producer_pid, str(capture_request.run_id), None,
+        expected_producer_instance_id=producer_child.instance_id,
     )
+    with _simulate_producer_pid(native_twitter_restore, producer_pid):
+        restored_anchors, *_ = native_twitter_restore._checked_twitter_lineage(lineage)
+    assert restored_anchors.wire() == anchors
     assert not restore_dir.exists() and not memory_probe_path.exists()
-    restored_pid, restore_evidence = _run_child(restore_factory, restore_request, terminal, deadline, prior_pids)
+    restored_child, restore_evidence = _run_child(
+        restore_factory, restore_request, terminal, deadline, prior_instances,
+    )
     proof_raw = _read_bounded(memory_probe_path, _RECEIPT_LIMIT)
     proof = json.loads(proof_raw)
-    assert set(proof) == {"pid", "frames", "step"} and proof["pid"] == restored_pid
+    assert set(proof) == {"pid", "frames", "step"} and proof["pid"] == restored_child.process_id
     assert proof["frames"] == [list(frame) for frame in expected_frames]
     assert {path.name for path in islice(restore_dir.iterdir(), 3)} == set(_RESTORE_OUTPUTS)
     assert _manifest(restore_dir, _RESTORE_OUTPUTS, _DB_LIMIT) == restore_evidence
@@ -664,6 +778,60 @@ def assert_fresh_twitter_continuation(tmp_path, request, original_pid, terminal,
     assert action["action_type"] == "CREATE_POST" and action["agent_id"] == owner and action["success"] is True
     assert action["action_args"]["content"] == content and action["action_args"]["post_id"] == post_id
     assert last == {"round": 2, "event_type": "round_end", "actions_count": 1}
+
+    fork_dir = tmp_path / "fresh-fork"
+    fork_probe_path = tmp_path / "fresh-fork-memory-probe.json"
+    assert not fork_dir.exists() and not fork_probe_path.exists()
+    fork_request = replace(
+        capture_request, run_id=uuid4(), schema_version=3, source_run_id=capture_request.run_id,
+        checkpoint_sha256=producer_evidence,
+        intervention=SwapActiveActorV1("swap_active_actor_v1", lineage["manifest_sha256"],
+                                       manifest["runner_state"]["sha256"]),
+    )
+    fork_prepared = _owned_factory(producer, fork_request, _RestoredModels(expected_frames, str(fork_probe_path)))
+    fork_factory = NativeRestoredTwitterFactory(
+        fork_prepared, str(checkpoint), str(lineage_dir), str(fork_dir),
+        producer_evidence, producer_pid, str(capture_request.run_id), None,
+        expected_producer_instance_id=producer_child.instance_id,
+    )
+    observed_factory = _ObservedForkFactory(fork_factory, tmp_path / 'fresh-fork-validation.stage')
+    try:
+        fork_child, fork_evidence = _run_child(
+            observed_factory, fork_request, terminal, deadline, prior_instances, require_closed=True,
+        )
+    except Exception as error:
+        error.add_note(f'fork_validation={observed_factory.observation()}')
+        raise
+    fork_pid = fork_child.process_id
+    assert observed_factory.observation() == f'entered/{int(fork_pid == producer_pid)} returned'
+    fork_proof_raw = _read_bounded(fork_probe_path, _RECEIPT_LIMIT)
+    fork_db = fork_dir / "native.sqlite3"
+    assert {path.name for path in islice(fork_dir.iterdir(), 3)} == set(_RESTORE_OUTPUTS)
+    assert _manifest(fork_dir, _RESTORE_OUTPUTS, _DB_LIMIT) == fork_evidence
+    assert all(not fork_db.samefile(path) for path in (database, producer_db, reference_db, child_db))
+    assert 0 < fork_db.stat().st_size <= _DB_LIMIT
+    fork_log = _read_bounded(fork_dir / "actions.jsonl", _LOG_LIMIT)
+    assert (staged_bytes + reference_db.stat().st_size + child_db.stat().st_size + fork_db.stat().st_size
+            + len(promoted) + len(fork_log) + len(fork_proof_raw)) <= 160 * 1024 * 1024
+
+    fork_owner = 1 - final["selection"]
+    fork_cursor, fork_trace, fork_posts, fork_recommendations = _native_rows(fork_db)
+    assert fork_trace[:len(old_trace)] == old_trace and fork_posts[:len(old_posts)] == old_posts
+    assert fork_recommendations == expected_recommendations
+    assert fork_posts[len(old_posts):] == [(post_id, fork_owner, _NEXT_POST, final["before_step"])]
+    fork_added_trace = fork_trace[len(old_trace):]
+    assert fork_cursor == fork_added_trace[-1][0] and all(row[1] == fork_owner for row in fork_added_trace)
+    (_, _, _, fork_info, fork_tick), = (row for row in fork_added_trace if row[2] == "create_post")
+    assert fork_tick == tick and json.loads(fork_info)["post_id"] == post_id
+    assert json.loads(fork_info)["content"] == _NEXT_POST
+    assert json.loads(fork_proof_raw) == {
+        "pid": fork_pid, "frames": [list(frame) for frame in expected_frames],
+        "step": {"agent_id": fork_owner, "post_id": post_id, "after_step": final["after_step"]},
+    }
+    assert fork_log.startswith(prefix)
+    fork_action = dict(action, agent_id=fork_owner, agent_name=lineage["owners"][fork_owner]["name"])
+    assert _events(fork_log[len(prefix):]) == [first, fork_action, last]
+    assert _manifest(restore_dir, _RESTORE_OUTPUTS, _DB_LIMIT) == restore_evidence
 
     assert {path: _artifact(path, limits[path]) for path in pins} == pins
     for root in (producer, reference):

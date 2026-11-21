@@ -60,6 +60,20 @@ def keys(value, names):
     require(type(value) is dict and set(value) == set(names))
 
 
+def reply_success(reply, sequence, stage):
+    require(type(reply) is dict)
+    require(type(reply.get('schema_version')) is int and reply['schema_version'] == 1
+            and type(reply.get('sequence')) is int and reply['sequence'] == sequence
+            and reply.get('stage') == stage and type(reply.get('ok')) is bool)
+    if reply['ok']:
+        keys(reply, ('schema_version', 'sequence', 'stage', 'ok', 'result'))
+        require(type(reply['result']) is dict and len(encoded(reply['result'])) <= WIRE)
+    else:
+        keys(reply, ('schema_version', 'sequence', 'stage', 'ok', 'error'))
+        require(type(reply['error']) is str and reply['error'] in ERRORS)
+    return reply['ok']
+
+
 def sha(raw):
     return hashlib.sha256(raw).hexdigest()
 
@@ -98,6 +112,9 @@ class FollowupBrowserSession:
         self.failures = []
         self.children = []
         self.replies = queue.Queue(maxsize=2)
+        self.expired_connect = None
+        self.last_protected_phase = 'none'
+        self.driver_stdout_eof = threading.Event()
         self.vite_ready = threading.Event()
         self.turns = {}
         self.starts = set()
@@ -268,6 +285,23 @@ class FollowupBrowserSession:
 
         # Tracking precedes token/origin middleware, without changing its result.
         app.before_request_funcs.setdefault(None, []).insert(0, entered)
+        graph = self.prep.display_graph_id
+        connect_phases = {('GET', '/api/graph/data/' + graph): 'graph-data',
+                          ('GET', '/api/source/library/' + graph): 'source-library',
+                          ('POST', self._route('report', 'status')): 'report-status'}
+
+        @app.before_request
+        def observe_admission():
+            # Runs after the existing protected origin and bearer checks.
+            phase = connect_phases.get((request.method, request.path))
+            if (phase is None or request.headers.getlist('Origin') != [ORIGIN]
+                    or request.query_string or request.headers.get('Content-Encoding')
+                    or request.headers.get('Transfer-Encoding')):
+                return
+            with self.lock:
+                if (g.followup_browser_stage == self.active == 'connect'
+                        and g.followup_browser_sequence == self.sequence):
+                    self.last_protected_phase = phase
 
         @app.teardown_request
         def left(_error):
@@ -401,13 +435,15 @@ class FollowupBrowserSession:
             for _ in range(COMMANDS):
                 raw = pipe.readline(WIRE + 1)
                 if not raw:
-                    return
+                    break
                 require(raw.endswith(b'\n') and len(raw) <= WIRE and b'\r' not in raw
                         and self.token.encode('ascii') not in raw)
                 value = strict(raw)
                 require(type(value) is dict)
                 self.replies.put_nowait(value)
-            require(not pipe.read(1), 'followup_browser_extra_reply')
+            else:
+                require(not pipe.read(1), 'followup_browser_extra_reply')
+            self.driver_stdout_eof.set()
         except Exception:
             self._failure('followup_browser_protocol_refused')
             try:
@@ -436,6 +472,8 @@ class FollowupBrowserSession:
                              (process.stderr, self._drain)):
             thread = threading.Thread(target=target, args=(pipe,), daemon=True)
             entry['threads'].append(thread)
+            if protocol and pipe is process.stdout:
+                entry['stdout_thread'] = thread
             thread.start()
         return entry
 
@@ -588,12 +626,15 @@ class FollowupBrowserSession:
                 and turn['binding']['scope'] == self.settings.scope)
         return turn
 
+    def _verify_connect_identity(self, proof):
+        keys(proof, ('display_graph_id', 'report_id', 'plan_sha256', 'token_cleared'))
+        require(proof['token_cleared'] is True and proof == dict(
+            display_graph_id=self.prep.display_graph_id, report_id=self.report_reference['report_id'],
+            plan_sha256=self.report_reference['plan_sha256'], token_cleared=True))
+
     def _verify(self, stage, payload, proof, events):
         if stage == 'connect':
-            keys(proof, ('display_graph_id', 'report_id', 'plan_sha256', 'token_cleared'))
-            require(proof == dict(display_graph_id=self.prep.display_graph_id,
-                report_id=self.report_reference['report_id'], plan_sha256=self.report_reference['plan_sha256'],
-                token_cleared=True))
+            self._verify_connect_identity(proof)
             graph = [event for event in events if event['method'] == 'GET'
                      and event['path'] == '/api/graph/data/' + self.prep.display_graph_id]
             require(len(graph) == 1 and graph[0]['data']['graph_id'] == self.prep.display_graph_id)
@@ -696,6 +737,13 @@ class FollowupBrowserSession:
                             and parent['data']['receipt_sha256'] == self.report_result['receipt_sha256'])
         return data
 
+    def _record_connect_timeout(self, command, timeout, error):
+        with self.lock:
+            last_phase = self.last_protected_phase
+        allowance = 'absolute-capped' if timeout < 15 else 'stage-limit'
+        error.add_note(f'followup_browser_connect_allowance={allowance} last_protected_phase={last_phase}')
+        self.expired_connect = (command['sequence'], command['stage'], error)
+
     def perform(self, stage, payload=None):
         require(stage in STAGES and not self.closed and self.sequence < COMMANDS)
         value = self._payload(stage, payload)
@@ -709,6 +757,7 @@ class FollowupBrowserSession:
             require(not self.failures)
             self.sequence += 1
             self.active, self.command_payload = stage, value
+            self.last_protected_phase = 'none'
             self.events = deque()
         self.last_request, self.last_proof = None, {}
         command = dict(schema_version=1, sequence=self.sequence, stage=stage,
@@ -717,17 +766,13 @@ class FollowupBrowserSession:
         try:
             reply = self.replies.get(timeout=max(.001, end - time.monotonic()))
         except queue.Empty:
-            raise RuntimeError('followup_browser_deadline') from None
-        require(time.monotonic() <= end and type(reply) is dict)
-        require(type(reply.get('schema_version')) is int and reply['schema_version'] == 1
-                and type(reply.get('sequence')) is int and reply['sequence'] == self.sequence
-                and reply.get('stage') == stage and type(reply.get('ok')) is bool)
-        if reply['ok'] is False:
-            keys(reply, ('schema_version', 'sequence', 'stage', 'ok', 'error'))
-            require(reply['error'] in ERRORS)
+            error = RuntimeError('followup_browser_deadline')
+            if stage == 'connect':
+                self._record_connect_timeout(command, timeout, error)
+            raise error from None
+        require(time.monotonic() <= end)
+        if not reply_success(reply, self.sequence, stage):
             raise RuntimeError(reply['error'])
-        keys(reply, ('schema_version', 'sequence', 'stage', 'ok', 'result'))
-        require(type(reply['result']) is dict and len(encoded(reply['result'])) <= WIRE)
         with self.requests_condition:
             require(self.requests_condition.wait_for(lambda: not self.requests,
                 timeout=max(0, end - time.monotonic())), 'followup_browser_request_not_closed')
@@ -855,12 +900,33 @@ class FollowupBrowserSession:
             self._stop_http()
         except Exception as error:
             errors.append(error)
+        stdout = self.driver.get('stdout_thread') if self.driver else None
+        # Prove the producer has stopped before deciding how many frames remain.
+        stdout_closed = stdout is not None and not stdout.is_alive() and self.driver_stdout_eof.is_set()
+        first_reply = None
+        extra_count = 0
         while True:
             try:
-                self.replies.get_nowait()
-                errors.append(RuntimeError('followup_browser_extra_reply'))
+                reply = self.replies.get_nowait()
             except queue.Empty:
                 break
+            if extra_count == 0:
+                first_reply = reply
+            extra_count += 1
+        expired, self.expired_connect = self.expired_connect, None
+        if stdout_closed and expired is not None and extra_count == 1:
+            sequence, stage, error = expired
+            try:
+                ok = reply_success(first_reply, sequence, stage)
+                if ok:
+                    self._verify_connect_identity(first_reply['result'])
+            except (RuntimeError, TypeError, ValueError):
+                pass
+            else:
+                # Record the frame on the timeout without admitting the connection.
+                error.add_note('followup_browser_late_success' if ok else 'followup_browser_late_error')
+                extra_count = 0
+        errors.extend(RuntimeError('followup_browser_extra_reply') for _ in range(extra_count))
         errors.extend(RuntimeError(code) for code in self.failures)
         if not errors and not self.work_failed:
             for entry in reversed(self.children):

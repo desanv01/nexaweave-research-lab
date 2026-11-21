@@ -7,86 +7,14 @@ from dataclasses import replace
 import hashlib
 from itertools import combinations
 import json
-import os
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
 
-# Reuse accepted actual native fixtures; these imports occur only when Main runs.
-from test_native_experiments import (cohort_fixture, connection_factory, hashes,
-    install_offline_boundary)
+from test_native_experiments import hashes
 
 pytestmark = pytest.mark.postgres
-
-
-@pytest.fixture
-def experiment_python():
-    """Require Main's explicit installed runtime; never use the test runner."""
-    value = os.environ.get('NEXAWEAVE_EXPERIMENT_TEST_PYTHON')
-    try:
-        if (type(value) is not str or not 1 <= len(value) <= 4096 or '\x00' in value
-                or not Path(value).is_absolute() or not Path(value).is_file()
-                or not os.access(value, os.X_OK)):
-            raise ValueError
-    except (ValueError, TypeError, OSError):
-        pytest.fail('NEXAWEAVE_EXPERIMENT_TEST_PYTHON must explicitly name an absolute installed knowledge interpreter executable', pytrace=False)
-    return value
-
-
-@pytest.fixture
-def protected_fixture(experiment_python, connection_factory, cohort_fixture, tmp_path, monkeypatch):
-    from app.services.native_experiment_contracts import ExperimentCohort, ExperimentMember, canonical, sha
-    from app.services.native_experiment_http_facade import ExperimentSettings, NativeExperimentFacade
-    from nexaweave_execution.native_run_contracts import NativeChildIdentity, NativeRunReceipt
-    from nexaweave_execution.native_run_store import NativeRunStore
-    from psycopg.conninfo import conninfo_to_dict
-    from types import SimpleNamespace
-    install_offline_boundary(monkeypatch)
-    base, runs, _ = cohort_fixture
-    store = NativeRunStore(connection_factory)
-    extras = []
-    for index, state in enumerate(('declared', 'uncertain', 'cancelled')):
-        request = replace(base.members[0].request, run_id=uuid4(),
-            simulation_id='http-'+state+'-'+uuid4().hex, seed=(-(2**63), 2**63-1, 2**53+1)[index],
-            platforms=('twitter',) if state == 'declared' else base.members[0].request.platforms)
-        store.register(request)
-        if state == 'declared':
-            store.request_cancel('owner', request.run_id)
-        else:
-            owner = uuid4()
-            claimed = store.claim_start('owner', request.run_id, owner, 240)
-            if state == 'uncertain':
-                store.mark_uncertain('owner', request.run_id, claimed.attempt_id, owner)
-            else:
-                # Authoritative synthetic control-plane fixture, not a claim of
-                # a real native cancellation. No process is launched/adopted.
-                child = NativeChildIdentity(uuid4(), 2147483000, 'a'*64)
-                store.attach('owner', request.run_id, claimed.attempt_id, owner, child, 240)
-                store.request_cancel('owner', request.run_id)
-                receipt = NativeRunReceipt(request.run_id, claimed.attempt_id, child.instance_id,
-                    request.fingerprint, 'cancelled', 'b'*64)
-                store.settle('owner', request.run_id, claimed.attempt_id, owner, receipt)
-        extras.append(ExperimentMember('http-'+state, 'Observed '+state, 'declared-case', request))
-    cohort = ExperimentCohort('owner', base.members+tuple(extras))
-    manifest = tmp_path/'cohort.json'
-    raw = canonical(cohort.wire())
-    manifest.write_bytes(raw)
-    pg = conninfo_to_dict(os.environ['PROJECT_STORE_POSTGRES_TEST_DSN'])
-    environment = {f'KNOWLEDGE_PG_{k}': pg[v] for k, v in (
-        ('HOST', 'host'), ('PORT', 'port'), ('DATABASE', 'dbname'), ('USER', 'user'), ('PASSWORD', 'password'))}
-    scope = {'schema_version': 1, 'workspace_id': str(uuid4()),
-        'project_id': str(cohort.members[0].request.project_id), 'graph_id': str(uuid4()),
-        'run_id': None, 'branch_id': None, 'layer': 'source'}
-    token = '0123456789abcdef'*4
-    settings = SimpleNamespace(python=experiment_python, principal='owner', scope=scope,
-        child_environment=environment, token=token, display_graph_id='http-fixture', bootstrap='unused')
-    monkeypatch.setenv('KNOWLEDGE_EXPERIMENT_MANIFEST', str(manifest))
-    monkeypatch.setenv('KNOWLEDGE_EXPERIMENT_MANIFEST_SHA256', sha(raw))
-    binding = ExperimentSettings.capture(settings)
-    assert binding is not None
-    facade = NativeExperimentFacade(settings, binding=binding)
-    return settings, facade, cohort, runs, manifest, raw
 
 
 def lean_client(monkeypatch, settings, facade):
@@ -262,6 +190,7 @@ def test_actual_failed_closed_catalog_and_compare(protected_fixture, monkeypatch
 
 def test_catalog_never_opens_recording_and_comparison_rejects_changed_bundle(protected_fixture, monkeypatch, tmp_path):
     from app.services.native_experiment_contracts import ExperimentCohort, canonical, sha
+    from app.services.native_experiment_http_client import NativeExperimentProcessClient, reply, request_value
     from app.services.native_experiment_http_facade import ExperimentSettings, NativeExperimentFacade
     settings, _, cohort, _, manifest, _ = protected_fixture
     # Keep actual run authority but bind a missing immutable recording. Catalog
@@ -271,10 +200,32 @@ def test_catalog_never_opens_recording_and_comparison_rejects_changed_bundle(pro
     wrong = ExperimentCohort('owner', (replace(member, recording=pin),))
     raw = canonical(wrong.wire()); manifest.write_bytes(raw)
     monkeypatch.setenv('KNOWLEDGE_EXPERIMENT_MANIFEST_SHA256', sha(raw))
-    facade = NativeExperimentFacade(settings, binding=ExperimentSettings.capture(settings))
+    binding = ExperimentSettings.capture(settings)
+    facade = NativeExperimentFacade(settings, binding=binding)
     client = lean_client(monkeypatch, settings, facade)
     auth = {'Authorization': 'Bearer '+settings.token}
-    assert client.get('/api/experiments/catalog', headers=auth).status_code == 200
+    child_outcome = 'binding-missing' if binding is None else 'before-child-call'
+    real_call = NativeExperimentProcessClient.call
+
+    def observe_first_catalog_call(process_client, request):
+        nonlocal child_outcome
+        try:
+            wire = real_call(process_client, request)
+        except Exception:
+            child_outcome = 'transport-or-reply-failure'
+            raise
+        try:
+            child_ok = reply(wire, request_value(request))['ok']
+        except (ValueError, TypeError, UnicodeError, RecursionError):
+            child_outcome = 'invalid-child-reply'
+        else:
+            child_outcome = 'child-accepted' if child_ok else 'child-rejected'
+        return wire
+
+    with monkeypatch.context() as observation:
+        observation.setattr(NativeExperimentProcessClient, 'call', observe_first_catalog_call)
+        response = client.get('/api/experiments/catalog', headers=auth)
+    assert response.status_code == 200, f'first catalog GET child outcome: {child_outcome}'
     response = client.post('/api/experiments/compare', headers=auth,
         json={'version': 1, 'title': 'Pinned missing recording', 'member_ids': [member.member_id]})
     assert response.status_code == 503 and not (tmp_path/'absent-bundle').exists()

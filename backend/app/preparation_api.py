@@ -43,7 +43,7 @@ def register_preparation_routes(app, settings, *, preparation_facade=None):
                     or request.headers.get('Transfer-Encoding') or request.headers.get('Content-Encoding')
                     or request.content_length is None or not 0 < request.content_length <= REQUEST_BYTES):
                 raise PreparationError('invalid_request')
-            if inspection and (
+            if (inspection or method in {'seed_pair', 'seed_ensemble'}) and (
                 request.query_string or 'Transfer-Encoding' in request.headers or 'Content-Encoding' in request.headers
                 or request.headers.getlist('Content-Length') != [str(request.content_length)]
             ):
@@ -69,7 +69,7 @@ def register_preparation_routes(app, settings, *, preparation_facade=None):
         except Exception:
             return failure('internal_error')
 
-    for method in ('plan', 'start', 'status', *READ_METHODS):
+    for method in ('plan', 'start', 'status', 'seed_pair', 'seed_ensemble', *READ_METHODS):
         app.add_url_rule('/api/preparation/<graph_id>/' + method,
                          'preparation_' + method,
                          lambda graph_id, method=method: run(method, graph_id), methods=['POST'])

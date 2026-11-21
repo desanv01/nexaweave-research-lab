@@ -23,6 +23,7 @@ MAX_FILES = 4096
 MAX_FILE_BYTES = 16 * 1024 * 1024
 MAX_SOURCE_BYTES = 128 * 1024 * 1024
 MAX_METADATA_BYTES = 8 * 1024 * 1024
+MAX_SOURCE_INVENTORY_BYTES = 2 * MAX_METADATA_BYTES + 8192
 MAX_ARTIFACT_BYTES = 148 * 1024 * 1024
 MAX_PACKAGES = 8192
 MAX_ARTIFACT_RECORDS = 32768
@@ -31,6 +32,12 @@ BUILD_TIMEOUT = 300
 ARCHIVE_SHA256 = "d3bef0afea92b99626526ffcce0508414feb3f9e88c3edda1f283ce5f447bf53"
 MANIFEST_PATH = ".mirofish-release/manifest.json"
 INVENTORY_PATH = ".mirofish-release/dependency-inventory.json"
+RETAINED_NOTICE_PATHS = (
+    ".github/star-history/THIRD_PARTY_NOTICES.md",
+    "THIRD_PARTY_NOTICES.md",
+    "docs/licenses/camel-oasis-0.2.5-LICENSE.txt",
+    "docs/licenses/graphiti-core-0.30.2-LICENSE.txt",
+)
 LOCKS = ("backend/uv.lock", "services/knowledge/uv.lock", "frontend/package-lock.json")
 REQUIRED = ("LICENSE", "docs/upstream/import-notes.md",
             "docs/upstream/archive-manifest.json", "docs/upstream/patches.json", *LOCKS)
@@ -50,13 +57,13 @@ def digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def canonical_json(value: object) -> bytes:
+def canonical_json(value: object, *, max_bytes: int | None = None) -> bytes:
     try:
         result = (json.dumps(value, ensure_ascii=False, sort_keys=True,
                              separators=(",", ":"), allow_nan=False) + "\n").encode("utf-8")
     except (ValueError, TypeError, UnicodeError, RecursionError):
         fail("metadata_invalid")
-    if len(result) > MAX_METADATA_BYTES:
+    if len(result) > (MAX_METADATA_BYTES if max_bytes is None else max_bytes):
         fail("metadata_limit")
     return result
 
@@ -509,7 +516,7 @@ def build_bundle(repository: str | Path, revision: str, output: str | Path) -> d
                 pass
 
 
-def verify_bundle(artifact: str | Path, expected_sha256: str, revision: str) -> dict:
+def _verified_members(artifact: str | Path, expected_sha256: str, revision: str) -> tuple[dict, dict, dict]:
     if not isinstance(revision, str) or not HEX40.fullmatch(revision):
         fail("revision_invalid")
     if not isinstance(expected_sha256, str) or not HEX64.fullmatch(expected_sha256):
@@ -569,4 +576,44 @@ def verify_bundle(artifact: str | Path, expected_sha256: str, revision: str) -> 
         fail("metadata_mismatch")
     if _zip(files, metadata) != data:
         fail("zip_noncanonical")
+    return files, generated, manifest
+
+
+def verify_bundle(artifact: str | Path, expected_sha256: str, revision: str) -> dict:
+    files, _, _ = _verified_members(artifact, expected_sha256, revision)
     return _report("verify", expected_sha256, revision, files)
+
+
+def inventory_bundle(artifact: str | Path, expected_sha256: str, revision: str) -> bytes:
+    files, generated, manifest = _verified_members(artifact, expected_sha256, revision)
+    # Verification just regenerated these rows from the exact archive bytes.
+    source_members = {entry["path"]: entry for entry in manifest["files"]}
+    generated_members = {
+        path: {"path": path, "mode": "100644", "size": len(data), "sha256": digest(data)}
+        for path, data in generated.items()
+    }
+    members = {**source_members, **generated_members}
+    dependencies = parse_json(generated[INVENTORY_PATH])
+    published = [
+        {key: package[key] for key in ("ecosystem", "lock_path", "lock_package_path",
+                                       "name", "version", "artifact_hashes")}
+        for package in dependencies["packages"] if package["artifact_hashes"]
+    ]
+    result = {
+        "ok": True,
+        **_report("inventory", expected_sha256, revision, files),
+        "schema_version": 1,
+        "inventory_kind": "source-archive",
+        "git_tree_id": manifest["git_tree_id"],
+        "shipped_members": [members[path] for path in sorted(members)],
+        "root_license": source_members["LICENSE"],
+        "retained_notices": [source_members[path] for path in RETAINED_NOTICE_PATHS
+                             if path in source_members],
+        "published_dependency_digests": {
+            "kind": "lock-derived",
+            "inventory_path": INVENTORY_PATH,
+            "inventory_sha256": generated_members[INVENTORY_PATH]["sha256"],
+            "packages": published,
+        },
+    }
+    return canonical_json(result, max_bytes=MAX_SOURCE_INVENTORY_BYTES)

@@ -208,8 +208,8 @@
     {
       "imported_path": "backend/run.py",
       "original_sha256": "893a01b2e1881e4eb06bdbc4737e444d72eb374f9f326a1249dbc9aa04274483",
-      "current_sha256": "cc39a7ead1df509de326128801d475d2d70eb00722d94c5a2895df0496d87b26",
-      "reason": "Select explicit graphiti_readonly startup validation and loopback default; preserve legacy startup behavior. U04d recognizes explicit research_local through the protected validator and loopback default; legacy behavior unchanged. NexaWeave canonical package/configuration and ordinary display names; reviewed derived source change preserving legal/provenance and persisted v1 identities.",
+      "current_sha256": "07e6dd51ac86f117ab9f84e8468c1c7b2ac694ea1cd9041a405f829753f6833c",
+      "reason": "Select explicit graphiti_readonly startup validation and loopback default; preserve legacy startup behavior. U04d recognizes explicit research_local through the protected validator and loopback default; legacy behavior unchanged. NexaWeave canonical package/configuration and ordinary display names; reviewed derived source change preserving legal/provenance and persisted v1 identities. W8.1 starts the explicitly configured managed research service with owned preparation and native launch.",
       "phase": "NexaWeave canonical rebrand"
     },
     {
@@ -303,15 +303,15 @@
     {
       "imported_path": "frontend/src/components/Step4Report.vue",
       "original_sha256": "dcac96bdcb6b8df566155b543387cb51034e341f235a83b455608e34abd6bb4c",
-      "current_sha256": "801d28d44092e8aed6e1204d837f69af3bb49d07d4d4b8001ccd7ac5e0361bf5",
-      "reason": "Use bounded shared sanitized Markdown at report/interview HTML sinks and Vue text for placeholders; preserve report heading suppression and expansion controls.",
+      "current_sha256": "eebe3359d5da9a9cf54deb67d50e7bacf65a6b67e503bb8d45307f45edb20f62",
+      "reason": "Use bounded shared sanitized Markdown at report/interview HTML sinks and Vue text for placeholders; preserve report heading suppression and expansion controls. W6.1 localizes report progress and controls in English, Chinese and Malay while preserving generated report content and identifiers.",
       "phase": "U02h"
     },
     {
       "imported_path": "frontend/src/components/Step5Interaction.vue",
       "original_sha256": "067f165535e5b6583515ed30d9eb97727c273a410b81e0b7e95886bdb37d9541",
-      "current_sha256": "dc83d1d229b8ea15cef26500d8719a237e85fbfbf55343304dec38635d78ea8f",
-      "reason": "Use bounded shared sanitized Markdown at report/chat/interview HTML sinks; preserve chat headings and native ordered-list start/nesting semantics.",
+      "current_sha256": "c0905bb7b67ac5acab6535476f6aefaf4fb5f19bc8b7741de85de45283c98c15",
+      "reason": "Use bounded shared sanitized Markdown at report/chat/interview HTML sinks; preserve chat headings and native ordered-list start/nesting semantics. W3.4 preserves the returned actor and platform in guided survey results and exports the displayed responses.",
       "phase": "U02h"
     },
     {

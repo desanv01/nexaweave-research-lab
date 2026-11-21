@@ -153,6 +153,9 @@ class NativeProcessDriver:
             raise InvalidNativeRun()
         self._spent = True
         instance = uuid4()
+        producer_instance = getattr(self._factory, "expected_producer_instance_id", None)
+        if producer_instance is not None and canonical_uuid(producer_instance) == instance:
+            raise InvalidNativeRun()
         parent = None
         child_pipe = None
         process = None
@@ -160,6 +163,7 @@ class NativeProcessDriver:
         private_parent = None
         private_child = None
         private_reader = None
+        failure_stage = "spawn"
         try:
             context = multiprocessing.get_context("spawn")
             parent, child_pipe = context.Pipe(duplex=True)
@@ -171,6 +175,7 @@ class NativeProcessDriver:
                 args += (private_child,)
             process = context.Process(target=child_main, args=args, daemon=False)
             process.start()
+            failure_stage = "ready_setup"
             try:
                 child_pipe.close()
             except Exception:
@@ -181,18 +186,35 @@ class NativeProcessDriver:
             reader = _FrameReader(parent)
             if private_parent is not None:
                 private_reader = _FrameReader(private_parent)
+            failure_stage = "ready_wait"
             event = reader.next(self._handshake)
             if event is None or event[0] != "data" or reader.overflow:
+                if reader.overflow:
+                    failure_stage = "ready_queue_overflow"
+                elif event is None:
+                    failure_stage = "ready_timeout"
+                elif event[0] == "eof":
+                    failure_stage = "ready_eof"
+                else:
+                    # Bounded recv_bytes also reports an oversized frame as a receive error.
+                    failure_stage = "ready_frame_read_error"
                 raise NativeRunUnavailable()
+            failure_stage = "ready_invalid_frame_or_identity"
             ready = decode_message(event[1], _READY_KEYS)
             if (ready["kind"] != "ready" or ready["run_id"] != str(request.run_id)
                     or ready["attempt_id"] != str(attempt)
                     or ready["instance_id"] != str(instance)
                     or ready["request_fingerprint"] != request.fingerprint
                     or type(ready["process_id"]) is not int
-                    or ready["process_id"] != process.pid or not process.is_alive()
-                    or reader.drain()):
+                    or ready["process_id"] != process.pid):
                 raise InvalidNativeRun()
+            failure_stage = "ready_liveness"
+            if not process.is_alive():
+                raise InvalidNativeRun()
+            failure_stage = "ready_drain"
+            if reader.drain():
+                raise InvalidNativeRun()
+            failure_stage = "ready_ownership"
             fingerprint = hashlib.sha256(
                 f"{request.fingerprint}:{attempt}:{instance}:{process.pid}".encode("ascii")
             ).hexdigest()
@@ -215,7 +237,9 @@ class NativeProcessDriver:
                 pass
             if isinstance(error, (KeyboardInterrupt, SystemExit)):
                 raise
-            raise NativeRunUnavailable() from None
+            unavailable = NativeRunUnavailable()
+            unavailable.add_note(f"native_launch_stage={failure_stage}")
+            raise unavailable from None
 
     def _handle(self, request, attempt_id, child):
         request = NativeRunRequest.from_wire(request)

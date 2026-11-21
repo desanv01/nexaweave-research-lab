@@ -18,6 +18,14 @@ if sys.platform == 'win32':
 # 添加项目根目录到路径
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+_MANAGED_FLAG = '--managed-research-local'
+if __name__ == '__main__' and _MANAGED_FLAG in sys.argv[1:]:
+    if (sys.argv[1:] != [_MANAGED_FLAG] or os.environ.get('PYTHON_DOTENV_DISABLED') != '1'
+            or os.environ.get('FLASK_SKIP_DOTENV') != '1'):
+        print('Managed research startup refused', file=sys.stderr)
+        sys.exit(1)
+
+
 from app import create_app
 from app.config import Config
 from app.utils.branding import app_mode
@@ -43,6 +51,17 @@ def main():
         print("\n请检查 .env 文件中的配置")
         sys.exit(1)
     
+    if _MANAGED_FLAG in sys.argv[1:]:
+        if mode != 'research_local' or sys.argv[1:] != [_MANAGED_FLAG]:
+            sys.exit('Managed research startup requires research_local mode')
+        try:
+            from app.services.managed_research_startup import run_managed
+            run_managed(config_class=Config, host=os.environ.get('FLASK_HOST', '127.0.0.1'),
+                        port=int(os.environ.get('FLASK_PORT', 5001)))
+        except Exception:
+            sys.exit('Managed research startup refused')
+        return
+
     # 创建应用
     app = create_app()
     
