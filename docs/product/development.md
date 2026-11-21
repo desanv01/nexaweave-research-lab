@@ -19,6 +19,16 @@ The installed distribution is `nexaweave-knowledge`; its canonical modules are `
 
 The manifest command checks archived source bytes and exceptions. The unit launcher uses dummy provider keys, disables .env loading, and blocks non-loopback connections in its guarded test processes while allowing local fixtures. Installing dependencies may contact a package registry. A passing run does not establish native engine, provider, browser or deployment qualification. Main owns execution and interpretation of project acceptance checks.
 
+For real-store qualification, use the locked knowledge profile with the
+`test` extra. Add the `source-pdf` extra for PDF cases or the `execution` extra
+for Temporal cases. Browser checks use the separate pruned HTTP backend
+profile defined in CI. Use fresh disposable loopback Neo4j and PostgreSQL
+fixtures from `infra/compose.knowledge-test.yml` and
+`infra/compose.operations-test.yml`. Temporal cases also need an owned
+loopback fixture with the selected namespace ready. Bind scoped test
+authority and verify restart readback and ordinary teardown when the
+selected case exercises them.
+
 ## Local operator bootstrap and protected startup (W8.1)
 
 Use the locked backend and separate knowledge environments with Python 3.12.13
@@ -89,6 +99,99 @@ launcher with a fixture-owned loopback readiness and shutdown hook. It checks
 catalog receipts, owner metadata across restart, and owned cleanup. Full
 Neo4j connectivity, Temporal workers, provider access, and the complete
 research journey have separate prerequisites and acceptance checks.
+
+### Managed startup on Windows
+
+Use this launch mode to start the protected source application and its two
+owned Temporal workers. Run PowerShell 7 from the repository root with Windows CPython
+3.12.13 and uv 0.11.25. Use a reviewed noneditable
+`nexaweave-knowledge` wheel built from the same source revision for both
+installs. Set `$KnowledgeWheel` to the absolute path of that wheel.
+
+```powershell
+uv sync --locked --project backend --python 3.12.13 --extra dev --extra native-store --extra native-temporal
+uv sync --locked --project services/knowledge --python 3.12.13 --extra test
+$backendVenv = (Resolve-Path backend/.venv).Path
+$knowledgeVenv = (Resolve-Path services/knowledge/.venv).Path
+$backendPython = Join-Path $backendVenv 'Scripts/python.exe'
+$env:KNOWLEDGE_PYTHON = Join-Path $knowledgeVenv 'Scripts/python.exe'
+& $backendPython tools/apply_native_import_patch.py --apply
+& $backendPython tools/apply_native_import_patch.py --check
+uv pip install --python $backendPython --no-deps $KnowledgeWheel
+uv pip install --python $env:KNOWLEDGE_PYTHON --no-deps --reinstall $KnowledgeWheel
+```
+
+Use the migration, project import and source binding steps above with the
+separate knowledge interpreter. Keep ambient `PG*` variables unset. Reuse the
+bound principal, display graph and
+canonical source scope, with no run or branch ID. Supply the PostgreSQL
+database, owner role and password through the existing explicit
+`KNOWLEDGE_PG_*` settings. Use an owned loopback PostgreSQL listener, a
+direct loopback Neo4j Bolt listener and an owned IPv4 loopback Temporal
+listener. The ports below are the fixture ports. Substitute the ports of your
+owned services when they differ. Supply the Neo4j credentials and read token
+privately, and set `NEXAWEAVE_ALLOWED_ORIGINS` for your loopback client.
+
+Set the current project revision and the canonical UUID of an existing budget
+account owned by the bound principal for that project. The artifact root must
+already exist as an absolute, resolved, owned directory beneath a filesystem
+root. Use an approved runtime SHA-256. Record the installed-file hashes only
+after verifying the two installations against the reviewed source and locks.
+
+```powershell
+$env:PYTHON_DOTENV_DISABLED = '1'
+$env:FLASK_SKIP_DOTENV = '1'
+$env:NEXAWEAVE_APP_MODE = 'research_local'
+$env:FLASK_DEBUG = '0'
+$env:FLASK_HOST = '127.0.0.1'
+$env:FLASK_PORT = '5001'
+$env:KNOWLEDGE_PG_HOST = '127.0.0.1'
+$env:KNOWLEDGE_PG_PORT = '15432'
+$env:KNOWLEDGE_NEO4J_URI = 'bolt://127.0.0.1:17687'
+$env:NEXAWEAVE_MANAGED_TEMPORAL_ADDRESS = '127.0.0.1:17233'
+$env:NEXAWEAVE_MANAGED_TEMPORAL_NAMESPACE = 'default'
+$env:NEXAWEAVE_MANAGED_QUEUE_PREFIX = 'nexaweave-local'
+$env:NEXAWEAVE_MANAGED_PROJECT_REVISION = '<current-project-revision>'
+$env:NEXAWEAVE_MANAGED_BUDGET_ACCOUNT_ID = '<owned-budget-account-uuid>'
+$env:KNOWLEDGE_PREPARATION_ARTIFACT_ROOT = '<absolute-owned-artifact-directory>'
+$env:NEXAWEAVE_MANAGED_RUNTIME_SHA256 = '<approved-runtime-sha256>'
+
+$record = Join-Path $backendVenv 'Lib/site-packages/nexaweave_knowledge-0.1.0.dist-info/RECORD'
+$env:KNOWLEDGE_BOOTSTRAP_SCRIPT = Join-Path $knowledgeVenv 'Lib/site-packages/nexaweave_knowledge/read_bootstrap.py'
+$env:NEXAWEAVE_MANAGED_OVERLAY_RECORD_SHA256 = (Get-FileHash -LiteralPath $record -Algorithm SHA256).Hash.ToLowerInvariant()
+$env:NEXAWEAVE_MANAGED_KNOWLEDGE_PYTHON_SHA256 = (Get-FileHash -LiteralPath $env:KNOWLEDGE_PYTHON -Algorithm SHA256).Hash.ToLowerInvariant()
+$env:NEXAWEAVE_MANAGED_KNOWLEDGE_PYVENV_SHA256 = (Get-FileHash -LiteralPath (Join-Path $knowledgeVenv 'pyvenv.cfg') -Algorithm SHA256).Hash.ToLowerInvariant()
+$env:NEXAWEAVE_MANAGED_KNOWLEDGE_BOOTSTRAP_SHA256 = (Get-FileHash -LiteralPath $env:KNOWLEDGE_BOOTSTRAP_SCRIPT -Algorithm SHA256).Hash.ToLowerInvariant()
+
+& $backendPython backend/run.py --managed-research-local
+```
+
+Use a queue prefix dedicated to this launcher and keep the chosen Temporal
+namespace available through shutdown. The launcher verifies the overlay
+`RECORD` and installed files, the separate knowledge interpreter and
+`pyvenv.cfg`, and the installed child bootstrap and support files.
+
+With the same graph ID and private read token in a second PowerShell session,
+confirm health reports `research_local` and the source library returns the
+bound owner's metadata. The same library request without a bearer returns
+HTTP 401.
+
+```powershell
+$base = 'http://127.0.0.1:5001'
+Invoke-RestMethod "$base/health"
+Invoke-RestMethod "$base/api/source/library/$env:KNOWLEDGE_DISPLAY_GRAPH_ID" -Headers @{
+    Authorization = "Bearer $env:KNOWLEDGE_READ_TOKEN"
+}
+```
+
+Stop from the foreground launcher console with Ctrl+C and wait for the
+backend to exit before stopping the owned services. Restart with the same
+settings to check the retained metadata again. The installed readiness case
+verifies protected metadata across restart, a real managed launcher with
+owned Temporal workers, graceful drain of a held-open incomplete request,
+both worker exits and ordinary fixture shutdown. This managed lifecycle profile supplies
+neither preparation model authority nor a native dispatch permit. A complete installed
+source-to-native terminal journey has separate acceptance.
 
 ## Opt-in scanned PDF uploads on Windows (W7.2)
 
