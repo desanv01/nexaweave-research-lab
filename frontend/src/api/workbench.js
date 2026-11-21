@@ -550,6 +550,7 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
     nativeLaunchCancel: payload => request('nativeLaunchCancel', payload),
     clearNativeLaunch,
     nativeObservationsPage: (payload, selection, knownPage) => observations.page(payload, selection, knownPage),
+    nativeObservationsEventStatus: (payload, selection, knownPage) => observations.eventStatus(payload, selection, knownPage),
     clearNativeObservations: () => observations.clear(),
     connectedReportPlan: (payload, selection) => reports.plan(payload, selection),
     connectedReportStart: (payload, known) => reports.start(payload, known),

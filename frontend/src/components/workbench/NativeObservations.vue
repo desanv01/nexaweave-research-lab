@@ -1,12 +1,14 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
-import { nativeObservationSelection, nativeObservationsPayload, parseObservationRecord, validateNativeObservationsResult } from '../../api/nativeObservations.js'
+import { nativeObservationEventLocator, nativeObservationSelection, nativeObservationsPayload,
+  parseObservationRecord, validateNativeObservationsResult } from '../../api/nativeObservations.js'
 import { nativeObservationsCopyFor, nativeObservationsError } from '../../i18n/nativeObservations.js'
 const props = defineProps({ methods: { type: Object, required: true }, selection: { type: Object, default: null }, connected: Boolean, busy: Boolean, displayGraphId: { type: String, default: '' }, resetVersion: { type: Number, default: 0 }, locale: { type: String, default: 'en' } })
 const copy = computed(() => nativeObservationsCopyFor(props.locale))
 const selected = ref(null), platform = ref(''), page = ref(null), pending = ref(false), error = ref(''), stale = ref(false), feedback = ref(null)
 let epoch = 0
-const locked = computed(() => !props.connected || props.busy || pending.value || !selected.value)
+const eventPending = ref(false), eventStatus = ref(null), eventAbsent = ref(false)
+const locked = computed(() => !props.connected || props.busy || pending.value || eventPending.value || !selected.value)
 const redditTargetFields = { SEARCH_USER: 'query', LIKE_COMMENT: 'comment_id', DISLIKE_COMMENT: 'comment_id' }
 function isExactCommentId(raw, value) {
   if (!Number.isSafeInteger(value) || value < 0) return false
@@ -35,7 +37,16 @@ const recordViews = computed(() => {
   const admitted = page.value
   return admitted ? admitted.records.map(record => recordView(record, admitted.platform === 'reddit')) : []
 })
-function clear() { epoch++; props.methods.clear?.(); selected.value = null; platform.value = ''; page.value = null; pending.value = false; error.value = ''; stale.value = false }
+function clearEventStatus() {
+  eventPending.value = false
+  eventStatus.value = null
+  eventAbsent.value = false
+}
+function clear() {
+  epoch++; props.methods.clear?.(); clearEventStatus()
+  selected.value = null; platform.value = ''; page.value = null
+  pending.value = false; error.value = ''; stale.value = false
+}
 async function announce() { await nextTick(); feedback.value?.focus() }
 async function select(value) {
   clear()
@@ -54,10 +65,12 @@ watch(() => props.displayGraphId, clear, { flush: 'sync' })
 onBeforeUnmount(clear)
 function changePlatform(event) {
   if (locked.value || !selected.value.launch.request.platforms.includes(event.target.value)) return
+  clearEventStatus()
   epoch++; props.methods.clear?.(); platform.value = event.target.value; page.value = null; error.value = ''; stale.value = false
 }
 async function load(offset = 0) {
   if (locked.value) return
+  clearEventStatus()
   const life = epoch, selection = JSON.parse(JSON.stringify(selected.value)), knownPage = page.value ? JSON.parse(JSON.stringify(page.value)) : null
   const payload = { schema_version: selection.launch.schema_version, launch_id: selection.launch.request.run_id, launch_sha256: selection.launch.launch_sha256, platform: platform.value, offset, limit: 20 }
   nativeObservationsPayload(payload)
@@ -74,9 +87,40 @@ async function load(offset = 0) {
     error.value = e?.code || 'invalid_reply'
   } finally { if (life === epoch) { pending.value = false; await announce() } }
 }
+async function readEventStatus(record) {
+  if (locked.value || stale.value || typeof props.methods.eventStatus !== 'function') return
+  const currentPage = page.value
+  const payload = nativeObservationEventLocator(currentPage, record)
+  if (!payload) return
+  const life = epoch
+  const owns = () => life === epoch && page.value === currentPage && props.connected
+  clearEventStatus()
+  eventPending.value = true
+  error.value = ''
+  try {
+    const value = await props.methods.eventStatus(payload, selected.value, currentPage)
+    if (!owns()) return
+    eventAbsent.value = value === null
+    eventStatus.value = value
+  } catch (e) {
+    if (!owns()) return
+    if (['unauthorized', 'origin_denied', 'disconnected', 'tombstoned'].includes(e?.code)) {
+      clear()
+      error.value = e.code
+      await announce()
+    } else {
+      error.value = e?.code || 'invalid_reply'
+    }
+  } finally {
+    if (owns()) {
+      eventPending.value = false
+      await announce()
+    }
+  }
+}
 </script>
 <template>
-  <section class="native-observations" :lang="locale" aria-labelledby="native-observations-title" :aria-busy="pending">
+  <section class="native-observations" :lang="locale" aria-labelledby="native-observations-title" :aria-busy="pending || eventPending">
     <h2 id="native-observations-title">{{ copy.title }}</h2><p>{{ copy.intro }}</p>
     <p v-if="!selected">{{ copy.missing }}</p>
     <template v-if="selected">
@@ -84,7 +128,7 @@ async function load(offset = 0) {
       <label for="observations-platform">{{ copy.platform }}<select id="observations-platform" :value="platform" :disabled="locked" @change="changePlatform"><option v-for="name in selected.launch.request.platforms" :key="name" :value="name">{{ name }}</option></select></label>
       <div class="actions"><button class="load" type="button" :disabled="locked" @click="load(0)">{{ copy.load }}</button><button class="refresh" type="button" :disabled="locked || !page" @click="load(0)">{{ copy.refresh }}</button></div>
     </template>
-    <p ref="feedback" class="feedback" role="status" aria-live="polite" aria-atomic="true" tabindex="-1"><span v-if="pending">{{ copy.pending }}</span><span v-else-if="error">{{ nativeObservationsError(copy, error) }}</span><span v-else-if="page">{{ copy.ready }}</span><span v-else-if="selected">{{ copy.unloaded }}</span><span v-if="stale"> {{ copy.stale }}</span></p>
+    <p ref="feedback" class="feedback" role="status" aria-live="polite" aria-atomic="true" tabindex="-1"><span v-if="pending">{{ copy.pending }}</span><span v-else-if="error">{{ nativeObservationsError(copy, error) }}</span><span v-else-if="eventPending">{{ copy.eventReceipt.loading }}</span><span v-else-if="eventAbsent">{{ copy.eventReceipt.absent }}</span><span v-else-if="eventStatus">{{ copy.eventReceipt.states[eventStatus.state] }}</span><span v-else-if="page">{{ copy.ready }}</span><span v-else-if="selected">{{ copy.unloaded }}</span><span v-if="stale"> {{ copy.stale }}</span></p>
     <template v-if="page">
       <dl class="counts"><dt>{{ copy.total }}</dt><dd>{{ page.total_records }}</dd><template v-for="(count, key) in page.counts" :key="key"><dt>{{ copy[key] }}</dt><dd>{{ count }}</dd></template></dl>
       <p v-if="!page.total_records" class="empty">{{ copy.empty }}</p>
@@ -97,8 +141,20 @@ async function load(offset = 0) {
             <dt>{{ copy[target.key] }}</dt><dd><pre>{{ target.value }}</pre></dd>
           </dl>
           <details><summary>{{ copy.literal }}</summary><pre>{{ record.raw_json }}</pre><p>{{ copy.recordHash }}<br><span class="mono">{{ record.record_sha256 }}</span></p></details>
+          <button v-if="methods.eventStatus && nativeObservationEventLocator(page, record)"
+            class="event-status-read" type="button" :disabled="locked || stale" @click="readEventStatus(record)">
+            {{ copy.eventReceipt.read }}
+          </button>
         </li>
       </ol>
+      <dl v-if="eventStatus" class="provenance event-status-result">
+        <dt>{{ copy.eventReceipt.operation }}</dt><dd class="mono">{{ eventStatus.operation_id }}</dd>
+        <dt>{{ copy.eventReceipt.fingerprint }}</dt><dd class="mono">{{ eventStatus.fingerprint }}</dd>
+        <template v-if="eventStatus.receipt">
+          <dt>{{ copy.eventReceipt.episode }}</dt><dd class="mono">{{ eventStatus.receipt.episode_id }}</dd>
+          <dt>{{ copy.eventReceipt.evidence }}</dt><dd class="mono">{{ eventStatus.receipt.evidence_ids[0] }}</dd>
+        </template>
+      </dl>
       <nav class="actions" :aria-label="copy.title"><button class="previous" type="button" :disabled="locked || page.offset === 0" @click="load(Math.max(0, page.offset - page.limit))">{{ copy.previous }}</button><button class="next" type="button" :disabled="locked || page.next_offset === null" @click="load(page.next_offset)">{{ copy.next }}</button></nav>
       <details class="manifest"><summary>{{ copy.files }}</summary><ul><li v-for="file in page.manifest.files" :key="file.name">{{ file.name }} · {{ copy.size }}: {{ file.size }}<br><span class="mono">{{ file.sha256 }}</span></li></ul></details>
     </template>
