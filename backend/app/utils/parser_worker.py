@@ -9,6 +9,7 @@ from pathlib import Path
 
 _VERSION = 1
 _OCR_VERSION = 2
+_OCR_PAGES_VERSION = 3
 _MAX_REQUEST_BYTES = 16 * 1024
 _LIMIT_FIELDS = frozenset(
     {
@@ -73,7 +74,7 @@ def _request():
     if type(value) is not dict or set(value) != {"version", "file_path", "limits"}:
         raise _ProtocolFailure()
     version = value["version"]
-    if type(version) is not int or version not in (_VERSION, _OCR_VERSION):
+    if type(version) is not int or version not in (_VERSION, _OCR_VERSION, _OCR_PAGES_VERSION):
         raise _ProtocolFailure()
     path = value["file_path"]
     if type(path) is not str or not path or "\x00" in path or not os.path.isabs(path):
@@ -94,16 +95,20 @@ def _run():
     try:
         parser = _load_file_parser()
         limits = parser.ParseLimits(**fields)
-        if version == _OCR_VERSION:
+        ocr = version in (_OCR_VERSION, _OCR_PAGES_VERSION)
+        if ocr:
             text = parser.FileParser._extract_scanned_pdf_text(path, limits=limits)
         else:
             text = parser.FileParser.extract_text(path, limits=limits)
         if type(text) is not str or len(text) > limits.max_text_chars:
             return {"version": version, "error": "parser_protocol_error"}
-        if version == _OCR_VERSION and (
+        if ocr and (
             not text.strip() or len(text.encode("utf-8")) > parser._SCANNED_OCR_MAX_TEXT_BYTES
         ):
             return {"version": version, "error": "parser_protocol_error"}
+        if version == _OCR_PAGES_VERSION:
+            # The accepted raw scan preflight and recognition each enforce one page.
+            return {"version": version, "page_count": 1, "page_text": [text]}
         return {"version": version, "text": text}
     except FileNotFoundError:
         return {"version": version, "error": "missing_file"}

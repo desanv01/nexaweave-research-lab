@@ -22,6 +22,7 @@ from app.utils.parser_process import (
     ParserFailedError,
     ParserProtocolError,
     ParserTimeoutError,
+    extract_scanned_pdf_pages_isolated,
     extract_scanned_pdf_text_isolated,
     extract_text_isolated,
 )
@@ -265,6 +266,33 @@ def test_scanned_ocr_profile_refusal_and_qualified_success(
     import fitz
     from test_file_parser_bounds import _scanned_pdf_fixture
 
+    page_version = parser_process._OCR_PAGES_PROTOCOL_VERSION
+    legacy_version = parser_process._OCR_PROTOCOL_VERSION
+    exact_text = "é" * 16384
+
+    def decode(response, version, limits=ParseLimits(max_text_chars=32768)):
+        raw = json.dumps(response, ensure_ascii=False).encode("utf-8")
+        return parser_process._parse_response(raw, limits, version=version)
+
+    legacy = {"version": legacy_version, "text": exact_text}
+    assert decode(legacy, legacy_version) == exact_text
+    page = {"version": page_version, "page_count": 1, "page_text": [exact_text]}
+    assert decode(page, page_version) == {"page_count": 1, "page_text": [exact_text]}
+    for invalid in (
+        dict(page, page_text=[exact_text + "x"]),
+        dict(page, page_text=[" "]),
+        dict(page, page_count=True),
+        dict(page, page_count=2, page_text=["first", "second"]),
+        dict(page, page_text=[]),
+        dict(page, text=exact_text),
+        dict(legacy, version=page_version),
+        dict(page, version=legacy_version),
+    ):
+        with pytest.raises(ParserProtocolError):
+            decode(invalid, page_version)
+    with pytest.raises(ParserProtocolError):
+        decode(page, page_version, ParseLimits(max_text_chars=len(exact_text) - 1))
+
     with fitz.open() as staging:
         page = staging.new_page(width=432, height=216)
         page.insert_text((36, 80), "PUBLIC LIBRARY NOTICE", fontsize=24)
@@ -309,7 +337,9 @@ def test_scanned_ocr_profile_refusal_and_qualified_success(
     # Once enabled, missing English data or unusable OCR output fails the case.
     if os.environ.get("NEXAWEAVE_TEST_SCANNED_OCR") == "1":
         assert os.name == "nt", "qualified scanned OCR requires the Windows Job profile"
-        text = extract_scanned_pdf_text_isolated(source, limits=limits)
+        result = extract_scanned_pdf_pages_isolated(source, limits=limits)
+        assert result["page_count"] == 1
+        (text,) = result["page_text"]
         assert [" ".join(line.split()) for line in text.splitlines() if line.strip()] == [
             "PUBLIC LIBRARY NOTICE", "MEETING AT 10 AM",
         ]
