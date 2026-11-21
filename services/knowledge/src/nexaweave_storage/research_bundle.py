@@ -1,16 +1,19 @@
 """Versioned retained-source data artifacts; inspection never dispatches metadata."""
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 from datetime import datetime, timezone
 
+from .original_pdf import MAX_ORIGINAL_BYTES, original_pdf_sha256
 from .validation import InvalidProject, HEX, canonical_payload, principal_id, uuid_value
 
 MAX_ARTIFACT_BYTES = 12 * 1024 * 1024
 MAX_TEXT_BYTES = 1024 * 1024
 MAX_TOTAL_TEXT_BYTES = 8 * 1024 * 1024
 WARNING = "private_retained_text_and_snapshot_metadata_not_secret_scanned"
+PDF_WARNING = "private_original_pdf_retained_text_and_snapshot_metadata_not_secret_scanned"
 
 
 class BundleError(ValueError):
@@ -121,13 +124,47 @@ def _evidence_link(project, source):
             "text_sha256": source["text_sha256"], "excerpt_sha256": passage["excerpt_sha256"]}
 
 
+def _original_pdf(value, source_revision):
+    _fields(value, "source_revision media_type byte_length sha256 content_base64")
+    if value["source_revision"] != source_revision or value["media_type"] != "application/pdf":
+        raise BundleError()
+    size = value["byte_length"]
+    _int(size, 1, MAX_ORIGINAL_BYTES)
+    encoded_size = 4 * ((size + 2) // 3)
+    chunks = value["content_base64"]
+    if type(chunks) is not list or len(chunks) != (encoded_size + MAX_TEXT_BYTES - 1) // MAX_TEXT_BYTES:
+        raise BundleError()
+    for index, chunk in enumerate(chunks):
+        expected = min(MAX_TEXT_BYTES, encoded_size - index * MAX_TEXT_BYTES)
+        if type(chunk) is not str or len(chunk) != expected or not chunk.isascii():
+            raise BundleError()
+    encoded = "".join(chunks).encode("ascii")
+    content = base64.b64decode(encoded, validate=True)
+    if (len(content) != size or base64.b64encode(content) != encoded
+            or original_pdf_sha256(content) != value["sha256"]):
+        raise BundleError()
+    return content
+
+
+def _pack_original(original, source_revision):
+    encoded = base64.b64encode(original.content).decode("ascii")
+    return {"source_revision": source_revision, "media_type": original.media_type,
+            "byte_length": original.byte_length, "sha256": original.sha256,
+            "content_base64": [encoded[i:i + MAX_TEXT_BYTES] for i in range(0, len(encoded), MAX_TEXT_BYTES)]}
+
+
 def _validate(value):
     _fields(value, "schema_version kind payload payload_sha256")
     version = value["schema_version"]
-    if type(version) is not int or version not in (1, 2) or value["kind"] != "mirofish_retained_sources":
+    if type(version) is not int or version not in (1, 2, 3) or value["kind"] != "mirofish_retained_sources":
         raise BundleError()
     payload = value["payload"]
-    _fields(payload, "scope project sources evidence_link" if version == 2 else "scope project sources")
+    fields = "scope project sources"
+    if version >= 2:
+        fields += " evidence_link"
+    if version == 3:
+        fields += " original_pdf"
+    _fields(payload, fields)
     if payload["scope"] != "selected_sources_only":
         raise BundleError()
     project = payload["project"]
@@ -139,7 +176,7 @@ def _validate(value):
     if project["digest"] != digest:
         raise BundleError()
     sources = payload["sources"]
-    if type(sources) is not list or not 1 <= len(sources) <= (1 if version == 2 else 16):
+    if type(sources) is not list or not 1 <= len(sources) <= (1 if version >= 2 else 16):
         raise BundleError()
     seen_sources, seen_evidence = set(), set()
     # Project evidence is inert reference metadata, validated independently by
@@ -190,27 +227,35 @@ def _validate(value):
                 raise BundleError()
             _digest(passage["excerpt_sha256"], excerpt_bytes)
             passage_count += 1
-    if version == 2 and payload["evidence_link"] != _evidence_link(project, sources[0]):
+    if version >= 2 and payload["evidence_link"] != _evidence_link(project, sources[0]):
         raise BundleError()
+    original = _original_pdf(payload["original_pdf"], sources[0]["source_revision"]) if version == 3 else None
     _digest(value["payload_sha256"], canonical(payload))
-    return {"schema_version": version, "scope": payload["scope"],
+    summary = {"schema_version": version, "scope": payload["scope"],
             "project_id": project_id, "project_revision": project["revision"],
             "source_count": len(sources), "passage_count": passage_count,
             "text_byte_length": total, "payload_sha256": value["payload_sha256"],
-            "warning": WARNING, "original_binaries_included": False,
+            "warning": PDF_WARNING if original is not None else WARNING,
+            "original_binaries_included": original is not None,
             "publisher_authenticated": False}
+    return summary, original
 
 
-def inspect_bundle(raw, expected_sha256=None):
+def _read_bundle(raw, expected_sha256=None):
     try:
         value = decode(raw)
         if expected_sha256 is not None:
             _digest(expected_sha256, raw)
-        result = _validate(value)
-        result.update(artifact_sha256=hashlib.sha256(raw).hexdigest(), artifact_byte_length=len(raw))
-        return result
+        summary, original = _validate(value)
+        summary.update(artifact_sha256=hashlib.sha256(raw).hexdigest(), artifact_byte_length=len(raw))
+        return value["payload"], summary, original
     except (InvalidProject, ValueError, TypeError, UnicodeError, RecursionError, OverflowError):
         raise BundleError() from None
+
+
+def inspect_bundle(raw, expected_sha256=None):
+    _, summary, _ = _read_bundle(raw, expected_sha256)
+    return summary
 
 
 def export_bundle(project_store, source_store, principal, project_id, revision, source_revisions, *, schema_version=1):
@@ -219,9 +264,9 @@ def export_bundle(project_store, source_store, principal, project_id, revision, 
         principal = principal_id(principal)
         project_id = _uuid(project_id)
         _int(revision, 1, 2_147_483_647)
-        if type(schema_version) is not int or schema_version not in (1, 2):
+        if type(schema_version) is not int or schema_version not in (1, 2, 3):
             raise BundleError("invalid_request")
-        if type(source_revisions) is not list or not 1 <= len(source_revisions) <= (1 if schema_version == 2 else 16):
+        if type(source_revisions) is not list or not 1 <= len(source_revisions) <= (1 if schema_version >= 2 else 16):
             raise BundleError("invalid_request")
         selected = [_uuid(item) for item in source_revisions]
         if len(set(selected)) != len(selected):
@@ -230,10 +275,15 @@ def export_bundle(project_store, source_store, principal, project_id, revision, 
         if str(project.project_id) != project_id or project.revision != revision or project.principal != principal:
             raise BundleError()
         sources = []
+        original = None
         total_text_bytes = 0
         # Selection is a set; canonical order makes caller ordering irrelevant.
         for selected_revision in sorted(selected):
-            source = source_store.get_source(principal, project_id, selected_revision)
+            if schema_version == 3:
+                original = source_store.get_original(principal, project_id, selected_revision)
+                source = original.source
+            else:
+                source = source_store.get_source(principal, project_id, selected_revision)
             # Count actual retained UTF-8 bytes, not caller/stored length claims.
             # Stop before another source read or assembling this source's data.
             total_text_bytes += len(source.text.encode("utf-8"))
@@ -254,8 +304,10 @@ def export_bundle(project_store, source_store, principal, project_id, revision, 
             "display_id": project.display_id, "revision": project.revision,
             "snapshot": project.snapshot, "evidence": list(project.evidence), "digest": project.digest},
             "sources": sources}
-        if schema_version == 2:
+        if schema_version >= 2:
             payload["evidence_link"] = _evidence_link(payload["project"], sources[0])
+        if original is not None:
+            payload["original_pdf"] = _pack_original(original, selected[0])
         raw = canonical({"schema_version": schema_version, "kind": "mirofish_retained_sources", "payload": payload,
                          "payload_sha256": hashlib.sha256(canonical(payload)).hexdigest()})
         inspect_bundle(raw)
