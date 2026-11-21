@@ -21,7 +21,7 @@ import time
 from types import SimpleNamespace
 from uuid import NAMESPACE_URL, UUID, uuid5
 from nexaweave_execution.preparation_contracts import (
-    document_envelope, validate_preparation_sources, validate_source_snapshots)
+    document_envelope, seed_ensemble_ids, validate_preparation_sources, validate_source_snapshots)
 from nexaweave_execution.native_seed_contracts import (SEED_BRIDGE_INDEX, seed_bridge_index,
     validate_native_seed_plan)
 
@@ -210,6 +210,9 @@ class DurablePreparationHost(PreparationReadAuthority):
         return {'model_calls_enabled': bool(enabled), 'ceiling_microusd': str(self.ceiling) if type(self.ceiling) is int and 1 <= self.ceiling <= 2**63-1 else None}
 
     def _dto(self, row, method, payload):
+        if row.state == 'ready' and not row.model_calls_started:
+            # Detached preparations are read through their ensemble declaration.
+            raise PreparationError('conflict')
         data = json.loads(encoded(row.frozen['public']))
         data.update(state=row.state, progress={'stage': row.stage, 'completed': row.completed, 'total': 100},
                     error_code=row.error_code, authorization=self.authorization(), receipt=row.receipt,
@@ -372,7 +375,16 @@ class DurablePreparationHost(PreparationReadAuthority):
 
     def seed_pair(self, payload):
         """Issue one detached READY alternate using only the settled donor's inputs."""
-        payload = validate_payload('seed_pair', payload)
+        return self._seed_variants('seed_pair', payload)
+
+    def seed_ensemble(self, payload):
+        """Publish both launchable members from the same settled donor."""
+        return self._seed_variants('seed_ensemble', payload)
+
+    def _seed_variants(self, method, payload):
+        payload = validate_payload(method, payload)
+        ensemble = method == 'seed_ensemble'
+        seeds = payload['seeds'] if ensemble else [payload['alternate_seed']]
         donor = self._row(payload)
         if (donor.state != 'ready' or donor.stage != 'ready' or donor.completed != 100
                 or donor.receipt is None or donor.error_code is not None or not donor.model_calls_started
@@ -380,7 +392,7 @@ class DurablePreparationHost(PreparationReadAuthority):
             raise PreparationError('conflict')
         public = donor.frozen['public']
         donor_seed = public['options']['seed']
-        if payload['alternate_seed'] == donor_seed:
+        if donor_seed in seeds:
             raise PreparationError('conflict')
         try:
             validate_receipt(donor.receipt, str(donor.operation_id), public['options']['platforms'])
@@ -402,16 +414,52 @@ class DurablePreparationHost(PreparationReadAuthority):
             return scope
 
         scope = current_authority()
-        alternate_id = uuid5(NAMESPACE_URL, 'nexaweave:prepared-seed-pair:v1:' + digest({
-            'principal': donor.principal, 'donor': str(donor.operation_id),
-            'idempotency_key': payload['idempotency_key'],
-        }))
-        if alternate_id == donor.operation_id:
+        if ensemble:
+            ensemble_id, ids = seed_ensemble_ids(donor.principal, donor.operation_id, payload['idempotency_key'])
+        else:
+            alternate_id = uuid5(NAMESPACE_URL, 'nexaweave:prepared-seed-pair:v1:' + digest({
+                'principal': donor.principal, 'donor': str(donor.operation_id),
+                'idempotency_key': payload['idempotency_key'],
+            }))
+            ids = ((alternate_id, None),)
+        if donor.operation_id in {operation for operation, _ in ids}:
             raise PreparationError('conflict')
+        members = tuple((self._seed_variant(donor, operation, seed, check), launch)
+                        for (operation, launch), seed in zip(ids, seeds, strict=True))
+
+        def publish(*, replay):
+            if current_authority() != scope:
+                raise PreparationError('conflict')
+            ready = []
+            for variant, launch in members:
+                receipt = self._publish_seed_alternate(donor, variant, replay=replay, check=check)
+                member = dict(operation_id=str(variant.operation_id), plan_sha256=variant.plan_sha256,
+                              seed=variant.frozen['public']['options']['seed'], receipt=receipt)
+                if ensemble:
+                    member['launch_id'] = str(launch)
+                ready.append(member)
+            if current_authority() != scope:
+                raise PreparationError('conflict')
+            result = dict(schema_version=1, display_graph_id=self.display_graph_id, scope=self.scope_dto,
+                project_revision=donor.project_revision, state='ready', idempotency_key=payload['idempotency_key'],
+                platforms=public['options']['platforms'],
+                donor=dict(operation_id=str(donor.operation_id), plan_sha256=donor.plan_sha256,
+                           seed=donor_seed, artifact_sha256=donor.receipt['artifact_sha256']))
+            if ensemble:
+                result.update(ensemble_id=str(ensemble_id), members=ready)
+            else:
+                result['alternate'] = ready[0]
+            return validate_result(result, self.display_graph_id, self.scope_dto, payload, method)
+
+        if ensemble:
+            return self.store.issue_seed_ensemble(donor, self.account_id, scope, payload, ensemble_id, members, publish)
+        return self.store.issue_seed_pair(donor, self.account_id, scope, payload, members[0][0].frozen, publish)
+
+    def _seed_variant(self, donor, operation_id, seed, check):
         frozen = deepcopy(donor.frozen)
         alternate_public, alternate_request = frozen['public'], frozen['request']
-        alternate_public['operation_id'] = alternate_request['operation_id'] = str(alternate_id)
-        alternate_public['options']['seed'] = alternate_request['options']['seed'] = payload['alternate_seed']
+        alternate_public['operation_id'] = alternate_request['operation_id'] = str(operation_id)
+        alternate_public['options']['seed'] = alternate_request['options']['seed'] = seed
         frozen['request'] = validate_payload('plan', alternate_request)
         frozen['plan_identity'] = {key: value for key, value in alternate_public.items() if key != 'plan_sha256'}
         alternate_public['plan_sha256'] = digest(frozen['plan_identity'])
@@ -420,26 +468,9 @@ class DurablePreparationHost(PreparationReadAuthority):
                 validate_preparation_sources(frozen, check)
             except (KeyError, TypeError, ValueError, UnicodeError):
                 raise PreparationError('preparation_uncertain') from None
-        alternate = replace(donor, operation_id=alternate_id, plan_sha256=alternate_public['plan_sha256'],
-                            request_sha256=digest(frozen['request']), frozen=frozen, receipt=None,
-                            attempt_id=None, budget_attempt_id=None, model_calls_started=False)
-
-        def publish(*, replay):
-            if current_authority() != scope:
-                raise PreparationError('conflict')
-            receipt = self._publish_seed_alternate(donor, alternate, replay=replay, check=check)
-            if current_authority() != scope:
-                raise PreparationError('conflict')
-            result = dict(schema_version=1, display_graph_id=self.display_graph_id, scope=self.scope_dto,
-                project_revision=donor.project_revision, state='ready', idempotency_key=payload['idempotency_key'],
-                platforms=public['options']['platforms'],
-                donor=dict(operation_id=str(donor.operation_id), plan_sha256=donor.plan_sha256,
-                           seed=donor_seed, artifact_sha256=donor.receipt['artifact_sha256']),
-                alternate=dict(operation_id=str(alternate_id), plan_sha256=alternate.plan_sha256,
-                               seed=payload['alternate_seed'], receipt=receipt))
-            return validate_result(result, self.display_graph_id, self.scope_dto, payload, 'seed_pair')
-
-        return self.store.issue_seed_pair(donor, self.account_id, scope, payload, frozen, publish)
+        return replace(donor, operation_id=operation_id, plan_sha256=alternate_public['plan_sha256'],
+                       request_sha256=digest(frozen['request']), frozen=frozen, receipt=None,
+                       attempt_id=None, budget_attempt_id=None, model_calls_started=False)
 
     def _publish_seed_alternate(self, donor, alternate, *, replay, check):
         from nexaweave_execution.native_owned_binding import _regular_bound_file, _safe_ancestors

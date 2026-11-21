@@ -92,6 +92,21 @@ def options(value):
 
 def validate_payload(method, value):
     try:
+        if method == 'seed_ensemble':
+            if type(value) is not dict or set(value) != {
+                    'schema_version', 'operation_id', 'plan_sha256', 'idempotency_key', 'seeds'}:
+                raise ValueError
+            validate_payload('status', {key: value[key] for key in (
+                'schema_version', 'operation_id', 'plan_sha256')})
+            uuid_string(value['idempotency_key'])
+            seeds = value['seeds']
+            if type(seeds) is not list or len(seeds) != 2:
+                raise ValueError
+            for seed in seeds:
+                integer(seed, 0, 4294967295)
+            if seeds[0] == seeds[1]:
+                raise ValueError
+            return json.loads(encoded(value))
         if method == 'seed_pair':
             if type(value) is not dict or set(value) != {
                     'schema_version', 'operation_id', 'plan_sha256', 'idempotency_key', 'alternate_seed'}:
@@ -191,6 +206,33 @@ def _seed_pair_result(value, graph_id, scope, payload):
 
 def validate_result(value, graph_id, scope, payload, method):
     try:
+        if method == 'seed_ensemble':
+            if type(value) is not dict or set(value) != {
+                    'schema_version', 'display_graph_id', 'scope', 'project_revision', 'state',
+                    'idempotency_key', 'platforms', 'donor', 'ensemble_id', 'members'}:
+                raise ValueError
+            uuid_string(value['ensemble_id'])
+            members = value['members']
+            if type(members) is not list or len(members) != 2:
+                raise ValueError
+            ids = {value['ensemble_id'], payload['operation_id']}
+            artifacts = set()
+            envelope = {key: item for key, item in value.items() if key not in {'ensemble_id', 'members'}}
+            for member, seed in zip(members, payload['seeds'], strict=True):
+                if type(member) is not dict or set(member) != {
+                        'operation_id', 'plan_sha256', 'receipt', 'seed', 'launch_id'}:
+                    raise ValueError
+                alternate = {key: item for key, item in member.items() if key != 'launch_id'}
+                _seed_pair_result({**envelope, 'alternate': alternate}, graph_id, scope,
+                                  {**payload, 'alternate_seed': seed})
+                uuid_string(member['launch_id'])
+                ids.update((member['operation_id'], member['launch_id']))
+                artifacts.add(member['receipt']['artifact_sha256'])
+            if len(ids) != 6 or len(artifacts) != 2:
+                raise ValueError
+            if len(encoded(value)) > RESULT_BYTES:
+                raise PreparationError('result_too_large')
+            return json.loads(encoded(value))
         if method == 'seed_pair':
             return _seed_pair_result(value, graph_id, scope, payload)
         keys = {'schema_version', 'display_graph_id', 'scope', 'project_revision', 'operation_id',

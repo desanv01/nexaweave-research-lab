@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from importlib.resources import files
 import hashlib
 import json
@@ -43,7 +43,8 @@ def _catalog(conn, *, legacy=False):
     return hashlib.sha256(json.dumps(catalog, default=str, separators=(',', ':')).encode()).hexdigest()
 
 
-def migrate(connection):
+def migrate(connection, *, seed_ensembles=False):
+    """Verify the preparation schema and optionally install ensemble authority."""
     try:
         migrations = files('nexaweave_execution').joinpath('migrations')
         original = migrations.joinpath('preparations_0001.sql').read_text('utf-8')
@@ -62,14 +63,32 @@ def migrate(connection):
                 raise PreparationAuthorityError('preparation_unavailable')
             rows = connection.execute('SELECT version,checksum,schema_checksum FROM mf_preparation.schema_migrations ORDER BY version').fetchall()
             catalog = _catalog(connection)
+            if len(rows) == 3 or seed_ensembles:
+                ensemble = migrations.joinpath('preparations_0003.sql').read_text('utf-8')
+                ensemble_checksum = hashlib.sha256(ensemble.encode()).hexdigest()
+            if len(rows) == 3:
+                if ([row[:2] for row in rows] != [(1, checksum), (2, additive_checksum), (3, ensemble_checksum)]
+                        or rows[2][2] != _ensemble_catalog(catalog, rows[:2])):
+                    raise PreparationAuthorityError('preparation_unavailable')
+                return
             if rows == [(1, checksum, catalog)]:
                 connection.execute(additive)
+                catalog = _catalog(connection)
                 connection.execute('INSERT INTO mf_preparation.schema_migrations VALUES(2,%s,%s)',
-                                   (additive_checksum, _catalog(connection)))
+                                   (additive_checksum, catalog))
+                rows.append((2, additive_checksum, catalog))
             elif rows != [(1, checksum, _catalog(connection, legacy=True)), (2, additive_checksum, catalog)]:
                 raise PreparationAuthorityError('preparation_unavailable')
+            if seed_ensembles:
+                connection.execute(ensemble)
+                connection.execute('INSERT INTO mf_preparation.schema_migrations VALUES(3,%s,%s)',
+                                   (ensemble_checksum, _ensemble_catalog(_catalog(connection), rows)))
     except (OSError, psycopg.Error):
         raise PreparationAuthorityError('preparation_unavailable') from None
+
+
+def _ensemble_catalog(catalog, prior):
+    return digest({'catalog_sha256': catalog, 'prior_migrations': [list(row) for row in prior]})
 
 
 @dataclass(frozen=True)
@@ -174,8 +193,6 @@ class PreparationStore:
 
     def issue_seed_pair(self, donor, account_id, scope, payload, alternate_frozen, publish):
         """Validate donor authority and commit one immutable relation and receipt."""
-        from .budget import BudgetLedger, ReservationState
-
         operation = identifier(alternate_frozen['public']['operation_id'])
         key = identifier(payload['idempotency_key'])
         request_hash = digest(payload)
@@ -187,23 +204,7 @@ class PreparationStore:
             # Serialize key conflicts across donors before obtaining either row.
             conn.execute("SELECT pg_advisory_xact_lock(720106, hashtext(%s))", (str(key),))
             self._lock_operation(conn, operation)
-            if self._get(conn, donor.principal, donor.operation_id, True) != donor:
-                raise PreparationAuthorityError('conflict')
-            project = conn.execute(
-                'SELECT current_revision FROM mf_app.projects WHERE principal=%s AND project_id=%s FOR UPDATE',
-                (donor.principal, donor.project_id)).fetchone()
-            if project is None or project[0] != donor.project_revision:
-                raise PreparationAuthorityError('conflict')
-            account = BudgetLedger._account(conn, donor.principal, account_id, lock=True)
-            prior = BudgetLedger._row(conn, account_id, donor.operation_id)
-            fingerprint = hashlib.sha256(('prepared_budget_v1:' + donor.plan_sha256).encode('ascii')).hexdigest()
-            expected = PreparedBudgetReceipt(donor.operation_id, donor.budget_attempt_id,
-                                             fingerprint, donor.receipt['artifact_sha256'])
-            if (account[2] != donor.project_id or prior is None or prior.state != ReservationState.settled
-                    or prior.attempt_id != donor.budget_attempt_id or prior.fingerprint != fingerprint
-                    or prior.scope_group_id != scope.group_id or prior.episode_id != scope.episode_uuid(donor.operation_id)
-                    or prior.evidence_ids or prior.receipt != expected):
-                raise PreparationAuthorityError('conflict')
+            self._lock_settled_seed_donor(conn, donor, account_id, scope)
             saved = conn.execute(
                 'SELECT principal,idempotency_key,donor_operation_id,alternate_operation_id,request_sha256,alternate_frozen,receipt '
                 'FROM mf_preparation.seed_pairs WHERE (principal=%s AND idempotency_key=%s) OR donor_operation_id=%s',
@@ -224,6 +225,89 @@ class PreparationStore:
                 'request_sha256,alternate_frozen,receipt) VALUES(%s,%s,%s,%s,%s,%s,%s)',
                 (*identity[:-1], Jsonb(alternate_frozen), Jsonb(receipt)))
             return receipt
+
+    def _lock_settled_seed_donor(self, conn, donor, account_id, scope):
+        from .budget import BudgetLedger, ReservationState
+
+        if self._get(conn, donor.principal, donor.operation_id, True) != donor:
+            raise PreparationAuthorityError('conflict')
+        project = conn.execute(
+            'SELECT current_revision FROM mf_app.projects WHERE principal=%s AND project_id=%s FOR UPDATE',
+            (donor.principal, donor.project_id)).fetchone()
+        if project is None or project[0] != donor.project_revision:
+            raise PreparationAuthorityError('conflict')
+        account = BudgetLedger._account(conn, donor.principal, account_id, lock=True)
+        prior = BudgetLedger._row(conn, account_id, donor.operation_id)
+        fingerprint = hashlib.sha256(('prepared_budget_v1:' + donor.plan_sha256).encode('ascii')).hexdigest()
+        expected = PreparedBudgetReceipt(donor.operation_id, donor.budget_attempt_id,
+                                         fingerprint, donor.receipt['artifact_sha256'])
+        if (account[2] != donor.project_id or prior is None or prior.state != ReservationState.settled
+                or prior.attempt_id != donor.budget_attempt_id or prior.fingerprint != fingerprint
+                or prior.scope_group_id != scope.group_id or prior.episode_id != scope.episode_uuid(donor.operation_id)
+                or prior.evidence_ids or prior.receipt != expected):
+            raise PreparationAuthorityError('conflict')
+
+    def issue_seed_ensemble(self, donor, account_id, scope, payload, ensemble_id, members, publish):
+        key = identifier(payload['idempotency_key'])
+        identity = (ensemble_id, donor.principal, key, identifier(account_id), donor.operation_id, digest(payload))
+        expected_members = [
+            (ordinal, variant.operation_id, launch_id, variant.frozen['public']['options']['seed'])
+            for ordinal, (variant, launch_id) in enumerate(members, 1)
+        ]
+        operations = tuple(member[1] for member in expected_members)
+        if len(operations) != 2 or len(set(operations)) != 2 or donor.operation_id in operations:
+            raise PreparationAuthorityError('conflict')
+        if any(len(json.dumps(variant.frozen, ensure_ascii=True, allow_nan=False,
+                              separators=(',', ':'))) > 16 * 1024 * 1024 for variant, _ in members):
+            raise PreparationAuthorityError('result_too_large')
+        with transaction(self._connect) as conn:
+            conn.execute("SELECT pg_advisory_xact_lock(720106, hashtext(%s))", (str(key),))
+            for operation in sorted(operations):
+                self._lock_operation(conn, operation)
+            self._lock_settled_seed_donor(conn, donor, account_id, scope)
+            saved = conn.execute(
+                'SELECT ensemble_id,principal,idempotency_key,account_id,donor_operation_id,request_sha256,receipt '
+                'FROM mf_preparation.seed_ensembles WHERE (principal=%s AND idempotency_key=%s) '
+                'OR donor_operation_id=%s',
+                (donor.principal, key, donor.operation_id)).fetchall()
+            if saved:
+                if len(saved) != 1 or saved[0][:-1] != identity:
+                    raise PreparationAuthorityError('conflict')
+                actual_members = conn.execute(
+                    'SELECT ordinal,operation_id,launch_id,seed FROM mf_preparation.seed_ensemble_members '
+                    'WHERE ensemble_id=%s ORDER BY ordinal', (ensemble_id,)).fetchall()
+                if actual_members != expected_members:
+                    raise PreparationAuthorityError('preparation_uncertain')
+                result = publish(replay=True)
+                if result != saved[0][-1]:
+                    raise PreparationAuthorityError('preparation_uncertain')
+                for (variant, _), member in zip(members, result['members'], strict=True):
+                    if self._get(conn, donor.principal, variant.operation_id) != replace(variant, receipt=member['receipt']):
+                        raise PreparationAuthorityError('preparation_uncertain')
+                return result
+            if conn.execute(
+                'SELECT operation_id FROM mf_preparation.plans WHERE operation_id=ANY(%s) '
+                'UNION ALL SELECT alternate_operation_id FROM mf_preparation.seed_pairs '
+                'WHERE alternate_operation_id=ANY(%s)', (list(operations), list(operations)),
+            ).fetchone():
+                raise PreparationAuthorityError('conflict')
+            result = publish(replay=False)
+            conn.execute(
+                'INSERT INTO mf_preparation.seed_ensembles('
+                'ensemble_id,principal,idempotency_key,account_id,donor_operation_id,request_sha256,receipt) '
+                'VALUES(%s,%s,%s,%s,%s,%s,%s)', (*identity, Jsonb(result)))
+            for (variant, _), member, metadata in zip(members, result['members'], expected_members, strict=True):
+                conn.execute(
+                    'INSERT INTO mf_preparation.plans(operation_id,principal,project_id,project_revision,'
+                    'display_graph_id,request_sha256,plan_sha256,frozen,state,stage,completed,receipt,seed_ensemble_id) '
+                    "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,'ready','ready',100,%s,%s)",
+                    (variant.operation_id, variant.principal, variant.project_id,
+                     variant.project_revision, variant.display_graph_id, variant.request_sha256,
+                     variant.plan_sha256, Jsonb(variant.frozen), Jsonb(member['receipt']), ensemble_id))
+                conn.execute(
+                    'INSERT INTO mf_preparation.seed_ensemble_members(ensemble_id,ordinal,operation_id,launch_id,seed) '
+                    'VALUES(%s,%s,%s,%s,%s)', (ensemble_id, *metadata))
+            return result
 
     def queue(self, principal, operation_id, plan_sha256, budget_attempt_id):
         with transaction(self._connect) as conn:

@@ -202,9 +202,22 @@ def _record(row):
         raise LaunchAuthorityError('native_launch_uncertain') from None
 
 
+def _seed_member(conn, preparation_id):
+    if not conn.execute("SELECT to_regclass('mf_preparation.seed_ensemble_members') IS NOT NULL").fetchone()[0]:
+        return None
+    return conn.execute(
+        'SELECT m.ensemble_id,m.ordinal,m.launch_id,m.seed,e.account_id '
+        'FROM mf_preparation.seed_ensemble_members m '
+        'JOIN mf_preparation.plans p ON p.operation_id=m.operation_id AND p.seed_ensemble_id=m.ensemble_id '
+        'JOIN mf_preparation.seed_ensembles e ON e.ensemble_id=m.ensemble_id AND e.principal=p.principal '
+        'WHERE m.operation_id=%s', (preparation_id,),
+    ).fetchone()
+
+
 def _verify_current_preparation(conn, request, identity):
     descriptor = identity['preparation']
-    if request.intervention is not None:
+    member = _seed_member(conn, identifier(descriptor['operation_id']))
+    if request.intervention is not None or member is not None:
         from nexaweave_knowledge.bindings import ScopeBindingStore
         from nexaweave_knowledge.contracts import KnowledgeScope
         from nexaweave_knowledge.operations import LedgerError
@@ -232,7 +245,11 @@ def _verify_current_preparation(conn, request, identity):
             or prep[0] != 'ready' or prep[1] != descriptor['plan_sha256']
             or type(prep[2]) is not dict or prep[2].get('artifact_sha256') != descriptor['artifact_sha256']):
         raise LaunchAuthorityError('conflict')
-    if identity['schema_version'] >= 2:
+    if member is not None and (identity['schema_version'] != 1 or request.run_id != member[2]
+                               or request.seed != member[3] or request.source_run_id is not None
+                               or 'checkpoint' in identity):
+        raise LaunchAuthorityError('conflict')
+    if identity['schema_version'] >= 2 or member is not None:
         options = prep[7]
         if (prep[3] != request.project_id or prep[4] != request.project_revision
                 or prep[5] != identity['display_graph_id'] or prep[6] != identity['scope']
@@ -241,8 +258,9 @@ def _verify_current_preparation(conn, request, identity):
                 or type(options.get('seed')) is not int or options['seed'] != request.seed
                 or type(options.get('max_rounds')) is not int or options['max_rounds'] != request.max_rounds):
             raise LaunchAuthorityError('conflict')
-    if request.intervention is not None and project[1] != identifier(identity['scope']['workspace_id']):
+    if (request.intervention is not None or member is not None) and project[1] != identifier(identity['scope']['workspace_id']):
         raise LaunchAuthorityError('conflict')
+    return member
 
 
 def _verify_checkpoint_source(conn, request, identity, configuration=None):
@@ -336,6 +354,10 @@ class NativeLaunchStore:
                 raise LaunchAuthorityError('conflict')
             return row
 
+    def seed_member(self, preparation_id):
+        with transaction(self._connect) as conn:
+            return _seed_member(conn, identifier(preparation_id))
+
     def put(self, principal, declaration, identity, *, configuration=None, fork_archive=None):
         identity = validate_identity(identity)
         declaration = validate_declaration(declaration)
@@ -355,7 +377,10 @@ class NativeLaunchStore:
         preparation_id = identifier(descriptor['operation_id'])
         version = declaration['schema_version']
         with transaction(self._connect) as conn:
-            if version == 1:
+            seed_member = _seed_member(conn, preparation_id)
+            if seed_member is not None and configuration['account_id'] != str(seed_member[4]):
+                raise LaunchAuthorityError('conflict')
+            if version == 1 and seed_member is None:
                 # Keep the existing serialized preparation check for v1 review.
                 prep = conn.execute(
                     'SELECT state FROM mf_preparation.plans WHERE principal=%s AND operation_id=%s FOR UPDATE',
@@ -366,7 +391,7 @@ class NativeLaunchStore:
             read_prior = ('SELECT request_sha256,launch_sha256,state FROM mf_native_launch.plans '
                           'WHERE run_id=%s AND principal=%s')
             prior = conn.execute(read_prior, (req.run_id, principal)).fetchone()
-            if version >= 2 and (prior is None or prior[2] == 'planned'):
+            if seed_member is not None or (version >= 2 and (prior is None or prior[2] == 'planned')):
                 _verify_current_preparation(conn, req, identity)
                 # A same-ID plan can appear while waiting for preparation ownership.
                 prior = conn.execute(read_prior, (req.run_id, principal)).fetchone()
@@ -444,7 +469,7 @@ class NativeLaunchStore:
                      (identifier(attempt_id), row.run_id))
         return self._get(conn, row.principal, row.run_id)
 
-    def queue(self, principal, run_id, launch_sha256, budget_attempt_id):
+    def queue(self, principal, run_id, launch_sha256, budget_attempt_id=None):
         with transaction(self._connect) as conn:
             row = self._get(conn, principal, run_id, True)
             if row.launch_sha256 != sha(launch_sha256) or row.intervention is not None:
@@ -453,7 +478,7 @@ class NativeLaunchStore:
                 return row, False
             req = row.request
             identity = row.frozen['identity']
-            _verify_current_preparation(conn, req, identity)
+            member = _verify_current_preparation(conn, req, identity)
             if row.source_run_id is None:
                 other = conn.execute(
                     'SELECT run_id FROM mf_native_launch.plans WHERE principal=%s AND preparation_id=%s '
@@ -468,7 +493,132 @@ class NativeLaunchStore:
                 ).fetchone()
             if other is not None:
                 raise LaunchAuthorityError('conflict')
-            return self._claim_queue(conn, row, budget_attempt_id), True
+            if member is not None:
+                if budget_attempt_id is not None:
+                    raise LaunchAuthorityError('conflict')
+                queued = self._queue_seed_member(conn, row, member)
+                if queued is not None:
+                    return queued
+            else:
+                if budget_attempt_id is None:
+                    raise LaunchAuthorityError('conflict')
+                return self._claim_queue(conn, row, budget_attempt_id), True
+        # The unclaimed refusal is committed before reporting it to the caller.
+        raise LaunchAuthorityError('budget_denied')
+
+    def _verify_seed_sequence(self, conn, row, member):
+        from nexaweave_knowledge.contracts import KnowledgeScope
+        from .budget import BudgetError, BudgetLedger, ReservationState
+        from .native_launch_contracts import NativeBudgetReceipt
+
+        identity = row.frozen['identity']
+        configuration = row.frozen['configuration']
+        account_id = configuration['account_id']
+        if account_id is None or identity['ceiling_microusd'] is None:
+            raise LaunchAuthorityError('model_calls_disabled')
+        ensemble, ordinal, _, _, ensemble_account = member
+        if account_id != str(ensemble_account):
+            raise LaunchAuthorityError('conflict')
+        siblings = conn.execute(
+            'SELECT ordinal,operation_id,launch_id FROM mf_preparation.seed_ensemble_members '
+            'WHERE ensemble_id=%s ORDER BY ordinal', (ensemble,),
+        ).fetchall()
+        if [sibling[0] for sibling in siblings] != [1, 2]:
+            raise LaunchAuthorityError('conflict')
+        _, preparation_id, launch_id = siblings[2 - ordinal]
+        # Never wait on the other launch with project/preparation locks held.
+        # Member one reads the review without taking member two's lock.
+        lock = ' FOR SHARE NOWAIT' if ordinal == 2 else ''
+        try:
+            data = conn.execute(
+                f'SELECT {_COLUMNS} FROM mf_native_launch.plans WHERE principal=%s AND run_id=%s' + lock,
+                (row.principal, launch_id),
+            ).fetchone()
+            if data is None:
+                raise LaunchAuthorityError('conflict')
+            other = _record(data)
+            if (other.preparation_id != preparation_id
+                    or other.frozen['configuration'] != configuration
+                    or other.frozen['identity']['scope'] != identity['scope']
+                    or other.frozen['identity']['display_graph_id'] != identity['display_graph_id']
+                    or other.request.project_id != row.request.project_id
+                    or other.request.project_revision != row.request.project_revision
+                    or other.cancel_requested):
+                raise LaunchAuthorityError('conflict')
+            if ordinal == 1:
+                if other.state != 'planned' or other.dispatch_claimed:
+                    raise LaunchAuthorityError('conflict')
+                return
+            if other.state in {'planned', 'queued', 'starting', 'running', 'uncertain'}:
+                raise LaunchAuthorityError('busy')
+            if other.state != 'completed' or not other.dispatch_claimed or other.receipt is None:
+                raise LaunchAuthorityError('conflict')
+            raw = conn.execute(
+                f'SELECT {_NATIVE_COLUMNS} FROM mf_native_execution.runs '
+                'WHERE principal=%s AND run_id=%s FOR SHARE NOWAIT', (row.principal, other.run_id),
+            ).fetchone()
+            if raw is None:
+                raise LaunchAuthorityError('conflict')
+            native = _native_record(raw)
+            receipt = NativeRunReceipt.from_wire(other.receipt)
+            if (receipt.outcome != 'completed' or receipt.run_id != other.run_id
+                    or receipt.request_fingerprint != other.request.fingerprint
+                    or native.state.value != 'completed' or native.cancel_requested
+                    or native.request != other.request or native.attempt_id != receipt.attempt_id
+                    or native.receipt != receipt or native.child is None
+                    or native.child.instance_id != receipt.instance_id):
+                raise LaunchAuthorityError('conflict')
+            scope = KnowledgeScope.model_validate_json(json.dumps(identity['scope']))
+            account = BudgetLedger._account(conn, row.principal, account_id, lock=True)
+            budget = BudgetLedger._row(conn, account_id, other.run_id)
+            if budget is None or budget.state != ReservationState.settled:
+                raise LaunchAuthorityError('busy')
+            expected = NativeBudgetReceipt(other.run_id, other.budget_attempt_id,
+                                           native_budget_fingerprint(other.launch_sha256), other.launch_sha256, receipt)
+            if (account[2] != row.request.project_id or budget.receipt != expected
+                    or budget.attempt_id != other.budget_attempt_id or budget.fingerprint != expected.fingerprint
+                    or budget.ceiling_microusd != int(other.frozen['identity']['ceiling_microusd'])
+                    or budget.scope_group_id != scope.group_id or budget.evidence_ids
+                    or budget.episode_id != native_budget_episode(scope.group_id, other.run_id)):
+                raise LaunchAuthorityError('conflict')
+        except psycopg.errors.LockNotAvailable:
+            raise LaunchAuthorityError('busy') from None
+        except (BudgetError, InvalidNativeRun, NativeRunUncertain, ValueError, TypeError, KeyError):
+            raise LaunchAuthorityError('conflict') from None
+
+    def _queue_seed_member(self, conn, row, member):
+        from nexaweave_knowledge.contracts import KnowledgeScope
+        from .budget import BudgetError, BudgetLedger, ReservationState
+
+        self._verify_seed_sequence(conn, row, member)
+        identity = row.frozen['identity']
+        scope = KnowledgeScope.model_validate_json(json.dumps(identity['scope']))
+        try:
+            reservation = BudgetLedger(lambda: nullcontext(conn)).reserve_native(
+                row.principal, row.frozen['configuration']['account_id'], scope, row.request,
+                row.launch_sha256, int(identity['ceiling_microusd']),
+            )
+        except BudgetError as error:
+            if error.code != 'budget_denied':
+                raise LaunchAuthorityError('conflict') from None
+            _, closed = self._close_undispatched(conn, row)
+            if not closed:
+                raise LaunchAuthorityError('native_launch_uncertain') from None
+            return None
+        if reservation.state != ReservationState.reserved:
+            raise LaunchAuthorityError('conflict')
+        return self._claim_queue(conn, row, reservation.attempt_id), True
+
+    def verify_seed_dispatch(self, principal, run_id, launch_sha256):
+        with transaction(self._connect) as conn:
+            row = self._get(conn, principal, run_id, True)
+            if row.launch_sha256 != launch_sha256 or not row.dispatch_claimed or row.cancel_requested:
+                raise LaunchAuthorityError('conflict')
+            member = _verify_current_preparation(conn, row.request, row.frozen['identity'])
+            if member is None or row.frozen['configuration']['account_id'] != str(member[4]):
+                raise LaunchAuthorityError('conflict')
+            if member[1] == 2:
+                self._verify_seed_sequence(conn, row, member)
 
     def workflow(self, principal, run_id, launch_sha256, value):
         with transaction(self._connect) as conn:
@@ -507,13 +657,19 @@ class NativeLaunchStore:
             row=self._get(conn,principal,run_id,True)
             if row.launch_sha256!=sha(launch_sha256):
                 raise LaunchAuthorityError('conflict')
-            if row.dispatch_claimed or row.budget_attempt_id is not None:
-                return row,False
-            if row.state=='planned':
-                conn.execute("UPDATE mf_native_launch.plans SET state='cancelled',cancel_requested=true,updated_at=now() WHERE run_id=%s",(row.run_id,))
-                row=self._get(conn,principal,run_id)
-            return row,(row.state=='cancelled' and row.cancel_requested and not row.dispatch_claimed
-                        and row.budget_attempt_id is None)
+            return self._close_undispatched(conn, row)
+
+    def _close_undispatched(self, conn, row):
+        if row.dispatch_claimed or row.budget_attempt_id is not None:
+            return row, False
+        if row.state == 'planned':
+            conn.execute(
+                "UPDATE mf_native_launch.plans SET state='cancelled',cancel_requested=true,updated_at=now() WHERE run_id=%s",
+                (row.run_id,),
+            )
+            row = self._get(conn, row.principal, row.run_id)
+        return row, (row.state == 'cancelled' and row.cancel_requested and not row.dispatch_claimed
+                     and row.budget_attempt_id is None)
 
     def observe(self, principal, run_id, launch_sha256, native_record):
         if not isinstance(native_record, NativeRunRecord):
@@ -526,7 +682,7 @@ class NativeLaunchStore:
             if state == 'declared':
                 return row
             receipt = native_record.receipt.to_wire() if native_record.receipt is not None else None
-            if row.intervention is not None:
+            if row.intervention is not None or _seed_member(conn, row.preparation_id) is not None:
                 if row.receipt is not None:
                     if receipt is None:
                         return row

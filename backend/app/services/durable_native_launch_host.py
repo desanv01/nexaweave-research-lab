@@ -381,6 +381,13 @@ class DurableNativeLaunchHost:
         from nexaweave_execution.native_launch_contracts import LaunchAuthorityError
         payload = validate_payload('plan',payload)
         prep,ref = self._preparation(payload['preparation'])
+        if not prep.model_calls_started:
+            member = self.store.seed_member(prep.operation_id)
+            if (member is None or payload['schema_version'] != 1
+                    or payload['launch_id'] != str(member[2])
+                    or str(self.account_id) != str(member[4])
+                    or 'checkpoint' in payload):
+                raise NativeLaunchError('conflict')
         try:
             prior = self.store.get(self.principal,payload['launch_id'])
         except LaunchAuthorityError as error:
@@ -440,6 +447,15 @@ class DurableNativeLaunchHost:
             except Exception:
                 # The atomic queue may already have reserved and claimed.
                 raise NativeLaunchError('native_launch_uncertain') from None
+            if not queued:
+                return self._dto(self._recover(row), 'start', payload)
+            attempt_id = row.budget_attempt_id
+        elif not prep.model_calls_started:
+            try:
+                row, queued = self.store.queue(self.principal, row.run_id, row.launch_sha256)
+            except LaunchAuthorityError as error:
+                code = 'native_launch_uncertain' if error.code == 'native_launch_unavailable' else error.code
+                raise NativeLaunchError(code) from None
             if not queued:
                 return self._dto(self._recover(row), 'start', payload)
             attempt_id = row.budget_attempt_id
@@ -683,7 +699,9 @@ class DurableNativeLaunchHost:
         if request!=row.request or not self.authorization(row)['model_calls_enabled']:
             return False
         current=self.store.get(self.principal,request.run_id,row.launch_sha256)
-        self._current(current)
+        prep, _ = self._current(current)
+        if not prep.model_calls_started:
+            self.store.verify_seed_dispatch(self.principal, current.run_id, current.launch_sha256)
         if request.source_run_id is not None:
             self._checkpoint_producer(request, current.frozen['identity']['preparation'])
         return current.dispatch_claimed and not current.cancel_requested

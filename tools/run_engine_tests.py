@@ -30,6 +30,7 @@ def child() -> int:
         result = int(pytest.main([
             "-q", "-p", "pytest_asyncio.plugin",
             "--ignore", str(ROOT / "backend" / "engine_tests" / "test_connected_preparation_native_launch.py"),
+            "--ignore", str(ROOT / "backend" / "engine_tests" / "test_native_seed_ensemble.py"),
             "--ignore", str(ROOT / "backend" / "engine_tests" / "test_connected_native_observations.py"),
             "--ignore", str(ROOT / "backend" / "engine_tests" / "test_connected_report_process.py"),
             str(ROOT / "backend" / "engine_tests"),
