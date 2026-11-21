@@ -31,6 +31,7 @@ from .file_parser import (
 
 _PROTOCOL_VERSION = 1
 _OCR_PROTOCOL_VERSION = 2
+_OCR_PAGES_PROTOCOL_VERSION = 3
 _OCR_JOB_COMMIT_LIMIT_BYTES = 268435456
 _MAX_REQUEST_BYTES = 16 * 1024
 _WORKER_SCRIPT = Path(__file__).with_name("parser_worker.py")
@@ -195,7 +196,21 @@ def _parse_response(data, limits, *, version=_PROTOCOL_VERSION):
         raise ParserProtocolError()
     if response["version"] != version:
         raise ParserProtocolError()
-    if set(response) == {"version", "text"} and type(response["text"]) is str:
+    if version == _OCR_PAGES_PROTOCOL_VERSION and set(response) == {"version", "page_count", "page_text"}:
+        count, pages = response["page_count"], response["page_text"]
+        if type(count) is not int or count != 1 or type(pages) is not list or len(pages) != count:
+            raise ParserProtocolError()
+        text = pages[0]
+        if type(text) is not str or len(text) > limits.max_text_chars or not text.strip():
+            raise ParserProtocolError()
+        try:
+            if len(text.encode("utf-8")) > _SCANNED_OCR_MAX_TEXT_BYTES:
+                raise ParserProtocolError()
+        except UnicodeError:
+            raise ParserProtocolError() from None
+        return {"page_count": count, "page_text": pages}
+    if (version != _OCR_PAGES_PROTOCOL_VERSION and set(response) == {"version", "text"}
+            and type(response["text"]) is str):
         text = response["text"]
         if len(text) > limits.max_text_chars:
             raise ParserProtocolError()
@@ -230,6 +245,13 @@ def extract_scanned_pdf_text_isolated(file_path, *, limits=None, timeout_seconds
     )
 
 
+def extract_scanned_pdf_pages_isolated(file_path, *, limits=None, timeout_seconds=30):
+    """Return the verified page count and ordered text for one admitted scan."""
+    return _extract_isolated(
+        file_path, limits, timeout_seconds, version=_OCR_PAGES_PROTOCOL_VERSION,
+    )
+
+
 def _extract_isolated(file_path, limits, timeout_seconds, *, version):
     timeout = _validated_timeout(timeout_seconds)
     if limits is None:
@@ -243,7 +265,7 @@ def _extract_isolated(file_path, limits, timeout_seconds, *, version):
     )
     payload = _request_bytes(file_path, limits, version=version)
     char_limit = limits.max_text_chars
-    ocr = version == _OCR_PROTOCOL_VERSION
+    ocr = version in (_OCR_PROTOCOL_VERSION, _OCR_PAGES_PROTOCOL_VERSION)
     if ocr:
         char_limit = min(char_limit, _SCANNED_OCR_MAX_TEXT_BYTES)
     job_profile = {"job_commit_limit_bytes": _OCR_JOB_COMMIT_LIMIT_BYTES} if ocr else {}
@@ -334,9 +356,9 @@ def _extract_isolated(file_path, limits, timeout_seconds, *, version):
         except (OSError, OwnedProcessError):
             if not interrupted:
                 raise ParserFailedError() from None
-    text = _parse_response(response_bytes, limits, version=version)
+    result = _parse_response(response_bytes, limits, version=version)
     if ocr:
         accounting = owner.terminal_job_memory
         if accounting is None or accounting[0] != _OCR_JOB_COMMIT_LIMIT_BYTES:
             raise ParserFailedError()
-    return text
+    return result
