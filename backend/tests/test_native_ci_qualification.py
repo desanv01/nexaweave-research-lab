@@ -73,7 +73,7 @@ def run_owned(lanes, *, cancel=None, max_seconds=25, environment=None,
                            max_seconds=max_seconds, cancel=cancel,
                            owner_factory=factory, sanitize_offline=sanitize_offline)
     assert len(owners) == 2
-    assert all(owner.closed and owner.tree_empty for owner in owners)
+    assert all(owner.closed and owner.tree_empty for owner in owners), _ownership_evidence(lanes, owners, output)
     assert all(owner.process.poll() is not None for owner in owners)
     assert all(owner.requested_creationflags & subprocess.CREATE_NO_WINDOW for owner in owners)
     assert all(not Path(owner._directory_name).exists() for owner in owners)
@@ -82,6 +82,49 @@ def run_owned(lanes, *, cancel=None, max_seconds=25, environment=None,
         exit_codes.update({lane.name: owner.process.returncode
                            for lane, owner in zip(lanes, owners)})
     return status, output.getvalue()
+
+
+def _ownership_evidence(lanes, owners, output):
+    """Summarize only fixed controller vocabulary on an ownership assertion failure."""
+    limit = 16 * 1024
+    with output.getbuffer() as buffer:
+        truncated = len(buffer) > limit
+        lines = bytes(buffer[-limit:]).splitlines()[int(truncated):]
+    timing_prefix = ci.TIMING_PREFIX.encode()
+    phases = ('launch-start', 'launch-end', 'launch-error', 'observed-exit', 'whole-bound-interruption',
+              'ownership-close-start', 'ownership-close-end', 'replay-start', 'replay-end',
+              'private-cleanup-start', 'private-cleanup-end')
+    stages = ('startup', 'cleanup', 'log close', 'log replay', 'private cleanup')
+    errors = (b'OwnedProcessError', b'RuntimeError', b'PermissionError', b'OSError',
+              b'FileNotFoundError', b'TimeoutExpired', b'KeyboardInterrupt', b'SystemExit')
+    evidence = []
+    for lane, owner in zip(lanes, owners):
+        seen, failures = set(), {}
+        prefixes = {f'lane {lane.name} {stage} failed: '.encode(): stage for stage in stages}
+        incomplete = f'lane {lane.name} failed or result evidence incomplete'.encode()
+        for line in lines:
+            if line.startswith(timing_prefix) and len(line) <= 1024:
+                try:
+                    row = json.loads(line[len(timing_prefix):])
+                except (ValueError, RecursionError):
+                    continue
+                if (type(row) is dict and row.get('token') == lane.token
+                        and row.get('lane') == lane.name and row.get('gate') == 'controller'
+                        and row.get('phase') in phases):
+                    seen.add(row['phase'])
+            for prefix, stage in prefixes.items():
+                if line.startswith(prefix):
+                    kind = line[len(prefix):]
+                    failures[stage] = kind.decode('ascii') if kind in errors else 'other'
+        process = owner.process
+        exit_code = process.returncode if process is not None else None
+        evidence.append(dict(lane=lane.name, started=owner.started, closed=owner.closed,
+            tree_empty=owner.tree_empty, job_retained=owner.job is not None,
+            root_present=process is not None, root_exit=exit_code if type(exit_code) is int else None,
+            directory_present=owner._directory_name is not None and os.path.lexists(owner._directory_name),
+            controller_phases=[phase for phase in phases if phase in seen],
+            reported_failures=failures, result_incomplete=incomplete in lines))
+    return json.dumps(dict(tail_truncated=truncated, lanes=evidence), sort_keys=True)
 
 
 def timings(output):
