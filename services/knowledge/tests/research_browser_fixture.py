@@ -549,12 +549,27 @@ class ResearchBrowserSession:
                 require(result == self.ontology_completed)
 
     def perform(self, stage, request=None):
+        if stage == 'pdf-read-after-restart':
+            from test_source_ingestion_http_integration import browser_two_hop_seed, verify_browser_two_hop
+
+            require(request is None and self.step < len(self.stages) and self.stages[self.step] == stage)
+            end = time.monotonic() + self._remaining(self.seconds[self.step])
+            scope, graph = self.prep.scope_dto, self.prep.display_graph_id
+            with browser_two_hop_seed(scope, self.selected.ingestion) as seed:
+                result = self._perform(stage, seed, stage_end=end)
+                require(self.last_proof.get('two_hop') is True)
+                with self.lock:
+                    outputs = [value for observed, path, value in self.events
+                               if observed == stage and path == '/api/graph/two-hop/' + graph]
+                verify_browser_two_hop(outputs, seed, graph, scope)
+            require(time.monotonic() < end, 'research_browser_stage_deadline')
+            return result
         if stage == 'ontology-execute':
             with patch.dict(os.environ, self.execution):
                 return self._perform(stage, request)
         return self._perform(stage, request)
 
-    def _perform(self, stage, request):
+    def _perform(self, stage, request, *, stage_end=None):
         require(self.step < len(self.stages) and self.stages[self.step] == stage, 'research_browser_stage_order')
         if stage in ONTOLOGY:
             keys = {'source_revision'}
@@ -566,6 +581,9 @@ class ResearchBrowserSession:
                     and request['source_revision'] == self.selected.revisions[0])
         timeout = self._remaining(self.seconds[self.step])
         end = time.monotonic() + timeout
+        if stage_end is not None:
+            end = min(end, stage_end)
+        require(time.monotonic() < end, 'research_browser_stage_deadline')
         with self.lock:
             self.active, self.events, self.event_bytes = stage, deque(), 0
             self.origin_events = deque()
