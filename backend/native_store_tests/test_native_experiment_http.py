@@ -190,6 +190,7 @@ def test_actual_failed_closed_catalog_and_compare(protected_fixture, monkeypatch
 
 def test_catalog_never_opens_recording_and_comparison_rejects_changed_bundle(protected_fixture, monkeypatch, tmp_path):
     from app.services.native_experiment_contracts import ExperimentCohort, canonical, sha
+    from app.services.native_experiment_http_client import NativeExperimentProcessClient, reply, request_value
     from app.services.native_experiment_http_facade import ExperimentSettings, NativeExperimentFacade
     settings, _, cohort, _, manifest, _ = protected_fixture
     # Keep actual run authority but bind a missing immutable recording. Catalog
@@ -199,10 +200,32 @@ def test_catalog_never_opens_recording_and_comparison_rejects_changed_bundle(pro
     wrong = ExperimentCohort('owner', (replace(member, recording=pin),))
     raw = canonical(wrong.wire()); manifest.write_bytes(raw)
     monkeypatch.setenv('KNOWLEDGE_EXPERIMENT_MANIFEST_SHA256', sha(raw))
-    facade = NativeExperimentFacade(settings, binding=ExperimentSettings.capture(settings))
+    binding = ExperimentSettings.capture(settings)
+    facade = NativeExperimentFacade(settings, binding=binding)
     client = lean_client(monkeypatch, settings, facade)
     auth = {'Authorization': 'Bearer '+settings.token}
-    assert client.get('/api/experiments/catalog', headers=auth).status_code == 200
+    child_outcome = 'binding-missing' if binding is None else 'before-child-call'
+    real_call = NativeExperimentProcessClient.call
+
+    def observe_first_catalog_call(process_client, request):
+        nonlocal child_outcome
+        try:
+            wire = real_call(process_client, request)
+        except Exception:
+            child_outcome = 'transport-or-reply-failure'
+            raise
+        try:
+            child_ok = reply(wire, request_value(request))['ok']
+        except (ValueError, TypeError, UnicodeError, RecursionError):
+            child_outcome = 'invalid-child-reply'
+        else:
+            child_outcome = 'child-accepted' if child_ok else 'child-rejected'
+        return wire
+
+    with monkeypatch.context() as observation:
+        observation.setattr(NativeExperimentProcessClient, 'call', observe_first_catalog_call)
+        response = client.get('/api/experiments/catalog', headers=auth)
+    assert response.status_code == 200, f'first catalog GET child outcome: {child_outcome}'
     response = client.post('/api/experiments/compare', headers=auth,
         json={'version': 1, 'title': 'Pinned missing recording', 'member_ids': [member.member_id]})
     assert response.status_code == 503 and not (tmp_path/'absent-bundle').exists()
