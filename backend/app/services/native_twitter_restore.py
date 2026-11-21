@@ -208,6 +208,8 @@ def _check_hours(hours):
 
 
 def _restore_schedule(manifest, runner_state, config_bytes, deadline):
+    from nexaweave_execution.native_seed_contracts import validate_native_seed_plan
+
     if (type(manifest) is not dict or manifest.get("platform") != "twitter"
             or not _integer(manifest.get("round"), 1, 1)
             or manifest.get("full_checkpoint") is not False
@@ -251,6 +253,12 @@ def _restore_schedule(manifest, runner_state, config_bytes, deadline):
     _remaining(deadline)
     if type(config) is not dict or "execution_controls" in config:
         raise RecordingError()
+    try:
+        seed_plan = validate_native_seed_plan(config)
+    except ValueError:
+        raise RecordingError() from None
+    if len(seed_plan) not in (1, 2):
+        raise RecordingError()
     anchors = manifest["anchors"]
     if any(config.get(key) != anchors[key] for key in ("graph_id", "simulation_id")):
         raise RecordingError()
@@ -283,7 +291,7 @@ def _restore_schedule(manifest, runner_state, config_bytes, deadline):
         activity = agent.get("activity_level", 0.5)
         if type(activity) not in (int, float) or not 0 <= activity <= 1:
             raise RecordingError()
-    return config, rng_state, clock["after_step"], completed, offset + interval
+    return config, seed_plan, rng_state, clock["after_step"], completed, offset + interval
 
 
 def _owned_graph_channel(graph):
@@ -304,7 +312,39 @@ def _owned_graph_channel(graph):
     return channel
 
 
-def _bound_restore_tables(platform, recommendation_rows, work_deadline):
+def _check_checkpoint_posts(connection, seed_plan, round_tick, cut_cursor, deadline):
+    posts = connection.execute(
+        "SELECT post_id, user_id, content, created_at, original_post_id, quote_content"
+        " FROM post ORDER BY post_id LIMIT 4",
+    )
+    with closing(posts), closing(connection.execute(
+        "SELECT rowid, user_id, created_at, info FROM trace WHERE action = 'create_post'"
+        " ORDER BY rowid LIMIT 4",
+    )) as traces:
+        for index, (post, trace) in enumerate(zip(posts, traces, strict=True)):
+            _remaining(deadline)
+            post_id, actor, content, tick, original, quote = post
+            rowid, trace_actor, trace_tick, info = trace
+            if (not _integer(post_id, 1, 2**63 - 1) or not _integer(actor, 0, 1)
+                    or type(content) is not str or original is not None or quote is not None
+                    or not _integer(trace_actor, actor, actor)):
+                raise RecordingError()
+            if index < len(seed_plan):
+                seed = seed_plan[index]
+                if (not _integer(tick, round_tick - 1, round_tick - 1)
+                        or (actor, content) != (seed.actor_id, seed.content)):
+                    raise RecordingError()
+            elif not _integer(tick, round_tick, round_tick) or rowid != cut_cursor:
+                raise RecordingError()
+            payload = strict_json(info)
+            if (not _integer(trace_tick, tick, tick) or type(payload) is not dict
+                    or payload.keys() != {"content", "post_id"}
+                    or not _integer(payload["post_id"], post_id, post_id)
+                    or payload["content"] != content):
+                raise RecordingError()
+
+
+def _bound_restore_tables(platform, manifest, seed_plan, work_deadline):
     connection, cursor = platform.db, platform.db_cursor
     connection.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, MAX_JSON)
     connection.set_progress_handler(
@@ -313,10 +353,12 @@ def _bound_restore_tables(platform, recommendation_rows, work_deadline):
     remaining_text = MAX_JSON
     # These are fixed tables used by the pinned default recommender and
     # three admitted native requests. The two-owner fixture has no groups,
-    # follow edges or comments, and its checkpoint has three regular posts.
+    # follow edges or comments. Its checkpoint has the seeds and one round-one post.
+    post_count = len(seed_plan) + 1
+    recommendation_rows = manifest["recommendation_state"]["rows"]
     tables = (
         ("user", 2, 2),
-        ("post", 3, 3),
+        ("post", post_count, post_count),
         ("trace", 1, 128),
         ("rec", recommendation_rows, recommendation_rows),
         ("follow", 0, 0),
@@ -336,6 +378,8 @@ def _bound_restore_tables(platform, recommendation_rows, work_deadline):
             remaining_text -= _wire_size(row, remaining_text)
         if count < minimum:
             raise RecordingError()
+    _check_checkpoint_posts(connection, seed_plan, manifest["engine_clock"]["before_step"],
+                            manifest["cursor"], work_deadline)
     _remaining(work_deadline)
 
 
@@ -396,7 +440,7 @@ async def _advance_restored_twitter_round(
         _remaining(work_deadline)
         if expected_post_content is not None:
             _wire_size(expected_post_content, MAX_WIRE)
-        config, rng_state, tick, round_index, minutes = _restore_schedule(
+        config, seed_plan, rng_state, tick, round_index, minutes = _restore_schedule(
             manifest, runner_state, config_bytes, work_deadline,
         )
         original_channel = _owned_graph_channel(graph)
@@ -423,8 +467,7 @@ async def _advance_restored_twitter_round(
         ) as (platform, handles):
             if os.environ.get("OASIS_DB_PATH") != platform.db_path:
                 raise RecordingError("invalid_request")
-            _bound_restore_tables(platform, manifest["recommendation_state"]["rows"],
-                                  work_deadline)
+            _bound_restore_tables(platform, manifest, seed_plan, work_deadline)
             env = OasisEnv(agent_graph=graph, platform=platform,
                            database_path=platform.db_path, semaphore=1)
             _remaining(work_deadline)
