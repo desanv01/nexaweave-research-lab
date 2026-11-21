@@ -20,6 +20,14 @@ class PdfError(ValueError):
         super().__init__(code)
 
 
+class PdfAllBlank(PdfError):
+    """An intact PDF whose ordinary extraction found no nonblank page."""
+
+    def __init__(self, page_count):
+        super().__init__()
+        self.page_count = page_count
+
+
 @dataclass(frozen=True)
 class PdfExtraction:
     text: str
@@ -86,8 +94,10 @@ def extract_pdf(binary):
                 "empty": empty, "excerpt_sha256": hashlib.sha256(data).hexdigest()})
             parts.append(text)
             offset += len(text)
-        if empty_count == count or document.is_repaired:
+        if document.is_repaired:
             raise PdfError()
+        if empty_count == count:
+            raise PdfAllBlank(count)
         return PdfExtraction("\n\n".join(parts), tuple(pages), count, empty_count)
     except PdfError:
         raise
