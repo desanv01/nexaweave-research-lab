@@ -18,7 +18,7 @@ from nexaweave_execution.native_launch_contracts import (LaunchAuthorityError, N
     native_budget_episode, native_budget_fingerprint)
 from nexaweave_execution.native_run_contracts import (NativeChildIdentity, NativeRunConflict,
     NativeRunBusy, NativeRunDenied, NativeRunReceipt, NativeRunRequest, RunState, SwapActiveActorV1)
-from nexaweave_execution.native_run_store import NativeRunStore,migrate_native_runs
+from nexaweave_execution.native_run_store import NativeRunStore, RedditCheckpointMode, migrate_native_runs
 from nexaweave_execution.budget import BudgetDenied, migrate as migrate_budget
 from nexaweave_execution.preparation_store import migrate as migrate_preparation
 from test_source_bridge_postgres import factory as original_factory
@@ -155,7 +155,7 @@ def test_own_migration_catalog_drift_and_previous_checksums(factory):
     with factory() as conn:
         old=conn.execute('SELECT checksum FROM mf_execution.schema_migrations').fetchall()
         upgraded=conn.execute(migrations).fetchall()
-        assert [row[0] for row in upgraded]==[1,2,3] and upgraded[0][1]==checksum
+        assert [row[0] for row in upgraded]==[1,2,3,4] and upgraded[0][1]==checksum
         with conn.transaction(force_rollback=True):
             conn.execute("SET LOCAL statement_timeout='10s'")
             conn.execute("SET LOCAL lock_timeout='5s'")
@@ -650,3 +650,125 @@ def test_pg_distinct_review_start_race_releases_only_permanently_closed_loser(fa
     assert winner.state=='queued' and loser.state=='cancelled' and loser.cancel_requested and loser.budget_attempt_id is None
     assert host.budget.native_reservation('owner',host.account_id,winner.request,winner.launch_sha256).state==ReservationState.started
     assert host.budget.native_reservation('owner',host.account_id,loser.request,loser.launch_sha256).state==ReservationState.released
+
+
+def test_reddit_checkpoint_store_binds_producer_before_budget_and_round_trips(factory, tmp_path, monkeypatch):
+    from app.services.preparation_client import PreparationError
+    from test_preparation_store import real_host, request, reference
+
+    migrate_all(factory)
+    prep, scope, retained, _, wires, _ = real_host(factory, tmp_path, cap=40)
+    options = {
+        'comment': 'Continue the bounded thread.',
+        'seed_post': {'poster_agent_id': 0, 'content': 'Open the bounded thread.'},
+    }
+    payload = dict(request(retained), schema_version=2, source_revisions=[str(retained.source_revision)])
+    payload['options'].update(types=None, max_agents=2, platforms=['reddit'], max_rounds=1,
+                              reddit_checkpoint=options)
+    plan = prep.plan(payload)
+    prep.start(reference(plan))
+    prep.generate(wires[0])
+    ready = prep.store.get('owner', plan['operation_id'], plan['plan_sha256'])
+    assert ready.state == 'ready'
+    config = json.loads((prep.root / ready.receipt['simulation_id'] / 'simulation_config.json').read_bytes())
+    assert config['reddit_checkpoint_comment'] == options['comment']
+    assert config['event_config']['initial_posts'] == [options['seed_post']]
+
+    def forbidden(*args, **kwargs):
+        pytest.fail('checkpoint donor reached variant publication or row issuance')
+
+    donor_budget = prep.budget.status('owner', prep.account_id)
+    artifact_roots = set(prep.root.iterdir())
+    variant = dict(reference(plan), idempotency_key=str(uuid4()))
+    with monkeypatch.context() as denial:
+        denial.setattr(prep, '_publish_seed_alternate', forbidden)
+        denial.setattr(prep.store, 'issue_seed_pair', forbidden)
+        denial.setattr(prep.store, 'issue_seed_ensemble', forbidden)
+        for action, selection in ((prep.seed_pair, {'alternate_seed': 8}),
+                                  (prep.seed_ensemble, {'seeds': [8, 9]})):
+            with pytest.raises(PreparationError, match='^conflict$'):
+                action(dict(variant, **selection))
+    assert set(prep.root.iterdir()) == artifact_roots
+    assert prep.budget.status('owner', prep.account_id) == donor_budget
+    assert prep.store.get('owner', ready.operation_id) == ready
+
+    host = launch_host(prep, factory)
+    capture = dict(declaration(plan), schema_version=4, checkpoint={'mode': 'capture'})
+    request_wire = {
+        'schema_version': 1, 'principal': 'owner', 'project_id': str(scope.project_id),
+        'project_revision': ready.project_revision, 'simulation_id': ready.receipt['simulation_id'],
+        'run_id': capture['launch_id'], 'artifact_sha256': ready.receipt['artifact_sha256'],
+        'runtime_sha256': 'c' * 64, 'platforms': ['reddit'],
+        'seed': payload['options']['seed'], 'max_rounds': 1,
+    }
+    identity = {
+        'schema_version': 4, 'display_graph_id': host.display_graph_id, 'scope': host.scope_dto,
+        'preparation': host._preparation_descriptor(ready), 'request': request_wire, 'limits': host.limits,
+        'ceiling_microusd': '4', 'model_label': host.model_label, 'checkpoint': capture['checkpoint'],
+    }
+    configuration = host._configuration()
+    native = NativeRunStore(factory)
+    capture_mode = RedditCheckpointMode.CAPTURE
+    continuation_mode = RedditCheckpointMode.CONTINUE
+    unbound = NativeRunRequest.from_wire(request_wire)
+    with pytest.raises(NativeRunDenied):
+        native.register(unbound, reddit_mode=capture_mode)
+    with pytest.raises(NativeRunDenied):
+        native.get('owner', unbound.run_id)
+    producer = host.store.put('owner', capture, identity, configuration=configuration)
+    with pytest.raises(NativeRunDenied):
+        native.register(producer.request, reddit_mode=capture_mode)
+    queued, won = host.store.queue_reddit('owner', producer.run_id, producer.launch_sha256)
+    assert won
+    host.budget.start('owner', prep.account_id, producer.run_id, queued.budget_attempt_id)
+    with pytest.raises(NativeRunDenied):
+        native.register(producer.request)
+    with pytest.raises(NativeRunDenied):
+        native.register(producer.request, reddit_mode=continuation_mode)
+    assert native.register(producer.request, reddit_mode=capture_mode).request == producer.request
+    owner_id = uuid4()
+    for wrong_mode in (None, continuation_mode):
+        with pytest.raises(NativeRunDenied):
+            native.claim_start('owner', producer.run_id, owner_id, reddit_mode=wrong_mode)
+    assert native.get('owner', producer.run_id).state is RunState.declared
+    started = native.claim_start('owner', producer.run_id, owner_id, reddit_mode=capture_mode)
+    child = NativeChildIdentity(uuid4(), 12345, 'f' * 64)
+    native.attach('owner', producer.run_id, started.attempt_id, owner_id, child)
+    receipt = NativeRunReceipt(producer.run_id, started.attempt_id, child.instance_id,
+                               producer.request.fingerprint, 'completed', 'e' * 64)
+    completed = native.settle('owner', producer.run_id, started.attempt_id, owner_id, receipt)
+    producer = host.store.observe('owner', producer.run_id, producer.launch_sha256, completed)
+
+    selector = _continuation(producer)
+    continuation = dict(declaration(plan), schema_version=4, checkpoint=selector)
+    request_wire = dict(request_wire, schema_version=4, run_id=continuation['launch_id'],
+                        source_run_id=selector['source_run_id'], checkpoint_sha256=selector['checkpoint_sha256'])
+    identity = dict(identity, checkpoint=selector, request=request_wire)
+    before = host.budget.status('owner', prep.account_id)
+    for key, invalid in (('checkpoint_sha256', '0' * 64), ('source_run_id', str(uuid4()))):
+        wrong_selector = dict(selector, **{key: invalid})
+        wrong_identity = dict(identity, checkpoint=wrong_selector, request=dict(request_wire, **{key: invalid}))
+        with pytest.raises(LaunchAuthorityError, match='^conflict$'):
+            host.store.put('owner', dict(continuation, checkpoint=wrong_selector), wrong_identity,
+                           configuration=configuration)
+        assert host.budget.status('owner', prep.account_id) == before
+    row = host.store.put('owner', continuation, identity, configuration=configuration)
+    assert row.request.to_wire() == request_wire
+    assert row.request.fingerprint == sha256(_wire_bytes(request_wire)).hexdigest()
+    for wrong_mode in (None, capture_mode, continuation_mode):
+        with pytest.raises(NativeRunDenied):
+            native.register(row.request, reddit_mode=wrong_mode)
+    queued, won = host.store.queue_reddit('owner', row.run_id, row.launch_sha256)
+    assert won
+    host.budget.start('owner', prep.account_id, row.run_id, queued.budget_attempt_id)
+    with pytest.raises(NativeRunDenied):
+        native.register(row.request)
+    registered = native.register(row.request, reddit_mode=continuation_mode)
+    assert native.get('owner', row.run_id) == registered and registered.request == row.request
+    with pytest.raises(NativeRunDenied):
+        native.claim_start('owner', row.run_id, uuid4())
+    assert native.get('owner', row.run_id).state is RunState.declared
+
+    ordinary = replace(unbound, simulation_id='sim_ordinary_reddit', run_id=uuid4())
+    assert native.register(ordinary).request == ordinary
+    assert native.request_cancel('owner', ordinary.run_id).cancel_requested

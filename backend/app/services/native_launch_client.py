@@ -41,7 +41,7 @@ def _fork_intervention(value):
 def _checkpoint(value, launch_id, version):
     if type(value) is not dict or type(value.get('mode')) is not str:
         raise ValueError
-    if version == 2 and value['mode'] == 'capture' and set(value) == {'mode'}:
+    if version in (2, 4) and value['mode'] == 'capture' and set(value) == {'mode'}:
         return None
     fields = {'mode'} | _CONTINUATION_KEYS
     if version == 3:
@@ -75,7 +75,7 @@ def validate_payload(method, value):
             return json.loads(encoded(value))
         if method not in {'plan', 'start', 'status', 'cancel'} or type(value) is not dict:
             raise ValueError
-        version = integer(value['schema_version'], 1, 3)
+        version = integer(value['schema_version'], 1, 4)
         expected = {'schema_version', 'launch_id', 'preparation' if method == 'plan' else 'launch_sha256'}
         if version >= 2 and method == 'plan':
             expected.add('checkpoint')
@@ -143,9 +143,9 @@ def validate_result(value, graph_id, scope, payload, method):
     try:
         if type(value) is not dict:
             raise ValueError
-        version = integer(value['schema_version'], 1, 3)
+        version = integer(value['schema_version'], 1, 4)
         expected = KEYS if version == 1 else _KEYS_V2
-        if (version != integer(payload['schema_version'], 1, 3) or set(value) != expected
+        if (version != integer(payload['schema_version'], 1, 4) or set(value) != expected
                 or len(encoded(value)) > RESULT_BYTES):
             raise ValueError
         if value['display_graph_id'] != graph_id or value['scope'] != scope:
@@ -182,7 +182,8 @@ def validate_result(value, graph_id, scope, payload, method):
                 or req['platforms'] not in [['twitter'], ['reddit'], ['twitter', 'reddit']]):
             raise ValueError
         integer(req['seed'], 0, 4294967295); integer(req['max_rounds'], 1, 24)
-        if version >= 2 and (req['platforms'] != ['twitter'] or req['max_rounds'] != 1):
+        checkpoint_platform = 'reddit' if version == 4 else 'twitter'
+        if version >= 2 and (req['platforms'] != [checkpoint_platform] or req['max_rounds'] != 1):
             raise ValueError
         intervention = _fork_intervention(req['intervention']) if request_version == 3 else None
         if checkpoint is not None and checkpoint != (

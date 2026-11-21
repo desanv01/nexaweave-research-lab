@@ -28,12 +28,13 @@ def planned(payload):
                    'runtime_sha256':'c'*64,'platforms':['twitter','reddit'],'seed':7,'max_rounds':2},
         'limits':{'max_calls':10,'max_input_bytes':262144,'max_output_tokens':4096,'max_run_seconds':120},
         'ceiling_microusd':'4','model_label':'scripted 猫😀'}
-    if payload['schema_version'] == 2:
-        value['schema_version'] = 2
+    if payload['schema_version'] in (2, 4):
+        version = payload['schema_version']
+        value['schema_version'] = version
         value['checkpoint'] = deepcopy(payload['checkpoint'])
-        value['request'].update(platforms=['twitter'], max_rounds=1)
+        value['request'].update(platforms=['reddit' if version == 4 else 'twitter'], max_rounds=1)
         if value['checkpoint']['mode'] == 'continue':
-            value['request'].update(schema_version=2, source_run_id=value['checkpoint']['source_run_id'],
+            value['request'].update(schema_version=version, source_run_id=value['checkpoint']['source_run_id'],
                                     checkpoint_sha256=value['checkpoint']['checkpoint_sha256'])
     value.update(launch_sha256=digest(value),state='planned',error_code=None,
                  authorization={'model_calls_enabled':False},workflow=None,receipt=None,cancel_requested=False,
@@ -264,3 +265,29 @@ def test_v2_checkpoint_reply_refuses_misbound_identity_even_with_valid_digest(ap
         wrong_version = dict(reference(dto), schema_version=3 - dto['schema_version'])
         reply = http.post(route.format('status'), json=wrong_version, headers=headers)
         assert reply.status_code == 502 and reply.json['error']['code'] == 'invalid_reply'
+
+
+def test_reddit_checkpoint_protected_v4_keeps_exact_platform_and_lineage(api):
+    http, facade, headers, _ = api
+    route = '/api/native-launch/plan/display-1'
+    capture = dict(declaration(), schema_version=4, checkpoint={'mode': 'capture'})
+    response = http.post(route, json=capture, headers=headers)
+    assert response.status_code == 200
+    assert response.json['data']['request']['platforms'] == ['reddit']
+    assert response.json['data']['request']['schema_version'] == 1
+    restore = dict(declaration(), schema_version=4, checkpoint={
+        'mode': 'continue', 'source_run_id': capture['launch_id'], 'checkpoint_sha256': 'e' * 64,
+    })
+    response = http.post(route, json=restore, headers=headers)
+    assert response.status_code == 200
+    assert response.json['data']['request']['schema_version'] == 4
+    assert response.json['data']['request']['source_run_id'] == capture['launch_id']
+
+    def mixed_platform(reply):
+        reply['request']['platforms'] = ['twitter']
+        reply['launch_sha256'] = digest({key: reply[key] for key in IDENTITY_V2})
+
+    facade.corrupt = mixed_platform
+    assert http.post(route, json=restore, headers=headers).status_code == 502
+    bad = dict(restore, checkpoint=dict(restore['checkpoint'], mode='fork'))
+    assert http.post(route, json=bad, headers=headers).status_code == 400

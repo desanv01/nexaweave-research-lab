@@ -489,3 +489,81 @@ def test_cancel_during_dispatch_gate_prevents_claim_and_native_launch(
     finally:
         release.set()
         _close(host)
+
+
+def test_reddit_continuation_requires_exact_settled_producer_before_driver_or_artifacts(tmp_path, monkeypatch):
+    from datetime import datetime, timedelta
+    from app.services.native_prepared_host import NativePreparedHost
+    from nexaweave_execution.native_owned_binding import NativeOwnedSessionFactory
+    from nexaweave_execution.native_process_driver import NativeProcessDriver
+    from nexaweave_execution.native_reddit_checkpoint_binding import NativeRedditCheckpointFactory
+    from nexaweave_execution.native_run_contracts import (
+        InvalidNativeRun, NativeChildIdentity, NativeRunDenied, NativeRunReceipt, NativeRunRequest, RunState,
+    )
+    from nexaweave_execution.native_run_store import NativeRunRecord, NativeRunStore, RedditCheckpointMode
+
+    project = uuid4()
+    prepared = NativeOwnedSessionFactory(str(tmp_path / "unread-preparation"), "graph-fixture",
+        "sim-fixture", "owner", str(project), 1, ("reddit",), 7, 1, "b" * 64, offline_models)
+    producer = NativeRunRequest.from_wire(dict(schema_version=1, principal="owner", project_id=project,
+        project_revision=1, simulation_id="sim-fixture", run_id=uuid4(), artifact_sha256="a" * 64,
+        runtime_sha256="b" * 64, platforms=["reddit"], seed=7, max_rounds=1))
+    request = replace(producer, schema_version=4, run_id=uuid4(),
+                      source_run_id=producer.run_id, checkpoint_sha256="e" * 64)
+    child = NativeChildIdentity(uuid4(), 12000, "f" * 64)
+    receipt = NativeRunReceipt(producer.run_id, uuid4(), child.instance_id, producer.fingerprint,
+                               "completed", request.checkpoint_sha256)
+    timestamp = datetime.fromisoformat("2026-11-21T00:00:00+00:00")
+    settled = NativeRunRecord(producer, producer.fingerprint, RunState.completed, False,
+                              receipt.attempt_id, uuid4(), None, child, receipt, timestamp, timestamp)
+    binding = NativeRedditCheckpointFactory(prepared, request, str(tmp_path / "unread-checkpoint"),
+                                            str(tmp_path / "unused-child"), settled)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("denied Reddit authority reached the store, driver, or artifact reader")
+
+    def host(factory):
+        return NativePreparedHost(principal="owner", request=request, session_factory=factory,
+                                  connection_factory=forbidden, dispatch_allowed=lambda _: True)
+
+    monkeypatch.setattr(NativeOwnedSessionFactory, "validate", forbidden)
+    with monkeypatch.context() as denial:
+        denial.setattr(NativeProcessDriver, "__init__", forbidden)
+        for wrong in (
+            None, child, replace(settled, state=RunState.running),
+            replace(settled, request=replace(producer, seed=8)),
+            replace(settled, request=replace(producer, run_id=uuid4())),
+            replace(settled, fingerprint="0" * 64),
+            replace(settled, receipt=replace(receipt, request_fingerprint="0" * 64)),
+            replace(settled, receipt=replace(receipt, evidence_sha256="0" * 64)),
+            replace(settled, receipt=replace(receipt, run_id=uuid4())),
+            replace(settled, attempt_id=uuid4()),
+            replace(settled, child=replace(child, instance_id=uuid4())),
+        ):
+            rejected = replace(binding, producer_record=wrong)
+            with pytest.raises(InvalidNativeRun):
+                host(rejected)
+            with pytest.raises(ValueError, match="^invalid protected Reddit producer$"):
+                rejected.validate(request)
+
+    reads = []
+
+    def stored_record(_store, principal, run_id):
+        reads.append((principal, run_id))
+        return replace(settled, cancel_requested=True, updated_at=timestamp + timedelta(seconds=1))
+
+    monkeypatch.setattr(NativeRunStore, "get", stored_record)
+    with monkeypatch.context() as denial:
+        denial.setattr(NativeProcessDriver, "__init__", forbidden)
+        wrong_process = replace(settled, child=replace(child, process_id=12001))
+        with pytest.raises(NativeRunDenied):
+            host(replace(binding, producer_record=wrong_process))
+
+    admitted = host(binding)
+    assert reads == [("owner", producer.run_id)] * 2
+    try:
+        assert admitted.supervisor.coordinator._reddit_mode is RedditCheckpointMode.CONTINUE
+        assert admitted.driver._factory.producer == child
+    finally:
+        _close(admitted)
+    assert not list(tmp_path.iterdir())

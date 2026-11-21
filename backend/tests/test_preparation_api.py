@@ -172,3 +172,20 @@ import app.services.preparation_client
     result = subprocess.run([sys.executable, '-c', script], cwd=Path(__file__).resolve().parents[1],
                             capture_output=True, text=True, timeout=15)
     assert result.returncode == 0, result.stderr
+
+
+def test_reddit_checkpoint_option_is_explicit_v2_and_bounded():
+    payload = plan_request()
+    payload['options'].update(platforms=['reddit'], max_agents=2, max_rounds=1,
+        reddit_checkpoint={'comment': 'A bounded reply.',
+                           'seed_post': {'poster_agent_id': 0, 'content': 'A bounded seed.'}})
+    with pytest.raises(PreparationError, match='^invalid_request$'):
+        validate_payload('plan', payload)
+    payload.update(schema_version=2, source_revisions=[payload['source_revision']])
+    assert validate_payload('plan', payload) == payload
+    for field, value in [('platforms', ['twitter']), ('max_rounds', 2), ('max_agents', 9)]:
+        with pytest.raises(PreparationError, match='^invalid_request$'):
+            validate_payload('plan', dict(payload, options={**payload['options'], field: value}))
+    payload['options']['reddit_checkpoint']['comment'] = '雪' * 171
+    with pytest.raises(PreparationError, match='^invalid_request$'):
+        validate_payload('plan', payload)

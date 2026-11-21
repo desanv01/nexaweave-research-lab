@@ -433,7 +433,7 @@ _CATALOGS = (
     ("mf_native_execution", "nexaweave_execution", "sql_sha256", "catalog_sha256",
      ("native_runs_0001.sql", "native_runs_0002.sql", "native_runs_0003.sql")),
     ("mf_native_launch", "nexaweave_execution", "checksum", "schema_checksum",
-     ("native_launch_0001.sql", "native_launch_0002.sql", "native_launch_0003.sql")),
+     ("native_launch_0001.sql", "native_launch_0002.sql", "native_launch_0003.sql", "native_launch_0004.sql")),
     ("mf_report", "nexaweave_execution", "checksum", "schema_checksum", ("report_0001.sql",)),
     ("mf_followup", "nexaweave_execution", "checksum", "schema_checksum", ("followup_0001.sql",)),
 )

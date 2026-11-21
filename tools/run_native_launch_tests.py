@@ -23,13 +23,14 @@ NEW_TARGETS = (
 )
 ENGINE_TARGET = ROOT / 'backend/engine_tests/test_connected_preparation_native_launch.py'
 ENSEMBLE_TARGET = ROOT / 'backend/engine_tests/test_native_seed_ensemble.py'
+REDDIT_CHECKPOINT_TARGET = ROOT / 'backend/engine_tests/test_protected_reddit_checkpoint.py'
 UNIT_REGRESSIONS = (ROOT / 'services/knowledge/tests/test_budget.py',)
 PG_REGRESSIONS = (
     ROOT / 'services/knowledge/tests/test_budget_postgres.py',
     ROOT / 'services/knowledge/tests/test_preparation_store.py',
 )
 HOSTED_COUNTS = {
-    'test_native_launch_store.py': 8,
+    'test_native_launch_store.py': 9,
     'test_native_launch_budget.py': 2,
     'test_temporal_connected_launch.py': 2,
 }
@@ -58,7 +59,7 @@ def child(mode: str) -> int:
             passed = 0
             skipped = 0
             node_paths = {}
-            targets = {p.name: 0 for p in (*NEW_TARGETS, ENGINE_TARGET, ENSEMBLE_TARGET)}
+            targets = {p.name: 0 for p in (*NEW_TARGETS, ENGINE_TARGET, ENSEMBLE_TARGET, REDDIT_CHECKPOINT_TARGET)}
             passed_nodes = set()
 
             def pytest_collection_finish(self, session):
@@ -85,9 +86,9 @@ def child(mode: str) -> int:
             selection = 'native_launch_temporal'
             required = ('test_temporal_connected_launch.py',)
         elif mode == 'engine':
-            targets = (ENGINE_TARGET, ENSEMBLE_TARGET)
+            targets = (ENGINE_TARGET, ENSEMBLE_TARGET, REDDIT_CHECKPOINT_TARGET)
             selection = 'native_launch_engine'
-            required = (ENGINE_TARGET.name, ENSEMBLE_TARGET.name)
+            required = tuple(path.name for path in targets)
         elif mode in ('integration', 'hosted-integration'):
             targets = NEW_TARGETS + (PG_REGRESSIONS if mode == 'integration' else ())
             selection = '(postgres or native_launch_temporal) and not native_launch_engine'

@@ -274,6 +274,11 @@ class DurablePreparationHost(PreparationReadAuthority):
                     break
         if not selected:
             raise PreparationError('empty_selection')
+        from .native_reddit_preparation import reddit_checkpoint_option
+
+        reddit = reddit_checkpoint_option(payload['options'])
+        if reddit is not None and (len(selected) < 2 or reddit['seed_post']['poster_agent_id'] >= len(selected)):
+            raise PreparationError('invalid_request')
         public = dict(schema_version=2, display_graph_id=self.display_graph_id, scope=self.scope_dto,
             project_revision=project_revision, operation_id=payload['operation_id'], source=metadata[0], sources=metadata,
             options=payload['options'], actors=[dict(source_entity_uuid=n['uuid'], name=n['name'],
@@ -390,9 +395,11 @@ class DurablePreparationHost(PreparationReadAuthority):
                 or donor.receipt is None or donor.error_code is not None or not donor.model_calls_started
                 or donor.attempt_id is None or donor.budget_attempt_id is None or self.account_id is None):
             raise PreparationError('conflict')
+        from .native_reddit_preparation import REDDIT_CHECKPOINT
+
         public = donor.frozen['public']
-        donor_seed = public['options']['seed']
-        if donor_seed in seeds:
+        donor_options = public['options']
+        if REDDIT_CHECKPOINT in donor_options or donor_options['seed'] in seeds:
             raise PreparationError('conflict')
         try:
             validate_receipt(donor.receipt, str(donor.operation_id), public['options']['platforms'])
@@ -530,15 +537,22 @@ class DurablePreparationHost(PreparationReadAuthority):
     def _freeze_seed_bridge(root, opts):
         from nexaweave_execution.native_owned_binding import _regular_bound_file
 
-        if SEED_BRIDGE_INDEX not in opts:
+        from .native_reddit_preparation import REDDIT_CHECKPOINT, freeze_reddit_checkpoint
+
+        if SEED_BRIDGE_INDEX not in opts and REDDIT_CHECKPOINT not in opts:
             return
         name = 'simulation_config.json'
         config = json.loads(_regular_bound_file(root, name, 2097152))
         if SEED_BRIDGE_INDEX in config:
             raise PreparationError('preparation_failed')
-        config[SEED_BRIDGE_INDEX] = seed_bridge_index(
-            opts, opts['platforms'], len(validate_native_seed_plan(config)),
-        )
+        if SEED_BRIDGE_INDEX in opts:
+            config[SEED_BRIDGE_INDEX] = seed_bridge_index(
+                opts, opts['platforms'], len(validate_native_seed_plan(config)),
+            )
+        try:
+            freeze_reddit_checkpoint(config, opts)
+        except (ValueError, KeyError, TypeError):
+            raise PreparationError('preparation_failed') from None
         raw = encoded(config)
         if len(raw) > 2097152:
             raise PreparationError('preparation_failed')
@@ -571,6 +585,11 @@ class DurablePreparationHost(PreparationReadAuthority):
         blobs = {n: _regular_bound_file(root, n, 2097152) for n in names}
         state, config, grounding = (json.loads(blobs[n]) for n in names[:3])
         opts = public['options']
+        from .native_reddit_preparation import validate_reddit_checkpoint_config
+        try:
+            validate_reddit_checkpoint_config(config, opts)
+        except (ValueError, TypeError, KeyError):
+            raise PreparationError('preparation_failed') from None
         if SEED_BRIDGE_INDEX in opts or SEED_BRIDGE_INDEX in config:
             try:
                 count = len(validate_native_seed_plan(config))

@@ -179,7 +179,10 @@ class DurableNativeLaunchHost:
         prep,ref = self._preparation(row.frozen['identity']['preparation'])
         request = row.request
         opts = prep.frozen['public']['options']
-        if (request.project_revision!=prep.project_revision or request.project_id!=prep.project_id
+        from .native_reddit_preparation import REDDIT_CHECKPOINT
+
+        if ((REDDIT_CHECKPOINT in opts) != (row.frozen['identity']['schema_version'] == 4)
+                or request.project_revision!=prep.project_revision or request.project_id!=prep.project_id
                 or request.simulation_id!=prep.receipt['simulation_id'] or request.artifact_sha256!=prep.receipt['artifact_sha256']
                 or request.platforms!=tuple(opts['platforms']) or request.seed!=opts['seed'] or request.max_rounds!=opts['max_rounds']):
             raise NativeLaunchError('conflict')
@@ -191,11 +194,16 @@ class DurableNativeLaunchHost:
                 'simulation_id': prep.receipt['simulation_id'],
                 'artifact_sha256': prep.receipt['artifact_sha256']}
 
-    def _checkpoint_request(self, prep, launch_id, checkpoint):
+    def _checkpoint_request(self, prep, launch_id, checkpoint, *, reddit=False):
         from nexaweave_execution.native_run_contracts import NativeRunRequest
 
         opts = prep.frozen['public']['options']
-        if opts['platforms'] != ['twitter'] or opts['max_rounds'] != 1:
+        from .native_reddit_preparation import reddit_checkpoint_option
+
+        platform = 'reddit' if reddit else 'twitter'
+        if (opts['platforms'] != [platform] or opts['max_rounds'] != 1
+                or (reddit_checkpoint_option(opts) is not None) != reddit
+                or (reddit and (prep.frozen['public']['schema_version'] != 2 or checkpoint['mode'] == 'fork'))):
             raise NativeLaunchError('conflict')
         wire = {'schema_version': 1, 'principal': self.principal, 'project_id': str(prep.project_id),
                 'project_revision': prep.project_revision, 'simulation_id': prep.receipt['simulation_id'],
@@ -203,7 +211,7 @@ class DurableNativeLaunchHost:
                 'runtime_sha256': self.runtime_sha256, 'platforms': opts['platforms'],
                 'seed': opts['seed'], 'max_rounds': opts['max_rounds']}
         if checkpoint['mode'] in {'continue', 'fork'}:
-            wire.update(schema_version=2, source_run_id=checkpoint['source_run_id'],
+            wire.update(schema_version=4 if reddit else 2, source_run_id=checkpoint['source_run_id'],
                         checkpoint_sha256=checkpoint['checkpoint_sha256'])
         if checkpoint['mode'] == 'fork':
             wire.update(schema_version=3, intervention=checkpoint['intervention'])
@@ -222,8 +230,13 @@ class DurableNativeLaunchHost:
                 raise
             raise NativeLaunchError('conflict') from None
         identity = producer.frozen['identity']
+        reddit = request.schema_version == 4
         if (producer.state != 'completed' or not producer.dispatch_claimed or producer.receipt is None
-                or identity['schema_version'] != 2 or identity.get('checkpoint') != {'mode': 'capture'}
+                or identity['schema_version'] != (4 if reddit else 2)
+                or identity.get('checkpoint') != {'mode': 'capture'}
+                or (reddit and (producer.frozen['configuration'] != self._configuration()
+                                or identity['limits'] != self.limits or identity['model_label'] != self.model_label
+                                or identity['ceiling_microusd'] != str(self.ceiling)))
                 or identity['display_graph_id'] != self.display_graph_id or identity['scope'] != self.scope_dto
                 or identity['preparation'] != preparation or producer.request != original):
             raise NativeLaunchError('conflict')
@@ -238,7 +251,7 @@ class DurableNativeLaunchHost:
                 or native.fingerprint != original.fingerprint or native.receipt != receipt
                 or native.child is None or native.child.instance_id != receipt.instance_id):
             raise NativeLaunchError('conflict')
-        return native.child
+        return native
 
     def _checkpoint_factory(self, prep, ref, request, checkpoint, *, preflight=False):
         from nexaweave_execution.native_twitter_checkpoint_binding import (
@@ -246,9 +259,12 @@ class DurableNativeLaunchHost:
         )
         from .native_recording_contracts import RecordingAnchors
 
-        if request != self._checkpoint_request(prep, str(request.run_id), checkpoint):
+        reddit = request.platforms == ('reddit',)
+        if request != self._checkpoint_request(prep, str(request.run_id), checkpoint, reddit=reddit):
             raise NativeLaunchError('conflict')
         public = prep.frozen['public']
+        if reddit:
+            return self._reddit_checkpoint_factory(prep, ref, request)
         if len(public['actors']) != 2 or len({actor['name'] for actor in public['actors']}) != 2:
             raise NativeLaunchError('conflict')
         model = self.model_factory
@@ -257,7 +273,7 @@ class DurableNativeLaunchHost:
             raise NativeLaunchError('model_calls_disabled')
         producer_child = None
         if request.source_run_id is not None:
-            producer_child = self._checkpoint_producer(request, self._preparation_descriptor(prep))
+            producer_child = self._checkpoint_producer(request, self._preparation_descriptor(prep)).child
         bound, prepared = self.preparation.bind_native(
             ref, run_id=request.run_id, runtime_sha256=request.runtime_sha256, model_factory=model,
         )
@@ -295,6 +311,41 @@ class DurableNativeLaunchHost:
             if preflight:
                 restoration._checked_restore(request)
             return restoration
+        except (ValueError, TypeError, KeyError, OSError, OverflowError):
+            raise NativeLaunchError('conflict') from None
+
+    def _reddit_checkpoint_factory(self, prep, ref, request):
+        from nexaweave_execution.native_reddit_checkpoint_binding import NativeRedditCheckpointFactory
+        from nexaweave_execution.native_run_contracts import InvalidNativeRun
+        from nexaweave_execution.native_twitter_checkpoint_binding import _directory
+
+        model = self.model_factory
+        if (model is None or model.platforms != ('reddit',) or model.mode != 'scripted'
+                or model.limits != self.limits or not model.configured()):
+            raise NativeLaunchError('model_calls_disabled')
+        producer_record = (self._checkpoint_producer(request, self._preparation_descriptor(prep))
+                           if request.source_run_id is not None else None)
+        try:
+            NativeRedditCheckpointFactory.check_producer(request, producer_record)
+        except (ValueError, InvalidNativeRun):
+            raise NativeLaunchError('conflict') from None
+        bound, prepared = self.preparation.bind_native(
+            ref, run_id=request.run_id, runtime_sha256=request.runtime_sha256, model_factory=model,
+        )
+        if bound != replace(request, schema_version=1, source_run_id=None, checkpoint_sha256=None,
+                            intervention=None):
+            raise NativeLaunchError('conflict')
+        try:
+            root = _directory(self.preparation.root)
+            producer_id = request.source_run_id or request.run_id
+            checkpoint = root / ('native_reddit_checkpoint_' + producer_id.hex)
+            output = root / ('native_reddit_run_' + request.run_id.hex)
+            factory = NativeRedditCheckpointFactory(
+                replace(prepared, timeout_seconds=self.limits['max_run_seconds']),
+                request, str(checkpoint), str(output), producer_record,
+            )
+            factory.validate(request)
+            return factory
         except (ValueError, TypeError, KeyError, OSError, OverflowError):
             raise NativeLaunchError('conflict') from None
 
@@ -351,7 +402,7 @@ class DurableNativeLaunchHost:
         current = self._row(source_ref)
         if current != source or self._current(current) != (prep, ref):
             raise NativeLaunchError('conflict')
-        producer = self._checkpoint_producer(request, self._preparation_descriptor(prep))
+        producer = self._checkpoint_producer(request, self._preparation_descriptor(prep)).child
         if (producer.process_id != restoration.expected_producer_pid
                 or producer.instance_id != restoration.expected_producer_instance_id):
             raise NativeLaunchError('conflict')
@@ -398,14 +449,19 @@ class DurableNativeLaunchHost:
                 raise NativeLaunchError('conflict')
             return self._dto(prior,'plan',payload)
         opts = prep.frozen['public']['options']
+        from .native_reddit_preparation import REDDIT_CHECKPOINT
+
         checkpoint = payload.get('checkpoint')
+        reddit = payload['schema_version'] == 4
+        if (REDDIT_CHECKPOINT in opts) != reddit:
+            raise NativeLaunchError('conflict')
         archive = None
         if checkpoint is None:
             model = self.model_factory or BoundedNativeModelFactory(tuple(opts['platforms']),self.limits,None)
             request,_ = self.preparation.bind_native(ref,run_id=UUID(payload['launch_id']),
                     runtime_sha256=self.runtime_sha256,model_factory=model)
         else:
-            request = self._checkpoint_request(prep, payload['launch_id'], checkpoint)
+            request = self._checkpoint_request(prep, payload['launch_id'], checkpoint, reddit=reddit)
             restoration = self._checkpoint_factory(prep, ref, request, checkpoint)
             if request.intervention is not None:
                 archive = self._fork_archive(restoration, request)
@@ -437,9 +493,11 @@ class DurableNativeLaunchHost:
             restoration = self._checkpoint_factory(prep, ref, row.request, checkpoint, preflight=not fork)
             if fork:
                 self._fork_archive(restoration, row.request)
-        if fork:
+        reddit = row.frozen['identity']['schema_version'] == 4
+        if fork or reddit:
             try:
-                row, queued = self.store.queue_fork(self.principal, row.run_id, row.launch_sha256)
+                queue = self.store.queue_reddit if reddit else self.store.queue_fork
+                row, queued = queue(self.principal, row.run_id, row.launch_sha256)
             except LaunchAuthorityError as error:
                 if error.code not in {'native_launch_unavailable', 'native_launch_uncertain'}:
                     raise
