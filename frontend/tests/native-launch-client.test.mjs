@@ -48,6 +48,7 @@ async function admitted(nativeReply = (_url, _options) => envelope(launch()), op
   const client = createWorkbenchClient({ ...options, fetchImpl: async (url, request) => {
     calls.push({ url, request })
     if (url.includes('/data/')) return envelope(graph)
+    if (url.endsWith('/seed_ensemble')) return nativeReply(url, request)
     if (url.includes('/preparation/')) return envelope(url.endsWith('/plan') ? planned : p)
     return nativeReply(url, request)
   } })
@@ -305,4 +306,185 @@ test('native clear aborts its active Start, discards late result and preserves t
   await client.nativeLaunchPlan(planPayload(), p)
   await assert.rejects(client.nativeLaunchStart(nativeLaunchIdentity(launch())), code('conflict'))
   assert.equal(starts, 1); client.disconnect()
+})
+
+function seedDeclaration(donor, payload) {
+  const members = payload.seeds.map((seed, index) => {
+    const operation_id = uid(40 + index), launch_id = uid(50 + index)
+    const member = { ...clone(donor), operation_id, options: { ...donor.options, seed } }
+    const files = donor.receipt.files.map((file, i) => i < 2 ? { ...file, sha256: digest([operation_id, file.name]) } : clone(file))
+    const receipt = { simulation_id: 'sim_' + operation_id.replaceAll('-', ''), artifact_sha256: digest({ schema_version: 1, files }), files }
+    return { operation_id, launch_id, seed, receipt, plan_sha256: digest(pick(member, 'schema_version display_graph_id scope project_revision operation_id source options actors projection_sha256')) }
+  })
+  return {
+    schema_version: 1, display_graph_id: donor.display_graph_id, scope: donor.scope, project_revision: donor.project_revision,
+    state: 'ready', idempotency_key: payload.idempotency_key, platforms: donor.options.platforms,
+    donor: { operation_id: donor.operation_id, plan_sha256: donor.plan_sha256, seed: donor.options.seed, artifact_sha256: donor.receipt.artifact_sha256 },
+    ensemble_id: uid(60), members,
+  }
+}
+function launchSeedMember(member) {
+  const value = launch()
+  value.preparation = { operation_id: member.operation_id, plan_sha256: member.plan_sha256, simulation_id: member.receipt.simulation_id, artifact_sha256: member.receipt.artifact_sha256 }
+  Object.assign(value.request, { run_id: member.launch_id, seed: member.seed, simulation_id: member.receipt.simulation_id, artifact_sha256: member.receipt.artifact_sha256 })
+  return rehash(value)
+}
+function completeSeedMember(plan) {
+  return { ...clone(plan), state: 'completed', receipt: { run_id: plan.request.run_id, attempt_id: uid(12), instance_id: uid(13),
+    request_fingerprint: digest(plan.request), outcome: 'completed', evidence_sha256: digest(['evidence', plan.request.run_id]) } }
+}
+
+test('one seed declaration replays its exact key and gates both Starts on reviewed authority', async () => {
+  let saved, attempt = 0, firstStatus = 0, secondAuthorized = false
+  const { client, ready: p, calls } = await admitted((url, { body, headers }) => {
+    const payload = JSON.parse(body)
+    assert.equal(headers.Authorization, 'Bearer ' + credentials.token)
+    if (url.endsWith('/seed_ensemble')) {
+      if (attempt++ === 0) { saved = seedDeclaration(ready(), payload); throw new Error('lost declaration response') }
+      assert.equal(payload.idempotency_key, saved.idempotency_key)
+      assert.deepEqual(payload, { ...preparationIdentity(ready()), idempotency_key: saved.idempotency_key, seeds: [0, 101] })
+      return envelope(saved)
+    }
+    const member = saved.members.find(item => item.launch_id === payload.launch_id)
+    const planned = launchSeedMember(member)
+    if (url.includes('/plan/')) {
+      assert.deepEqual(payload, { schema_version: 1, launch_id: member.launch_id, preparation: { operation_id: member.operation_id, plan_sha256: member.plan_sha256 } })
+      if (member.seed === 101) planned.authorization.model_calls_enabled = secondAuthorized
+      return envelope(planned)
+    }
+    assert.deepEqual(payload, nativeLaunchIdentity(planned))
+    if (url.includes('/status/') && member.seed === 101) {
+      planned.authorization.model_calls_enabled = secondAuthorized
+      return envelope(planned)
+    }
+    if (url.includes('/start/') && member.seed === 0) throw new Error('lost Start response')
+    if (url.includes('/status/') && member.seed === 0 && firstStatus++ === 0) return envelope({ ...planned, state: 'running' })
+    return envelope(completeSeedMember(planned))
+  })
+  try {
+    await assert.rejects(client.ensemble.declare([p.options.seed, 101], p), code('invalid_request'))
+    await assert.rejects(client.ensemble.declare([0, 101], p), code('transport_failure'))
+    assert.deepEqual(client.ensemble.pendingSeeds(p), [0, 101])
+    await assert.rejects(client.ensemble.declare([101, 0], p), code('conflict'))
+    const declared = await client.ensemble.declare([0, 101], p)
+    assert.deepEqual(declared.members.map(member => member.launch_id), saved.members.map(member => member.launch_id))
+    await assert.rejects(nativeReadyPreparation({ ...p, model_calls_started: false }, 'graph_1'), code('invalid_reply'))
+    await assert.rejects(client.nativeLaunchPlan({ schema_version: 1, launch_id: saved.members[0].launch_id,
+      preparation: { operation_id: saved.members[0].operation_id, plan_sha256: saved.members[0].plan_sha256 } }, p), code('invalid_request'))
+    await client.ensemble.launch('plan', 0, p)
+    await assert.rejects(client.ensemble.launch('start', 0, p), code('conflict'))
+    const secondPlan = (await client.ensemble.launch('plan', 1, p)).members[1].launch
+    assert.equal(secondPlan.authorization.model_calls_enabled, false)
+    await assert.rejects(client.ensemble.launch('start', 0, p), code('conflict'))
+    await assert.rejects(client.ensemble.launch('start', 1, p), code('conflict'))
+    assert.equal(calls.filter(call => call.url.includes('/native-launch/start/')).length, 0)
+    secondAuthorized = true
+    const refreshed = (await client.ensemble.launch('status', 1, p)).members[1]
+    assert.deepEqual(JSON.parse(calls.at(-1).request.body), nativeLaunchIdentity(secondPlan))
+    assert.equal(refreshed.launch.authorization.model_calls_enabled, true)
+    assert.equal(refreshed.attempted, false)
+    await assert.rejects(client.ensemble.launch('start', 0, p), error => error.code === 'transport_failure' && error.attempted === true)
+    await assert.rejects(client.ensemble.launch('start', 0, p), code('conflict'))
+    assert.equal((await client.ensemble.launch('status', 0, p)).members[0].settled, false)
+    await assert.rejects(client.ensemble.launch('start', 1, p), code('conflict'))
+    assert.equal((await client.ensemble.launch('status', 0, p)).members[0].settled, true)
+    assert.equal((await client.ensemble.launch('start', 1, p)).members[1].launch.state, 'completed')
+    assert.equal(calls.filter(call => call.url.includes('/native-launch/start/')).length, 2)
+  } finally { client.disconnect() }
+})
+
+test('a producer receipt observed before any local Start cannot unlock member two', async () => {
+  let declaration
+  const { client, ready: p, calls } = await admitted((url, { body }) => {
+    const payload = JSON.parse(body)
+    if (url.endsWith('/seed_ensemble')) {
+      declaration = seedDeclaration(ready(), payload)
+      return envelope(declaration)
+    }
+    const member = declaration.members.find(item => item.launch_id === payload.launch_id)
+    const plan = launchSeedMember(member)
+    return envelope(url.includes('/status/') ? completeSeedMember(plan) : plan)
+  })
+  try {
+    await client.ensemble.declare([0, 101], p)
+    await client.ensemble.launch('plan', 0, p)
+    await client.ensemble.launch('plan', 1, p)
+    const first = (await client.ensemble.launch('status', 0, p)).members[0]
+    assert.equal(first.launch.receipt.outcome, 'completed')
+    assert.equal(first.attempted, false)
+    assert.equal(first.settled, false)
+    await assert.rejects(client.ensemble.launch('start', 1, p), code('conflict'))
+    assert.equal(calls.some(call => call.url.includes('/native-launch/start/')), false)
+  } finally { client.disconnect() }
+})
+
+test('ensemble admission rejects altered donor, member digests, or stable replay identities', async () => {
+  let mutate = () => {}, declarationCalls = 0
+  const { client, ready: p } = await admitted((_url, { body }) => {
+    declarationCalls++
+    const value = seedDeclaration(ready(), JSON.parse(body))
+    mutate(value)
+    return envelope(value)
+  })
+  try {
+    await assert.rejects(client.ensemble.declare([0, 1], { ...p, project_revision: 2 }), code('scope_changed'))
+    assert.equal(declarationCalls, 0)
+    for (const tamper of [
+      value => value.donor.artifact_sha256 = hash,
+      value => value.scope.graph_id = uid(92),
+      value => value.project_revision++,
+      value => value.members.reverse(),
+      value => value.members[0].receipt.artifact_sha256 = hash,
+      value => value.members[0].plan_sha256 = hash,
+      value => value.members[1].launch_id = value.members[0].launch_id,
+      value => {
+        const receipt = value.members[0].receipt
+        receipt.files[2].sha256 = hash.replaceAll('a', 'b')
+        receipt.artifact_sha256 = digest({ schema_version: 1, files: receipt.files })
+      },
+    ]) {
+      mutate = tamper
+      await assert.rejects(client.ensemble.declare([0, 1], p), code('invalid_reply'))
+    }
+    mutate = () => {}
+    await client.ensemble.declare([0, 1], p)
+    mutate = value => value.members[1].launch_id = uid(91)
+    await assert.rejects(client.ensemble.declare([0, 1], p), code('invalid_reply'))
+  } finally { client.disconnect() }
+})
+
+test('ensemble cancellation discards its delayed reply while the public native status request continues', async () => {
+  let finishStatus, finishDeclaration, statusSignal
+  let statusDispatch, declarationDispatch
+  const statusRequested = new Promise(resolve => { statusDispatch = resolve })
+  const declaring = new Promise(resolve => { declarationDispatch = resolve })
+  const { client, ready: p } = await admitted((url, { signal, body }) => {
+    if (url.endsWith('/seed_ensemble')) return new Promise(resolve => {
+      finishDeclaration = () => resolve(envelope(seedDeclaration(ready(), JSON.parse(body))))
+      declarationDispatch()
+    })
+    if (url.includes('/status/')) return new Promise(resolve => {
+      statusSignal = signal
+      finishStatus = () => resolve(envelope(observed()))
+      statusDispatch()
+    })
+    return envelope(url.includes('/start/') ? observed('running') : launch())
+  })
+  try {
+    await client.nativeLaunchPlan(planPayload(), p)
+    await client.nativeLaunchStart(nativeLaunchIdentity(launch()))
+    const status = client.nativeLaunchStatus(nativeLaunchIdentity(launch()))
+    await statusRequested
+    const pending = client.ensemble.declare([0, 1], p)
+    const rejected = assert.rejects(pending, code('cancelled'))
+    await declaring
+    assert.equal(statusSignal.aborted, false)
+    client.ensemble.cancel()
+    finishDeclaration()
+    await rejected
+    await assert.rejects(client.ensemble.launch('plan', 0, p), code('invalid_request'))
+    assert.equal(statusSignal.aborted, false)
+    finishStatus()
+    assert.equal((await status).state, 'completed')
+  } finally { client.disconnect() }
 })

@@ -2,6 +2,7 @@
 import { WorkbenchError } from './workbench.js'
 import { sha256 } from './sourceLibrary.js'
 import { preparationIdentity, validatePreparationResult } from './simulationPreparation.js'
+import { verifiedEnsemblePreparation } from './nativeEnsemble.js'
 const enc = new TextEncoder()
 const bad = (code = 'invalid_reply') => { throw new WorkbenchError(code) }
 const fields = (v, keys) => { if (!v || typeof v !== 'object' || Array.isArray(v) || Object.getPrototypeOf(v) !== Object.prototype || Object.keys(v).sort().join('|') !== keys.split(' ').sort().join('|')) bad() }
@@ -95,8 +96,10 @@ export async function nativeReadyPreparation(value, graph) {
 }
 export async function validateNativeLaunchResult(value, { graph, payload, preparation, known, capture, planning = false } = {}) {
   try {
-    value = detached(value); payload = detached(payload); preparation = detached(preparation); if (known) known = detached(known); if (capture) capture = detached(capture)
-    const ready = await nativeReadyPreparation(preparation, graph)
+    const derived = verifiedEnsemblePreparation(preparation, graph)
+    value = detached(value); payload = detached(payload); if (known) known = detached(known); if (capture) capture = detached(capture)
+    const ready = derived ?? await nativeReadyPreparation(preparation, graph)
+    if (derived && payload.schema_version !== 1) bad()
     if (enc.encode(JSON.stringify(value)).length > 65536) bad()
     nativeLaunchPayload(payload, planning)
     const checkpointed = payload.schema_version >= 2

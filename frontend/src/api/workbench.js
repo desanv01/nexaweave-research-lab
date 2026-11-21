@@ -12,6 +12,7 @@ import { createNativeObservationsChannel } from './nativeObservations.js'
 import { createConnectedReportsChannel } from './connectedReports.js'
 import { createConnectedFollowupsChannel } from './connectedFollowups.js'
 import { twoHopPayload, validateTwoHopResult } from './twoHop.js'
+import { createNativeEnsembleChannel, guardWorkbenchPromise } from './nativeEnsemble.js'
 
 export class WorkbenchError extends Error {
   constructor(code) { super(code); this.name = 'WorkbenchError'; this.code = code }
@@ -231,6 +232,8 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
   const observations = createNativeObservationsChannel({ fetchImpl, deadlineMs, connection: () => authenticated && connection ? { ...connection } : null, denied: () => disconnect() })
   const reports = createConnectedReportsChannel({ fetchImpl, deadlineMs, connection: () => authenticated && connection ? { ...connection } : null, denied: () => disconnect() })
   const followups = createConnectedFollowupsChannel({ fetchImpl, deadlineMs, connection: () => authenticated && connection ? { ...connection } : null, denied: () => disconnect() })
+  const ensemble = createNativeEnsembleChannel({ fetchImpl, deadlineMs, connection: () => authenticated ? connection : null,
+    donorFor: id => preparationPlans.get(id), denied: disconnect })
   function cancelShared(preservePopulation = false) { generation++; active?.abort(); active = null; activeMethod = null; if (!preservePopulation) populationAdmission = null }
   function cancel(preservePopulation = false) { reports.cancel(); followups.cancel(); cancelShared(preservePopulation) }
   function clearNativeLaunch() {
@@ -240,7 +243,7 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
     if (active && activeMethod?.startsWith('nativeLaunch')) cancel()
     nativePlans.clear(); forkPreview = null
   }
-  function disconnect() { reports.clear(); followups.clear(); observations.clear(); cancel(); connection = null; authenticated = false; ingestionScope = null; populationAdmission = null; preparationPlans.clear(); preparationStarted.clear(); nativePlans.clear(); nativeStarted.clear(); forkPreview = null }
+  function disconnect() { ensemble.disconnect(); reports.clear(); followups.clear(); observations.clear(); cancel(); connection = null; authenticated = false; ingestionScope = null; populationAdmission = null; preparationPlans.clear(); preparationStarted.clear(); nativePlans.clear(); nativeStarted.clear(); forkPreview = null }
   async function request(method, payload, ingestionContext, options = {}) {
     if (!connection || (method !== 'graph' && !authenticated)) fail('disconnected')
     const twoHop = method === 'twoHop'
@@ -354,15 +357,7 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
     if (options.signal?.aborted) callerAbort()
     else options.signal?.addEventListener('abort', callerAbort, { once: true })
     const owned = () => { if (generation !== epoch || controller.signal.aborted) fail(timedOut ? 'deadline' : 'cancelled') }
-    const guarded = promise => new Promise((resolve, reject) => {
-      const aborted = () => reject(new WorkbenchError(timedOut ? 'deadline' : 'cancelled'))
-      if (controller.signal.aborted) { aborted(); return }
-      controller.signal.addEventListener('abort', aborted, { once: true })
-      Promise.resolve(promise).then(value => {
-        if (controller.signal.aborted && value?.body?.cancel) { try { void value.body.cancel().catch(() => {}) } catch { /* discard */ } }
-        resolve(value)
-      }, reject).finally(() => controller.signal.removeEventListener('abort', aborted))
-    })
+    const guarded = guardWorkbenchPromise(controller, () => timedOut)
     try {
       const paths = { graph: 'data', research: 'research', dossier: 'dossier', twoHop: 'two-hop' }
       if (method === 'sourceRetain') { await guarded(verifySourceInput(sourceRequest)); owned() }
@@ -509,6 +504,7 @@ export function createWorkbenchClient({ fetchImpl = globalThis.fetch, deadlineMs
     }
   }
   return {
+    ensemble,
     async connect({ origin, graph, token }) {
       disconnect()
       const canonical = localOrigin(origin); displayId(graph)
