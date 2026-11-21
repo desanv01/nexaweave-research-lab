@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { createWorkbenchClient, WorkbenchError, awareTimestamp } from '../api/workbench.js'
 import { copyFor, safeError } from '../i18n/workbench.js'
 import EvidenceResults from '../components/workbench/EvidenceResults.vue'
+import TwoHopResearch from '../components/workbench/TwoHopResearch.vue'
 import SourceLibrary from '../components/workbench/SourceLibrary.vue'
 import SourceIngestion from '../components/workbench/SourceIngestion.vue'
 import ExperimentComparison from '../components/workbench/ExperimentComparison.vue'
@@ -26,7 +27,7 @@ const bannerError = computed(() => {
 })
 const graphData = ref(null), result = ref(null), mode = ref('research'), query = ref(''), title = ref('')
 const sections = ref([{ heading: '', query: '' }]), advanced = ref(false), topK = ref(10), validAt = ref(''), recordedBefore = ref('')
-const graphPage = ref(0), graphKind = ref('nodes')
+const graphPage = ref(0), graphKind = ref('nodes'), twoHopReset = ref(0)
 const client = createWorkbenchClient()
 const sourceReset = ref(0)
 const experimentCancel = ref(0)
@@ -114,7 +115,7 @@ const reviewReset = ref(0)
 const graphEntries = computed(() => graphData.value?.[graphKind.value] || [])
 function clearProtected() { clearNativeViews(); sourceCatalog.value = null; sourceReset.value++; populationReset.value++; preparationReset.value++; nativeReset.value++; nativeReady.value = null; inspectedSource.value = null; graphData.value = null; result.value = null; graphPage.value = 0 }
 function disconnect() { generation++; client.disconnect(); token.value = ''; reveal.value = false; connected.value = false; busy.value = false; clearProtected(); errorCode.value = ''; ingestionRequest.value = ''; status.value = 'disconnected' }
-function cancel() { generation++; reviewReset.value++; experimentCancel.value++; populationReset.value++; client.cancel(); busy.value = false; status.value = 'cancelled'; errorCode.value = ''; if (!connected.value) { client.disconnect(); token.value = ''; clearProtected() } }
+function cancel() { generation++; twoHopReset.value++; reviewReset.value++; experimentCancel.value++; populationReset.value++; client.cancel(); busy.value = false; status.value = 'cancelled'; errorCode.value = ''; if (!connected.value) { client.disconnect(); token.value = ''; clearProtected() } }
 async function operation(action, connecting = false, source = false, ingestion = '', population = false, preserveProtected = false, graphRefresh = false) {
   const epoch = ++generation
   if (!population) populationReset.value++
@@ -143,7 +144,11 @@ function connect() {
 }
 function refreshGraph() {
   if (!connected.value || busy.value) return
+  twoHopReset.value++
   return operation(() => client.refreshGraph(), false, true, '', false, true, true)
+}
+function readTwoHop(payload, signal) {
+  return operation(() => client.twoHop(payload, { signal }), false, true, '', false, true)
 }
 function verifyDossierSource(payload, dossier) {
   const graphId = graphData.value?.graph_id
@@ -185,7 +190,37 @@ onBeforeUnmount(disconnect)
       </section>
       <section v-if="graphData" class="graph-overview"><h2>{{ copy.graphOverview }} <span class="mono">{{ graphData.graph_id }}</span></h2><p>{{ copy.nodes }}: {{ graphData.node_count }} · {{ copy.edges }}: {{ graphData.edge_count }}</p>
         <button class="graph-refresh" type="button" :disabled="!connected || busy" aria-describedby="graph-refresh-help" @click="refreshGraph">{{ copy.refreshGraph }}</button><p id="graph-refresh-help" class="help">{{ copy.refreshGraphHint }}</p>
-        <details><summary>{{ copy.overview }}</summary><div class="choices"><label><input v-model="graphKind" value="nodes" type="radio" @change="graphPage = 0">{{ copy.nodes }}</label><label><input v-model="graphKind" value="edges" type="radio" @change="graphPage = 0">{{ copy.edges }}</label></div><ul><li v-for="entry in graphEntries.slice(graphPage * 10, (graphPage + 1) * 10)" :key="entry.uuid"><details><summary>{{ entry.name || entry.uuid }}</summary><p class="mono">{{ entry.uuid }}</p><p>{{ entry.summary }}</p><p>{{ entry.fact }}</p><p v-if="graphKind === 'edges'">{{ entry.source_node_name }} → {{ entry.target_node_name }}</p></details></li></ul><nav v-if="graphEntries.length > 10" class="actions" :aria-label="copy.graphOverview"><button type="button" :disabled="!graphPage" @click="graphPage--">{{ copy.previous }}</button><span>{{ copy.range }} {{ graphPage + 1 }} / {{ Math.ceil(graphEntries.length / 10) }}</span><button type="button" :disabled="(graphPage + 1) * 10 >= graphEntries.length" @click="graphPage++">{{ copy.next }}</button></nav></details>
+        <TwoHopResearch :graph-data="graphData" :read-path="readTwoHop" :disabled="!connected || busy" :reset-version="twoHopReset" :locale="locale">
+          <template #nodes="{ choose, source, target, copy: pathCopy, locked }">
+            <details>
+              <summary>{{ copy.overview }}</summary>
+              <div class="choices">
+                <label><input v-model="graphKind" value="nodes" type="radio" @change="graphPage = 0">{{ copy.nodes }}</label>
+                <label><input v-model="graphKind" value="edges" type="radio" @change="graphPage = 0">{{ copy.edges }}</label>
+              </div>
+              <ul>
+                <li v-for="entry in graphEntries.slice(graphPage * 10, (graphPage + 1) * 10)" :key="entry.uuid">
+                  <details>
+                    <summary>{{ entry.name || entry.uuid }}</summary>
+                    <p class="mono">{{ entry.uuid }}</p>
+                    <p>{{ entry.summary }}</p>
+                    <p>{{ entry.fact }}</p>
+                    <p v-if="graphKind === 'edges'">{{ entry.source_node_name }} → {{ entry.target_node_name }}</p>
+                  </details>
+                  <div v-if="graphKind === 'nodes'" class="two-hop-node-actions" role="group" :aria-label="entry.name || entry.uuid">
+                    <button type="button" :aria-pressed="source === entry.uuid" :disabled="locked || target === entry.uuid" @click="choose('source', entry.uuid)">{{ pathCopy.chooseStart }}</button>
+                    <button type="button" :aria-pressed="target === entry.uuid" :disabled="locked || source === entry.uuid" @click="choose('target', entry.uuid)">{{ pathCopy.chooseDestination }}</button>
+                  </div>
+                </li>
+              </ul>
+              <nav v-if="graphEntries.length > 10" class="actions" :aria-label="copy.graphOverview">
+                <button type="button" :disabled="!graphPage" @click="graphPage--">{{ copy.previous }}</button>
+                <span>{{ copy.range }} {{ graphPage + 1 }} / {{ Math.ceil(graphEntries.length / 10) }}</span>
+                <button type="button" :disabled="(graphPage + 1) * 10 >= graphEntries.length" @click="graphPage++">{{ copy.next }}</button>
+              </nav>
+            </details>
+          </template>
+        </TwoHopResearch>
       </section>
       <SourceLibrary :methods="sourceMethods" :connected="connected" :busy="busy" :reset-version="sourceReset" :locale="locale" @inspected="inspectedSource = $event" @catalog="sourceCatalog = $event" />
       <SourceIngestion :methods="ingestionMethods" :inspected="inspectedSource" :connected="connected" :busy="busy" :reset-version="sourceReset" :locale="locale" />
@@ -209,4 +244,6 @@ onBeforeUnmount(disconnect)
 </template>
 <style scoped>
 .workbench{--canvas:#f4f6f9;--surface:#fff;--ink:#172638;--muted:#526174;--primary:#174d96;--border:#b9c4d2;--control-border:#7b8797;--accent:#a9650c;background:var(--canvas);color:var(--ink);min-height:100vh;font:16px/1.5 system-ui,sans-serif;overflow-wrap:anywhere}.workbench *{box-sizing:border-box}.header{background:var(--surface);border-bottom:1px solid var(--border);padding:16px clamp(16px,4vw,48px);display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:16px}.brand{font-weight:750;letter-spacing:.08em;text-decoration:none;color:var(--ink);min-height:44px;display:flex;align-items:center;flex-wrap:wrap;gap:16px}.brand span{letter-spacing:0;font-weight:500;color:var(--primary)}main{max-width:1320px;margin:0 auto;padding:32px clamp(16px,4vw,48px) 64px}.intro{margin-bottom:24px}h1{font-size:clamp(1.7rem,4vw,2.4rem);line-height:1.2;margin:8px 0 12px}h2{font-size:1.25rem;margin:0 0 16px}p{margin:8px 0}.eyebrow{font-size:.8rem;letter-spacing:.1em;color:var(--muted)}.connection,.query-section,.graph-overview{background:var(--surface);padding:24px;border:1px solid var(--border);border-radius:8px;margin-bottom:24px;min-width:0}label{display:flex;flex-direction:column;gap:6px;font-weight:550;min-width:0}input,textarea,select{width:100%;min-width:0;background:var(--surface);color:var(--ink);border:1px solid var(--control-border);border-radius:5px;font:inherit;padding:10px 12px;min-height:44px}textarea{resize:vertical}button{min-height:44px;max-width:100%;padding:10px 16px;border:1px solid var(--border);border-radius:5px;background:var(--surface);color:var(--primary);font:inherit;font-weight:550;cursor:pointer;overflow-wrap:anywhere}.primary{background:var(--primary);color:white;border-color:var(--primary)}button:hover:not(:disabled){filter:brightness(.92)}button:disabled,fieldset:disabled{opacity:.65}button:disabled{cursor:default}input:disabled,textarea:disabled{background:var(--canvas)}button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible,a:focus-visible,summary:focus-visible{outline:3px solid var(--primary);outline-offset:3px}.connection-form{display:grid;gap:12px;align-items:end}.help{font-size:.875rem;color:var(--muted);margin-top:12px}.status{border-left:3px solid var(--primary);padding:8px 12px;margin-top:16px}fieldset{border:0;padding:0;margin:0;min-width:0}legend{color:var(--muted);font-size:.875rem}.choices{display:flex;flex-wrap:wrap;gap:16px;margin:12px 0 20px}.choices label{flex-direction:row;align-items:center;min-height:44px}.choices input{width:20px;min-height:20px;margin-right:4px}.actions{display:flex;flex-wrap:wrap;align-items:center;gap:12px;margin-top:20px}.advanced-button{display:block;margin:20px 0 12px}.advanced{display:grid;gap:12px}.dossier-section{border-top:1px solid var(--border);margin-top:16px;padding:16px 0;display:grid;gap:12px}.dossier-section button{justify-self:start}.mono{font:.875rem/1.6 ui-monospace,Consolas,monospace}summary{cursor:pointer;min-height:44px;padding:10px 0}ul{padding-left:20px}.skip{position:absolute;left:16px;top:-100px;padding:12px;background:var(--surface);color:var(--primary);z-index:2}.skip:focus{top:8px}@media(min-width:768px){.connection-form{grid-template-columns:repeat(3,minmax(0,1fr))}.advanced{grid-template-columns:repeat(3,minmax(0,1fr))}.advanced .help{grid-column:1/-1}}@media(max-width:480px){.connection,.query-section,.graph-overview{padding:16px}}@media(prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;transition:none!important;animation:none!important}}
+.two-hop-node-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.two-hop-node-actions [aria-pressed="true"] { background: var(--primary); color: white; }
 </style>

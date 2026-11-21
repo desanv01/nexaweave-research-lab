@@ -236,6 +236,74 @@ def neo_scope(scope):
             assert rows[0]['n'] == 0
 
 
+
+@contextmanager
+def browser_two_hop_seed(scope_dto, ingestion):
+    from nexaweave_knowledge.contracts import KnowledgeScope
+    from neo4j import Query
+
+    scope = KnowledgeScope.model_validate_json(json.dumps(scope_dto))
+    assert os.environ.get('KNOWLEDGE_INTEGRATION') == '1'
+    password = os.environ['KNOWLEDGE_TEST_PASSWORD']
+    assert password and password.lower() not in {'password', 'neo4j', 'test', 'changeme'}
+    first, second = ingestion[:2]
+    assert all(item['state'] == 'completed' and item['scope'] == scope_dto for item in (first, second))
+    episodes = [item['episode_id'] for item in (first, second)]
+    evidence = [sorted(item['evidence_ids']) for item in (first, second)]
+    assert len(set(episodes)) == 2 and all(1 <= len(ids) <= 100 for ids in evidence)
+    nodes = [str(uuid4()) for _ in range(3)]
+    edges = [str(uuid4()) for _ in range(2)]
+    with GraphDatabase.driver('bolt://127.0.0.1:17687', auth=('neo4j', password), connection_timeout=3,
+                              connection_acquisition_timeout=3, max_transaction_retry_time=0) as driver:
+        def run(query, **parameters):
+            return driver.execute_query(Query(query, timeout=3), group=scope.group_id, **parameters)
+
+        try:
+            run(
+                "CREATE (a:Entity {uuid:$nodes[0],group_id:$group,name:'Cited path start',"
+                "summary:'',created_at:datetime()}), "
+                "(b:Entity {uuid:$nodes[1],group_id:$group,name:'Cited path midpoint',"
+                "summary:'',created_at:datetime()}), "
+                "(c:Entity {uuid:$nodes[2],group_id:$group,name:'Cited path destination',"
+                "summary:'',created_at:datetime()}) "
+                "CREATE (a)-[:RELATES_TO {uuid:$edges[0],group_id:$group,name:'RELATES_TO',"
+                "fact:'The start leads to the midpoint.',episodes:[$episodes[0]],"
+                "created_at:datetime(),valid_at:datetime()}]->(b), "
+                "(b)-[:RELATES_TO {uuid:$edges[1],group_id:$group,name:'RELATES_TO',"
+                "fact:'The midpoint leads to the destination.',episodes:[$episodes[1]],"
+                "created_at:datetime(),valid_at:datetime()}]->(c)",
+                nodes=nodes, edges=edges, episodes=episodes,
+            )
+            yield {'nodes': nodes, 'edges': edges, 'evidence': evidence}
+        finally:
+            try:
+                run('MATCH ()-[r:RELATES_TO]->() WHERE r.group_id=$group AND r.uuid IN $ids DELETE r', ids=edges)
+            finally:
+                run('MATCH (n:Entity) WHERE n.group_id=$group AND n.uuid IN $ids DELETE n', ids=nodes)
+
+
+def verify_browser_two_hop(outputs, seed, graph, scope):
+    assert len(outputs) == 2, 'expected exactly two successful protected two-hop reads'
+    found, reverse = outputs
+    source, middle, target = seed['nodes']
+    for result in outputs:
+        scan = result['scope_coverage']
+        assert result['schema_version'] == 2 and result['operation'] == 'two_hop'
+        assert result['historical'] is False and scan['display_graph_id'] == graph and scan['scope'] == scope
+        assert 2 <= scan['scanned'] <= 500 and type(scan['truncated']) is bool
+    assert (found['source_node_id'], found['target_node_id']) == (source, target)
+    assert found['path_status'] == 'found' and found['scope_coverage']['returned'] == 2
+    assert found['path']['intermediate_node_id'] == middle
+    hops = found['path']['hops']
+    assert [(hop['source_node_id'], hop['target_node_id']) for hop in hops] == [(source, middle), (middle, target)]
+    assert [hop['provider_id'] for hop in hops] == seed['edges']
+    for hop, evidence in zip(hops, seed['evidence'], strict=True):
+        assert hop['evidence_ids'] == evidence == [item['evidence_id'] for item in hop['citations']]
+    assert (reverse['source_node_id'], reverse['target_node_id']) == (target, source)
+    assert reverse['path_status'] == 'no_path_in_scan' and reverse['path'] is None
+    assert reverse['scope_coverage']['returned'] == 0 and reverse['passage_coverage'] == []
+
+
 def seed(factory):
     from test_integration_neo4j import fixture_data
     with factory() as connection: migrate(connection)

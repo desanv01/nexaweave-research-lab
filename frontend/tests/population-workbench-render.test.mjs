@@ -32,7 +32,9 @@ const evidence = await compile('../src/components/workbench/EvidenceResults.vue'
 const sources = await compile('../src/components/workbench/SourceLibrary.vue')
 const ingestion = await compile('../src/components/workbench/SourceIngestion.vue')
 const experiments = await compile('../src/components/workbench/ExperimentComparison.vue')
+const twoHop = await compile('../src/components/workbench/TwoHopResearch.vue')
 const workbench = await compile('../src/views/ResearchWorkbench.vue', {
+  '../components/workbench/TwoHopResearch.vue': twoHop.url,
   '../i18n/index.js': localeUrl,
   '../components/workbench/ConnectedFollowup.vue': connectedFollowup.url,
   '../components/workbench/PopulationWorkbench.vue': population.url, '../components/workbench/SimulationPreparation.vue': preparation.url, '../components/workbench/NativeLaunch.vue': nativeLaunch.url, '../components/workbench/NativeObservations.vue': nativeObservations.url, '../components/workbench/ConnectedReports.vue': connectedReports.url,
