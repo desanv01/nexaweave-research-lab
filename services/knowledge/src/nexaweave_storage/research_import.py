@@ -1,13 +1,13 @@
 """Atomic selected-source retention. Artifact metadata is inert provenance only."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hashlib
 import json
 from uuid import UUID, uuid5
 
-from .research_bundle import BundleError, WARNING, canonical, decode, inspect_bundle
+from .research_bundle import BundleError, PDF_WARNING, WARNING, _read_bundle, canonical
 from .validation import HEX, InvalidProject, principal_id, uuid_value
 
 MAX_PROVENANCE_BYTES = 2 * 1024 * 1024
@@ -59,6 +59,7 @@ class ImportPlan:
     _payload_json: str
     _provenance_json: str
     bundle_version: int = 1
+    original_pdf: bytes | None = field(default=None, repr=False)
 
     @property
     def payload(self):
@@ -78,8 +79,9 @@ def prepare_import(raw, principal, target_project_id, expected_revision, expecte
             raise ImportError("invalid_request")
         if type(expected_sha256) is not str or not HEX.fullmatch(expected_sha256):
             raise ImportError("invalid_request")
-        summary = inspect_bundle(raw, expected_sha256)
-        payload = decode(raw)["payload"]
+        payload, summary, original = _read_bundle(raw, expected_sha256)
+        if original is not None:
+            del payload["original_pdf"]
         _postgres_tree(payload)
         sources = []
         for source in payload["sources"]:
@@ -103,7 +105,8 @@ def prepare_import(raw, principal, target_project_id, expected_revision, expecte
             raise ImportError()
         return ImportPlan(principal, target, expected_revision, expected_sha256,
                           summary["payload_sha256"], canonical(payload).decode("utf-8"),
-                          encoded.decode("utf-8"), bundle_version=summary["schema_version"])
+                          encoded.decode("utf-8"), bundle_version=summary["schema_version"],
+                          original_pdf=original)
     except ImportError:
         raise
     except (BundleError, InvalidProject, ValueError, TypeError, UnicodeError, RecursionError, OverflowError):
@@ -121,6 +124,7 @@ class ImportReceipt:
     imported_at: datetime
     provenance_sha256: str
     _provenance_json: str
+    original_binaries_restored: bool = False
 
     @property
     def provenance(self):
@@ -136,7 +140,8 @@ class ImportReceipt:
                 "imported_at": self.imported_at.isoformat(),
                 "source_count": len(data["sources"]),
                 "passage_count": sum(len(s["passages"]) for s in data["sources"]),
-                "warning": WARNING, "original_binaries_restored": False,
+                "warning": PDF_WARNING if self.original_binaries_restored else WARNING,
+                "original_binaries_restored": self.original_binaries_restored,
                 "graph_restored": False, "publisher_authenticated": False}
 
 
@@ -164,6 +169,9 @@ def _expected_sources(plan, imported_at):
 
 
 def _verify_sources(conn, plan, imported_at, storage_error):
+    if plan.original_pdf is not None:
+        from .source import _read_original_row, _validated_original
+
     for source, passages in _expected_sources(plan, imported_at):
         actual = conn.execute(
             "SELECT source_revision,project_id,name,retained_text,text_sha256,byte_length,codepoint_length,recorded_at "
@@ -176,6 +184,11 @@ def _verify_sources(conn, plan, imported_at, storage_error):
             (plan.target_project_id, source[0])).fetchall()
         if actual_passages != passages:
             raise storage_error()
+        if plan.original_pdf is not None:
+            row = _read_original_row(conn, plan.target_project_id, source[0], lock=True)
+            content, _ = _validated_original(row)
+            if content != plan.original_pdf:
+                raise storage_error()
 
 
 class ResearchImportStore:
@@ -184,7 +197,7 @@ class ResearchImportStore:
 
     def import_bundle(self, raw, principal, target_project_id, expected_revision, expected_sha256):
         plan = prepare_import(raw, principal, target_project_id, expected_revision, expected_sha256)
-        linked = plan.bundle_version == 2
+        linked = plan.bundle_version >= 2
         # Driver/storage dependencies are needed only after pure admission.
         import psycopg
         from psycopg.types.json import Jsonb
@@ -223,7 +236,6 @@ class ResearchImportStore:
                         imported_at = imported_at.astimezone(timezone.utc)
                         if digest != _receipt_digest(plan, target_revision, imported_at, provenance):
                             raise StorageError()
-                        _verify_sources(conn, plan, imported_at, StorageError)
                     else:
                         if linked:
                             if plan.target_project_id == UUID(origin["project_id"]):
@@ -249,6 +261,10 @@ class ResearchImportStore:
                                     "INSERT INTO mf_app.passage_evidence "
                                     "(evidence_id,project_id,source_revision,ordinal,start_offset,end_offset,page,excerpt,excerpt_sha256) "
                                     "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)", passage)
+                            if plan.original_pdf is not None:
+                                from .source import _insert_original
+                                _insert_original(conn, plan.target_project_id, source[0], plan.original_pdf,
+                                                 hashlib.sha256(plan.original_pdf).hexdigest())
                         conn.execute(
                             "INSERT INTO mf_app.research_imports "
                             "(target_project_id,artifact_sha256,payload_sha256,origin_project_id,origin_revision,target_revision,imported_at,provenance,provenance_sha256) "
@@ -256,10 +272,10 @@ class ResearchImportStore:
                             (plan.target_project_id, plan.artifact_sha256, plan.payload_sha256,
                              UUID(origin["project_id"]), origin["revision"], target_revision,
                              imported_at, Jsonb(provenance), digest))
-                        _verify_sources(conn, plan, imported_at, StorageError)
+                    _verify_sources(conn, plan, imported_at, StorageError)
                     return ImportReceipt(plan.target_project_id, plan.artifact_sha256, plan.payload_sha256,
                         UUID(origin["project_id"]), origin["revision"], target_revision, imported_at,
-                        digest, plan._provenance_json)
+                        digest, plan._provenance_json, original_binaries_restored=plan.original_pdf is not None)
         except psycopg.errors.UniqueViolation:
             raise Conflict() from None
         except psycopg.Error:
