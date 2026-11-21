@@ -100,7 +100,46 @@ async def test_protected_seed_ensemble_settles_in_order_and_replays(factory, tmp
             declaration = {**parent_ref, 'idempotency_key': str(uuid4()),
                            'seeds': [(seed + 1) % 2**32, (seed + 2) % 2**32]}
             route = prep_route + '/seed_ensemble'
-            pair = await post(client, route, declaration)
+            issue = prep.seed_ensemble
+            stage = 'before_host'
+            detail = ()
+            exception_names = {
+                'AttributeError', 'KeyError', 'NameError', 'OSError', 'PermissionError',
+                'PreparationAuthorityError', 'PreparationError', 'TypeError', 'ValueError',
+            }
+            source_functions = {
+                'seed_ensemble', '_seed_variants', '_seed_variant', '_publish_seed_alternate',
+                'issue_seed_ensemble', '_lock_settled_seed_donor', 'publish',
+                '_artifacts', 'validate_result', 'seed_ensemble_ids',
+            }
+
+            def observe_first_issue(payload):
+                nonlocal stage, detail
+                stage = 'host_entered'
+                try:
+                    value = issue(payload)
+                except Exception as error:
+                    cause = error.__cause__ or error.__context__ or error
+                    frame = cause.__traceback__
+                    while frame is not None and frame.tb_next is not None:
+                        frame = frame.tb_next
+                    kind = type(cause).__name__
+                    function = frame.tb_frame.f_code.co_name if frame is not None else None
+                    detail = (
+                        kind if kind in exception_names else 'other',
+                        function if function in source_functions else 'other',
+                        frame.tb_lineno if function in source_functions else None,
+                    )
+                    raise
+                stage = 'host_returned'
+                return value
+
+            with monkeypatch.context() as observation:
+                observation.setattr(prep, 'seed_ensemble', observe_first_issue)
+                try:
+                    pair = await post(client, route, declaration)
+                except AssertionError as error:
+                    raise AssertionError(f'First seed ensemble issue: {stage}, {detail}') from error
             assert pair['state'] == 'ready' and [member['seed'] for member in pair['members']] == declaration['seeds']
             assert (len(chat.calls), transport.calls) == calls
             await post(client, route, {**declaration, 'seeds': declaration['seeds'][::-1]},
