@@ -1,5 +1,10 @@
 const copy = {
   en: {
+    question: 'Question (optional)',
+    questionHelp: 'Use up to 2,000 characters to rank cited paths between the selected nodes.',
+    questionInvalid: 'Enter up to 2,000 Unicode characters using valid text.',
+    rankMatched: 'Ranked by terms shared with the question.',
+    rankNoMatch: 'No question terms matched the returned hops. The path follows edge ID order.',
     title: 'Cited two-hop path',
     chooseStart: 'Use as start',
     chooseDestination: 'Use as destination',
@@ -23,6 +28,11 @@ const copy = {
     offsets: 'Unicode offsets (end excluded)',
   },
   zh: {
+    question: '问题（可选）',
+    questionHelp: '最多输入 2,000 个字符，用于为所选节点之间的带引文路径排序。',
+    questionInvalid: '请输入有效文本，最多 2,000 个 Unicode 字符。',
+    rankMatched: '按与问题共有的词语排序。',
+    rankNoMatch: '返回的两跳均未匹配问题中的词语，路径按关系 ID 顺序选出。',
     title: '带引文的两跳路径',
     chooseStart: '设为起点',
     chooseDestination: '设为终点',
@@ -46,6 +56,11 @@ const copy = {
     offsets: 'Unicode 偏移量（不含结束位置）',
   },
   ms: {
+    question: 'Soalan (pilihan)',
+    questionHelp: 'Gunakan sehingga 2,000 aksara untuk menyusun laluan bersitasi antara nod yang dipilih.',
+    questionInvalid: 'Masukkan teks yang sah dengan maksimum 2,000 aksara Unicode.',
+    rankMatched: 'Disusun mengikut istilah yang dikongsi dengan soalan.',
+    rankNoMatch: 'Tiada istilah soalan sepadan dengan langkah yang dipaparkan. Laluan dipilih mengikut susunan ID hubungan.',
     title: 'Laluan dua langkah bersitasi',
     chooseStart: 'Tetapkan sebagai mula',
     chooseDestination: 'Tetapkan sebagai destinasi',

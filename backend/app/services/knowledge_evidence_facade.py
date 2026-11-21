@@ -113,12 +113,16 @@ def _check_two_hop_result(data, payload, scope):
         "path_status", "scope_coverage", "passage_coverage", "historical", "historical_semantics", "rank_basis"})
     source, target = payload["source_node_id"], payload["target_node_id"]
     coverage, passages = data["scope_coverage"], data["passage_coverage"]
+    rank_basis = data["rank_basis"]
+    rank_valid = (rank_basis == "directed_path_edge_id_order"
+                  or (rank_basis == "directed_path_lexical_token_overlap"
+                      and payload.get("question") is not None and data["path_status"] == "found"))
     _exact_object(coverage, {"display_graph_id", "scope", "truncated"} | _COVERAGE_LIMITS.keys())
     if (not _integer(data["schema_version"], 2, 2) or data["operation"] != "two_hop"
             or (data["source_node_id"], data["target_node_id"]) != (source, target)
             or type(data["historical"]) is not bool
             or data["historical_semantics"] != "retained_edges_not_bitemporal_reconstruction"
-            or data["rank_basis"] != "directed_path_edge_id_order"
+            or not rank_valid
             or coverage["display_graph_id"] != payload["display_graph_id"]
             or json.dumps(coverage["scope"], sort_keys=True) != json.dumps(scope, sort_keys=True)
             or type(coverage["truncated"]) is not bool
