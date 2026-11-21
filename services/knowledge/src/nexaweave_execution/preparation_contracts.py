@@ -5,7 +5,7 @@ from dataclasses import asdict, dataclass
 import hashlib
 import json
 import re
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 
 class PreparationAuthorityError(RuntimeError):
@@ -34,6 +34,19 @@ def sha(value):
     if type(value) is not str or not re.fullmatch('[0-9a-f]{64}', value):
         raise ValueError
     return value
+
+
+def seed_ensemble_ids(principal, donor_operation_id, idempotency_key):
+    ensemble_id = uuid5(NAMESPACE_URL, 'nexaweave:seed-ensemble:v1:' + digest({
+        'principal': principal,
+        'donor': str(identifier(donor_operation_id)),
+        'key': str(identifier(idempotency_key)),
+    }))
+    members = tuple(
+        (uuid5(ensemble_id, f'preparation:{ordinal}'), uuid5(ensemble_id, f'launch:{ordinal}'))
+        for ordinal in (1, 2)
+    )
+    return ensemble_id, members
 
 
 def source_revisions(values, anchor=None):
