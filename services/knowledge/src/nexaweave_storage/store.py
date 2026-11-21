@@ -117,7 +117,8 @@ def migrate(connection: psycopg.Connection) -> None:
     for version, filename in ((1, "0001_project_revisions.sql"),
                               (2, "0002_source_evidence.sql"),
                               (3, "0003_research_imports.sql"),
-                              (4, "0004_source_binaries.sql")):
+                              (4, "0004_source_binaries.sql"),
+                              (5, "0005_legacy_reports.sql")):
         sql = files("nexaweave_storage").joinpath("migrations", filename).read_text("utf-8")
         migrations.append((version, sql, hashlib.sha256(sql.encode("utf-8")).hexdigest()))
     try:

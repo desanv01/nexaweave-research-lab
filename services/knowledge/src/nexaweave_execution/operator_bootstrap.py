@@ -100,12 +100,24 @@ def _bind_source(connect, args):
             "display_graph_id": bound.display_graph_id, "scope": bound.scope.model_dump(mode="json")}
 
 
+def _register_legacy_report(connect, args):
+    from nexaweave_storage.legacy_report import LegacyReportStore, read_original_pair
+
+    meta, markdown = read_original_pair(args.input_dir)
+    return LegacyReportStore(connect).register(
+        args.principal, args.workspace_id, args.project_id, args.legacy_report_id, meta, markdown,
+    )
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     migrate = commands.add_parser("migrate", help="install or verify the eight catalogs")
     bind = commands.add_parser("bind-source", help="bind an owned project's source-layer scope")
-    for command in (migrate, bind):
+    register = commands.add_parser("register-legacy-report", help="retain an owned original legacy report pair")
+    for name in ("principal", "workspace-id", "project-id", "legacy-report-id", "input-dir"):
+        register.add_argument("--" + name, required=True)
+    for command in (migrate, bind, register):
         command.add_argument("--database", required=True)
         command.add_argument("--owner-role", required=True)
     for name in ("principal", "workspace-id", "project-id", "graph-id", "display-graph-id"):
@@ -113,7 +125,12 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         connect = _connection_factory(args.database, args.owner_role)
-        receipt = _migrate(connect) if args.command == "migrate" else _bind_source(connect, args)
+        if args.command == "migrate":
+            receipt = _migrate(connect)
+        elif args.command == "bind-source":
+            receipt = _bind_source(connect, args)
+        else:
+            receipt = _register_legacy_report(connect, args)
     except Refused as error:
         print(f"operator_bootstrap_refused:{error}", file=sys.stderr)
         return 2

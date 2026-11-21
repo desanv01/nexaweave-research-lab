@@ -39,7 +39,8 @@ MARKERS = ('postgres: approved disposable PostgreSQL authority\n'
 
 # Reviewed Group1 input sizes are read caps, not new application allowances.
 FRESH_SOURCES = (('nexaweave_execution', 'report_contracts.py', 24865),
-                 ('nexaweave_knowledge', 'source_library.py', 18952))
+                 ('nexaweave_knowledge', 'source_library.py', 18952),
+                 ('nexaweave_knowledge', 'source_validation.py', 1965))
 
 
 def _plain_source_path(value, *, directory=False):
