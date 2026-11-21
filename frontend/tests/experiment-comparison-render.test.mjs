@@ -15,17 +15,24 @@ let code = compileScript(descriptor, { id: 'experiment-comparison', inlineTempla
 code = code.replace(/from (['"])vue\1/g, `from ${JSON.stringify(import.meta.resolve('vue'))}`).replace(/from (['"])(\.{1,2}\/[^'"]+)\1/g, (_match, _quote, relative) => `from ${JSON.stringify(new URL(relative, file).href)}`)
 const component = (await import(`data:text/javascript;base64,${Buffer.from(code + '\nexport default __component').toString('base64')}`)).default
 const project = '11111111-1111-1111-1111-111111111111', hash = 'a'.repeat(64), malicious = '<img src=x onerror=alert(1)> 中😀 https://evil.test'
-function catalog() { return { version: 1, project_id: project, project_revision: 1, cohort_manifest_digest: hash, public_projection_digest: hash, members: [{ member_id: 'm0', member_label: malicious, case_label: 'Case', run_id: project, state: 'completed', cancel_requested: true, seed: '9007199254740993', max_rounds: 2, platforms: ['twitter'] }, { member_id: 'm1', member_label: 'Pending member', case_label: 'Case', run_id: '22222222-2222-2222-2222-222222222222', state: 'running', cancel_requested: false, seed: '-9223372036854775808', max_rounds: 2, platforms: ['twitter'] }] } }
+function catalog() { return { version: 1, project_id: project, project_revision: 1, cohort_manifest_digest: hash, public_projection_digest: hash, members: [{ member_id: 'm0', member_label: malicious, case_label: 'Case', run_id: project, state: 'completed', cancel_requested: true, seed: '9007199254740993', max_rounds: 2, platforms: ['twitter', 'reddit'] }, { member_id: 'm1', member_label: 'Pending member', case_label: 'Case', run_id: '22222222-2222-2222-2222-222222222222', state: 'running', cancel_requested: false, seed: '-9223372036854775808', max_rounds: 2, platforms: ['twitter'] }] } }
 function result(cat, payload) {
   const members = cat.members.filter(m => payload.member_ids.includes(m.member_id)).map(m => ({ ...structuredClone(m), disposition: m.state === 'completed' ? 'successful' : 'pending', project_revision: 1, runtime_sha256: hash, prepared_artifact_sha256: hash, request_fingerprint: hash, record_digest: hash, metrics: null, recording: null }))
   const successful = members.filter(m => m.disposition === 'successful')
   for (const m of successful) {
-    m.metrics = { twitter: { logged_action_total: 0, logged_action_by_type: {}, final_table_counts: Object.fromEntries(experimentTables.map(t => [t, t === 'post' ? 0 : null])) } }
-    m.recording = { version: 1, recording_revision: hash, anchors: { graph_id: 'recorded.graph', simulation_id: 'simulation', branch_id: 'branch', run_id: m.run_id, project_id: project, project_revision: 1 }, platforms: ['twitter'], runtime_sha256: hash, runtime_versions: { python: '3.11', sqlite: '3', oasis: '0.2', camel: '0.2' }, artifact_sha256: { 'simulation_config.json': hash, 'source_grounding.json': hash, 'twitter_profiles.csv': hash } }
+    m.metrics = Object.fromEntries(m.platforms.map(platform => [platform, { logged_action_total: 0, logged_action_by_type: {}, final_table_counts: Object.fromEntries(experimentTables.map(t => [t, t === 'post' ? 0 : null])) }]))
+    m.recording = { version: 1, recording_revision: hash, anchors: { graph_id: 'recorded.graph', simulation_id: 'simulation', branch_id: 'branch', run_id: m.run_id, project_id: project, project_revision: 1 }, platforms: [...m.platforms], runtime_sha256: hash, runtime_versions: { python: '3.11', sqlite: '3', oasis: '0.2', camel: '0.2' }, artifact_sha256: Object.fromEntries(['simulation_config.json', 'source_grounding.json', ...m.platforms.map(platform => platform === 'twitter' ? 'twitter_profiles.csv' : 'reddit_profiles.json')].map(name => [name, hash])) }
   }
-  const dist = n => ({ sample_count: n, missing_count: members.length - n, min: n ? 0 : null, max: n ? 0 : null, arithmetic_mean: n ? 0 : null, median: n ? 0 : null, population_standard_deviation: n ? 0 : null })
+  const dist = (sample, eligible) => ({ sample_count: sample, missing_count: eligible - sample, min: sample ? 0 : null, max: sample ? 0 : null, arithmetic_mean: sample ? 0 : null, median: sample ? 0 : null, population_standard_deviation: sample ? 0 : null })
+  const distributions = []
+  for (const label of new Set(members.map(m => m.case_label))) for (const platform of ['twitter', 'reddit']) {
+    const eligible = members.filter(m => m.case_label === label && m.platforms.includes(platform))
+    if (!eligible.length) continue
+    const available = eligible.filter(m => m.metrics !== null)
+    distributions.push({ case_label: label, platform, member_count: eligible.length, successful_count: available.length, non_successful_count: eligible.length - available.length, distinct_declared_seed_count: new Set(eligible.map(m => m.seed)).size, distinct_successful_seed_count: new Set(available.map(m => m.seed)).size, metrics: { logged_action_total: dist(available.length, eligible.length), logged_action_by_type: {}, final_table_counts: Object.fromEntries(experimentTables.map(t => [t, dist(available.filter(m => m.metrics[platform].final_table_counts[t] !== null).length, eligible.length)])) } })
+  }
   const comparability_matrix = members.length === 2 ? [{ left_member_id: 'm0', right_member_id: 'm1', fields: Object.fromEntries(['seed', 'max_rounds', 'runtime_sha256', 'platforms', 'project_revision', 'prepared_artifact_sha256', 'artifact_sha256', 'runtime_versions'].map(field => { const retained = ['artifact_sha256', 'runtime_versions'].includes(field), l = retained ? members[0].recording?.[field] ?? null : members[0][field], r = retained ? members[1].recording?.[field] ?? null : members[1][field]; return [field, { left: l, right: r, equal: retained ? null : JSON.stringify(l) === JSON.stringify(r) }] })) }] : []
-  return { version: 1, title: payload.title, project_id: project, project_revision: 1, cohort_manifest_digest: hash, members, accounting: { successful: successful.length, failed: 0, cancelled: 0, pending: members.length - successful.length, uncertain: 0 }, distributions: [{ case_label: 'Case', platform: 'twitter', member_count: members.length, successful_count: successful.length, non_successful_count: members.length - successful.length, distinct_declared_seed_count: members.length, distinct_successful_seed_count: successful.length, metrics: { logged_action_total: dist(successful.length), logged_action_by_type: {}, final_table_counts: Object.fromEntries(experimentTables.map(t => [t, dist(t === 'post' ? successful.length : 0)])) } }], cancellation_intent: { cancel_requested_count: successful.length, overlaps_disposition_accounting: true }, distinct_declared_seed_count: members.length, distinct_successful_seed_count: successful.length, comparability_matrix, native_result_digest: hash, public_projection_digest: hash, causal_attribution_supported: false, provider_quality_assessed: false, shared_budget_enforcement_supported: false, actual_provider_spend: null, ensemble_launch_supported: false, coverage: { atomic_cohort_snapshot: false, statistics: 'descriptive_completed_available_observations_only', labels_prove_controlled_intervention: false, hashes_prove_semantic_equivalence: false, digests_are_signatures: false, possible_initial_log_duplicates: true, post_log_interviews_may_exist_in_trace: true, exact_event_row_links: false, historical_or_causal_truth: false, missing_metrics_are_zero: false } }
+  return { version: 1, title: payload.title, project_id: project, project_revision: 1, cohort_manifest_digest: hash, members, accounting: { successful: successful.length, failed: 0, cancelled: 0, pending: members.length - successful.length, uncertain: 0 }, distributions, cancellation_intent: { cancel_requested_count: successful.length, overlaps_disposition_accounting: true }, distinct_declared_seed_count: members.length, distinct_successful_seed_count: successful.length, comparability_matrix, native_result_digest: hash, public_projection_digest: hash, causal_attribution_supported: false, provider_quality_assessed: false, shared_budget_enforcement_supported: false, actual_provider_spend: null, ensemble_launch_supported: false, coverage: { atomic_cohort_snapshot: false, statistics: 'descriptive_completed_available_observations_only', labels_prove_controlled_intervention: false, hashes_prove_semantic_equivalence: false, digests_are_signatures: false, possible_initial_log_duplicates: true, post_log_interviews_may_exist_in_trace: true, exact_event_row_links: false, historical_or_causal_truth: false, missing_metrics_are_zero: false } }
 }
 function mount(overrides = {}) {
   const props = reactive({ methods: { catalog: async () => catalog(), compare: async (payload, cat) => result(cat, payload) }, connected: true, busy: false, resetVersion: 0, locale: 'en', ...overrides })
@@ -54,8 +61,14 @@ test('actual SFC makes no automatic requests on mount/connect/locale and uses la
 })
 test('actual SFC renders inert labels, exact seeds, unavailable versus zero, comparability and provenance in three languages', async () => {
   for (const locale of ['en', 'zh', 'ms']) {
-    let compares = 0, submitted
-    const mounted = mount({ locale, methods: { catalog: async () => catalog(), compare: async (payload, cat) => { compares++; submitted = payload; return result(cat, payload) } } })
+    let loads = 0, compares = 0, submitted
+    const mounted = mount({
+      locale,
+      methods: {
+        catalog: async () => { loads++; return catalog() },
+        compare: async (payload, cat) => { compares++; submitted = payload; return result(cat, payload) }
+      }
+    })
     try {
       await prepare(mounted); assert.equal(compares, 0); submit(mounted.root); await settle()
       assert.equal(compares, 1); assert.deepEqual(submitted.member_ids, ['m0', 'm1'])
@@ -64,10 +77,28 @@ test('actual SFC renders inert labels, exact seeds, unavailable versus zero, com
       assert.ok(panel.textContent.includes(malicious)); assert.equal(mounted.root.querySelector('img,script,a'), null)
       assert.deepEqual([...panel.querySelectorAll('.seed')].map(n => n.textContent), ['9007199254740993', '-9223372036854775808'])
       assert.equal(panel.querySelector('.logged-total').textContent, '0'); assert.ok(panel.querySelector('.unavailable-metrics').textContent.includes(copy.unavailable))
+      const table = panel.querySelector('.action-total-comparison')
+      assert.equal(table.caption.textContent.trim(), copy.loggedTotal)
+      const headers = [...table.tHead.rows[0].cells]
+      assert.deepEqual(headers.map(cell => [cell.tagName, cell.scope, cell.textContent.trim()]), [
+        ['TH', 'col', copy.members], ['TH', 'col', 'twitter']
+      ])
+      assert.equal(table.textContent.includes('reddit'), false)
+      assert.ok(panel.textContent.includes('reddit'))
+      const rows = [...table.tBodies[0].rows]
+      assert.deepEqual(rows.map(({ cells: [member, total] }) => [
+        member.tagName, member.scope, member.querySelector('.mono').textContent,
+        total.tagName, total.textContent.trim()
+      ]), [['TH', 'row', 'm0', 'TD', '0'], ['TH', 'row', 'm1', 'TD', copy.unavailable]])
+      assert.deepEqual(rows.map(row => row.cells.length), [2, 2])
+      assert.ok(rows[0].cells[0].textContent.includes(malicious))
       assert.ok(panel.textContent.includes(copy.cancelOverlap)); assert.ok(panel.textContent.includes(copy.limitations)); assert.ok(panel.textContent.includes(copy.spend + ': ' + copy.unknown))
       assert.ok(panel.querySelector('.comparability').textContent.includes(copy.different)); assert.ok(panel.querySelector('.comparability').textContent.includes(copy.unavailable))
       const summary = panel.querySelector('.result-provenance summary'); summary.focus(); assert.equal(document.activeElement, summary)
       assert.ok(panel.querySelector('.distributions').textContent.includes(copy.statisticLabels.missing_count))
+      select(mounted.root, 1); await settle()
+      assert.equal(mounted.root.querySelector('.action-total-comparison'), null)
+      assert.deepEqual([loads, compares], [1, 1])
     } finally { mounted.cleanup() }
   }
 })
