@@ -6,6 +6,7 @@ import { JSDOM } from 'jsdom'
 import { parse, compileScript } from '@vue/compiler-sfc'
 import { nativeObservationsCopy, nativeObservationsCopyFor } from '../src/i18n/nativeObservations.js'
 import { validateNativeObservationsResult } from '../src/api/nativeObservations.js'
+import { createWorkbenchClient } from '../src/api/workbench.js'
 globalThis.crypto ||= webcrypto
 const dom = new JSDOM('<!doctype html><html><body></body></html>', { url: 'http://127.0.0.1:5173/research' })
 for (const name of ['window', 'document', 'Element', 'HTMLElement', 'SVGElement', 'Node', 'Document', 'ShadowRoot']) globalThis[name] = name === 'window' ? dom.window : dom.window[name]
@@ -56,7 +57,7 @@ const redditLines = [
   '{"round":1,"timestamp":"2026-10-05T00:00:00.000000","event_type":"round_start","simulated_hour":0}',
 ]
 const platformLogs = { twitter: lines, reddit: redditLines }
-function fixture(restored = false) {
+function fixture(restored = false, logs = platformLogs) {
   const files = ['state.json', 'simulation_config.json', 'source_grounding.json', 'twitter_profiles.csv', 'reddit_profiles.json'].map(name => ({ name, sha256: hash, size: 123 }))
   const preparation = { schema_version: 1, display_graph_id: 'graph_1', scope: { schema_version: 1, workspace_id: uid(1), project_id: uid(2), graph_id: uid(3), run_id: null, branch_id: null, layer: 'source' }, project_revision: 1, operation_id: uid(9), source: { source_revision: uid(5), source_name: hostile, source_sha256: hash }, options: { types: null, max_agents: 10, seed: 0, platforms: ['twitter', 'reddit'], max_rounds: 24, simulation_requirement: hostile }, actors: [{ source_entity_uuid: uid(7), name: hostile, labels: ['Person'] }], projection_sha256: hash, plan_sha256: null, state: 'ready', progress: { stage: 'ready', completed: 100, total: 100 }, error_code: null, authorization: { model_calls_enabled: true, ceiling_microusd: '12345' }, receipt: { simulation_id: 'sim_' + uid(9).replaceAll('-', ''), artifact_sha256: digest({ schema_version: 1, files }), files }, graph_snapshot_atomic: false, model_calls_started: true, simulation_executed: false }
   if (restored) {
@@ -66,7 +67,7 @@ function fixture(restored = false) {
   }
   preparation.plan_sha256 = digest(pick(preparation, 'schema_version display_graph_id scope project_revision operation_id source options actors projection_sha256'))
   const manifest = { schema_version: 1, files: preparation.options.platforms.flatMap(platform => {
-    const rawLog = platformLogs[platform].join('\n') + '\n'
+    const rawLog = logs[platform].join('\n') + '\n'
     return [{ name: restored ? 'native.sqlite3' : platform + '_simulation.db', sha256: bytesHash('db'), size: 2 },
       { name: restored ? 'actions.jsonl' : platform + '/actions.jsonl', sha256: bytesHash(rawLog), size: Buffer.byteLength(rawLog) }]
   }) }
@@ -79,10 +80,10 @@ function fixture(restored = false) {
   }
   launch.launch_sha256 = digest(pick(launch, 'schema_version display_graph_id scope preparation request limits ceiling_microusd model_label' + (restored ? ' checkpoint' : '')))
   launch.receipt = { run_id: uid(10), attempt_id: uid(12), instance_id: uid(13), request_fingerprint: digest(launch.request), outcome: 'completed', evidence_sha256: digest(manifest) }
-  return { selection: { launch, preparation }, manifest }
+  return { selection: { launch, preparation }, manifest, logs }
 }
 function page(payload, f = fixture()) {
-  const log = platformLogs[payload.platform]
+  const log = f.logs[payload.platform]
   const records = log.slice(payload.offset, payload.offset + payload.limit).map((raw_json, i) => ({ index: payload.offset + i, raw_json, record_sha256: bytesHash(raw_json) }))
   const counts = { event_records: 0, action_records: 0, successful_action_records: 0, failed_action_records: 0 }
   for (const raw of log) {
@@ -190,6 +191,95 @@ test('mounted restored observations request version two and render the bound out
     assert.equal(m.root.textContent.includes(f.selection.launch.checkpoint.checkpoint_sha256), false)
   } finally { m.cleanup() }
 })
+test('mounted restored event status verifies the receipt, bounded absence and late reply refusal', async () => {
+  const twitter = [
+    JSON.stringify({ round: 2, event_type: 'round_start' }),
+    JSON.stringify({ round: 2, action_type: 'CREATE_POST', success: true,
+      action_args: { post_id: 7, content: 'Restored fixture post' } }),
+    JSON.stringify({ round: 2, event_type: 'round_end', actions_count: 1 }),
+  ]
+  const f = fixture(true, { ...platformLogs, twitter })
+  const launch = f.selection.launch
+  const payload = { schema_version: 3, launch_id: launch.request.run_id, launch_sha256: launch.launch_sha256,
+    platform: 'twitter', record_index: 1, record_sha256: bytesHash(twitter[1]) }
+  function uuid5(namespace, label) {
+    const bytes = createHash('sha1').update(Buffer.from(namespace.replaceAll('-', ''), 'hex')).update(label).digest()
+    bytes[6] = (bytes[6] & 15) | 80
+    bytes[8] = (bytes[8] & 63) | 128
+    return bytes.subarray(0, 16).toString('hex').replace(/^(........)(....)(....)(....)/, '$1-$2-$3-$4-')
+  }
+  const operation = uuid5(payload.launch_id, 'mirofish:restored-twitter-action:v1:1')
+  const evidence = uuid5(operation, 'mirofish:restored-twitter-action-evidence:v1')
+  const scope = { ...launch.scope, layer: 'simulation', run_id: payload.launch_id }
+  const group = 'mf1_' + digest(pick(scope, 'workspace_id project_id graph_id run_id branch_id layer'))
+  const episode = uuid5('6ba7b811-9dad-11d1-80b4-00c04fd430c8', 'mirofish:episode:v1:' + group + ':' + operation)
+  const completed = { ...payload, scope,
+    operation_id: operation, fingerprint: hash, state: 'completed', attempt_id: uid(31), completion_barrier_open: true,
+    receipt: { group_id: group, episode_id: episode, fingerprint: hash, evidence_ids: [evidence] } }
+  const json = (value, status = 200) => new Response(JSON.stringify(value), {
+    status, headers: { 'Content-Type': 'application/json' },
+  })
+  const success = data => json({ success: true, data })
+  const calls = []
+  let deliverLate, lateSignal
+  const client = createWorkbenchClient({ fetchImpl: async (url, options) => {
+    assert.equal(options.headers.Authorization, 'Bearer fixture-observation-token')
+    if (url.endsWith('/api/graph/data/graph_1')) {
+      return success({ graph_id: 'graph_1', nodes: [], edges: [], node_count: 0, edge_count: 0 })
+    }
+    const body = JSON.parse(options.body)
+    if (url.endsWith('/api/native-observations/page/graph_1')) return success(page(body, f))
+    assert.equal(url, 'http://127.0.0.1:5001/api/native-observations/event-status/graph_1')
+    assert.equal(options.method, 'POST')
+    assert.equal(options.cache, 'no-store')
+    assert.deepEqual(body, payload)
+    calls.push(body)
+    if (calls.length === 1) return success(completed)
+    if (calls.length === 2) return json({ success: false, error: { code: 'not_found' } }, 404)
+    if (calls.length === 3) return success({ ...completed, receipt: { ...completed.receipt, episode_id: uid(32) } })
+    lateSignal = options.signal
+    return new Promise(resolve => { deliverLate = () => resolve(success(completed)) })
+  } })
+  await client.connect({ origin: 'http://127.0.0.1:5001', graph: 'graph_1', token: 'fixture-observation-token' })
+  const m = mount({ selection: f.selection, methods: {
+    page: client.nativeObservationsPage, eventStatus: client.nativeObservationsEventStatus,
+    clear: client.clearNativeObservations,
+  } })
+  try {
+    await admitted(m)
+    m.root.querySelector('.load').click(); await finished(m)
+    const button = () => m.root.querySelector('.event-status-read')
+    assert.equal(m.root.querySelectorAll('.event-status-read').length, 1)
+    assert.equal(button().closest('li').dataset.index, '1')
+    assert.deepEqual(calls, [])
+
+    button().click(); await finished(m)
+    assert.ok(m.root.querySelector('.event-status-result').textContent.includes(evidence))
+    assert.ok(m.root.textContent.includes(nativeObservationsCopy.en.eventReceipt.states.completed))
+
+    button().click(); await finished(m)
+    assert.equal(m.root.querySelector('.event-status-result'), null)
+    assert.ok(m.root.textContent.includes(nativeObservationsCopy.en.eventReceipt.absent))
+
+    button().click(); await finished(m)
+    assert.equal(m.root.querySelector('.event-status-result'), null)
+    assert.ok(m.root.textContent.includes(nativeObservationsCopy.en.errors.invalid_reply))
+
+    button().click(); await waitFor(() => !!deliverLate)
+    m.props.resetVersion++
+    await nextTick()
+    assert.equal(lateSignal.aborted, true)
+    deliverLate()
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(m.root.querySelector('.event-status-result'), null)
+    assert.equal(m.root.querySelector('.event-status-read'), null)
+    assert.equal(calls.length, 4)
+  } finally {
+    m.cleanup()
+    client.disconnect()
+  }
+})
+
 test('pending contradictory controls are disabled; clear, disconnect, source context and unmount fence late replies', async () => {
   for (const action of ['clear', 'disconnect', 'reset', 'selection', 'graph', 'unmount']) {
     let finish, cleared = 0, requests = 0, requested

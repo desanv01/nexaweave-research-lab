@@ -66,6 +66,10 @@ const observationMethods = Object.freeze({
     try { return await client.nativeObservationsPage(payload, selection, knownPage) }
     catch (e) { if (['unauthorized', 'origin_denied', 'disconnected'].includes(e?.code)) disconnect(); throw e }
   },
+  eventStatus: async (payload, selection, knownPage) => {
+    try { return await client.nativeObservationsEventStatus(payload, selection, knownPage) }
+    catch (e) { if (['unauthorized', 'origin_denied', 'disconnected'].includes(e?.code)) disconnect(); throw e }
+  },
   clear: () => client.clearNativeObservations()
 })
 watch([inspectedSource, nativeReady, nativeReset], clearNativeViews, { deep: true, flush: 'sync' })
