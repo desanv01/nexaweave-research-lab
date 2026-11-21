@@ -1,9 +1,8 @@
 # Portable retained-source bundles — bounded U04b
 
-Implementation is **UNVERIFIED** pending Main review, installation and checks.
 This private data artifact supports a selected immutable PostgreSQL project
-revision and 1–16 explicitly requested retained source revisions. It is separate
-from the U14 committed-source ZIP. It does not establish full C41/U04 acceptance.
+revision and up to 16 explicitly requested retained source revisions. The U14
+committed-source ZIP is a separate artifact.
 
 `nexaweave_storage.research_bundle.export_bundle` resolves persisted authority
 through `ProjectStore.get(principal, project_id, revision)` and
@@ -49,11 +48,44 @@ Export counts actual retained UTF-8 bytes after each selected source read and
 fails immediately above 8 MiB, before reading another source or assembling the
 oversized artifact. Final validation still enforces the encoded 12 MiB cap.
 
+## Version 2 linked evidence and version 3 original PDF
+
+Version 2 selects exactly one owned retained source and adds an `evidence_link`
+with its source revision, evidence ID, text SHA-256 and excerpt SHA-256. The
+selected project revision must refer to exactly one passage from that source.
+
+Version 3 adds one `original_pdf` field alongside the version 2 payload fields.
+The exporter reads the stored original and its bound source through
+`SourceStore.get_original` using the same project and principal as the project
+revision lookup. The object carries `source_revision`, `media_type` set to
+`application/pdf`, `byte_length`, `sha256`, and `content_base64`. The latter
+is a list of standard padded base64 strings. Each non-final string is exactly
+1 MiB and the final string holds the remaining encoded bytes. Inspection
+checks canonical encoding, revision binding, the PDF header and EOF marker,
+exact decoded length and SHA-256. An original is limited to 2 MiB and the
+existing 12 MiB encoded artifact cap applies. The payload digest covers both
+the evidence link and original.
+
+The installed `nexaweave_storage.research_import_cli` takes a trusted local input
+file, its exact SHA-256, and an explicit principal, target project ID and
+current target revision. A first v2 or v3 import requires a distinct owned target
+project with an empty retained-source library and no prior import receipts.
+The target project is created independently before import. The transaction
+remaps retained source and passage IDs under the target project, writes the
+retained text and passages, and in v3 writes the original PDF under the remapped
+source revision. The receipt commits with those rows. Replay checks current
+target ownership and revision, then verifies the receipt, remapped rows and,
+for v3, the exact stored original before returning the same receipt. The target
+owner reads the restored PDF through the ordinary `SourceStore.get_original`
+entry point. The import records the origin project and evidence as provenance.
+
 ## Trusted local CLI
 
 Run the installed module `python -m nexaweave_storage.research_bundle_cli` with one
 UTF-8 JSON request on stdin, capped at 32768 bytes. Main owns execution and
-installation. Export request fields:
+installation. The following export request defaults to version 1. Pass
+`"schema_version": 2` or `"schema_version": 3` and a single source revision to
+opt in to the corresponding newer format.
 
 ```json
 {"operation":"export","principal":"owned-local-principal","project_id":"00000000-0000-0000-0000-000000000001","revision":1,"source_revisions":["00000000-0000-0000-0000-000000000002"],"output":"C:\\trusted\\new-bundle.json"}
@@ -85,23 +117,21 @@ One fixed JSON reply is written: `{"ok":true,"result":...}` or
 `{"ok":false,"error":...}`, exit 0 or 2. Error vocabulary is `invalid_request`,
 `invalid_bundle`, `invalid_path`, `bundle_denied`, `authority_unavailable`.
 Summaries include identity/revision, counts, total retained text bytes, artifact
-and payload hashes, a privacy warning and explicit false binary/authenticity
-claims. They never echo source text, paths, display names, principal, DSN or raw
-exceptions.
+and payload hashes, a privacy warning and binary presence and publisher
+authentication flags. Version 3 import reports original binary restoration
+after transaction verification. CLI replies omit source text, original bytes,
+paths, display names, principal, DSN and raw exceptions.
 
 ## Privacy and remaining scope
 
-Export includes private retained text and potentially sensitive original snapshot
-metadata. It is not a secret scan. Snapshot paths, workflow IDs and graph IDs
-remain inert strings and are never resolved, rendered, extracted or dispatched.
-Evidence object keys do not prove original binary presence. Hashes identify
-integrity, not publisher authenticity or signatures.
+Export includes private retained text and potentially sensitive original
+snapshot metadata. A v3 artifact also carries the unredacted original PDF.
+Treat the whole artifact as private. Snapshot paths, workflow IDs and graph IDs
+remain inert strings. The trusted artifact hash identifies the exact bytes
+chosen for import. Publisher authentication would require separate evidence.
 
-No durable import, identity remapping, original binary restoration, graph restore,
-Temporal replay, model/provider calls or public publication is implemented.
-Reports, events, metrics and checkpoints remain future bundle work. This packet
-does not change Vue/Flask/OASIS/CAMEL, Graphiti/self-hosted Neo4j, initial
-configurable DeepSeek selection, inherited licenses, notices or all 44 criteria.
+Graph data, Temporal history, reports, events, metrics and checkpoints are
+outside the retained-source bundle scope.
 
 Authored tests cover synthetic pure artifacts and the approved disposable
 PostgreSQL factory, including fresh isolated installed-module subprocesses.
@@ -116,6 +146,6 @@ Controlled stat regressions admit stable differing path/descriptor ctimes while
 rejecting a ctime-only change within either API. Raw ASCII JSON containing escaped
 lone surrogates reaches both decode and inspection rejection directly, without
 first failing artifact encoding in the test authoring helper.
-These sources are not execution evidence. Main must install the exact candidate,
-run tests under approved guards, review filesystem/connection behavior, integrate
-runner/CI registration and decide exact-revision acceptance.
+The v3 PostgreSQL witness covers exact binary and passage restoration in a
+distinct owner's project, authorized replay, and rejection when the restored
+PDF has been replaced with a different file and a matching stored digest.

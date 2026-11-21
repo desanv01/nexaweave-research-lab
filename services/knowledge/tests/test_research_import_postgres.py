@@ -15,8 +15,9 @@ from psycopg.types.json import Jsonb
 import pytest
 
 from nexaweave_storage import Conflict, NotFound, ProjectStore, SourceStore, StorageError
-from nexaweave_storage.research_bundle import canonical, decode, export_bundle
-from nexaweave_storage.research_import import ResearchImportStore, remap_id
+from nexaweave_storage.research_bundle import canonical, decode, export_bundle, inspect_bundle
+from nexaweave_storage.research_bundle_cli import parse_request
+from nexaweave_storage.research_import import ImportError, ResearchImportStore, remap_id
 from test_project_store import snapshot
 from test_research_bundle_postgres import _CHILD as _BUNDLE_CHILD
 from test_source_store_postgres import factory
@@ -25,7 +26,7 @@ pytestmark = pytest.mark.postgres
 OWNER = "import-local-owner"
 
 
-def _fixture_origin(factory):
+def _fixture_origin(factory, *, original=None):
     project, source, passage = uuid4(), uuid4(), uuid4()
     store = ProjectStore(factory)
     snap = snapshot()
@@ -34,8 +35,13 @@ def _fixture_origin(factory):
     first = store.create("origin-owner", uuid4(), project, "proj_1", snap,
         [{"evidence_id": str(passage), "source_revision": str(source), "sha256": "0" * 64,
           "object_key": "inert/private.bin", "byte_length": 17}])
-    retained = SourceStore(factory).ingest_text("origin-owner", project, source, "Unicode origin",
-        "\ufeffA😀\r\n猫e\u0301", [{"evidence_id": str(passage), "start": 2, "end": 6, "page": 9}])
+    store = SourceStore(factory)
+    passages = [{"evidence_id": str(passage), "start": 2, "end": 6, "page": 9}]
+    text = "\ufeffA😀\r\n猫e\u0301"
+    if original is None:
+        retained = store.ingest_text("origin-owner", project, source, "Unicode origin", text, passages)
+    else:
+        retained = store.ingest_pdf("origin-owner", project, source, "original.pdf", text, passages, original).source
     return first, retained
 
 
@@ -365,6 +371,101 @@ def test_fresh_noneditable_cli_file_to_owned_pg_digest_repeat_denial_and_tamper(
     result = run(data)
     assert result.returncode == 2 and json.loads(result.stdout)["error"] == "invalid_import"
     assert counts(factory, project) == (1, 1, 1) and ProjectStore(factory).get(OWNER, project) == current
+
+
+def test_v3_owned_original_pdf_restores_and_replays(factory, tmp_path, monkeypatch):
+    # Synthetic storage fixture spanning the base64 chunk boundary.
+    original = b"%PDF-1.7\n%" + bytes(1024 * 1024) + b"\n%%EOF\n"
+    original_sha = hashlib.sha256(original).hexdigest()
+    origin, retained = _fixture_origin(factory, original=original)
+    cited = retained.passages[0]
+    project, first, current = target(factory)
+    assert origin.principal != current.principal and origin.workspace_id != current.workspace_id
+    assert counts(factory, project) == (0, 0, 0)
+    sources, projects = SourceStore(factory), ProjectStore(factory)
+    selected = [str(retained.source_revision)]
+    export_request = {
+        "operation": "export", "schema_version": 3, "principal": origin.principal,
+        "project_id": str(origin.project_id), "revision": origin.revision,
+        "source_revisions": selected, "output": str(tmp_path / "portable-v3.json"),
+    }
+    assert parse_request(canonical(export_request)) == export_request
+    with pytest.raises(NotFound):
+        export_bundle(projects, sources, current.principal, str(origin.project_id),
+                      origin.revision, selected, schema_version=3)
+    raw = export_bundle(projects, sources, origin.principal, str(origin.project_id),
+                        origin.revision, selected, schema_version=3)
+    digest = hashlib.sha256(raw).hexdigest()
+    inspected = inspect_bundle(raw, digest)
+    assert inspected["schema_version"] == 3 and inspected["original_binaries_included"] is True
+
+    bundle = decode(raw)
+    pdf = bundle["payload"]["original_pdf"]
+    assert pdf["sha256"] == original_sha
+    first_chunk, final_chunk = pdf["content_base64"]
+    assert len(first_chunk) == 1024 * 1024 and final_chunk
+    pdf["source_revision"] = str(uuid4())
+    bundle["payload_sha256"] = hashlib.sha256(canonical(bundle["payload"])).hexdigest()
+    invalid = canonical(bundle)
+    def unexpected_connection():
+        pytest.fail("invalid original reached the database")
+    with pytest.raises(ImportError, match="^invalid_import$"):
+        ResearchImportStore(unexpected_connection).import_bundle(
+            invalid, OWNER, project, current.revision, hashlib.sha256(invalid).hexdigest())
+    with pytest.raises(NotFound):
+        ResearchImportStore(factory).import_bundle(raw, origin.principal, project, current.revision, digest)
+    with pytest.raises(Conflict):
+        ResearchImportStore(factory).import_bundle(raw, origin.principal, origin.project_id, origin.revision, digest)
+    assert counts(factory, project) == (0, 0, 0)
+
+    from nexaweave_storage import source as source_module
+
+    insert_original = source_module._insert_original
+
+    def fail_after_binary(conn, *args):
+        insert_original(conn, *args)
+        conn.execute("SELECT 1/0")
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(source_module, "_insert_original", fail_after_binary)
+        with pytest.raises(StorageError):
+            ResearchImportStore(factory).import_bundle(raw, OWNER, project, current.revision, digest)
+    assert counts(factory, project) == (0, 0, 0)
+    with factory() as conn:
+        assert conn.execute("SELECT count(*) FROM mf_app.source_binaries WHERE project_id=%s",
+                            (project,)).fetchone()[0] == 0
+
+    receipt = ResearchImportStore(factory).import_bundle(raw, OWNER, project, current.revision, digest)
+    assert receipt.summary()["original_binaries_restored"] is True
+    revision = remap_id(project, "source", digest, retained.source_revision)
+    evidence = remap_id(project, "passage", digest, cited.evidence_id)
+    restored = SourceStore(factory).get_original(OWNER, project, revision)
+    assert restored.source.project_id == project and restored.source.source_revision == revision
+    assert restored.source.text == retained.text and restored.source.text_sha256 == retained.text_sha256
+    assert restored.content == original and restored.sha256 == original_sha
+    assert restored.byte_length == len(original) and restored.media_type == "application/pdf"
+    resolved = sources.resolve_evidence(OWNER, project, evidence)
+    assert resolved.source_revision == revision and resolved.evidence_id == evidence
+    assert (resolved.start, resolved.end, resolved.declared_page) == (cited.start, cited.end, cited.page)
+    assert resolved.excerpt == cited.excerpt and resolved.excerpt_sha256 == cited.excerpt_sha256
+    assert projects.history(OWNER, project) == [first, current]
+    assert ResearchImportStore(factory).import_bundle(raw, OWNER, project, current.revision, digest) == receipt
+    with pytest.raises(NotFound):
+        ResearchImportStore(factory).import_bundle(raw, origin.principal, project, current.revision, digest)
+    with pytest.raises(NotFound):
+        sources.get_original(origin.principal, project, revision)
+    assert counts(factory, project) == (1, 1, 1)
+
+    # A replacement that matches its own stored digest must still fail replay.
+    replacement = original.replace(b"%PDF-1.7", b"%PDF-1.6", 1)
+    with factory() as conn:
+        conn.execute("UPDATE mf_app.source_binaries SET original_bytes=%s,sha256=%s "
+                     "WHERE project_id=%s AND source_revision=%s",
+                     (replacement, hashlib.sha256(replacement).hexdigest(), project, revision))
+    with pytest.raises(StorageError):
+        ResearchImportStore(factory).import_bundle(raw, OWNER, project, current.revision, digest)
+    assert counts(factory, project) == (1, 1, 1)
+    assert sources.get_original(origin.principal, origin.project_id, retained.source_revision).content == original
 
 
 def test_fresh_noneditable_v2_owned_evidence_to_new_target(factory, tmp_path):
