@@ -24,7 +24,6 @@ import pytest
 
 from nexaweave_storage import NotFound, ProjectStore, SourceStore, canonical_payload, migrate
 from nexaweave_storage.pdf import extract_pdf
-from test_pdf_source import pdf_bytes
 from test_project_store import snapshot
 
 pytestmark = pytest.mark.postgres
@@ -407,6 +406,7 @@ def test_one_project_original_pdf_logical_backup_restore():
             migrate(conn)
         workspace, project, source_revision = uuid4(), uuid4(), uuid4()
         owner = 'w82-' + token
+        from test_pdf_source import pdf_bytes
         binary = pdf_bytes(['W8.2 original 猫', '', 'Retained end 雪'])
         extracted = extract_pdf(binary)
         declarations = extracted.declarations(str(source_revision))
