@@ -17,6 +17,8 @@ from uuid import uuid4
 
 import pytest
 
+from followup_recovery_timings import RecoveryTimings
+
 pytestmark = [pytest.mark.postgres, pytest.mark.connected_followup_temporal]
 
 
@@ -32,14 +34,14 @@ class FixturePhases:
         self.count = 0
         self.started = {}
 
-    def emit(self, phase, event, started, *, cleanup=False):
+    def emit(self, phase, event, started, *, cleanup=False, elapsed_seconds=None):
         active_error = sys.exception() if cleanup else None
         try:
             if self.count >= 128:
                 return
             now = time.monotonic()
-            elapsed = max(0.0, now - started)
-            if not math.isfinite(now) or not math.isfinite(elapsed) or now < 0:
+            elapsed = max(0.0, now - started) if elapsed_seconds is None else elapsed_seconds
+            if not math.isfinite(now) or not math.isfinite(elapsed) or now < 0 or elapsed < 0:
                 return
             self.count += 1
             record = dict(
@@ -353,6 +355,7 @@ async def test_actual_report_followup_history_and_disabled_exports(factory, tmp_
             return response
 
     phases = FixturePhases('followup')
+    recovery_timings = RecoveryTimings(recovery_connections, phases.emit) if recovery_connections is not None else None
     phases.start('setup')
     monkeypatch.chdir(tmp_path)
     migrate_all(factory)
@@ -680,8 +683,10 @@ async def test_actual_report_followup_history_and_disabled_exports(factory, tmp_
             async def recover(operation, body):
                 if recovery_connections is None:
                     return await asyncio.to_thread(operation, body)
-                result, counts = await asyncio.to_thread(recovery_connections.run, operation, body)
+                result, counts, records = await asyncio.to_thread(
+                    recovery_timings.run, operation, body, monkeypatch)
                 recovery_counts.append(counts)
+                recovery_timings.report(records)
                 return result
 
             phases.start('followup-disabled-history-exports-recovery')
