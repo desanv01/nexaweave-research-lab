@@ -25,7 +25,7 @@ def _text(value, maximum):
 
 def _validate_two_hop(value, anchor):
     required = {"schema_version", "operation", "display_graph_id", "source_node_id", "target_node_id"}
-    if (not required <= set(value) <= required | {"valid_at", "recorded_before"}
+    if (not required <= set(value) <= required | {"valid_at", "recorded_before", "question"}
             or type(value["schema_version"]) is not int or value["schema_version"] != 2
             or value["operation"] != "two_hop" or value["display_graph_id"] != anchor):
         raise ValueError
@@ -33,6 +33,8 @@ def _validate_two_hop(value, anchor):
     if source == target or any(type(node) is not str or len(node) != 36
                                or str(UUID(node)) != node for node in (source, target)):
         raise ValueError
+    if value.get("question") is not None:
+        _text(value["question"], 2000)
     for key in ("valid_at", "recorded_before"):
         stamp = value.get(key)
         if stamp is not None:

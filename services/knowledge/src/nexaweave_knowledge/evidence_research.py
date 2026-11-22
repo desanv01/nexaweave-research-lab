@@ -123,14 +123,16 @@ def claim_candidates(facts):
 
 
 def _directed_two_hop(facts, request, is_cited):
-    """Choose the first fully cited pair in first-edge, second-edge ID order."""
+    """Prefer question overlap across both cited hops, then provider ID order."""
     source, target = request.source_node_id, request.target_node_id
     ordered = sorted(facts, key=lambda fact: fact.provider_id)
+    rank_by_question = any(fact.overlap_tokens for fact in ordered)
     second_edges = {}
     for edge in ordered:
         if edge.target_node_id == target and edge.source_node_id not in (source, target):
             second_edges.setdefault(edge.source_node_id, []).append(edge)
     best_second = {}
+    selected, best_rank = (), None
     has_topology = False
     for edge in ordered:
         middle = edge.target_node_id
@@ -140,10 +142,24 @@ def _directed_two_hop(facts, request, is_cited):
         if not is_cited(edge):
             continue
         if middle not in best_second:
-            best_second[middle] = next((second for second in second_edges[middle] if is_cited(second)), None)
-        if best_second[middle] is not None:
-            return (edge, best_second[middle]), True
-    return (), has_topology
+            candidates = second_edges[middle]
+            if rank_by_question:
+                # Stable sort preserves provider ID order for equal overlaps.
+                # Increasing the second overlap improves the pair's score for
+                # any first edge, so only this middle's best cited second is needed.
+                candidates = sorted(candidates, key=lambda second: -second.overlap_tokens)
+            best_second[middle] = next((second for second in candidates if is_cited(second)), None)
+        second = best_second[middle]
+        if second is None:
+            continue
+        if not rank_by_question:
+            return (edge, second), True
+        first_overlap, second_overlap = edge.overlap_tokens, second.overlap_tokens
+        rank = (min(first_overlap, second_overlap), first_overlap + second_overlap)
+        # Equal scores keep the earliest first edge in provider ID order.
+        if best_rank is None or rank > best_rank:
+            selected, best_rank = (edge, second), rank
+    return selected, has_topology
 
 
 class EvidenceResearchService:
@@ -254,7 +270,8 @@ class EvidenceResearchService:
         try:
             provider = _DirectPageProvider(driver)
             two_hop = isinstance(request, TwoHopRequest)
-            query_tokens = frozenset() if two_hop else _tokens(request.text)
+            query = request.question if two_hop else request.text
+            query_tokens = _tokens(query) if query is not None else frozenset()
             collected, coverage = [], []
             history_evidence, revision_metadata = {}, {}
 
@@ -351,7 +368,8 @@ class EvidenceResearchService:
                             source_node_id=fact.source_node_id, target_node_id=fact.target_node_id,
                             episode_ids=fact.episode_ids, evidence_ids=fact.evidence_ids,
                             created_at=created, valid_at=valid, invalid_at=invalid, expired_at=expired,
-                            overlap_tokens=len(query_tokens & _tokens(fact.fact + " " + (fact.name or ""))),
+                            overlap_tokens=(len(query_tokens & _tokens(fact.fact + " " + (fact.name or "")))
+                                            if query_tokens else 0),
                             query_tokens=len(query_tokens), citations=(), unavailable_evidence_ids=()))
                     cursor = page.next_cursor
                     if cursor is None:
@@ -429,6 +447,8 @@ class EvidenceResearchService:
                 result = TwoHopResult(
                     source_node_id=request.source_node_id, target_node_id=request.target_node_id,
                     path=path, path_status=status,
+                    rank_basis=("directed_path_lexical_token_overlap" if any(fact.overlap_tokens for fact in resolved)
+                                else "directed_path_edge_id_order"),
                     scope_coverage=coverage[0].model_copy(update={"returned": len(resolved)}),
                     passage_coverage=passage_coverage(resolved), historical=historical,
                 )

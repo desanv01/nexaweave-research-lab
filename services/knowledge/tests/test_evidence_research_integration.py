@@ -180,6 +180,7 @@ async def retained_graph(factory):
     try:
         for scope, fact_text in ((source, "Alice works for 猫 source"), (simulation, "Alice works for 猫 simulation")):
             edge, episode, subject, target = map(str, (uuid4(), uuid4(), uuid4(), uuid4()))
+            edge = "1" + edge[1:]  # Keep the original hop ahead of the ranked alternative.
             edge_ids.append(edge)
             episode_ids.append(episode)
             nodes.append((subject, target))
@@ -187,7 +188,8 @@ async def retained_graph(factory):
                 "CREATE (a:Entity {uuid:$subject,group_id:$group_id,name:'Alice'}), "
                 "(b:Entity {uuid:$target,group_id:$group_id,name:'猫'}), "
                 "(e:Episodic {uuid:$episode,group_id:$group_id,created_at:datetime($stamp)}), "
-                "(o:MiroFishIngest {uuid:$episode,group_id:$group_id,status:'complete',evidence_ids:$evidence}) "
+                "(o:MiroFishIngest {uuid:$episode,group_id:$group_id,status:'complete',"
+                "evidence_ids:$evidence,asserted_valid_at:datetime($stamp)}) "
                 "CREATE (a)-[:RELATES_TO {uuid:$edge,group_id:$group_id,name:'WORKS_FOR', "
                 "fact:$fact,episodes:[$episode],created_at:datetime($stamp),valid_at:datetime($stamp)}]->(b)",
                 parameters_={"subject": subject, "target": target, "group_id": scope.group_id,
@@ -408,7 +410,11 @@ async def test_real_subprocess_json_cli_history_and_denied_display(retained_grap
         KNOWLEDGE_NEO4J_PASSWORD=os.environ['KNOWLEDGE_TEST_PASSWORD'],
     )
 
+    ordinal = 0
+
     async def invoke(request, expected_status, *, installed=False, profile="research_cli"):
+        nonlocal ordinal
+        ordinal += 1
         raw = json.dumps(request, ensure_ascii=False, allow_nan=False).encode('utf-8')
         if profile != "research_cli":
             raw = len(raw).to_bytes(4, 'big') + raw
@@ -428,8 +434,6 @@ async def test_real_subprocess_json_cli_history_and_denied_display(retained_grap
             pytest.fail('research_cli_child_timeout', pytrace=False)
         except OSError:
             pytest.fail('research_cli_child_os_error', pytrace=False)
-        # Never include subprocess objects, stderr or configuration in failures.
-        # Only fixed categories and integer return codes are diagnostic data.
         if completed.returncode != expected_status or completed.stderr:
             category = {
                 91: 'guard_violation', 92: 'model_or_search_observed',
@@ -437,17 +441,41 @@ async def test_real_subprocess_json_cli_history_and_denied_display(retained_grap
                 95: 'driver_and_pg_close_missing', 96: 'cli_exit_missing', 97: 'installed_cli_required',
                 98: 'denied_child_external_read',
             }.get(completed.returncode, 'exit_status')
-            stderr_category = 'empty'
-            if completed.stderr:
-                # Presence detection does not trust/print a warning message.
-                # Keep even deprecations failing until Main identifies a known
-                # accepted import warning; never suppress runtime warnings here.
-                stderr_category = ('deprecation_warning_present'
-                                   if b'DeprecationWarning' in completed.stderr
-                                   else 'nonempty')
+            # Scan a fixed number of bytes and report only predetermined labels.
+            stderr = completed.stderr
+            sample_limit = 8 * 1024
+            truncated = len(stderr) > 2 * sample_limit
+            samples = (stderr[:sample_limit], stderr[-sample_limit:]) if truncated else (stderr,)
+            warning_markers = (
+                (b'DeprecationWarning:', 'deprecation_warning_present'),
+                (b'RuntimeWarning:', 'runtime_warning_present'),
+                (b'ResourceWarning:', 'resource_warning_present'),
+                (b'UserWarning:', 'user_warning_present'),
+                (b'FutureWarning:', 'future_warning_present'),
+            )
+            categories = [label for marker, label in warning_markers
+                          if any(marker in sample for sample in samples)]
+            if any(b'neo4j.notifications' in sample or
+                   b'Received notification from DBMS server:' in sample for sample in samples):
+                categories.append('neo4j_notification_present')
+                # A text marker cannot establish the child's typed filter match.
+                if any(b'01N52' in sample for sample in samples):
+                    categories.append('neo4j_01n52_token_present')
+            if any(b'Neo.ClientNotification.Statement.UnknownPropertyKeyWarning' in sample
+                   for sample in samples):
+                categories.append('neo4j_unknown_property_key_warning_present')
+            stderr_category = ','.join(categories) or ('nonempty' if stderr else 'empty')
+            framed = profile != 'research_cli'
+            payload = request.get('payload') if framed else request
+            has_question = isinstance(payload, dict) and 'question' in payload
+            source_profile = 'installed' if installed else 'source'
+            transport = 'framed' if framed else 'cli'
             pytest.fail(
                 f'research_cli_child_{category}: expected_exit={expected_status} '
-                f'actual_exit={completed.returncode} stderr={stderr_category}',
+                f'actual_exit={completed.returncode} profile={source_profile} '
+                f'transport={transport} ordinal={ordinal} has_question={int(has_question)} '
+                f'stderr_bytes={len(stderr)} stderr_scan_truncated={int(truncated)} '
+                f'stderr={stderr_category}',
                 pytrace=False)
         output = completed.stdout
         if profile != "research_cli":
@@ -528,28 +556,38 @@ async def test_real_subprocess_json_cli_history_and_denied_display(retained_grap
     assert denied == {'error': 'research_unavailable'}
 
     source_node, middle_node = f['nodes'][0]
-    target_node = str(uuid4())
+    ranked_middle, target_node = str(uuid4()), str(uuid4())
+    ranked_first, ranked_episode = '9' + str(uuid4())[1:], str(uuid4())
     second_ids = sorted('8' + str(uuid4())[1:] for _ in range(2))
     second_episodes = [str(uuid4()) for _ in second_ids]
     original = f['retained'].passages
     candidates = [
-        {'edge': edge, 'episode': episode, 'evidence': [str(passage.evidence_id)]}
-        for edge, episode, passage in zip(second_ids, second_episodes, reversed(original), strict=True)
+        {'edge': second_ids[0], 'episode': second_episodes[0], 'evidence': [str(original[1].evidence_id)],
+         'source': middle_node, 'target': target_node, 'name': 'LOCATED_IN',
+         'fact': 'The organization is based at the laboratory for budget audit planning'},
+        {'edge': ranked_first, 'episode': ranked_episode, 'evidence': [str(original[0].evidence_id)],
+         'source': source_node, 'target': ranked_middle, 'name': 'WORKS_FOR',
+         'fact': 'Alice works with the budget team'},
+        {'edge': second_ids[1], 'episode': second_episodes[1], 'evidence': [str(original[1].evidence_id)],
+         'source': ranked_middle, 'target': target_node, 'name': 'LOCATED_IN',
+         'fact': 'The team conducts its audit at the laboratory'},
+        # This continuation would beat the cited audit hop but lacks retained evidence.
+        {'edge': '0' + str(uuid4())[1:], 'episode': str(uuid4()), 'evidence': [str(uuid4())],
+         'source': ranked_middle, 'target': target_node, 'name': 'LOCATED_IN',
+         'fact': 'The team conducts budget audit planning at the laboratory'},
     ]
-    # Admit this earlier edge by topology and valid time, then require its
-    # dangling evidence to lose to the later fully cited alternative.
-    uncited_edge = '0' + str(uuid4())[1:]
-    candidates.insert(0, {'edge': uncited_edge, 'episode': str(uuid4()), 'evidence': [str(uuid4())]})
     await f['writer'].execute_query(
-        'MATCH (b:Entity {uuid:$middle,group_id:$group_id}) '
-        'CREATE (c:Entity {uuid:$target,group_id:$group_id,name:"Laboratory"}) '
-        'WITH b,c UNWIND $candidates AS item '
+        'CREATE (:Entity {uuid:$ranked_middle,group_id:$group_id,name:"Budget team"}), '
+        '(:Entity {uuid:$target,group_id:$group_id,name:"Laboratory"}) '
+        'WITH $candidates AS candidates UNWIND candidates AS item '
+        'MATCH (a:Entity {uuid:item.source,group_id:$group_id}), '
+        '(b:Entity {uuid:item.target,group_id:$group_id}) '
         'CREATE (e:Episodic {uuid:item.episode,group_id:$group_id,created_at:datetime($stamp)}), '
-        "(o:MiroFishIngest {uuid:item.episode,group_id:$group_id,status:'complete',evidence_ids:item.evidence}), "
-        "(b)-[:RELATES_TO {uuid:item.edge,group_id:$group_id,name:'LOCATED_IN', "
-        "fact:'The organization is based at the laboratory',episodes:[item.episode],"
-        'created_at:datetime($stamp),valid_at:datetime($stamp)}]->(c)',
-        parameters_={'middle': middle_node, 'target': target_node, 'group_id': f['source'].group_id,
+        "(o:MiroFishIngest {uuid:item.episode,group_id:$group_id,status:'complete',"
+        "evidence_ids:item.evidence,asserted_valid_at:datetime($stamp)}), "
+        '(a)-[:RELATES_TO {uuid:item.edge,group_id:$group_id,name:item.name, '
+        'fact:item.fact,episodes:[item.episode],created_at:datetime($stamp),valid_at:datetime($stamp)}]->(b)',
+        parameters_={'ranked_middle': ranked_middle, 'target': target_node, 'group_id': f['source'].group_id,
                      'candidates': candidates, 'stamp': f['stamp'].isoformat()},
     )
     path_request = {
@@ -573,21 +611,43 @@ async def test_real_subprocess_json_cli_history_and_denied_display(retained_grap
     assert [hop['evidence_ids'] for hop in (first_hop, second_hop)] == [
         sorted(str(p.evidence_id) for p in original), [str(original[1].evidence_id)],
     ]
-    for hop in (first_hop, second_hop):
-        assert [citation['evidence_id'] for citation in hop['citations']] == hop['evidence_ids']
-        for citation in hop['citations']:
-            passage = next(item for item in original if str(item.evidence_id) == citation['evidence_id'])
-            assert citation['source_revision'] == str(f['retained'].source_revision)
-            assert citation['source_sha256'] == f['retained'].text_sha256
-            assert (citation['start'], citation['end'], citation['excerpt'], citation['excerpt_sha256']) == (
-                passage.start, passage.end, passage.excerpt, passage.excerpt_sha256,
-            )
+
+    def assert_citation_lineage(hops):
+        for hop in hops:
+            assert [citation['evidence_id'] for citation in hop['citations']] == hop['evidence_ids']
+            for citation in hop['citations']:
+                passage = next(item for item in original if str(item.evidence_id) == citation['evidence_id'])
+                assert citation['source_revision'] == str(f['retained'].source_revision)
+                assert citation['source_sha256'] == f['retained'].text_sha256
+                assert (citation['start'], citation['end'], citation['excerpt'], citation['excerpt_sha256']) == (
+                    passage.start, passage.end, passage.excerpt, passage.excerpt_sha256,
+                )
+
+    assert_citation_lineage((first_hop, second_hop))
     assert two_hop['scope_coverage'] == {
         'display_graph_id': f['ids'][0], 'scope': f['source'].model_dump(mode='json'),
-        'pages': 1, 'scanned': 4, 'eligible': 4, 'excluded': 0, 'unknown': 0,
+        'pages': 1, 'scanned': 5, 'eligible': 5, 'excluded': 0, 'unknown': 0,
         'returned': 2, 'truncated': False,
     }
     assert two_hop['passage_coverage'] == result['passage_coverage']
+    assert await evidence_call(dict(path_request, question='unmatchedword')) == two_hop
+    # One match on each hop beats three matches concentrated on the legacy continuation.
+    ranked_request = dict(path_request, question='BUDGET audit planning?')
+    ranked = await evidence_call(ranked_request)
+    assert ranked['path_status'] == 'found' and ranked['historical'] is True
+    assert ranked['rank_basis'] == 'directed_path_lexical_token_overlap'
+    assert ranked['path']['intermediate_node_id'] == ranked_middle
+    ranked_hops = ranked['path']['hops']
+    assert [hop['provider_id'] for hop in ranked_hops] == [ranked_first, second_ids[1]]
+    assert [(hop['source_node_id'], hop['target_node_id']) for hop in ranked_hops] == [
+        (source_node, ranked_middle), (ranked_middle, target_node),
+    ]
+    assert [hop['episode_ids'] for hop in ranked_hops] == [[ranked_episode], [second_episodes[1]]]
+    assert [hop['evidence_ids'] for hop in ranked_hops] == [[str(passage.evidence_id)] for passage in original]
+    assert_citation_lineage(ranked_hops)
+    assert ranked['scope_coverage'] == two_hop['scope_coverage']
+    assert ranked['passage_coverage'] == two_hop['passage_coverage']
+    await evidence_call(dict(path_request, question='x' * 2001), error=True)
     reversed_path = await evidence_call(dict(path_request, source_node_id=target_node,
                                              target_node_id=source_node))
     assert reversed_path['path_status'] == 'no_path_in_scan' and reversed_path['path'] is None
@@ -600,7 +660,8 @@ async def test_real_subprocess_json_cli_history_and_denied_display(retained_grap
         'MATCH (b:Entity {uuid:$middle,group_id:$trusted}), '
         '(c:Entity {uuid:$target,group_id:$foreign}) '
         'CREATE (e:Episodic {uuid:$episode,group_id:$foreign,created_at:datetime($stamp)}), '
-        "(o:MiroFishIngest {uuid:$episode,group_id:$foreign,status:'complete',evidence_ids:$evidence}), "
+        "(o:MiroFishIngest {uuid:$episode,group_id:$foreign,status:'complete',"
+        "evidence_ids:$evidence,asserted_valid_at:datetime($stamp)}), "
         "(b)-[edge:RELATES_TO {uuid:$edge,group_id:$foreign,name:'LOCATED_IN', "
         "fact:'The organization is based at the foreign laboratory',episodes:[$episode],"
         'created_at:datetime($stamp),valid_at:datetime($stamp)}]->(c) '
@@ -625,8 +686,9 @@ async def test_real_subprocess_json_cli_history_and_denied_display(retained_grap
         'WHERE edge.group_id = $group_id AND edge.uuid IN $cited_edges DELETE edge',
         parameters_={'group_id': f['source'].group_id, 'cited_edges': second_ids},
     )
-    unavailable = await evidence_call(path_request)
+    unavailable = await evidence_call(ranked_request)
     assert unavailable['path_status'] == 'selected_path_evidence_unavailable'
+    assert unavailable['rank_basis'] == 'directed_path_edge_id_order'
     assert unavailable['path'] is None and unavailable['scope_coverage']['returned'] == 0
     assert unavailable['passage_coverage'] == []
     # Normal child exit observed driver/PG close. This additional admission
