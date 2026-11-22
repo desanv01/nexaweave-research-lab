@@ -34,7 +34,7 @@ export async function retainBrowserFiles(command, { page, exchange, sourceRoute,
   const root = path.resolve(command.profile_root, '..', '..', 'uploaded-documents')
   await physical(root, true)
   const library = page.locator('.source-library')
-  const form = library.locator('form.source-form')
+  const form = library.locator('form.source-form').filter({ has: page.locator('#source-name') })
   const receipts = []
   let pdf
   for (const [index, spec] of command.intake.entries()) {
