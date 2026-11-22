@@ -8,6 +8,7 @@ import { inspectPreparedProfiles } from './research-browser-prepared-profiles.mj
 import { browserMode, inspectReadyConfiguration, nativeStages, suggestPlatforms } from './research-browser-ready-configuration.mjs'
 import { inspectDossierSupport } from './research-browser-support-review.mjs'
 import { checkConnectSources, retainBrowserFiles } from './research-browser-intake.mjs'
+import { runResearchBrowserRestart } from './research-browser-restart.mjs'
 
 const WIRE = 7200
 const FRONTEND = 'http://127.0.0.1:4317'
@@ -660,27 +661,17 @@ async function checkTwoHop(graph, [start, , end]) {
 
 async function pdfAfterRestart(command) {
   const { nodes, edges } = commandRequest(command, true)
-  await page.locator('.connection-form button[type=button]').last().click()
-  await enabled(page.locator('.connection-form button[type=submit]'))
-  // Exercise the wrong credential through the form.
   const invalid = connection.token === 'research-browser-invalid' ? 'research-browser-invalid-2' : 'research-browser-invalid'
-  await connectForm(page, invalid, 401)
-  const { value: graph } = await connectForm(page)
-  await inspectDossierSupport({ page, graph: { ...graph, edges: graph.edges.filter(e => !edges.includes(e.uuid)) },
-    sourceRoute, exchange, enabled, requireTrue, sha })
-  const original = await readPdf()
-  // Exercise origin denial from a second real frontend origin.
-  const denied = await context.newPage(); observe(denied)
-  try {
-    phase = 'page-load'
-    await denied.goto('http://localhost:4317/research', { waitUntil: 'domcontentloaded' })
-    await denied.locator('#workbench-language').selectOption('en')
-    await connectForm(denied, connection.token, 403)
-  } finally { await denied.close() }
-  requireTrue(await page.locator('#bearer-token').inputValue() === '')
-  phase = 'protocol'
-  await checkTwoHop(graph, nodes)
-  return { reference: { source_revision: pdf.source_revision }, proof: { pdf: original, auth_denied: true, origin_denied: true, token_cleared: true, dossier_support_review: true, two_hop: true } }
+  const restart = await runResearchBrowserRestart({
+    page, context, pdfRevision: pdf.source_revision, notes: orderedSources.find(source => source.source_name === 'notes.md'),
+    connect: (target, status) => connectForm(target, status === 401 ? invalid : undefined, status),
+    readPdf, readItem: (revision, action) => exchange(page, sourceRoute('item', revision), 'GET', action, 4195328),
+    observe, enabled, sha, requireTrue, setPhase: value => { phase = value },
+    afterConnect: graph => inspectDossierSupport({ page, graph: { ...graph, edges: graph.edges.filter(edge => !edges.includes(edge.uuid)) },
+      sourceRoute, exchange, enabled, requireTrue, sha }),
+    afterRestart: graph => checkTwoHop(graph, nodes),
+  })
+  return { reference: restart.reference, proof: { ...restart.proof, dossier_support_review: true, two_hop: true } }
 }
 async function cleanup() {
   if (closing) return closing
