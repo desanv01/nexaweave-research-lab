@@ -2,15 +2,28 @@ const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const encoder = new TextEncoder()
 const requestKeys = ['schema_version', 'operation', 'display_graph_id', 'source_node_id', 'target_node_id']
 const unavailable = ['no_path_in_scan', 'selected_path_evidence_unavailable']
+const edgeOrder = 'directed_path_edge_id_order'
+const lexicalOverlap = 'directed_path_lexical_token_overlap'
+// Match Python str.strip() for blank input and refuse unpaired UTF-16 surrogates.
+const blankQuestion = /^[\u0009-\u000d\u001c-\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]*$/u
+
+export function twoHopQuestion(value) {
+  if (typeof value !== 'string' || value.length > 4000 || /[\uD800-\uDFFF]/u.test(value)
+    || [...value].length > 2000) return null
+  return blankQuestion.test(value) ? '' : value
+}
 
 export function twoHopPayload(value, graph, fail) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)
-    || Object.keys(value).length !== requestKeys.length || !requestKeys.every(key => Object.hasOwn(value, key))
+  if (!value || typeof value !== 'object' || Array.isArray(value)) fail('invalid_request')
+  const hasQuestion = Object.hasOwn(value, 'question')
+  const keys = hasQuestion ? [...requestKeys, 'question'] : requestKeys
+  if (Object.keys(value).length !== keys.length || !keys.every(key => Object.hasOwn(value, key))
+    || (hasQuestion && !twoHopQuestion(value.question))
     || value.schema_version !== 2 || value.operation !== 'two_hop' || value.display_graph_id !== graph
     || ![value.source_node_id, value.target_node_id].every(id => typeof id === 'string' && uuid.test(id))
     || value.source_node_id === value.target_node_id) fail('invalid_request')
 
-  const raw = JSON.stringify(Object.fromEntries(requestKeys.map(key => [key, value[key]])))
+  const raw = JSON.stringify(Object.fromEntries(keys.map(key => [key, value[key]])))
   if (encoder.encode(raw).length > 16384) fail('invalid_request')
   return raw
 }
@@ -20,11 +33,13 @@ export async function validateTwoHopResult(value, request, checks) {
   shape(value, 'schema_version operation source_node_id target_node_id path path_status scope_coverage passage_coverage historical historical_semantics rank_basis')
   const { path, path_status: status, scope_coverage: scan, passage_coverage: passages } = value
   coverage(scan)
+  const rankValid = value.rank_basis === edgeOrder || (value.rank_basis === lexicalOverlap
+    && status === 'found' && Object.hasOwn(request, 'question') && !!twoHopQuestion(request.question))
   if (value.schema_version !== 2 || value.operation !== 'two_hop'
     || value.source_node_id !== request.source_node_id || value.target_node_id !== request.target_node_id
     || scan.display_graph_id !== request.display_graph_id || value.historical !== false
     || value.historical_semantics !== 'retained_edges_not_bitemporal_reconstruction'
-    || value.rank_basis !== 'directed_path_edge_id_order' || !Array.isArray(passages) || passages.length > 200) fail()
+    || !rankValid || !Array.isArray(passages) || passages.length > 200) fail()
 
   if (unavailable.includes(status)) {
     if (path !== null || scan.returned !== 0 || passages.length !== 0) fail()

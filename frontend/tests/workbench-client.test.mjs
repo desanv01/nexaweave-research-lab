@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { createWorkbenchClient, localOrigin, awareTimestamp, validateResult } from '../src/api/workbench.js'
 const credentials = { origin: 'http://127.0.0.1:5001', graph: 'graph_1', token: 'secret-token' }
 const scope = { schema_version: 1, workspace_id: '11111111-1111-1111-1111-111111111111', project_id: '22222222-2222-2222-2222-222222222222', graph_id: '33333333-3333-3333-3333-333333333333', run_id: null, branch_id: null, layer: 'source' }
@@ -13,6 +14,62 @@ async function fixture(handler) {
   const calls = []; const client = createWorkbenchClient({ fetchImpl: async (url, options) => { calls.push({ url, options }); return calls.length === 1 ? reply(graph()) : handler(url, options) } })
   await client.connect(credentials); return { client, calls }
 }
+test('protected two-hop preserves the legacy wire and accepts lexical rank only for a cited question result', async () => {
+  const base = { schema_version: 2, operation: 'two_hop', display_graph_id: credentials.graph,
+    source_node_id: '55555555-5555-5555-5555-555555555555', target_node_id: '77777777-7777-7777-7777-777777777777' }
+  const middle = '66666666-6666-6666-6666-666666666666'
+  const edgeOrder = 'directed_path_edge_id_order', lexical = 'directed_path_lexical_token_overlap'
+  const nodeIds = [base.source_node_id, middle, base.target_node_id]
+  const hops = ['First retained excerpt 雪', 'Second retained excerpt 😀'].map((excerpt, index) => {
+    const id = (index ? 'b' : 'a').repeat(8)
+    const evidence_id = id + '-1111-1111-1111-111111111111'
+    const citation = { evidence_id, project_id: scope.project_id, source_revision: scope.workspace_id,
+      source_name: 'Retained source', source_sha256: 'c'.repeat(64), source_byte_length: 64, source_codepoint_length: 64,
+      source_recorded_at: '2026-11-22T00:00:00Z', start: 0, end: [...excerpt].length,
+      offset_unit: 'unicode_codepoint', excerpt, excerpt_sha256: createHash('sha256').update(excerpt).digest('hex'), declared_page: 1 }
+    return { provider_id: 'edge-' + index, name: 'retained relation', fact: excerpt,
+      source_node_id: nodeIds[index], target_node_id: nodeIds[index + 1],
+      episode_ids: ['episode'], evidence_ids: [evidence_id], citations: [citation],
+      valid_at: null, invalid_at: null, expired_at: null, created_at: null }
+  })
+  const result = { schema_version: 2, operation: 'two_hop', source_node_id: base.source_node_id,
+    target_node_id: base.target_node_id, path: { intermediate_node_id: middle, hops }, path_status: 'found',
+    scope_coverage: { ...coverage(), pages: 1, scanned: 2, eligible: 2, returned: 2 }, passage_coverage: [],
+    historical: false, historical_semantics: 'retained_edges_not_bitemporal_reconstruction', rank_basis: edgeOrder }
+  let next = result
+  const { client, calls } = await fixture(() => reply(next))
+  try {
+    assert.deepEqual(await client.twoHop(base), result)
+    assert.equal(calls[1].options.body, JSON.stringify(base))
+    assert.equal(calls[1].url, credentials.origin + '/api/graph/two-hop/' + credentials.graph)
+    assert.equal(calls[1].options.headers.Authorization, 'Bearer ' + credentials.token)
+    const withQuestion = { ...base, question: '  哪条路径提到 retained？😀  ' }
+    next = { ...result, rank_basis: lexical }
+    const ranked = await client.twoHop(withQuestion)
+    assert.deepEqual(JSON.parse(calls[2].options.body), withQuestion)
+    assert.equal(ranked.rank_basis, lexical)
+    assert.deepEqual(ranked.path.hops.map(hop => hop.citations[0].excerpt),
+      ['First retained excerpt 雪', 'Second retained excerpt 😀'])
+    await assert.rejects(client.twoHop(base), code('invalid_reply'))
+    next = { ...result, path: null, path_status: 'no_path_in_scan', rank_basis: lexical,
+      scope_coverage: { ...result.scope_coverage, returned: 0 } }
+    await assert.rejects(client.twoHop(withQuestion), code('invalid_reply'))
+    next = { ...next, rank_basis: edgeOrder }
+    assert.equal((await client.twoHop(withQuestion)).path_status, 'no_path_in_scan')
+    next = result
+    assert.equal((await client.twoHop({ ...base, question: '😀'.repeat(2000) })).rank_basis, edgeOrder)
+    const before = calls.length
+    for (const question of [null, '', '\u0085\u3000', '\ud800', '😀'.repeat(2001)]) {
+      await assert.rejects(client.twoHop({ ...base, question }), code('invalid_request'))
+    }
+    assert.equal(calls.length, before)
+    const invalidCitation = JSON.parse(JSON.stringify(result))
+    invalidCitation.path.hops[1].citations[0].excerpt_sha256 = 'd'.repeat(64)
+    next = invalidCitation
+    await assert.rejects(client.twoHop(withQuestion), code('invalid_reply'))
+  } finally { client.disconnect() }
+})
+
 test('graph refresh requires completed authentication and never opens a second pending connection', async () => {
   let finish, calls = 0
   const client = createWorkbenchClient({ fetchImpl: () => { calls++; return new Promise(resolve => { finish = () => resolve(reply(graph())) }) } })

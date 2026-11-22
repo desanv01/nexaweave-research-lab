@@ -57,6 +57,7 @@ class TwoHopRequest(StrictModel):
     target_node_id: str
     valid_at: datetime | None = None
     recorded_before: datetime | None = None
+    question: str | None = Field(default=None, min_length=1, max_length=2000)
 
     @field_validator("schema_version", mode="before")
     @classmethod
@@ -76,6 +77,11 @@ class TwoHopRequest(StrictModel):
         if value != str(UUID(value)):
             raise ValueError("invalid entity identity")
         return value
+
+    @field_validator("question")
+    @classmethod
+    def question_text(cls, value):
+        return None if value is None else ResearchRequest.query(value)
 
     @field_validator("valid_at", "recorded_before")
     @classmethod
@@ -231,12 +237,13 @@ class TwoHopResult(StrictModel):
     passage_coverage: tuple[PassageCoverage, ...] = Field(max_length=200)
     historical: bool
     historical_semantics: Literal["retained_edges_not_bitemporal_reconstruction"] = "retained_edges_not_bitemporal_reconstruction"
-    rank_basis: Literal["directed_path_edge_id_order"] = "directed_path_edge_id_order"
+    rank_basis: Literal["directed_path_edge_id_order", "directed_path_lexical_token_overlap"] = "directed_path_edge_id_order"
 
     @model_validator(mode="after")
     def directed_path(self):
         if self.path is None:
-            if self.path_status == "found" or self.passage_coverage or self.scope_coverage.returned != 0:
+            if (self.path_status == "found" or self.passage_coverage or self.scope_coverage.returned != 0
+                    or self.rank_basis != "directed_path_edge_id_order"):
                 raise ValueError("invalid empty path coverage")
             return self
         first, second = self.path.hops
