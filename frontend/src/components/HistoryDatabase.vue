@@ -119,7 +119,7 @@
                 </span>
                 <span class="modal-create-time">{{ formatDate(selectedProject.created_at) }} {{ formatTime(selectedProject.created_at) }}</span>
               </div>
-              <button class="modal-close" @click="closeModal">×</button>
+              <button class="modal-close" :aria-label="$t('common.close')" @click="closeModal">×</button>
             </div>
 
             <!-- 弹窗内容 -->
@@ -157,7 +157,7 @@
                 @click="goToProject"
                 :disabled="!selectedProject.project_id"
               >
-                <span class="btn-step">Step1</span>
+                <span class="btn-step">{{ $t('main.stepCounter', { current: 1, total: 5 }) }}</span>
                 <span class="btn-icon">◇</span>
                 <span class="btn-text">{{ $t('history.step1Button') }}</span>
               </button>
@@ -165,7 +165,7 @@
                 class="modal-btn btn-simulation" 
                 @click="goToSimulation"
               >
-                <span class="btn-step">Step2</span>
+                <span class="btn-step">{{ $t('main.stepCounter', { current: 2, total: 5 }) }}</span>
                 <span class="btn-icon">◈</span>
                 <span class="btn-text">{{ $t('history.step2Button') }}</span>
               </button>
@@ -174,7 +174,7 @@
                 @click="goToReport"
                 :disabled="!selectedProject.report_id"
               >
-                <span class="btn-step">Step4</span>
+                <span class="btn-step">{{ $t('main.stepCounter', { current: 4, total: 5 }) }}</span>
                 <span class="btn-icon">◆</span>
                 <span class="btn-text">{{ $t('history.step4Button') }}</span>
               </button>
