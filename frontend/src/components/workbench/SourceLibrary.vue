@@ -1,14 +1,17 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
-import { prepareSource, validateSourceResult, validateSourceOriginalResult } from '../../api/sourceLibrary.js'
+import { prepareSource, sourceRevision, validateSourceResult, validateSourceOriginalResult } from '../../api/sourceLibrary.js'
 import { copyFor } from '../../i18n/workbench.js'
+import { sourceRevisionRecoveryCopyFor } from '../../i18n/sourceRevisionRecovery.js'
 const props = defineProps({ methods: { type: Object, required: true }, connected: Boolean, busy: Boolean, resetVersion: Number, locale: { type: String, default: 'en' } })
 const emit = defineEmits(['inspected', 'catalog'])
 const copy = computed(() => copyFor(props.locale).sources)
+const recoveryCopy = computed(() => sourceRevisionRecoveryCopyFor(props.locale))
 const windowData = ref(null), loadedAt = ref(''), inspected = ref(null), receipt = ref(null)
 const name = ref(''), draft = ref(''), inputMode = ref('paste'), selectedFile = ref(null), fileInput = ref(null)
 const prepared = ref(null), attempt = ref(null), preparing = ref(false), pending = ref(false), message = ref(''), error = ref('')
 const inspector = ref(null), excerptPanel = ref(null), activePassage = ref(null)
+const recoveryRevision = ref(''), recoveryButton = ref(null)
 const originalRevision = ref(''), originalInfo = ref(null)
 let originalUrl = null, originalAbort = null, originalOperation = null
 let generation = 0, inspectorReturnFocus = null, passageReturnFocus = null
@@ -23,6 +26,8 @@ const feedback = computed(() => {
   return error.value ? errorText() : copy.value[message.value] || ''
 })
 function errorText() {
+  if (error.value === 'invalid_revision') return recoveryCopy.value.invalid
+  if (error.value === 'revision_not_found') return recoveryCopy.value.notFound
   if (error.value === 'source_denied') return copy.value.denied
   if (['source_unavailable', 'unsupported', 'not_found'].includes(error.value)) return error.value === 'not_found' && attempt.value ? copy.value.notFound : copy.value.unavailable
   if (['invalid_request', 'limit_exceeded'].includes(error.value)) return copy.value.invalid
@@ -37,7 +42,7 @@ function clearAll() {
   originalAbort?.abort(); originalAbort = null
   originalOperation = null
   if (originalUrl) URL.revokeObjectURL(originalUrl)
-  originalUrl = null; originalRevision.value = ''; originalInfo.value = null
+  originalUrl = null; originalRevision.value = ''; originalInfo.value = null; recoveryRevision.value = ''
   generation++; clearDraft(); windowData.value = null; loadedAt.value = ''; inspected.value = null; receipt.value = null
   inputMode.value = 'paste'
   attempt.value = null; activePassage.value = null; preparing.value = false; pending.value = false; error.value = ''; message.value = ''; inspectorReturnFocus = null; passageReturnFocus = null
@@ -71,7 +76,7 @@ async function prepare() {
   } catch (e) { if (epoch === generation) error.value = e.code || 'invalid_request' }
   finally { if (epoch === generation) preparing.value = false }
 }
-async function read(action, apply) {
+async function read(action, apply, notFoundCode = 'not_found') {
   if (disabled.value) return
   const epoch = ++generation
   pending.value = true; message.value = ''; error.value = ''
@@ -79,7 +84,7 @@ async function read(action, apply) {
     const data = await action()
     if (epoch !== generation || !props.connected) return
     await apply(data, () => epoch === generation && props.connected)
-  } catch (e) { if (epoch === generation && props.connected) error.value = e.code || 'invalid_reply' }
+  } catch (e) { if (epoch === generation && props.connected) error.value = e?.code === 'not_found' ? notFoundCode : e?.code || 'invalid_reply' }
   finally { if (epoch === generation) pending.value = false }
 }
 function load() {
@@ -93,11 +98,21 @@ function load() {
     emit('catalog', sources.map(source => ({ ...source })))
   })
 }
-function inspect(source, event) {
+function inspectRevision() {
   if (disabled.value) return
-  inspectorReturnFocus = event?.currentTarget || null; inspected.value = null; activePassage.value = null
+  let revision
+  try { revision = sourceRevision(recoveryRevision.value.trim()) }
+  catch { message.value = ''; error.value = 'invalid_revision'; return }
+  const known = attempt.value?.source_revision === revision ? attempt.value
+    : windowData.value?.sources.find(source => source.source_revision === revision)
+  return inspect(known || { source_revision: revision }, null, 'revision_not_found')
+}
+function inspect(source, event, notFoundCode) {
+  if (disabled.value) return
   const project = source.project_id || windowData.value?.sources[0]?.project_id || receipt.value?.source.project_id
-  return read(() => props.methods.get({ source_revision: source.source_revision, ...(project ? { project_id: project } : {}) }), async data => {
+  inspectorReturnFocus = event?.currentTarget || recoveryButton.value
+  inspected.value = null; activePassage.value = null
+  return read(() => props.methods.get({ source_revision: source.source_revision, ...(project ? { project_id: project } : {}) }), async (data, current) => {
     // Project is a consistency check only; server binding remains authoritative.
     if (project && data.source.project_id !== project) throw { code: 'invalid_reply' }
     if (source.text_sha256 && data.source.text_sha256 !== source.text_sha256) throw { code: 'invalid_reply' }
@@ -105,8 +120,9 @@ function inspect(source, event) {
     inspected.value = data; message.value = 'inspected'
     // A V1 text view cannot reconcile an original-byte retention attempt.
     if (!attempt.value?.original && attempt.value?.source_revision === data.source.source_revision) attempt.value = { ...attempt.value, uncertain: false }
-    await nextTick(); inspector.value?.focus()
-  })
+    await nextTick()
+    if (current()) inspector.value?.focus()
+  }, notFoundCode)
 }
 async function retain() {
   if (disabled.value || !prepared.value || attempt.value?.uncertain) return
@@ -229,6 +245,16 @@ async function closeInspection() { inspected.value = null; activePassage.value =
         <label v-if="inputMode === 'paste'" for="source-text">{{ copy.text }}<textarea id="source-text" v-model="draft" rows="5" required spellcheck="false"></textarea></label>
         <label v-else for="source-file">{{ copy.choose }}<input id="source-file" ref="fileInput" type="file" accept=".txt,.md,.docx,.pdf" required aria-describedby="source-file-help" @change="fileChanged"></label>
         <p id="source-file-help" class="help">{{ copy.originalFileHint }}</p><button type="submit">{{ copy.prepare }}</button>
+      </fieldset>
+    </form>
+    <form class="source-form source-revision-recovery" @submit.prevent="inspectRevision">
+      <fieldset :disabled="disabled">
+        <legend>{{ recoveryCopy.title }}</legend>
+        <label for="source-inspect-revision">{{ copy.revision }}
+          <input id="source-inspect-revision" v-model="recoveryRevision" autocomplete="off" spellcheck="false" required aria-describedby="source-revision-help source-feedback">
+        </label>
+        <p id="source-revision-help" class="help">{{ recoveryCopy.hint }}</p>
+        <button id="source-revision-inspect" ref="recoveryButton" type="submit">{{ copy.select }}</button>
       </fieldset>
     </form>
     <div v-if="prepared" class="prepared"><p v-if="prepared.payload.format === 'pdf'" class="notice">{{ copy.pdfPrepare }}</p><h3>{{ copy.prepared }}</h3><dl><dt>{{ copy.name }}</dt><dd>{{ prepared.payload.source_name }}</dd><template v-if="prepared.filename"><dt>{{ copy.filename }}</dt><dd>{{ prepared.filename }}</dd></template><dt>{{ copy.format }}</dt><dd>{{ prepared.payload.format }}</dd><dt>{{ copy.bytes }}</dt><dd>{{ prepared.inputBytes }}</dd><dt>{{ copy.codepoints }}</dt><dd>{{ prepared.codepoints ?? copy.unknownLayout }}</dd><dt>{{ copy.inputDigest }}</dt><dd class="mono">{{ prepared.payload.input_sha256 }}</dd><dt>{{ copy.revision }}</dt><dd class="mono">{{ prepared.payload.source_revision }}</dd></dl><button class="primary" type="button" :disabled="disabled" @click="retain">{{ copy.retain }}</button><button v-if="prepared.payload.format === 'pdf'" type="button" :disabled="disabled || !methods.retainOriginal" @click="retainOriginal">{{ copy.originalRetain }}</button></div>
