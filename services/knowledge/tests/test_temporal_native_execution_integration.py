@@ -5,6 +5,7 @@ import asyncio
 import json
 import os
 from pathlib import Path
+from threading import Event
 from uuid import uuid4
 
 import pytest
@@ -263,3 +264,112 @@ async def test_remote_temporal_sdk_cancel_retains_owner_cleanup(factory, tmp_pat
         release.write_text("release", encoding="ascii")
         for supervisor, _ in created:
             await asyncio.to_thread(supervisor.close, 10)
+
+
+@pytest.mark.asyncio
+async def test_real_native_temporal_drains_running_and_late_factory_owners(factory, tmp_path):
+    temporal = await client()
+    running, late, rejected = (owned(factory) for _ in range(3))
+    paths = {running.run_id: path_set(tmp_path / "running"),
+             late.run_id: path_set(tmp_path / "late")}
+    for started, _, _ in paths.values():
+        started.parent.mkdir()
+    made = []
+    construct = prepared_factory(factory, paths, made)
+    factory_entered, release_factory = Event(), Event()
+    close_entered, release_close = Event(), Event()
+    running_close_calls = []
+
+    def gated_factory(request):
+        if request.run_id == late.run_id:
+            factory_entered.set()
+            if not release_factory.wait(20):
+                raise RuntimeError("late factory gate expired")
+        supervisor = construct(request)
+        if request.run_id == running.run_id:
+            driver = supervisor.coordinator.driver
+            real_close = driver.close
+
+            def gated_close():
+                running_close_calls.append(True)
+                close_entered.set()
+                if not release_close.wait(20):
+                    return False
+                return real_close()
+
+            driver.close = gated_close
+        return supervisor
+
+    host = TemporalNativeHost(client=temporal,
+        task_queue="mirofish-native-drain-" + uuid4().hex,
+        trusted_principal="owner", supervisor_factory=gated_factory,
+        allow_dispatch=lambda: True)
+    activities = host._activities
+    try:
+        async with host.worker():
+            try:
+                running_wire, late_wire = running.to_wire(), late.to_wire()
+                running_ref = await asyncio.wait_for(host.start(running_wire), 10)
+                await asyncio.to_thread(await_file, paths[running.run_id][0])
+                late_ref = await asyncio.wait_for(host.start(late_wire), 10)
+                assert await asyncio.to_thread(factory_entered.wait, 10)
+
+                first = await host.drain_retained(0.05)
+                assert first.admission_closed and not first.complete
+                assert first.retained_count == 2 and first.closed_count == 0
+                assert set(first.pending_run_ids) == {running.run_id, late.run_id}
+                assert await asyncio.to_thread(close_entered.wait, 4)
+                with activities._lock:
+                    closing = activities._entries[running.run_id].cleanup_task
+                    assert closing is not None and not closing.done()
+                    assert not activities._entries[late.run_id].factory_processed
+
+                second = await host.drain_retained(0.05)
+                assert second == first
+                with activities._lock:
+                    assert activities._entries[running.run_id].cleanup_task is closing
+
+                waiting = asyncio.create_task(host.drain_retained(20))
+                await asyncio.sleep(0)
+                waiting.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await waiting
+                with activities._lock:
+                    assert activities._entries[running.run_id].cleanup_task is closing
+                assert not closing.cancelled()
+
+                release_close.set()
+                release_factory.set()
+                final = await host.drain_retained(15)
+                assert final.admission_closed and final.complete
+                assert final.retained_count == final.closed_count == 2
+                assert final.pending_run_ids == ()
+                assert running_close_calls == [True]
+
+                receipt = await asyncio.wait_for(host.result(running_wire, running_ref), 10)
+                row = NativeRunStore(factory).get("owner", running.run_id)
+                assert receipt.outcome == "cancelled" and row.receipt == receipt
+                assert row.cancel_requested and row.state == RunState.cancelled
+                with pytest.raises(NativeTemporalHostError) as failed:
+                    await asyncio.wait_for(host.result(late_wire, late_ref), 10)
+                assert failed.value.code == "native_cancel_pending"
+                assert not paths[late.run_id][0].exists() and not paths[running.run_id][2].exists()
+                assert [supervisor.request.run_id for supervisor, _ in made] == [running.run_id, late.run_id]
+                assert not made[1][0]._start_spent and not made[1][1]._spent
+                assert all(driver._closed and driver._owned is None for _, driver in made)
+                with pytest.raises(NativeTemporalHostError) as refused:
+                    await host.start(rejected.to_wire())
+                assert refused.value.code == "dispatch_disabled"
+                assert await host.drain_retained(0) == final
+            finally:
+                release_close.set()
+                release_factory.set()
+                for _, release, _ in paths.values():
+                    release.write_text("release", encoding="ascii")
+    finally:
+        results = await asyncio.gather(
+            *(asyncio.to_thread(supervisor.close, 10) for supervisor, _ in made),
+            return_exceptions=True,
+        )
+        failed = sum(result is not True for result in results)
+        assert failed == 0, "retained supervisor fallback cleanup failed"

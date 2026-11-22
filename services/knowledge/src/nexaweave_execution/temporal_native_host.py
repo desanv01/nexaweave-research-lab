@@ -16,7 +16,7 @@ from .native_run_contracts import (InvalidNativeRun, NativeRunReceipt,
                                    NativeRunRequest, principal_id)
 from .native_run_supervisor import NativeRunSupervisor
 from .temporal_native_activities import (LocalNativeStatus, NativeActivityError,
-                                         NativeExecutionActivities)
+                                         NativeDrainResult, NativeExecutionActivities)
 from .temporal_native_contracts import native_workflow_id, qualified_receipt
 from .temporal_native_workflow import NativeExecutionWorkflow
 
@@ -122,7 +122,7 @@ class TemporalNativeHost:
             allowed = self._allow is not None and self._allow() is True
         except Exception:
             allowed = False
-        if not allowed:
+        if not allowed or self._activities.admission_closed:
             raise NativeTemporalHostError("dispatch_disabled")
         try:
             handle = await self._client.start_workflow(
@@ -221,6 +221,13 @@ class TemporalNativeHost:
             return await self._activities.local_status(request)
         except NativeActivityError as error:
             raise NativeTemporalHostError(error.code) from None
+
+    async def drain_retained(self, wait_seconds: float = 5) -> NativeDrainResult:
+        """Stop local admission and drain on this host's activity event loop."""
+        try:
+            return await self._activities.drain_retained(wait_seconds)
+        except InvalidNativeRun:
+            raise NativeTemporalHostError("invalid_request") from None
 
     async def retry_cleanup(self, value: object) -> LocalNativeStatus:
         request = self._request(value)
