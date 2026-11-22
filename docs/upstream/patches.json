@@ -488,6 +488,14 @@
       "phase": "W1.2 reviewed ontology validation"
     },
     {
+      "imported_path": "frontend/src/components/GraphPanel.vue",
+      "original_sha256": "10f297a24b93155adee025f043a10813298738cb39f127af5d67deb669af0468",
+      "current_sha256": "7e41bcaf1c8be5d32de27949e61941da238cc923c767edd022ffc16e1f7d9d54",
+      "reason": "W6.1 localizes graph controls and metadata, preserves displayed values and makes relation disclosure keyboard accessible.",
+      "phase": "U11 workbench and languages",
+      "review_status": "Scoped review complete. Exact hosted checks pending."
+    },
+    {
       "imported_path": "frontend/src/components/Step1GraphBuild.vue",
       "original_sha256": "2eda6d5ad075363a9b4bc198eedf72ef04d52a41d9e539968d0c9371168e308d",
       "current_sha256": "975e3c03a34ca4e882b1d397aeac45f784639e0836d3b80471bf6920ccd95c76",

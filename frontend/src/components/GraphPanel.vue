@@ -1,14 +1,14 @@
 <template>
   <div class="graph-panel">
     <div class="panel-header">
-      <span class="panel-title">{{ $t('graph.panelTitle') }}</span>
+      <span class="panel-title">{{ details.panelTitle ?? $t('graph.panelTitle') }}</span>
       <!-- 顶部工具栏 (Internal Top Right) -->
       <div class="header-tools">
         <button class="tool-btn" @click="$emit('refresh')" :disabled="loading" :title="$t('graph.refreshGraph')">
-          <span class="icon-refresh" :class="{ 'spinning': loading }">↻</span>
-          <span class="btn-text">Refresh</span>
+          <span class="icon-refresh" :class="{ 'spinning': loading }" aria-hidden="true">↻</span>
+          <span class="btn-text">{{ $t('graph.refreshGraph') }}</span>
         </button>
-        <button class="tool-btn" @click="$emit('toggle-maximize')" :title="$t('graph.toggleMaximize')">
+        <button class="tool-btn" @click="$emit('toggle-maximize')" :title="$t('graph.toggleMaximize')" :aria-label="$t('graph.toggleMaximize')">
           <span class="icon-maximize">⛶</span>
         </button>
       </div>
@@ -40,7 +40,7 @@
             </svg>
           </div>
           <span class="hint-text">{{ $t('graph.pendingContentHint') }}</span>
-          <button class="hint-close-btn" @click="dismissFinishedHint" :title="$t('graph.closeHint')">
+          <button class="hint-close-btn" @click="dismissFinishedHint" :title="$t('graph.closeHint')" :aria-label="$t('graph.closeHint')">
             <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
               <line x1="18" y1="6" x2="6" y2="18"></line>
               <line x1="6" y1="6" x2="18" y2="18"></line>
@@ -51,48 +51,50 @@
         <!-- 节点/边详情面板 -->
         <div v-if="selectedItem" class="detail-panel">
           <div class="detail-panel-header">
-            <span class="detail-title">{{ selectedItem.type === 'node' ? $t('graph.nodeDetails') : $t('graph.relationship') }}</span>
+            <span class="detail-title">{{ selectedItem.type === 'node'
+              ? (details.nodeDetails ?? $t('graph.nodeDetails'))
+              : (details.relationship ?? $t('graph.relationship')) }}</span>
             <span v-if="selectedItem.type === 'node'" class="detail-type-badge" :style="{ background: selectedItem.color, color: '#fff' }">
               {{ selectedItem.entityType }}
             </span>
-            <button class="detail-close" @click="closeDetailPanel">×</button>
+            <button class="detail-close" :aria-label="$t('common.close')" @click="closeDetailPanel">×</button>
           </div>
           
           <!-- 节点详情 -->
           <div v-if="selectedItem.type === 'node'" class="detail-content">
             <div class="detail-row">
-              <span class="detail-label">Name:</span>
+              <span class="detail-label">{{ details.name }}</span>
               <span class="detail-value">{{ selectedItem.data.name }}</span>
             </div>
             <div class="detail-row">
-              <span class="detail-label">UUID:</span>
+              <span class="detail-label">{{ details.uuid }}</span>
               <span class="detail-value uuid-text">{{ selectedItem.data.uuid }}</span>
             </div>
             <div class="detail-row" v-if="selectedItem.data.created_at">
-              <span class="detail-label">Created:</span>
+              <span class="detail-label">{{ details.created }}</span>
               <span class="detail-value">{{ formatDateTime(selectedItem.data.created_at) }}</span>
             </div>
             
             <!-- Properties -->
             <div class="detail-section" v-if="selectedItem.data.attributes && Object.keys(selectedItem.data.attributes).length > 0">
-              <div class="section-title">Properties:</div>
+              <div class="section-title">{{ details.properties }}</div>
               <div class="properties-list">
                 <div v-for="(value, key) in selectedItem.data.attributes" :key="key" class="property-item">
                   <span class="property-key">{{ key }}:</span>
-                  <span class="property-value">{{ value || 'None' }}</span>
+                  <span class="property-value">{{ value ?? $t('common.none') }}</span>
                 </div>
               </div>
             </div>
             
             <!-- Summary -->
             <div class="detail-section" v-if="selectedItem.data.summary">
-              <div class="section-title">Summary:</div>
+              <div class="section-title">{{ details.summary }}</div>
               <div class="summary-text">{{ selectedItem.data.summary }}</div>
             </div>
             
             <!-- Labels -->
             <div class="detail-section" v-if="selectedItem.data.labels && selectedItem.data.labels.length > 0">
-              <div class="section-title">Labels:</div>
+              <div class="section-title">{{ details.labels }}</div>
               <div class="labels-list">
                 <span v-for="label in selectedItem.data.labels" :key="label" class="label-tag">
                   {{ label }}
@@ -106,8 +108,8 @@
             <!-- 自环组详情 -->
             <template v-if="selectedItem.data.isSelfLoopGroup">
               <div class="edge-relation-header self-loop-header">
-                {{ selectedItem.data.source_name }} - Self Relations
-                <span class="self-loop-count">{{ selectedItem.data.selfLoopCount }} items</span>
+                {{ selectedItem.data.source_name || $t('common.unknown') }} - {{ details.selfRelations }}
+                <span class="self-loop-count">{{ details.selfRelationCount(selectedItem.data.selfLoopCount) }}</span>
               </div>
               
               <div class="self-loop-list">
@@ -117,34 +119,36 @@
                   class="self-loop-item"
                   :class="{ expanded: expandedSelfLoops.has(loop.uuid || idx) }"
                 >
-                  <div 
+                  <button
+                    type="button"
                     class="self-loop-item-header"
+                    :aria-expanded="expandedSelfLoops.has(loop.uuid || idx)"
                     @click="toggleSelfLoop(loop.uuid || idx)"
                   >
                     <span class="self-loop-index">#{{ idx + 1 }}</span>
-                    <span class="self-loop-name">{{ loop.name || loop.fact_type || 'RELATED' }}</span>
-                    <span class="self-loop-toggle">{{ expandedSelfLoops.has(loop.uuid || idx) ? '−' : '+' }}</span>
-                  </div>
+                    <span class="self-loop-name">{{ loop.name || loop.fact_type || details.related }}</span>
+                    <span class="self-loop-toggle" aria-hidden="true">{{ expandedSelfLoops.has(loop.uuid || idx) ? '−' : '+' }}</span>
+                  </button>
                   
                   <div class="self-loop-item-content" v-show="expandedSelfLoops.has(loop.uuid || idx)">
                     <div class="detail-row" v-if="loop.uuid">
-                      <span class="detail-label">UUID:</span>
+                      <span class="detail-label">{{ details.uuid }}</span>
                       <span class="detail-value uuid-text">{{ loop.uuid }}</span>
                     </div>
                     <div class="detail-row" v-if="loop.fact">
-                      <span class="detail-label">Fact:</span>
+                      <span class="detail-label">{{ details.fact }}</span>
                       <span class="detail-value fact-text">{{ loop.fact }}</span>
                     </div>
                     <div class="detail-row" v-if="loop.fact_type">
-                      <span class="detail-label">Type:</span>
+                      <span class="detail-label">{{ details.type }}</span>
                       <span class="detail-value">{{ loop.fact_type }}</span>
                     </div>
                     <div class="detail-row" v-if="loop.created_at">
-                      <span class="detail-label">Created:</span>
+                      <span class="detail-label">{{ details.created }}</span>
                       <span class="detail-value">{{ formatDateTime(loop.created_at) }}</span>
                     </div>
                     <div v-if="loop.episodes && loop.episodes.length > 0" class="self-loop-episodes">
-                      <span class="detail-label">Episodes:</span>
+                      <span class="detail-label">{{ details.episodes }}</span>
                       <div class="episodes-list compact">
                         <span v-for="ep in loop.episodes" :key="ep" class="episode-tag small">{{ ep }}</span>
                       </div>
@@ -157,29 +161,29 @@
             <!-- 普通边详情 -->
             <template v-else>
               <div class="edge-relation-header">
-                {{ selectedItem.data.source_name }} → {{ selectedItem.data.name || 'RELATED_TO' }} → {{ selectedItem.data.target_name }}
+                {{ selectedItem.data.source_name }} → {{ selectedItem.data.name || details.relatedTo }} → {{ selectedItem.data.target_name }}
               </div>
               
               <div class="detail-row">
-                <span class="detail-label">UUID:</span>
+                <span class="detail-label">{{ details.uuid }}</span>
                 <span class="detail-value uuid-text">{{ selectedItem.data.uuid }}</span>
               </div>
               <div class="detail-row">
-                <span class="detail-label">Label:</span>
-                <span class="detail-value">{{ selectedItem.data.name || 'RELATED_TO' }}</span>
+                <span class="detail-label">{{ details.label }}</span>
+                <span class="detail-value">{{ selectedItem.data.name || details.relatedTo }}</span>
               </div>
               <div class="detail-row">
-                <span class="detail-label">Type:</span>
-                <span class="detail-value">{{ selectedItem.data.fact_type || 'Unknown' }}</span>
+                <span class="detail-label">{{ details.type }}</span>
+                <span class="detail-value">{{ selectedItem.data.fact_type || $t('common.unknown') }}</span>
               </div>
               <div class="detail-row" v-if="selectedItem.data.fact">
-                <span class="detail-label">Fact:</span>
+                <span class="detail-label">{{ details.fact }}</span>
                 <span class="detail-value fact-text">{{ selectedItem.data.fact }}</span>
               </div>
               
               <!-- Episodes -->
               <div class="detail-section" v-if="selectedItem.data.episodes && selectedItem.data.episodes.length > 0">
-                <div class="section-title">Episodes:</div>
+                <div class="section-title">{{ details.episodes }}</div>
                 <div class="episodes-list">
                   <span v-for="ep in selectedItem.data.episodes" :key="ep" class="episode-tag">
                     {{ ep }}
@@ -188,11 +192,11 @@
               </div>
               
               <div class="detail-row" v-if="selectedItem.data.created_at">
-                <span class="detail-label">Created:</span>
+                <span class="detail-label">{{ details.created }}</span>
                 <span class="detail-value">{{ formatDateTime(selectedItem.data.created_at) }}</span>
               </div>
               <div class="detail-row" v-if="selectedItem.data.valid_at">
-                <span class="detail-label">Valid From:</span>
+                <span class="detail-label">{{ details.validFrom }}</span>
                 <span class="detail-value">{{ formatDateTime(selectedItem.data.valid_at) }}</span>
               </div>
             </template>
@@ -215,7 +219,7 @@
 
     <!-- 底部图例 (Bottom Left) -->
     <div v-if="graphData && entityTypes.length" class="graph-legend">
-      <span class="legend-title">Entity Types</span>
+      <span class="legend-title">{{ details.entityTypes }}</span>
       <div class="legend-items">
         <div class="legend-item" v-for="type in entityTypes" :key="type.name">
           <span class="legend-dot" :style="{ background: type.color }"></span>
@@ -227,17 +231,19 @@
     <!-- 显示边标签开关 -->
     <div v-if="graphData" class="edge-labels-toggle">
       <label class="toggle-switch">
-        <input type="checkbox" v-model="showEdgeLabels" />
+        <input type="checkbox" v-model="showEdgeLabels" :aria-label="details.showEdgeLabels" />
         <span class="slider"></span>
       </label>
-      <span class="toggle-label">Show Edge Labels</span>
+      <span class="toggle-label">{{ details.showEdgeLabels }}</span>
     </div>
   </div>
 </template>
 
 <script setup>
 import { ref, onMounted, onUnmounted, watch, nextTick, computed } from 'vue'
+import { useI18n } from 'vue-i18n'
 import * as d3 from 'd3'
+import { graphDetailsCopyFor } from '../i18n/graphDetails'
 
 const props = defineProps({
   graphData: Object,
@@ -247,6 +253,8 @@ const props = defineProps({
 })
 
 const emit = defineEmits(['refresh', 'toggle-maximize'])
+const { locale } = useI18n({ useScope: 'global' })
+const details = computed(() => graphDetailsCopyFor(locale.value))
 
 const graphContainer = ref(null)
 const graphSvg = ref(null)
@@ -303,7 +311,7 @@ const formatDateTime = (dateStr) => {
   if (!dateStr) return ''
   try {
     const date = new Date(dateStr)
-    return date.toLocaleString('en-US', { 
+    return date.toLocaleString(locale.value, { 
       month: 'short', 
       day: 'numeric', 
       year: 'numeric',
@@ -324,9 +332,11 @@ const closeDetailPanel = () => {
 let currentSimulation = null
 let linkLabelsRef = null
 let linkLabelBgRef = null
+let updateGraphLabels = null
 
 const renderGraph = () => {
   if (!graphSvg.value || !props.graphData) return
+  updateGraphLabels = null
   
   // 停止之前的仿真
   if (currentSimulation) {
@@ -355,7 +365,7 @@ const renderGraph = () => {
   
   const nodes = nodesData.map(n => ({
     id: n.uuid,
-    name: n.name || 'Unnamed',
+    name: n.name,
     type: n.labels?.find(l => l !== 'Entity') || 'Entity',
     rawData: n
   }))
@@ -403,13 +413,12 @@ const renderGraph = () => {
       processedSelfLoopNodes.add(e.source_node_uuid)
       
       const allSelfLoops = selfLoopEdges[e.source_node_uuid]
-      const nodeName = nodeMap[e.source_node_uuid]?.name || 'Unknown'
+      const nodeName = nodeMap[e.source_node_uuid]?.name
       
       edges.push({
         source: e.source_node_uuid,
         target: e.target_node_uuid,
         type: 'SELF_LOOP',
-        name: `Self Relations (${allSelfLoops.length})`,
         curvature: 0,
         isSelfLoop: true,
         rawData: {
@@ -450,7 +459,7 @@ const renderGraph = () => {
       source: e.source_node_uuid,
       target: e.target_node_uuid,
       type: e.fact_type || e.name || 'RELATED',
-      name: e.name || e.fact_type || 'RELATED',
+      name: e.name || e.fact_type,
       curvature,
       isSelfLoop: false,
       pairIndex: currentIndex,
@@ -616,10 +625,13 @@ const renderGraph = () => {
     })
 
   // Link labels
+  const linkLabelText = d => d.isSelfLoop
+    ? `${details.value.selfRelations} (${d.rawData.selfLoopCount})`
+    : d.name || details.value.related
   const linkLabels = linkGroup.selectAll('text')
     .data(edges)
     .enter().append('text')
-    .text(d => d.name)
+    .text(linkLabelText)
     .attr('font-size', '9px')
     .attr('fill', '#666')
     .attr('text-anchor', 'middle')
@@ -726,10 +738,15 @@ const renderGraph = () => {
     })
 
   // Node Labels
+  const nodeLabelText = d => {
+    const name = d.name
+    if (!name) return details.value.unnamed
+    return name.length > 8 ? name.substring(0, 8) + '…' : name
+  }
   const nodeLabels = nodeGroup.selectAll('text')
     .data(nodes)
     .enter().append('text')
-    .text(d => d.name.length > 8 ? d.name.substring(0, 8) + '…' : d.name)
+    .text(nodeLabelText)
     .attr('font-size', '11px')
     .attr('fill', '#333')
     .attr('font-weight', '500')
@@ -737,6 +754,26 @@ const renderGraph = () => {
     .attr('dy', 4)
     .style('pointer-events', 'none')
     .style('font-family', 'system-ui, sans-serif')
+
+  const positionLinkLabelBackgrounds = () => {
+    linkLabelBg.each(function(d, i) {
+      const mid = getLinkMidpoint(d)
+      const textEl = linkLabels.nodes()[i]
+      const bbox = textEl.getBBox()
+      d3.select(this)
+        .attr('x', mid.x - bbox.width / 2 - 4)
+        .attr('y', mid.y - bbox.height / 2 - 2)
+        .attr('width', bbox.width + 8)
+        .attr('height', bbox.height + 4)
+        .attr('transform', '') // 移除旋转
+    })
+  }
+
+  updateGraphLabels = () => {
+    linkLabels.text(linkLabelText)
+    nodeLabels.text(nodeLabelText)
+    if (showEdgeLabels.value) positionLinkLabelBackgrounds()
+  }
 
   simulation.on('tick', () => {
     // 更新曲线路径
@@ -750,19 +787,7 @@ const renderGraph = () => {
         .attr('y', mid.y)
         .attr('transform', '') // 移除旋转，保持水平
     })
-    
-    // 更新边标签背景
-    linkLabelBg.each(function(d, i) {
-      const mid = getLinkMidpoint(d)
-      const textEl = linkLabels.nodes()[i]
-      const bbox = textEl.getBBox()
-      d3.select(this)
-        .attr('x', mid.x - bbox.width / 2 - 4)
-        .attr('y', mid.y - bbox.height / 2 - 2)
-        .attr('width', bbox.width + 8)
-        .attr('height', bbox.height + 4)
-        .attr('transform', '') // 移除旋转
-    })
+    positionLinkLabelBackgrounds()
 
     node
       .attr('cx', d => d.x)
@@ -787,6 +812,10 @@ watch(() => props.graphData, () => {
   nextTick(renderGraph)
 }, { deep: true })
 
+watch(locale, () => {
+  if (graphSvg.value) updateGraphLabels?.()
+})
+
 // 监听边标签显示开关
 watch(showEdgeLabels, (newVal) => {
   if (linkLabelsRef) {
@@ -795,6 +824,7 @@ watch(showEdgeLabels, (newVal) => {
   if (linkLabelBgRef) {
     linkLabelBgRef.style('display', newVal ? 'block' : 'none')
   }
+  if (newVal && graphSvg.value) updateGraphLabels?.()
 })
 
 const handleResize = () => {
@@ -1339,8 +1369,13 @@ input:checked + .slider:before {
   display: flex;
   align-items: center;
   gap: 8px;
+  width: 100%;
   padding: 10px 12px;
+  border: 0;
   background: #F5F5F5;
+  color: inherit;
+  font: inherit;
+  text-align: left;
   cursor: pointer;
   transition: background 0.2s;
 }
