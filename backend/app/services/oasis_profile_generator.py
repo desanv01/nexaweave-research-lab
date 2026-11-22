@@ -30,6 +30,9 @@ if TYPE_CHECKING:
 
 logger = get_logger('nexaweave.oasis_profile')
 
+# The native Reddit profile loader rejects usernames longer than this.
+_REDDIT_USERNAME_LIMIT = 128
+
 
 class OasisProfileGenerator:
     """
@@ -196,7 +199,23 @@ class OasisProfileGenerator:
         # 添加随机后缀避免重复
         suffix = getattr(self, "_rng", random).randint(100, 999)
         return f"{username}_{suffix}"
-    
+
+    @staticmethod
+    def disambiguate_usernames(profiles: List[OasisAgentProfile]) -> None:
+        """Resolve repeated actor handles in actor order before serialization."""
+        usernames = set()
+        for profile in profiles:
+            original = profile.user_name
+            candidate = original
+            number = 2
+            while candidate in usernames:
+                suffix = f"_{number}"
+                # Shorten only enough for the suffixed handle to fit Reddit's limit.
+                candidate = f"{original[:_REDDIT_USERNAME_LIMIT - len(suffix)]}{suffix}"
+                number += 1
+            profile.user_name = candidate
+            usernames.add(candidate)
+
     def _search_zep_for_entity(self, entity: EntityNode) -> Dict[str, Any]:
         """
         使用Zep图谱混合搜索功能获取实体相关的丰富信息
@@ -937,6 +956,10 @@ class OasisProfileGenerator:
                     save_profiles_realtime()
         
         print(f"\n{'='*60}")
+        if (getattr(self, 'neutral_mode', False)
+                and getattr(self, 'strict_generation', False)):
+            self.disambiguate_usernames(profiles)
+            save_profiles_realtime()
         print(f"人设生成完成！共生成 {len([p for p in profiles if p])} 个Agent")
         print(f"{'='*60}\n")
         
