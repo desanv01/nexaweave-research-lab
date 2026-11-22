@@ -403,14 +403,20 @@ jobs:
         if: always()
         run: docker compose -f infra/compose.operations-test.yml down -v
 
-  native-engine-windows:
-    name: native-engine-windows
+  native-engine-windows-core:
+    name: native-engine-windows-core
     runs-on: windows-latest
     timeout-minutes: 20
+    outputs:
+      elapsed_seconds: ${{ steps.measure.outputs.elapsed_seconds }}
     env:
       PROJECT_STORE_TEST_PASSWORD: nexaweave-ci-disposable-native-only
       TEMPORAL_TEST_ADDRESS: '127.0.0.1:17233'
     steps:
+      - name: Record Windows worker start
+        shell: pwsh
+        run: |
+          "NEXAWEAVE_WINDOWS_START_MS=$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())" >> $env:GITHUB_ENV
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
         with:
@@ -448,6 +454,121 @@ jobs:
       - name: Stop only this job's native PostgreSQL fixture
         if: always()
         run: ./tools/native_store_ci_postgres.ps1 -Action stop
+      - name: Measure Windows worker duration
+        if: always()
+        id: measure
+        shell: pwsh
+        run: |
+          if (-not $env:NEXAWEAVE_WINDOWS_START_MS) { throw 'Windows worker start timestamp missing' }
+          $start = [long]$env:NEXAWEAVE_WINDOWS_START_MS
+          $elapsed = [math]::Round(([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - $start) / 1000.0, 3)
+          $elapsedText = $elapsed.ToString('0.###', [Globalization.CultureInfo]::InvariantCulture)
+          "elapsed_seconds=$elapsedText" >> $env:GITHUB_OUTPUT
+          Write-Output "job=$env:GITHUB_JOB revision=$env:GITHUB_SHA elapsed_seconds=$elapsedText"
+          "### $env:GITHUB_JOB Windows worker" >> $env:GITHUB_STEP_SUMMARY
+          "- revision: $env:GITHUB_SHA" >> $env:GITHUB_STEP_SUMMARY
+          "- elapsed_seconds: $elapsedText" >> $env:GITHUB_STEP_SUMMARY
+
+  native-engine-windows-connected:
+    name: native-engine-windows-connected
+    runs-on: windows-latest
+    timeout-minutes: 20
+    outputs:
+      elapsed_seconds: ${{ steps.measure.outputs.elapsed_seconds }}
+    env:
+      PROJECT_STORE_TEST_PASSWORD: nexaweave-ci-disposable-native-only
+      TEMPORAL_TEST_ADDRESS: '127.0.0.1:17233'
+    steps:
+      - name: Record Windows worker start
+        shell: pwsh
+        run: |
+          "NEXAWEAVE_WINDOWS_START_MS=$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())" >> $env:GITHUB_ENV
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          version: '0.11.25'
+      - name: Install inherited locked backend runtime
+        run: uv sync --project backend --locked --extra dev --extra native-store --extra native-temporal --python 3.12.13
+      - name: Apply fingerprint-checked native optional import correction
+        run: |
+          backend/.venv/Scripts/python.exe tools/apply_native_import_patch.py --apply
+          if ($LASTEXITCODE -ne 0) { throw 'Native optional import correction failed' }
+          backend/.venv/Scripts/python.exe tools/apply_native_import_patch.py --check
+          if ($LASTEXITCODE -ne 0) { throw 'Native optional import fingerprint verification failed' }
+      - name: Install fixed experiment child package and select explicit test runtimes
+        shell: pwsh
+        run: |
+          uv pip install --python backend/.venv/Scripts/python.exe --no-deps services/knowledge
+          if ($LASTEXITCODE -ne 0) { throw 'Installed experiment child package failed' }
+          $experimentPython = (Resolve-Path backend/.venv/Scripts/python.exe).Path
+          $experimentBootstrap = & $experimentPython -I -c "import importlib.util; print(importlib.util.find_spec('nexaweave_knowledge.read_bootstrap').origin)"
+          if ($LASTEXITCODE -ne 0) { throw 'Installed bootstrap selection failed' }
+          "NEXAWEAVE_EXPERIMENT_TEST_PYTHON=$experimentPython" >> $env:GITHUB_ENV
+          "NEXAWEAVE_EXPERIMENT_TEST_HTTP_PYTHON=$experimentPython" >> $env:GITHUB_ENV
+          "NEXAWEAVE_EXPERIMENT_TEST_BOOTSTRAP=$experimentBootstrap" >> $env:GITHUB_ENV
+      - name: Qualify connected report and follow-up integration with fresh owned fixtures
+        run: |
+          backend/.venv/Scripts/python.exe tools/run_native_ci_qualification.py
+          if ($LASTEXITCODE -ne 0) { throw 'Owned native CI lanes failed or evidence incomplete' }
+      - name: Stop only this job's Temporal fixture
+        if: always()
+        run: ./tools/native_temporal_ci_server.ps1 -Action stop
+      - name: Stop only this job's native PostgreSQL fixture
+        if: always()
+        run: ./tools/native_store_ci_postgres.ps1 -Action stop
+      - name: Measure Windows worker duration
+        if: always()
+        id: measure
+        shell: pwsh
+        run: |
+          if (-not $env:NEXAWEAVE_WINDOWS_START_MS) { throw 'Windows worker start timestamp missing' }
+          $start = [long]$env:NEXAWEAVE_WINDOWS_START_MS
+          $elapsed = [math]::Round(([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - $start) / 1000.0, 3)
+          $elapsedText = $elapsed.ToString('0.###', [Globalization.CultureInfo]::InvariantCulture)
+          "elapsed_seconds=$elapsedText" >> $env:GITHUB_OUTPUT
+          Write-Output "job=$env:GITHUB_JOB revision=$env:GITHUB_SHA elapsed_seconds=$elapsedText"
+          "### $env:GITHUB_JOB Windows worker" >> $env:GITHUB_STEP_SUMMARY
+          "- revision: $env:GITHUB_SHA" >> $env:GITHUB_STEP_SUMMARY
+          "- elapsed_seconds: $elapsedText" >> $env:GITHUB_STEP_SUMMARY
+
+  native-engine-windows:
+    name: native-engine-windows
+    if: always()
+    needs: [native-engine-windows-core, native-engine-windows-connected]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Measure slower Windows worker and total Windows runner time
+        if: always()
+        env:
+          CORE_SECONDS: ${{ needs['native-engine-windows-core'].outputs.elapsed_seconds }}
+          CONNECTED_SECONDS: ${{ needs['native-engine-windows-connected'].outputs.elapsed_seconds }}
+          REVISION: ${{ github.sha }}
+        run: |
+          set -eu
+          core="${CORE_SECONDS:-0}"
+          connected="${CONNECTED_SECONDS:-0}"
+          slower="$(awk -v a="$core" -v b="$connected" 'BEGIN { printf "%.3f", (a > b ? a : b) }')"
+          total="$(awk -v a="$core" -v b="$connected" 'BEGIN { printf "%.3f", a + b }')"
+          printf 'revision=%s core_seconds=%s connected_seconds=%s slower_worker_seconds=%s windows_total_seconds=%s\n' \
+            "$REVISION" "$core" "$connected" "$slower" "$total"
+          {
+            echo '## Windows runner timing'
+            echo "- revision: $REVISION"
+            echo "- core_seconds: $core"
+            echo "- connected_seconds: $connected"
+            echo "- slower_worker_seconds: $slower"
+            echo "- windows_total_seconds: $total"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Require both Windows workers to have succeeded
+        env:
+          CORE: ${{ needs['native-engine-windows-core'].result }}
+          CONNECTED: ${{ needs['native-engine-windows-connected'].result }}
+        run: |
+          set -eu
+          printf 'core=%s connected=%s\n' "$CORE" "$CONNECTED"
+          test "$CORE" = success
+          test "$CONNECTED" = success
 
   project-store:
     name: project-store

@@ -1,7 +1,10 @@
 """Hosted Windows CI overlap; no product imports or qualification relaxation.
 
-The only CLI runs two fixed lanes. _run_lanes is a trusted local-test seam,
-not a command-line command/endpoint override. YAML retains always-stop fallbacks.
+The fixed hosted job id selects exactly one of two plans: the two-lane core
+plan (offline plus core native fixture) or the one-lane connected plan (report
+and follow-up integration). The CLI accepts no arguments. _run_lanes is a
+trusted local-test seam, not a command-line command/endpoint override. YAML
+retains always-stop fallbacks.
 """
 from __future__ import annotations
 
@@ -49,9 +52,15 @@ FIXTURE_TESTS = (
     ('observations-integration', 'run_native_observations_tests.py', '--integration'),
     ('observations-engine', 'run_native_observations_tests.py', '--engine'),
     ('seed-integration', 'run_native_seed_tests.py', '--integration'),
+)
+CONNECTED_FIXTURE_TESTS = (
     ('report-integration', 'run_connected_report_tests.py', '--integration --journey'),
     ('followup-integration', 'run_connected_followup_tests.py', '--integration --journey'),
 )
+HOSTED_JOB_PLANS = {
+    'native-engine-windows-core': 'core',
+    'native-engine-windows-connected': 'connected',
+}
 
 
 @dataclass(frozen=True)
@@ -60,6 +69,14 @@ class Lane:
     argv: tuple[str, ...]
     expected: tuple[str, ...]
     token: str
+
+
+def _plan_for_hosted_job(job):
+    """Select only a fixed plan from the fixed hosted Windows job id."""
+    try:
+        return HOSTED_JOB_PLANS[job]
+    except (KeyError, TypeError):
+        raise SystemExit('fixed hosted Windows qualification job required') from None
 
 
 def _owner_type():
@@ -138,15 +155,15 @@ def _timing(output, *, token, lane, gate, phase, origin, started):
 
 def _run_lanes(lanes, *, environment, output, max_seconds=1000,
                cancel=None, owner_factory=None, sanitize_offline=False):
-    """Own two real child trees through log replay/exit aggregation.
+    """Own one or two real child trees through log replay/exit aggregation.
 
     A ten-second reserve is inside the whole bound for tree closure. Test callers
     can supply fixed synthetic commands and an Event; production never accepts
     commands, environment or deadlines from CLI input.
     """
     if (type(max_seconds) not in (int, float) or not math.isfinite(max_seconds)
-            or not 0 < max_seconds <= 1000 or len(lanes) != 2
-            or len({lane.name for lane in lanes}) != 2
+            or not 0 < max_seconds <= 1000 or len(lanes) not in (1, 2)
+            or len({lane.name for lane in lanes}) != len(lanes)
             or any(not lane.expected or len(set(lane.expected)) != len(lane.expected)
                    for lane in lanes)):
         raise ValueError('invalid bounded CI plan')
@@ -298,30 +315,35 @@ def _quote_ps(value):
     return "'" + str(value).replace("'", "''") + "'"
 
 
-def _write_scripts(directory, python, token):
-    offline = directory / 'offline.py'
-    commands = [(gate, str(ROOT / 'tools' / script), mode)
-                for gate, script, mode in OFFLINE_TESTS]
-    offline.write_text(
-        'import json,subprocess,sys,time\n'
-        f'commands={commands!r}\ntoken={token!r}\nfailed=False\norigin=time.monotonic()\n'
-        'def timing(gate,phase,started):\n'
-        ' try:\n'
-        '  now=time.monotonic()\n'
-        f'  print({TIMING_PREFIX!r}+json.dumps(dict(token=token,lane="offline",gate=gate,phase=phase,monotonic_seconds=now,elapsed_seconds=max(0.0,now-started),lane_elapsed_seconds=max(0.0,now-origin)),allow_nan=False),flush=True)\n'
-        ' except Exception:\n'
-        '  pass\n'
-        'for gate,script,mode in commands:\n'
-        ' started=time.monotonic()\n'
-        ' timing(gate,"start",started)\n'
-        ' try:\n'
-        '  status=subprocess.run([sys.executable,script,*([mode] if mode else [])],check=False).returncode\n'
-        ' except Exception:\n'
-        '  status=-1\n'
-        ' timing(gate,"end",started)\n'
-        f' print({PREFIX!r}+json.dumps(dict(token=token,gate=gate,status=status)),flush=True)\n'
-        ' failed=failed or status!=0\n'
-        'raise SystemExit(int(failed))\n', encoding='utf-8')
+def _write_scripts(directory, python, token, *, plan='core'):
+    if plan not in ('core', 'connected'):
+        raise ValueError('invalid fixed CI plan')
+    if plan == 'core':
+        offline = directory / 'offline.py'
+        commands = [(gate, str(ROOT / 'tools' / script), mode)
+                    for gate, script, mode in OFFLINE_TESTS]
+        offline.write_text(
+            'import json,subprocess,sys,time\n'
+            f'commands={commands!r}\ntoken={token!r}\nfailed=False\norigin=time.monotonic()\n'
+            'def timing(gate,phase,started):\n'
+            ' try:\n'
+            '  now=time.monotonic()\n'
+            f'  print({TIMING_PREFIX!r}+json.dumps(dict(token=token,lane="offline",gate=gate,phase=phase,monotonic_seconds=now,elapsed_seconds=max(0.0,now-started),lane_elapsed_seconds=max(0.0,now-origin)),allow_nan=False),flush=True)\n'
+            ' except Exception:\n'
+            '  pass\n'
+            'for gate,script,mode in commands:\n'
+            ' started=time.monotonic()\n'
+            ' timing(gate,"start",started)\n'
+            ' try:\n'
+            '  status=subprocess.run([sys.executable,script,*([mode] if mode else [])],check=False).returncode\n'
+            ' except Exception:\n'
+            '  status=-1\n'
+            ' timing(gate,"end",started)\n'
+            f' print({PREFIX!r}+json.dumps(dict(token=token,gate=gate,status=status)),flush=True)\n'
+            ' failed=failed or status!=0\n'
+            'raise SystemExit(int(failed))\n', encoding='utf-8')
+        offline_lane = Lane('offline', (str(python), str(offline)),
+                            tuple(gate for gate, _, _ in commands), token)
     fixture = directory / 'fixture.ps1'
     pg = _quote_ps(ROOT / 'tools/native_store_ci_postgres.ps1')
     temporal = _quote_ps(ROOT / 'tools/native_temporal_ci_server.ps1')
@@ -352,12 +374,19 @@ def _write_scripts(directory, python, token):
              '}',
              'try {',
              f"  Invoke-Gate 'postgres-start' {{ & {pg} -Action start }}",
-             '  if (-not $script:gateSucceeded) { throw \'PostgreSQL prerequisite failed\' }',
-             f"  Invoke-Gate 'native-store' {{ & {_quote_ps(python)} {_quote_ps(ROOT / 'tools/run_native_store_tests.py')} --postgres }}",
-             f"  Invoke-Gate 'temporal-start' {{ & {temporal} -Action start }}",
-             '  if (-not $script:gateSucceeded) { throw \'Temporal prerequisite failed\' }']
+             '  if (-not $script:gateSucceeded) { throw \'PostgreSQL prerequisite failed\' }']
+    if plan == 'core':
+        before_temporal = FIXTURE_TESTS[:1]
+        after_temporal = FIXTURE_TESTS[1:]
+    else:
+        before_temporal = ()
+        after_temporal = CONNECTED_FIXTURE_TESTS
+    for gate, script, mode in before_temporal:
+        lines.append(f"  Invoke-Gate {_quote_ps(gate)} {{ & {_quote_ps(python)} {_quote_ps(ROOT / 'tools' / script)} {mode} }}")
+    lines.extend([f"  Invoke-Gate 'temporal-start' {{ & {temporal} -Action start }}",
+                  '  if (-not $script:gateSucceeded) { throw \'Temporal prerequisite failed\' }'])
     # Keep actual Windows journeys; the same CI runs database-only cases on Linux.
-    for gate, script, mode in FIXTURE_TESTS[1:]:
+    for gate, script, mode in after_temporal:
         if gate == 'native-launch-integration':
             lines.append(f'  $launchIntegrationMode = {_quote_ps(mode)}')
             lines.append("  if ($preparationSucceeded) { $launchIntegrationMode = '--hosted-integration' }")
@@ -375,13 +404,16 @@ def _write_scripts(directory, python, token):
                   f"  Invoke-Gate 'postgres-stop' {{ & {pg} -Action stop }}",
                   '}', 'if ($failed) { exit 1 }', 'exit 0'])
     fixture.write_text('\n'.join(lines) + '\n', encoding='utf-8')
-    return (
-        Lane('offline', (str(python), str(offline)), tuple(g for g, _, _ in commands), token),
-        Lane('fixture', ('pwsh', '-NoLogo', '-NoProfile', '-NonInteractive',
-                         '-File', str(fixture)),
-             ('postgres-start', 'native-store', 'temporal-start',
-              *(g for g, _, _ in FIXTURE_TESTS[1:]), 'temporal-stop', 'postgres-stop'), token),
-    )
+    expected_fixture = (('postgres-start',)
+                        + tuple(gate for gate, _, _ in before_temporal)
+                        + ('temporal-start',)
+                        + tuple(gate for gate, _, _ in after_temporal)
+                        + ('temporal-stop', 'postgres-stop'))
+    fixture_lane = Lane('fixture', ('pwsh', '-NoLogo', '-NoProfile', '-NonInteractive',
+                                    '-File', str(fixture)), expected_fixture, token)
+    if plan == 'connected':
+        return (fixture_lane,)
+    return (offline_lane, fixture_lane)
 
 
 def main():
@@ -393,8 +425,9 @@ def main():
     python = Path(sys.executable).absolute()  # preserve the locked venv identity
     if python != (ROOT / 'backend/.venv/Scripts/python.exe').absolute():
         raise SystemExit('locked backend interpreter required')
+    plan = _plan_for_hosted_job(os.environ.get('GITHUB_JOB'))
     with tempfile.TemporaryDirectory(prefix='nexaweave-native-ci-plan-') as directory:
-        lanes = _write_scripts(Path(directory), python, uuid4().hex)
+        lanes = _write_scripts(Path(directory), python, uuid4().hex, plan=plan)
         return _run_lanes(lanes, environment=os.environ, output=sys.stdout.buffer,
                           sanitize_offline=True)
 

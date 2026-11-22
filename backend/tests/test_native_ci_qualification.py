@@ -57,7 +57,8 @@ def local_lane(tmp_path, name, *, status=0, marker=True, wait=False, descendant=
 
 
 def run_owned(lanes, *, cancel=None, max_seconds=25, environment=None,
-              sanitize_offline=False, owner_type=None, exit_codes=None, output_sink=None):
+              sanitize_offline=False, owner_type=None, exit_codes=None, output_sink=None,
+              expected_lanes=2):
     owners = []
     owner_type = owner_type or ci._owner_type()
     class RecordingOwner(owner_type):
@@ -72,7 +73,7 @@ def run_owned(lanes, *, cancel=None, max_seconds=25, environment=None,
     status = ci._run_lanes(lanes, environment=os.environ if environment is None else environment, output=output,
                            max_seconds=max_seconds, cancel=cancel,
                            owner_factory=factory, sanitize_offline=sanitize_offline)
-    assert len(owners) == 2
+    assert len(owners) == expected_lanes
     assert all(owner.closed and owner.tree_empty for owner in owners), _ownership_evidence(lanes, owners, output)
     assert all(owner.process.poll() is not None for owner in owners)
     assert all(owner.requested_creationflags & subprocess.CREATE_NO_WINDOW for owner in owners)
@@ -183,6 +184,52 @@ def test_real_zero_exit_without_required_result_fails_closed(tmp_path):
     assert status == 1
     assert b'result evidence incomplete' in output
     assert b'complete output missing' in output and b'complete output success' in output
+
+
+def test_real_single_lane_success_closes_exited_root_descendant(tmp_path):
+    lane, _, child_ready = local_lane(tmp_path, 'fixture-only', descendant=True)
+    status, output = run_owned((lane,), expected_lanes=1)
+    assert status == 0
+    assert child_ready.is_file()
+    assert b'complete output fixture-only' in output
+    assert b'local descendant output' in output
+    assert output.count(ci.PREFIX.encode()) == 1
+    assert_controller_lifecycle(output, (lane,))
+
+
+def test_real_single_lane_refuses_incomplete_receipt(tmp_path):
+    lane, _, _ = local_lane(tmp_path, 'fixture-only', marker=False)
+    status, output = run_owned((lane,), expected_lanes=1)
+    assert status == 1
+    assert b'result evidence incomplete' in output
+    assert b'complete output fixture-only' in output
+    assert_controller_lifecycle(output, (lane,))
+
+
+def test_real_single_lane_cancel_joins_active_tree_and_descendant(tmp_path):
+    lane, ready, child_ready = local_lane(tmp_path, 'fixture-only', wait=True, descendant=True)
+    cancel = threading.Event()
+    observed = []
+    def cancel_when_running():
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            if ready.exists() and child_ready.exists():
+                observed.append(True)
+                cancel.set()
+                return
+            time.sleep(0.01)
+        cancel.set()
+    thread = threading.Thread(target=cancel_when_running)
+    thread.start()
+    try:
+        status, output = run_owned((lane,), cancel=cancel, expected_lanes=1)
+    finally:
+        thread.join(timeout=16)
+    assert not thread.is_alive() and observed == [True]
+    assert status == 1
+    assert b'cancelled or whole deadline exhausted' in output
+    assert b'complete output fixture-only' in output
+    assert_controller_lifecycle(output, (lane,), interrupted=True)
 
 
 def test_real_cancel_joins_both_active_trees_and_descendants(tmp_path):
@@ -553,6 +600,66 @@ def test_actual_generated_offline_timing_control_stops_before_work_admission(tmp
     assert [row['gate'] for row in results] == ['companion']
 
 
+def test_generated_plans_have_exact_stage_membership_and_command_parity(tmp_path):
+    def invoked_gates(text):
+        return [line.split("Invoke-Gate '", 1)[1].split("'", 1)[0]
+                for line in text.splitlines() if "Invoke-Gate '" in line]
+
+    core_dir = tmp_path / 'core'
+    core_dir.mkdir()
+    core = ci._write_scripts(core_dir, Path(sys.executable), 'core-token')
+    assert [lane.name for lane in core] == ['offline', 'fixture']
+    assert core[0].expected == tuple(gate for gate, _, _ in ci.OFFLINE_TESTS)
+    assert core[1].expected == (
+        'postgres-start', 'native-store', 'temporal-start', 'native-temporal',
+        'preparation', 'native-launch-integration', 'native-launch-engine',
+        'observations-integration', 'observations-engine', 'seed-integration',
+        'temporal-stop', 'postgres-stop')
+    core_offline = (core_dir / 'offline.py').read_text(encoding='utf-8')
+    commands = [(gate, str(ci.ROOT / 'tools' / script), mode)
+                for gate, script, mode in ci.OFFLINE_TESTS]
+    assert [line for line in core_offline.splitlines() if line.startswith('commands=')] == [f'commands={commands!r}']
+    core_fixture = (core_dir / 'fixture.ps1').read_text(encoding='utf-8')
+    assert invoked_gates(core_fixture) == list(core[1].expected)
+    for gate, script, mode in ci.FIXTURE_TESTS:
+        if gate == 'native-launch-integration':
+            assert "$launchIntegrationMode = '--integration'" in core_fixture
+            assert "if ($preparationSucceeded) { $launchIntegrationMode = '--hosted-integration' }" in core_fixture
+            continue
+        expected = (f"  Invoke-Gate {ci._quote_ps(gate)} {{ & {ci._quote_ps(Path(sys.executable))} "
+                    f"{ci._quote_ps(ci.ROOT / 'tools' / script)} {mode} }}")
+        assert expected in core_fixture
+
+    connected_dir = tmp_path / 'connected'
+    connected_dir.mkdir()
+    connected = ci._write_scripts(connected_dir, Path(sys.executable), 'connected-token',
+                                  plan='connected')
+    assert len(connected) == 1 and connected[0].name == 'fixture'
+    assert connected[0].expected == (
+        'postgres-start', 'temporal-start', 'report-integration',
+        'followup-integration', 'temporal-stop', 'postgres-stop')
+    assert not (connected_dir / 'offline.py').exists()
+    connected_fixture = (connected_dir / 'fixture.ps1').read_text(encoding='utf-8')
+    assert invoked_gates(connected_fixture) == list(connected[0].expected)
+    for gate, script, mode in ci.CONNECTED_FIXTURE_TESTS:
+        expected = (f"  Invoke-Gate {ci._quote_ps(gate)} {{ & {ci._quote_ps(Path(sys.executable))} "
+                    f"{ci._quote_ps(ci.ROOT / 'tools' / script)} {mode} }}")
+        assert expected in connected_fixture
+    assert 'run_native_store_tests.py' not in connected_fixture
+    assert 'run_native_temporal_tests.py' not in connected_fixture
+    assert 'run_native_launch_tests.py' not in connected_fixture
+    with pytest.raises(ValueError):
+        ci._write_scripts(connected_dir, Path(sys.executable), 'bad-token', plan='full')
+
+
+def test_fixed_hosted_job_plan_selection_is_closed():
+    assert ci._plan_for_hosted_job('native-engine-windows-core') == 'core'
+    assert ci._plan_for_hosted_job('native-engine-windows-connected') == 'connected'
+    for job in (None, '', 'native-engine-windows', 'native-engine-windows-extra'):
+        with pytest.raises(SystemExit):
+            ci._plan_for_hosted_job(job)
+
+
 def test_cli_rejects_local_invocation_before_any_fixture(tmp_path):
     environment = dict(os.environ)
     environment.pop('GITHUB_ACTIONS', None)
@@ -791,7 +898,7 @@ def test_actual_generated_nested_helper_returns_with_extra_handle_and_keeps_fail
     results = [json.loads(line[len(ci.PREFIX):]) for line in output.decode().splitlines()
                if line.startswith(ci.PREFIX)]
     expected_fixture = list(lanes[1].expected)
-    expected_count = 27
+    expected_count = 25
     if helper_fail:
         expected_fixture = ['postgres-start', 'temporal-stop', 'postgres-stop']
         expected_count = 16
