@@ -31,9 +31,10 @@ class NativePreparedHost:
         from nexaweave_execution.native_process_driver import NativeProcessDriver
         from nexaweave_execution.native_run_contracts import (
             InvalidNativeRun, NativeRunDenied, NativeRunRequest, canonical_uuid, principal_id, sha256)
+        from nexaweave_execution.native_paired_checkpoint_binding import NativePairedCheckpointFactory
         from nexaweave_execution.native_reddit_checkpoint_binding import NativeRedditCheckpointFactory
         from nexaweave_execution.native_run_coordinator import NativeRunCoordinator
-        from nexaweave_execution.native_run_store import NativeRunStore, RedditCheckpointMode
+        from nexaweave_execution.native_run_store import NativeRunStore, PairedCheckpointMode, RedditCheckpointMode
         from nexaweave_execution.native_run_supervisor import NativeRunSupervisor
         from nexaweave_execution.native_twitter_checkpoint_binding import (
             NativeRestoredTwitterFactory, NativeTwitterCaptureFactory)
@@ -47,7 +48,7 @@ class NativePreparedHost:
             raise InvalidNativeRun()
         factory_type = type(session_factory)
         version = bound_request.schema_version
-        reddit_mode = None
+        reddit_mode = paired_mode = None
         if version == 1 and factory_type is NativeOwnedSessionFactory:
             prepared = session_factory
         elif ((version == 1 and factory_type is NativeTwitterCaptureFactory)
@@ -62,6 +63,10 @@ class NativePreparedHost:
             except ValueError:
                 raise InvalidNativeRun() from None
             reddit_mode = RedditCheckpointMode.CAPTURE if version == 1 else RedditCheckpointMode.CONTINUE
+            prepared = session_factory.prepared
+        elif factory_type is NativePairedCheckpointFactory:
+            session_factory.check_request(bound_request)
+            paired_mode = PairedCheckpointMode.CAPTURE if version == 1 else PairedCheckpointMode.CONTINUE
             prepared = session_factory.prepared
         else:
             raise InvalidNativeRun()
@@ -96,7 +101,7 @@ class NativePreparedHost:
             raise InvalidNativeRun()
 
         store = NativeRunStore(connection_factory)
-        if reddit_mode is RedditCheckpointMode.CONTINUE:
+        if reddit_mode is RedditCheckpointMode.CONTINUE or paired_mode is PairedCheckpointMode.CONTINUE:
             stored = store.get(bound_principal, bound_request.source_run_id)
             producer = session_factory.producer_record
             # Completed cancellation can update these two metadata fields
@@ -111,7 +116,8 @@ class NativePreparedHost:
             go_timeout_seconds=go_timeout_seconds)
         try:
             coordinator = NativeRunCoordinator(bound_principal, store, driver,
-                dispatch_allowed=dispatch_allowed, lease_seconds=lease_seconds, reddit_mode=reddit_mode)
+                dispatch_allowed=dispatch_allowed, lease_seconds=lease_seconds,
+                reddit_mode=reddit_mode, paired_mode=paired_mode)
             supervisor = NativeRunSupervisor(bound_request, coordinator,
                 poll_seconds=poll_seconds, call_budget_seconds=call_budget_seconds)
         except BaseException:

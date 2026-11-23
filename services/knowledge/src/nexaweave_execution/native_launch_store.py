@@ -55,6 +55,8 @@ def migrate(connection):
         sql_v2 = directory.joinpath('native_launch_0002.sql').read_text('utf-8')
         sql_v3 = directory.joinpath('native_launch_0003.sql').read_text('utf-8')
         sql_v4 = directory.joinpath('native_launch_0004.sql').read_text('utf-8')
+        sql_v5 = directory.joinpath('native_launch_0005.sql').read_text('utf-8')
+        checksum_v5 = hashlib.sha256(sql_v5.encode()).hexdigest()
         checksum_v1 = hashlib.sha256(sql_v1.encode()).hexdigest()
         checksum_v2 = hashlib.sha256(sql_v2.encode()).hexdigest()
         checksum_v3 = hashlib.sha256(sql_v3.encode()).hexdigest()
@@ -71,7 +73,7 @@ def migrate(connection):
                 raise LaunchAuthorityError('native_launch_unavailable')
             rows = connection.execute(_MIGRATIONS).fetchall()
             versions = [row[0] for row in rows]
-            if versions not in ([1], [1, 2], [1, 2, 3], [1, 2, 3, 4]) or rows[0][1] != checksum_v1:
+            if versions not in ([1], [1, 2], [1, 2, 3], [1, 2, 3, 4], [1, 2, 3, 4, 5]) or rows[0][1] != checksum_v1:
                 raise LaunchAuthorityError('native_launch_unavailable')
             previous = rows[0]
             if versions == [1]:
@@ -100,8 +102,18 @@ def migrate(connection):
                 chain = _catalog_v3_receipt(connection, 'mf_native_launch', history_v3, _catalog)
                 connection.execute(_SAVE_MIGRATION, (4, checksum_v4, chain))
                 rows = connection.execute(_MIGRATIONS).fetchall()
-            chain = _catalog_v3_receipt(connection, 'mf_native_launch', history_v3, _catalog)
-            if rows != [*history_v3, (4, checksum_v4, chain)]:
+            if rows[:3] != history_v3 or rows[3][:2] != (4, checksum_v4):
+                raise LaunchAuthorityError('native_launch_unavailable')
+            history_v4 = rows[:4]
+            if len(rows) == 4:
+                if rows[3][2] != _catalog_v3_receipt(connection, 'mf_native_launch', history_v3, _catalog):
+                    raise LaunchAuthorityError('native_launch_unavailable')
+                connection.execute(sql_v5)
+                chain = _catalog_v3_receipt(connection, 'mf_native_launch', history_v4, _catalog)
+                connection.execute(_SAVE_MIGRATION, (5, checksum_v5, chain))
+                rows = connection.execute(_MIGRATIONS).fetchall()
+            chain = _catalog_v3_receipt(connection, 'mf_native_launch', history_v4, _catalog)
+            if rows != [*history_v4, (5, checksum_v5, chain)]:
                 raise LaunchAuthorityError('native_launch_unavailable')
     except (OSError, psycopg.Error):
         raise LaunchAuthorityError('native_launch_unavailable') from None
@@ -230,7 +242,8 @@ def _verify_current_preparation(conn, request, identity):
     descriptor = identity['preparation']
     member = _seed_member(conn, identifier(descriptor['operation_id']))
     reddit = identity['schema_version'] == 4
-    if request.intervention is not None or member is not None or reddit:
+    tight_checkpoint = identity['schema_version'] in (4, 5)
+    if request.intervention is not None or member is not None or tight_checkpoint:
         from nexaweave_knowledge.bindings import ScopeBindingStore
         from nexaweave_knowledge.contracts import KnowledgeScope
         from nexaweave_knowledge.operations import LedgerError
@@ -273,7 +286,7 @@ def _verify_current_preparation(conn, request, identity):
             raise LaunchAuthorityError('conflict')
     if reddit != (type(prep[7]) is dict and 'reddit_checkpoint' in prep[7]):
         raise LaunchAuthorityError('conflict')
-    if ((request.intervention is not None or member is not None or reddit)
+    if ((request.intervention is not None or member is not None or tight_checkpoint)
             and project[1] != identifier(identity['scope']['workspace_id'])):
         raise LaunchAuthorityError('conflict')
     return member
@@ -291,8 +304,9 @@ def _verify_checkpoint_source(conn, request, identity, configuration=None):
     source_identity = source.frozen['identity']
     original = replace(request, schema_version=1, run_id=request.source_run_id,
                        source_run_id=None, checkpoint_sha256=None, intervention=None)
-    reddit = identity['schema_version'] == 4
-    if (source_identity['schema_version'] != (4 if reddit else 2)
+    tight_checkpoint = identity['schema_version'] in (4, 5)
+    source_version = identity['schema_version'] if tight_checkpoint else 2
+    if (source_identity['schema_version'] != source_version
             or source_identity.get('checkpoint') != {'mode': 'capture'}
             or source_identity['scope'] != identity['scope']
             or source_identity['preparation'] != identity['preparation']
@@ -314,7 +328,7 @@ def _verify_checkpoint_source(conn, request, identity, configuration=None):
         raise LaunchAuthorityError('native_launch_uncertain') from None
     if native.request != original or native.receipt != receipt:
         raise LaunchAuthorityError('conflict')
-    if (request.intervention is not None or reddit) and (
+    if (request.intervention is not None or tight_checkpoint) and (
             native.child is None or native.child.instance_id != receipt.instance_id
             or source_identity['display_graph_id'] != identity['display_graph_id']
             or source.frozen['configuration'] != configuration
@@ -332,7 +346,7 @@ def verify_checkpoint_dispatch(conn, request):
             or row.state not in {'queued', 'starting', 'running'}):
         raise LaunchAuthorityError('conflict')
     identity, configuration = row.frozen['identity'], row.frozen['configuration']
-    if request.intervention is None and identity['schema_version'] != 4:
+    if request.intervention is None and identity['schema_version'] not in (4, 5):
         raise LaunchAuthorityError('conflict')
     _verify_current_preparation(conn, request, identity)
     if request.source_run_id is not None:
@@ -425,7 +439,7 @@ class NativeLaunchStore:
                         verify_fork_archive(fork_archive, req, identity['display_graph_id'], producer.child.process_id)
                 if prior is not None:
                     saved = self._get(conn, principal, req.run_id)
-                    if (req.intervention is not None or version == 4) and saved.frozen['configuration'] != configuration:
+                    if (req.intervention is not None or version in (4, 5)) and saved.frozen['configuration'] != configuration:
                         raise LaunchAuthorityError('conflict')
                     return saved
             if req.intervention is not None or version == 4:
@@ -447,18 +461,21 @@ class NativeLaunchStore:
             except LaunchAuthorityError:
                 raise LaunchAuthorityError('conflict') from None
             if (row.request_sha256 != request_sha256 or row.launch_sha256 != launch_sha256
-                    or (req.intervention is not None or version == 4) and row.frozen['configuration'] != configuration):
+                    or (req.intervention is not None or version in (4, 5)) and row.frozen['configuration'] != configuration):
                 raise LaunchAuthorityError('conflict')
             return row
 
     def queue_fork(self, principal, run_id, launch_sha256):
         """Reserve and claim the reviewed fork together, after current authority checks."""
-        return self._queue_checkpoint(principal, run_id, launch_sha256, reddit=False)
+        return self._queue_checkpoint(principal, run_id, launch_sha256, expected_version=3)
 
     def queue_reddit(self, principal, run_id, launch_sha256):
-        return self._queue_checkpoint(principal, run_id, launch_sha256, reddit=True)
+        return self._queue_checkpoint(principal, run_id, launch_sha256, expected_version=4)
 
-    def _queue_checkpoint(self, principal, run_id, launch_sha256, *, reddit):
+    def queue_paired(self, principal, run_id, launch_sha256):
+        return self._queue_checkpoint(principal, run_id, launch_sha256, expected_version=5)
+
+    def _queue_checkpoint(self, principal, run_id, launch_sha256, *, expected_version):
         from nexaweave_knowledge.contracts import KnowledgeScope
         from .budget import BudgetError, BudgetLedger, ReservationState
 
@@ -470,7 +487,6 @@ class NativeLaunchStore:
             row = self._get(conn, principal, run_id, True)
             req = row.request
             identity, configuration = row.frozen['identity'], row.frozen['configuration']
-            expected_version = 4 if reddit else 3
             if row.launch_sha256 != launch_sha256 or identity['schema_version'] != expected_version:
                 raise LaunchAuthorityError('conflict')
             if row.state != 'planned' or row.cancel_requested:
@@ -479,7 +495,7 @@ class NativeLaunchStore:
             if req.source_run_id is not None:
                 _verify_checkpoint_source(conn, req, identity, configuration)
             _reject_occupied_checkpoint_run_id(conn, req.run_id)
-            if reddit:
+            if expected_version in (4, 5):
                 if req.source_run_id is None:
                     occupied = conn.execute(
                         'SELECT 1 FROM mf_native_launch.plans WHERE principal=%s AND preparation_id=%s '
@@ -515,7 +531,7 @@ class NativeLaunchStore:
         with transaction(self._connect) as conn:
             row = self._get(conn, principal, run_id, True)
             if (row.launch_sha256 != sha(launch_sha256) or row.intervention is not None
-                    or row.frozen['identity']['schema_version'] == 4):
+                    or row.frozen['identity']['schema_version'] in (4, 5)):
                 raise LaunchAuthorityError('conflict')
             if row.state != 'planned' or row.cancel_requested:
                 return row, False
@@ -725,7 +741,7 @@ class NativeLaunchStore:
             if state == 'declared':
                 return row
             receipt = native_record.receipt.to_wire() if native_record.receipt is not None else None
-            if (row.frozen['identity']['schema_version'] == 4 or row.intervention is not None
+            if (row.frozen['identity']['schema_version'] in (4, 5) or row.intervention is not None
                     or _seed_member(conn, row.preparation_id) is not None):
                 if row.receipt is not None:
                     if receipt is None:

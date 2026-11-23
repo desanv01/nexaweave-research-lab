@@ -156,7 +156,7 @@ def test_own_migration_catalog_drift_and_previous_checksums(factory):
     with factory() as conn:
         old=conn.execute('SELECT checksum FROM mf_execution.schema_migrations').fetchall()
         upgraded=conn.execute(migrations).fetchall()
-        assert [row[0] for row in upgraded]==[1,2,3,4] and upgraded[0][1]==checksum
+        assert [row[0] for row in upgraded]==[1,2,3,4,5] and upgraded[0][1]==checksum
         with conn.transaction(force_rollback=True):
             conn.execute("SET LOCAL statement_timeout='10s'")
             conn.execute("SET LOCAL lock_timeout='5s'")

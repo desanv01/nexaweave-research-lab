@@ -578,7 +578,7 @@ def test_reddit_continuation_requires_exact_settled_producer_before_driver_or_ar
     admitted = host(binding)
     assert reads == [("owner", producer.run_id)] * 2
     try:
-        assert admitted.supervisor.coordinator._reddit_mode is RedditCheckpointMode.CONTINUE
+        assert admitted.supervisor.coordinator._checkpoint_mode == {'reddit_mode': RedditCheckpointMode.CONTINUE}
         assert admitted.driver._factory.producer == child
     finally:
         _close(admitted)

@@ -122,6 +122,29 @@ independent SQLite/log expectations and fresh CLI processes under scrubbed
 environment, engine-import prohibition and a socket guard. Main must run those
 sources and integrate runners/CI before accepting any capability slice.
 
+## Paired checkpoint and continuation
+
+The protected launch API accepts schema version 5 for a READY preparation with
+both Twitter and Reddit, two registered actors, and a two-to-24-round limit.
+This profile uses native local recommendation settings and excludes optional
+execution controls and cross-platform seed transfer. An ordinary launch keeps
+its existing scheduler. Paired checkpoint launches use Twitter then Reddit in
+each logical round.
+
+Plan capture with `checkpoint: {"mode":"capture"}`. Capture completes after
+round one on both platforms. The owner parks both platform writers, checks SQLite
+and trace boundaries, and saves the two databases, action-log prefixes, CAMEL
+histories, clocks, scheduler position, topology, and Python RNG state. The
+manifest binds the files and preparation to the runtime and settled producer.
+
+Plan continuation with `checkpoint: {"mode":"continue","source_run_id":"…",
+"checkpoint_sha256":"…"}` using the completed capture's launch ID and receipt
+digest. The protected start claims a separate run and budget. A fresh process
+hydrates private working copies and continues from round two. The original
+preparation and capture are read-only inputs. A schema version 5 observations
+page for the completed continuation accepts either platform and authenticates
+the recorded output against its receipt.
+
 All 44 plan requirements and inherited notices remain in force. Vue/Flask,
 OASIS/CAMEL and Graphiti with self-hosted Neo4j Community are retained. The
 configurable initial provider remains DeepSeek official `deepseek-flash` with
