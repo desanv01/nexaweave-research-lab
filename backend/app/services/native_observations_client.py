@@ -1,4 +1,5 @@
 """SDK-free, finite completed-observations wire contract."""
+from datetime import datetime
 import hashlib
 import json
 from uuid import UUID, uuid5
@@ -8,6 +9,9 @@ from .native_launch_client import validate_result as validate_launch, NativeLaun
 REQUEST_BYTES, RESULT_BYTES, ENVELOPE_OVERHEAD = 4096, 262144, 128
 LOG_BYTES, LINE_BYTES, RECORDS, DEPTH = 8388608, 8192, 10000, 8
 OUTPUT_BYTES, AGGREGATE_BYTES = 67108864, 268435456
+REDDIT_OBSERVATION_VERSION = 4
+REDDIT_TRACE_FILE = 'native.sqlite3'
+REDDIT_TRACE_BYTES, REDDIT_TRACE_RECORDS = 4 * 1024 * 1024, 10
 CODES = frozenset(('invalid_request not_found unauthorized origin_denied conflict tombstoned busy '
                   'result_too_large observations_unavailable evidence_invalid invalid_reply internal_error').split())
 COUNT_KEYS = {'event_records', 'action_records', 'successful_action_records', 'failed_action_records'}
@@ -24,12 +28,15 @@ def validate_payload(value):
     try:
         if type(value) is not dict or set(value) != {'schema_version', 'launch_id', 'launch_sha256', 'platform', 'offset', 'limit'}:
             raise ValueError
-        version = integer(value['schema_version'], 1, 2)
+        version = integer(value['schema_version'], 1, REDDIT_OBSERVATION_VERSION)
         uuid_string(value['launch_id']); sha(value['launch_sha256'])
-        if (type(value['platform']) is not str or value['platform'] not in {'twitter', 'reddit'}
-                or (version == 2 and value['platform'] != 'twitter')):
+        reddit = version == REDDIT_OBSERVATION_VERSION
+        if (version not in (1, 2, REDDIT_OBSERVATION_VERSION)
+                or type(value['platform']) is not str or value['platform'] not in {'twitter', 'reddit'}
+                or (version == 2 and value['platform'] != 'twitter') or (reddit and value['platform'] != 'reddit')):
             raise ValueError
-        integer(value['offset'], 0, RECORDS); integer(value['limit'], 1, 20)
+        integer(value['offset'], 0, REDDIT_TRACE_RECORDS if reddit else RECORDS)
+        integer(value['limit'], 1, 20)
         if len(encoded(value)) > REQUEST_BYTES:
             raise ValueError
         return json.loads(encoded(value))
@@ -172,9 +179,77 @@ def output_names(platforms, *, restored=False):
     return [name for platform in platforms for name in (platform + '_simulation.db', action_log_name(platform))]
 
 
+def validate_reddit_trace_record(record, index, total, seed):
+    if type(record) is not dict or set(record) != {'index', 'trace_id', 'actor_id', 'action', 'simulated_at', 'data'}:
+        raise ValueError
+    actors = total - 2
+    integer(record['index'], index, index)
+    integer(record['trace_id'], index + 1, index + 1)
+    actor = integer(record['actor_id'], 0, actors - 1)
+    at = record['simulated_at']
+    if type(at) is not str or len(at) != 19 or datetime.fromisoformat(at).isoformat(sep=' ') != at:
+        raise ValueError
+    data = record['data']
+    action = 'sign_up' if index < actors else 'create_post' if index == actors else 'create_comment'
+    if record['action'] != action or type(data) is not dict:
+        raise ValueError
+    if action == 'sign_up':
+        if actor != index or data:
+            raise ValueError
+        return
+    key = 'post_id' if action == 'create_post' else 'comment_id'
+    if set(data) != {key, 'content'} or (action == 'create_comment' and actor != seed % actors):
+        raise ValueError
+    integer(data[key], 1, 1)
+    content = data['content']
+    if (type(content) is not str or not content.strip() or not 1 <= len(content.encode('utf-8')) <= 512
+            or any(ord(char) < 32 or ord(char) == 127 for char in content)):
+        raise ValueError
+
+
+def _validate_reddit_page(value, graph_id, scope, payload, principal):
+    if type(value) is not dict or set(value) != {'schema_version', 'launch', 'evidence', 'platform',
+            'offset', 'limit', 'total_records', 'next_offset', 'records'}:
+        raise ValueError
+    if len(encoded(value)) > RESULT_BYTES:
+        raise NativeObservationsError('result_too_large')
+    integer(value['schema_version'], REDDIT_OBSERVATION_VERSION, REDDIT_OBSERVATION_VERSION)
+    launch = validate_launch(value['launch'], graph_id, scope, launch_reference(payload), 'status')
+    if (launch['state'] != 'completed' or launch['receipt'] is None or launch['cancel_requested']
+            or launch['request']['principal'] != principal or launch['request']['platforms'] != ['reddit']
+            or launch['checkpoint']['mode'] != 'continue'):
+        raise ValueError
+    evidence = value['evidence']
+    if type(evidence) is not dict or set(evidence) != {'kind', 'file'} or evidence['kind'] != 'reddit_sqlite_trace_v1':
+        raise ValueError
+    file = evidence['file']
+    if (type(file) is not dict or set(file) != {'name', 'sha256', 'size'} or file['name'] != REDDIT_TRACE_FILE
+            or sha(file['sha256']) != launch['receipt']['evidence_sha256']):
+        raise ValueError
+    integer(file['size'], 512, REDDIT_TRACE_BYTES)
+    for key in ('platform', 'offset', 'limit'):
+        if type(value[key]) is not type(payload[key]) or value[key] != payload[key]:
+            raise ValueError
+    total = integer(value['total_records'], 4, REDDIT_TRACE_RECORDS)
+    offset, limit = payload['offset'], payload['limit']
+    end = min(total, offset + limit)
+    records = value['records']
+    if offset > total or type(records) is not list or len(records) != end - offset:
+        raise ValueError
+    if end < total:
+        integer(value['next_offset'], end, end)
+    elif value['next_offset'] is not None:
+        raise ValueError
+    for index, record in enumerate(records, offset):
+        validate_reddit_trace_record(record, index, total, launch['request']['seed'])
+    return json.loads(encoded(value))
+
+
 def validate_result(value, graph_id, scope, payload, principal):
     """Validate injected replies too; never allow facade injection to bypass wire limits."""
     try:
+        if payload['schema_version'] == REDDIT_OBSERVATION_VERSION:
+            return _validate_reddit_page(value, graph_id, scope, payload, principal)
         if type(value) is not dict or set(value) != {'schema_version', 'launch', 'manifest', 'platform', 'offset', 'limit',
                 'total_records', 'next_offset', 'counts', 'records'}:
             raise ValueError

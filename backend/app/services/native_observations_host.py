@@ -4,8 +4,9 @@ import json
 from uuid import uuid5
 from .native_observations_client import (NativeObservationsError, validate_payload, validate_result,
     launch_reference, encoded, stage_operation_id, stage_scope, validate_stage_payload,
-    validate_dispatch_payload, validate_event_status_payload)
+    validate_dispatch_payload, validate_event_status_payload, REDDIT_OBSERVATION_VERSION)
 from .native_observation_reader import NativeObservationReader
+from .native_reddit_observation_reader import NativeRedditObservationReader
 from .preparation_client import canonical
 
 
@@ -18,6 +19,7 @@ class NativeObservationsHost:
         self.principal, self.display_graph_id = launch_host.principal, launch_host.display_graph_id
         self.scope_dto = json.loads(encoded(launch_host.scope_dto))
         self.reader = NativeObservationReader()
+        self.reddit_reader = NativeRedditObservationReader()
         self.event_writer = event_writer
         self.event_verifier = event_verifier
 
@@ -56,6 +58,10 @@ class NativeObservationsHost:
             if dto['checkpoint']['mode'] != 'continue' or row.cancel_requested or native.cancel_requested:
                 raise NativeObservationsError('conflict')
             self.launch._checkpoint_producer(row.request, row.frozen['identity']['preparation'])
+        if dto['schema_version'] == REDDIT_OBSERVATION_VERSION:
+            if (dto['checkpoint']['mode'] != 'continue' or row.cancel_requested or native.cancel_requested
+                    or row.request.runtime_sha256 != self.launch.runtime_sha256 or native.lease_until is not None):
+                raise NativeObservationsError('conflict')
         if prep.frozen['public']['schema_version'] == 2:
             self.launch.preparation._owned_row(prep, expected_revision=prep.project_revision)
         return row, prep, native, dto
@@ -68,6 +74,8 @@ class NativeObservationsHost:
         row, prep, native, launch = self._authority(payload)  # All authority failures before file access.
         base = self.launch.preparation.root
         prepared_root = base / ('sim_' + prep.operation_id.hex)
+        if launch['schema_version'] == REDDIT_OBSERVATION_VERSION:
+            return self._read_reddit_page(payload, row, prep, native, launch, prepared_root)
         if self._artifacts(prep, prepared_root) != prep.receipt:
             raise NativeObservationsError('conflict')
         restored = launch['schema_version'] == 2
@@ -80,6 +88,43 @@ class NativeObservationsHost:
                     or self._artifacts(current, prepared_root) != current.receipt):
                 raise NativeObservationsError('conflict')
             result = validate_result(dict(observed, schema_version=launch['schema_version'], launch=launch),
+                                     self.display_graph_id, self.scope_dto, payload, self.principal)
+        return result, row, prep, native
+
+    def _reddit_producer(self, row):
+        from nexaweave_execution.native_launch_store import (
+            LaunchAuthorityError, _verify_checkpoint_source, _verify_current_preparation, transaction,
+        )
+        from nexaweave_execution.native_reddit_checkpoint_binding import NativeRedditCheckpointFactory
+        from nexaweave_execution.native_run_contracts import InvalidNativeRun
+
+        identity, configuration = row.frozen['identity'], row.frozen['configuration']
+        try:
+            with transaction(self.launch.connect) as conn:
+                if self.launch.store._get(conn, self.principal, row.run_id) != row:
+                    raise NativeObservationsError('conflict')
+                _verify_current_preparation(conn, row.request, identity)
+                producer = _verify_checkpoint_source(conn, row.request, identity, configuration)
+                NativeRedditCheckpointFactory.check_producer(row.request, producer)
+                return producer
+        except LaunchAuthorityError as error:
+            code = ('observations_unavailable' if error.code in {'native_launch_unavailable', 'native_launch_uncertain'}
+                    else 'conflict')
+            raise NativeObservationsError(code) from None
+        except (InvalidNativeRun, ValueError):
+            raise NativeObservationsError('conflict') from None
+
+    def _read_reddit_page(self, payload, row, prep, native, launch, prepared_root):
+        producer = self._reddit_producer(row)
+        if self._artifacts(prep, prepared_root) != prep.receipt:
+            raise NativeObservationsError('conflict')
+        output = prepared_root.parent / ('native_reddit_run_' + row.run_id.hex)
+        with self.reddit_reader.page(output, payload['offset'], payload['limit'], row.request.seed,
+                                     row.receipt['evidence_sha256']) as observed:
+            if (self._authority(payload) != (row, prep, native, launch) or self._reddit_producer(row) != producer
+                    or self._artifacts(prep, prepared_root) != prep.receipt):
+                raise NativeObservationsError('conflict')
+            result = validate_result(dict(observed, schema_version=REDDIT_OBSERVATION_VERSION, launch=launch),
                                      self.display_graph_id, self.scope_dto, payload, self.principal)
         return result, row, prep, native
 

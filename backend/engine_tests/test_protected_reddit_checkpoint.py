@@ -1,5 +1,6 @@
 """Protected Reddit READY, capture and fresh continuation with actual owned children."""
 import asyncio
+from contextlib import contextmanager
 from hashlib import sha256
 import json
 from multiprocessing import active_children
@@ -16,6 +17,9 @@ from app.services.knowledge_preparation_facade import KnowledgePreparationFacade
 from app.services.knowledge_read_facade import ReadHostSettings
 from app.services.native_launch_facade import NativeLaunchFacade
 from app.services.native_launch_models import BoundedNativeModelFactory
+from app.services.native_observations_client import NativeObservationsError
+from app.services.native_observations_facade import NativeObservationsFacade
+from app.services.native_observations_host import NativeObservationsHost
 from native_reddit_checkpoint_fixture import (
     _COMMENT_TICK, _DB, _EPOCH, _MANIFEST, _NAMES, _SEED_TICK, _SIGNUP_TICK, _json, _pin, _read, _rows,
 )
@@ -119,20 +123,26 @@ async def test_protected_reddit_capture_and_fresh_continuation(factory, tmp_path
 
     host.attach_temporal(native, call)
     monkeypatch.setattr(ReadHostSettings, 'from_config', classmethod(lambda cls, config: prep.settings))
+    observations = NativeObservationsHost(launch_host=host)
     http = create_app(
         preparation_facade=KnowledgePreparationFacade(prep.settings, host=prep),
         native_launch_facade=NativeLaunchFacade(prep.settings, host=host),
+        native_observations_facade=NativeObservationsFacade(prep.settings, host=observations),
     ).test_client()
     headers = {'Authorization': 'Bearer ' + prep.settings.token}
     graph = prep.display_graph_id
+    observation_route = f'/api/native-observations/page/{graph}'
     launched = []
 
-    async def post(route, payload):
+    async def post(route, payload, *, status=200, code=None):
         response = await asyncio.wait_for(
             asyncio.to_thread(http.post, route, json=payload, headers=headers), remaining(30),
         )
-        assert response.status_code == 200
+        assert response.status_code == status
         assert response.headers['Cache-Control'] == 'no-store'
+        if code is not None:
+            assert response.json == {'success': False, 'error': {'code': code}}
+            return None
         assert response.json['success'] is True
         return response.json['data']
 
@@ -289,6 +299,53 @@ async def test_protected_reddit_capture_and_fresh_continuation(factory, tmp_path
             assert restored_comments == [(1, 1, actor, comment, _COMMENT_TICK)]
             assert restored_trace == trace + [(4, actor, 'create_comment', {'comment_id': 1, 'content': comment}, _COMMENT_TICK)]
             assert restored_recs == [(0, 1), (1, 1)]
+
+            observation_fields = {'platform': 'reddit', 'limit': 2, 'offset': 0}
+            with monkeypatch.context() as capture_check:
+                def artifact_tripwire(*args, **kwargs):
+                    pytest.fail('Reddit capture reached the continuation artifact reader')
+
+                capture_check.setattr(observations, '_artifacts', artifact_tripwire)
+                await post(observation_route, dict(reference(capture), **observation_fields),
+                           status=409, code='conflict')
+
+            selector_page = dict(reference(continuation), **observation_fields)
+            child_file = _pin(child / _DB)
+            first = await post(observation_route, selector_page)
+            second = await post(observation_route, dict(selector_page, offset=2))
+            expected = [
+                dict(index=index, trace_id=trace_id, actor_id=owner, action=action, simulated_at=tick,
+                     data={} if action == 'sign_up' else data)
+                for index, (trace_id, owner, action, data, tick) in enumerate(restored_trace)
+            ]
+            for page, offset in ((first, 0), (second, 2)):
+                assert page['schema_version'] == 4 and page['platform'] == 'reddit'
+                assert (page['offset'], page['limit'], page['total_records']) == (offset, 2, 4)
+                assert reference(page['launch']) == reference(continuation)
+                assert page['launch']['receipt'] == restored.receipt.to_wire()
+                assert page['evidence'] == {'kind': 'reddit_sqlite_trace_v1', 'file': {
+                    'name': _DB, 'sha256': child_file['sha256'], 'size': child_file['bytes'],
+                }}
+                assert page['records'] == expected[offset:offset + 2]
+            assert first['next_offset'] == 2 and second['next_offset'] is None
+
+            original_page = observations.reddit_reader.page
+
+            @contextmanager
+            def revoke_after_file_read(*args, **kwargs):
+                with original_page(*args, **kwargs) as result:
+                    with monkeypatch.context() as revoked:
+                        def deny(*_args):
+                            raise NativeObservationsError('conflict')
+
+                        revoked.setattr(observations, '_reddit_producer', deny)
+                        yield result
+
+            with monkeypatch.context() as revalidation:
+                revalidation.setattr(observations.reddit_reader, 'page', revoke_after_file_read)
+                await post(observation_route, selector_page, status=409, code='conflict')
+            assert await post(observation_route, selector_page) == first
+            assert _pin(child / _DB) == child_file
 
             replay = await post(f'/api/native-launch/start/{graph}', reference(continuation))
             assert replay['state'] == 'completed' and replay['receipt'] == restored.receipt.to_wire()
