@@ -219,10 +219,57 @@ def _connected_preparation(tmp_path):
 
 
 def test_connected_preparation_native_rounds_and_report_tool(tmp_path, monkeypatch):
+    import io
+
+    from app.services.oasis_profile_generator import OasisProfileGenerator
     from native_reddit_checkpoint_fixture import assert_fresh_reddit_continuation
 
     monkeypatch.chdir(tmp_path)
-    root, state, facade, original_bytes = _connected_preparation(tmp_path)
+    with monkeypatch.context() as patch:
+        patch.setattr(OasisProfileGenerator, "_generate_username",
+                      lambda self, name: "paired_123")
+        root, state, facade, original_bytes = _connected_preparation(tmp_path)
+    expected_actors = [
+        (0, "Mira Vale", "Person", "paired_123", str(UUID(int=10))),
+        (1, "Harbor Labs", "Organization", "paired_123_2", str(UUID(int=11))),
+    ]
+    reddit_profiles = json.loads(original_bytes["reddit_profiles.json"])
+    assert [(profile["user_id"], profile["name"], profile["username"])
+            for profile in reddit_profiles] == [
+        (actor_id, name, handle)
+        for actor_id, name, _, handle, _ in expected_actors]
+    assert len({profile["username"] for profile in reddit_profiles}) == 2
+    twitter_profiles = list(csv.DictReader(io.StringIO(
+        original_bytes["twitter_profiles.csv"].decode("utf-8"), newline="")))
+    assert [(int(profile["user_id"]), profile["name"], profile["username"])
+            for profile in twitter_profiles] == [
+        (actor_id, name, handle)
+        for actor_id, name, _, handle, _ in expected_actors]
+    assert len({profile["username"] for profile in twitter_profiles}) == 2
+    config = json.loads(original_bytes["simulation_config.json"])
+    assert [(actor["agent_id"], actor["entity_uuid"], actor["entity_type"])
+            for actor in config["agent_configs"]] == [
+        (actor_id, source_id, entity_type)
+        for actor_id, _, entity_type, _, source_id in expected_actors]
+    assert [profile["user_id"] for profile in reddit_profiles] == [
+        actor["agent_id"] for actor in config["agent_configs"]]
+    assert [int(profile["user_id"]) for profile in twitter_profiles] == [
+        actor["agent_id"] for actor in config["agent_configs"]]
+    evidence_ids = [str(UUID(int=900))]
+    grounding = json.loads(original_bytes["source_grounding.json"])
+    for _, name, entity_type, _, source_id in expected_actors:
+        record = grounding[source_id]
+        assert record["source_entity_uuid"] == source_id
+        assert record["labels"] == ["Entity", entity_type]
+        assert record["summary"] == f"Synthetic source for {name}"
+        assert record["episode_ids"] == [str(UUID(int=800))]
+        assert record["evidence_ids"] == evidence_ids
+        assert len(record["facts"]) == 1
+        fact = record["facts"][0]
+        assert fact["edge_uuid"] == str(UUID(int=20))
+        assert fact["fact"] == "Mira knows Harbor Labs"
+        assert fact["episode_ids"] == [str(UUID(int=800))]
+        assert fact["evidence_ids"] == evidence_ids
     model = _offline_model()
     session = NativeSimulationSession(root, graph_id="display-1",
                                       simulation_id=state.simulation_id,
@@ -249,6 +296,9 @@ def test_connected_preparation_native_rounds_and_report_tool(tmp_path, monkeypat
             assert "None years old" not in prompt and "30 years old" not in prompt
         for platform in ("twitter", "reddit"):
             with sqlite3.connect(root / f"{platform}_simulation.db") as connection:
+                assert connection.execute(
+                    "SELECT agent_id, user_id FROM user ORDER BY agent_id"
+                ).fetchall() == [(0, 0), (1, 1)]
                 posts = [row[0] for row in connection.execute("SELECT content FROM post")]
                 assert "Initial fixture event" in posts
                 assert any(post.startswith("Synthetic native post ") for post in posts)

@@ -83,18 +83,10 @@ class KnowledgePopulation:
         generated_on = date.today().isoformat()
         profiles = []
         grounding = {}
-        usernames = set()
         for index, node in enumerate(selected):
             entity = EntityNode(node["uuid"], node["name"], list(node["labels"]),
                                 node["summary"], dict(node["attributes"]))
             profile = generator.generate_profile_from_entity(entity, index, use_llm=False)
-            original_username = profile.user_name
-            if profile.user_name in usernames:
-                suffix = 2
-                while f"{original_username}_{suffix}" in usernames:
-                    suffix += 1
-                profile.user_name = f"{original_username}_{suffix}"
-            usernames.add(profile.user_name)
             profile.created_at = generated_on
             profiles.append(profile)
             grounding[node["uuid"]] = {
@@ -103,6 +95,7 @@ class KnowledgePopulation:
                 "episode_ids": list(node["episodes"]), "evidence_ids": list(node["evidence_ids"]),
                 "facts": sorted(incident[node["uuid"]], key=lambda item: item["edge_uuid"]),
             }
+        generator.disambiguate_usernames(profiles)
         preview = {"graph_id": graph["graph_id"], "generator": "inherited_rule_based_v1",
                    "enrichment": "none", "llm_used": False, "simulation_executed": False,
                    "snapshot_consistent": False, "profile_date": generated_on,
