@@ -134,7 +134,7 @@ class NativeRunRequest:
     def from_wire(cls, value: object) -> NativeRunRequest:
         if isinstance(value, cls):
             value = asdict(value)
-            if value["schema_version"] in (1, 2, 4) and value["intervention"] is None:
+            if value["schema_version"] in (1, 2, 4, 5) and value["intervention"] is None:
                 del value["intervention"]
             if value["schema_version"] == 1 and all(value[key] is None for key in _CONTINUATION_KEYS):
                 for key in _CONTINUATION_KEYS:
@@ -143,7 +143,7 @@ class NativeRunRequest:
             raise InvalidNativeRun()
         try:
             version = value.get("schema_version")
-            if type(version) is not int or version not in (1, 2, 3, 4):
+            if type(version) is not int or version not in (1, 2, 3, 4, 5):
                 raise InvalidNativeRun()
             expected_keys = _REQUEST_KEYS
             if version >= 2:
@@ -169,8 +169,12 @@ class NativeRunRequest:
             if version >= 2:
                 source_run_id = canonical_uuid(value["source_run_id"])
                 checkpoint_sha256 = sha256(value["checkpoint_sha256"])
-                checkpoint_platform = "reddit" if version == 4 else "twitter"
-                if source_run_id == run_id or tuple(platforms) != (checkpoint_platform,) or rounds != 1:
+                if version == 5:
+                    profile_matches = tuple(platforms) == ("twitter", "reddit") and rounds >= 2
+                else:
+                    platform = "reddit" if version == 4 else "twitter"
+                    profile_matches = tuple(platforms) == (platform,) and rounds == 1
+                if source_run_id == run_id or not profile_matches:
                     raise InvalidNativeRun()
             if version == 3:
                 intervention = SwapActiveActorV1.from_wire(value["intervention"])

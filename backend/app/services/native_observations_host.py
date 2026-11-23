@@ -4,7 +4,7 @@ import json
 from uuid import uuid5
 from .native_observations_client import (NativeObservationsError, validate_payload, validate_result,
     launch_reference, encoded, stage_operation_id, stage_scope, validate_stage_payload,
-    validate_dispatch_payload, validate_event_status_payload, REDDIT_OBSERVATION_VERSION)
+    validate_dispatch_payload, validate_event_status_payload, REDDIT_OBSERVATION_VERSION, PAIRED_OBSERVATION_VERSION)
 from .native_observation_reader import NativeObservationReader
 from .native_reddit_observation_reader import NativeRedditObservationReader
 from .preparation_client import canonical
@@ -54,8 +54,9 @@ class NativeObservationsHost:
         dto = validate_launch(dto, self.display_graph_id, self.scope_dto, launch_reference(payload), 'status')
         if dto['request']['principal'] != self.principal:
             raise NativeObservationsError('unauthorized')
-        if dto['schema_version'] == 2:
-            if dto['checkpoint']['mode'] != 'continue' or row.cancel_requested or native.cancel_requested:
+        if dto['schema_version'] in (2, PAIRED_OBSERVATION_VERSION):
+            if (dto['checkpoint']['mode'] != 'continue' or row.cancel_requested or native.cancel_requested
+                    or (dto['schema_version'] == PAIRED_OBSERVATION_VERSION and native.lease_until is not None)):
                 raise NativeObservationsError('conflict')
             self.launch._checkpoint_producer(row.request, row.frozen['identity']['preparation'])
         if dto['schema_version'] == REDDIT_OBSERVATION_VERSION:
@@ -79,7 +80,10 @@ class NativeObservationsHost:
         if self._artifacts(prep, prepared_root) != prep.receipt:
             raise NativeObservationsError('conflict')
         restored = launch['schema_version'] == 2
-        output_root = base / ('native_child_' + row.run_id.hex) if restored else prepared_root
+        if launch['schema_version'] == PAIRED_OBSERVATION_VERSION:
+            output_root = base / ('native_paired_run_' + row.run_id.hex)
+        else:
+            output_root = base / ('native_child_' + row.run_id.hex) if restored else prepared_root
         reader_options = {"restored": True} if restored else {}
         with self.reader.page(output_root, row.request.platforms, payload['platform'], payload['offset'],
                               payload['limit'], row.receipt['evidence_sha256'], **reader_options) as observed:

@@ -664,6 +664,75 @@ class PlatformSimulation:
         self.total_actions = 0
 
 
+async def step_native_round(platform, result, config, db_path, action_logger,
+                            agent_names, round_index, minutes_per_round, cursor,
+                            total_actions, logical_rounds, native_dependencies=None):
+    """Advance an already-owned environment and project its acknowledged trace."""
+    if platform not in ("twitter", "reddit"):
+        raise ValueError("invalid native round platform")
+
+    round_num = round_index + 1
+    simulated_minutes = round_index * minutes_per_round
+    simulated_hour = (simulated_minutes // 60) % 24
+    active_agents = get_active_agents_for_round(
+        result.env, config, simulated_hour, round_index,
+        simulated_minutes=simulated_minutes, native_dependencies=native_dependencies,
+    )
+    if action_logger:
+        action_logger.log_round_start(round_num, simulated_hour)
+
+    twitter_capture = platform == "twitter" and native_dependencies is not None
+    if twitter_capture and hasattr(native_dependencies, "begin_capture_round"):
+        native_dependencies.begin_capture_round(result, round_num, active_agents, cursor)
+
+    if not active_agents:
+        if action_logger:
+            action_logger.log_round_end(round_num, 0)
+        return cursor, total_actions, False
+
+    if "LLMAction" not in globals():
+        _load_native_engine()
+    actions = {agent: LLMAction() for _, agent in active_agents}
+    await result.env.step(actions)
+
+    if platform == "twitter":
+        capture_deadline = None
+        if twitter_capture and hasattr(native_dependencies, "check_capture_projection"):
+            capture_deadline = native_dependencies.check_capture_projection(result, round_num)
+        actual_actions, cursor = fetch_new_actions_from_db(
+            db_path, cursor, agent_names, capture_deadline=capture_deadline,
+        )
+    else:
+        actual_actions, cursor = fetch_new_actions_from_db(db_path, cursor, agent_names)
+
+    round_action_count = 0
+    for action_data in actual_actions:
+        if action_logger:
+            action_logger.log_action(
+                round_num=round_num,
+                agent_id=action_data['agent_id'],
+                agent_name=action_data['agent_name'],
+                action_type=action_data['action_type'],
+                action_args=action_data['action_args'],
+            )
+            total_actions += 1
+            round_action_count += 1
+    if action_logger:
+        action_logger.log_round_end(round_num, round_action_count)
+
+    if twitter_capture and hasattr(native_dependencies, "capture_completed_round"):
+        capture_options = {}
+        if getattr(native_dependencies, "runner_state_enabled", False) is True:
+            capture_options["runner_position"] = (
+                round_num, logical_rounds, minutes_per_round, simulated_minutes, total_actions,
+            )
+        await native_dependencies.capture_completed_round(
+            result, round_num, cursor, getattr(action_logger, "log_path", None),
+            agent_names, **capture_options,
+        )
+    return cursor, total_actions, True
+
+
 async def run_twitter_simulation(
     config: Dict[str, Any], 
     simulation_dir: str,
@@ -785,77 +854,32 @@ async def run_twitter_simulation(
             log_info(f"轮数已截断: {original_rounds} -> {total_rounds} (max_rounds={max_rounds})")
     
     start_time = datetime.now()
-    
+    paired_rounds = getattr(native_dependencies, "paired_rounds", None)
+    if paired_rounds is not None:
+        await paired_rounds.ready(
+            "twitter", result, agent_names, db_path, action_logger, last_rowid,
+            total_actions, logical_rounds, minutes_per_round, total_rounds,
+        )
+
     for round_num in range(total_rounds):
         # 检查是否收到退出信号
         if _shutdown_event and _shutdown_event.is_set():
             if main_logger:
                 main_logger.info(f"收到退出信号，在第 {round_num + 1} 轮停止模拟")
             break
-        
-        simulated_minutes = round_num * minutes_per_round
-        simulated_hour = (simulated_minutes // 60) % 24
-        simulated_day = simulated_minutes // (60 * 24) + 1
-        
-        active_agents = get_active_agents_for_round(
-            result.env, config, simulated_hour, round_num,
-            simulated_minutes=simulated_minutes, native_dependencies=native_dependencies
+
+        last_rowid, total_actions, active = await step_native_round(
+            "twitter", result, config, db_path, action_logger, agent_names,
+            round_num, minutes_per_round, last_rowid, total_actions, logical_rounds,
+            native_dependencies,
         )
-        
-        # 无论是否有活跃agent，都记录round开始
-        if action_logger:
-            action_logger.log_round_start(round_num + 1, simulated_hour)
+        if paired_rounds is not None:
+            await paired_rounds.after_round("twitter", round_num + 1, last_rowid, total_actions)
 
-        if native_dependencies is not None and hasattr(native_dependencies, "begin_capture_round"):
-            native_dependencies.begin_capture_round(
-                result, round_num + 1, active_agents, last_rowid)
-        
-        if not active_agents:
-            # 没有活跃agent时也记录round结束（actions_count=0）
-            if action_logger:
-                action_logger.log_round_end(round_num + 1, 0)
-            continue
-        
-        actions = {agent: LLMAction() for _, agent in active_agents}
-        await result.env.step(actions)
-
-        capture_deadline = None
-        if native_dependencies is not None and hasattr(native_dependencies, "check_capture_projection"):
-            capture_deadline = native_dependencies.check_capture_projection(result, round_num + 1)
-        
-        # 从数据库获取实际执行的动作并记录
-        actual_actions, last_rowid = fetch_new_actions_from_db(
-            db_path, last_rowid, agent_names, capture_deadline=capture_deadline
-        )
-        
-        round_action_count = 0
-        for action_data in actual_actions:
-            if action_logger:
-                action_logger.log_action(
-                    round_num=round_num + 1,
-                    agent_id=action_data['agent_id'],
-                    agent_name=action_data['agent_name'],
-                    action_type=action_data['action_type'],
-                    action_args=action_data['action_args']
-                )
-                total_actions += 1
-                round_action_count += 1
-        
-        if action_logger:
-            action_logger.log_round_end(round_num + 1, round_action_count)
-
-        if native_dependencies is not None and hasattr(native_dependencies, "capture_completed_round"):
-            capture_options = {}
-            if getattr(native_dependencies, "runner_state_enabled", False) is True:
-                capture_options["runner_position"] = (
-                    round_num + 1, logical_rounds, minutes_per_round,
-                    simulated_minutes, total_actions,
-                )
-            await native_dependencies.capture_completed_round(
-                result, round_num + 1, last_rowid,
-                getattr(action_logger, "log_path", None), agent_names, **capture_options)
-        
-        if (round_num + 1) % 20 == 0:
+        if active and (round_num + 1) % 20 == 0:
+            simulated_minutes = round_num * minutes_per_round
+            simulated_hour = (simulated_minutes // 60) % 24
+            simulated_day = simulated_minutes // (60 * 24) + 1
             progress = (round_num + 1) / total_rounds * 100
             log_info(f"Day {simulated_day}, {simulated_hour:02d}:00 - Round {round_num + 1}/{total_rounds} ({progress:.1f}%)")
     
@@ -985,7 +1009,8 @@ async def run_reddit_simulation(
     time_config = config.get("time_config", {})
     total_hours = time_config.get("total_simulation_hours", 72)
     minutes_per_round = time_config.get("minutes_per_round", 30)
-    total_rounds = (total_hours * 60) // minutes_per_round
+    logical_rounds = (total_hours * 60) // minutes_per_round
+    total_rounds = logical_rounds
     
     # 如果指定了最大轮数，则截断
     if max_rounds is not None and max_rounds > 0:
@@ -995,58 +1020,32 @@ async def run_reddit_simulation(
             log_info(f"轮数已截断: {original_rounds} -> {total_rounds} (max_rounds={max_rounds})")
     
     start_time = datetime.now()
-    
+    paired_rounds = getattr(native_dependencies, "paired_rounds", None)
+    if paired_rounds is not None:
+        await paired_rounds.ready(
+            "reddit", result, agent_names, db_path, action_logger, last_rowid,
+            total_actions, logical_rounds, minutes_per_round, total_rounds,
+        )
+
     for round_num in range(total_rounds):
         # 检查是否收到退出信号
         if _shutdown_event and _shutdown_event.is_set():
             if main_logger:
                 main_logger.info(f"收到退出信号，在第 {round_num + 1} 轮停止模拟")
             break
-        
-        simulated_minutes = round_num * minutes_per_round
-        simulated_hour = (simulated_minutes // 60) % 24
-        simulated_day = simulated_minutes // (60 * 24) + 1
-        
-        active_agents = get_active_agents_for_round(
-            result.env, config, simulated_hour, round_num,
-            simulated_minutes=simulated_minutes, native_dependencies=native_dependencies
+
+        last_rowid, total_actions, active = await step_native_round(
+            "reddit", result, config, db_path, action_logger, agent_names,
+            round_num, minutes_per_round, last_rowid, total_actions, logical_rounds,
+            native_dependencies,
         )
-        
-        # 无论是否有活跃agent，都记录round开始
-        if action_logger:
-            action_logger.log_round_start(round_num + 1, simulated_hour)
-        
-        if not active_agents:
-            # 没有活跃agent时也记录round结束（actions_count=0）
-            if action_logger:
-                action_logger.log_round_end(round_num + 1, 0)
-            continue
-        
-        actions = {agent: LLMAction() for _, agent in active_agents}
-        await result.env.step(actions)
-        
-        # 从数据库获取实际执行的动作并记录
-        actual_actions, last_rowid = fetch_new_actions_from_db(
-            db_path, last_rowid, agent_names
-        )
-        
-        round_action_count = 0
-        for action_data in actual_actions:
-            if action_logger:
-                action_logger.log_action(
-                    round_num=round_num + 1,
-                    agent_id=action_data['agent_id'],
-                    agent_name=action_data['agent_name'],
-                    action_type=action_data['action_type'],
-                    action_args=action_data['action_args']
-                )
-                total_actions += 1
-                round_action_count += 1
-        
-        if action_logger:
-            action_logger.log_round_end(round_num + 1, round_action_count)
-        
-        if (round_num + 1) % 20 == 0:
+        if paired_rounds is not None:
+            await paired_rounds.after_round("reddit", round_num + 1, last_rowid, total_actions)
+
+        if active and (round_num + 1) % 20 == 0:
+            simulated_minutes = round_num * minutes_per_round
+            simulated_hour = (simulated_minutes // 60) % 24
+            simulated_day = simulated_minutes // (60 * 24) + 1
             progress = (round_num + 1) / total_rounds * 100
             log_info(f"Day {simulated_day}, {simulated_hour:02d}:00 - Round {round_num + 1}/{total_rounds} ({progress:.1f}%)")
     

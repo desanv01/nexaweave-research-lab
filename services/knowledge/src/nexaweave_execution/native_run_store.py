@@ -42,6 +42,11 @@ class RedditCheckpointMode(Enum):
     CONTINUE = "continue"
 
 
+class PairedCheckpointMode(Enum):
+    CAPTURE = "capture"
+    CONTINUE = "continue"
+
+
 @dataclass(frozen=True)
 class NativeRunRecord:
     request: NativeRunRequest
@@ -178,7 +183,8 @@ def _row(value: tuple) -> NativeRunRecord:
             "artifact_sha256": artifact.strip(), "runtime_sha256": runtime.strip(),
             "platforms": tuple(platforms), "seed": seed, "max_rounds": rounds}
         if source_run_id is not None or checkpoint is not None:
-            wire.update(schema_version=4 if tuple(platforms) == ("reddit",) else 2, source_run_id=source_run_id,
+            checkpoint_version = {("twitter",): 2, ("reddit",): 4, ("twitter", "reddit"): 5}[tuple(platforms)]
+            wire.update(schema_version=checkpoint_version, source_run_id=source_run_id,
                         checkpoint_sha256=None if checkpoint is None else checkpoint.strip())
         if intervention is not None:
             wire.update(schema_version=3, intervention=intervention)
@@ -194,7 +200,7 @@ def _row(value: tuple) -> NativeRunRecord:
             raise InvalidNativeRun()
         return NativeRunRecord(request, fingerprint.strip(), RunState(state), cancel,
                                attempt, owner, lease, child, saved, created, updated)
-    except (TypeError, ValueError, AttributeError, InvalidNativeRun):
+    except (TypeError, ValueError, KeyError, AttributeError, InvalidNativeRun):
         raise NativeRunUncertain() from None
 
 
@@ -220,23 +226,28 @@ def _lock_checkpoint_run_id(conn, run_id):
     conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 72196248041506))", (str(run_id),))
 
 
-def _verify_reddit_mode(conn, request, expected):
+def _verify_typed_checkpoint_mode(conn, request, expected):
     """Keep ordinary V1 runs and typed checkpoint owners disjoint."""
     if expected is None:
-        if request.schema_version == 4:
+        if request.schema_version in (4, 5):
             raise NativeRunDenied()
-        if (request.schema_version == 1 and request.platforms == ("reddit",)
+        if (request.schema_version == 1 and request.platforms in (("reddit",), ("twitter", "reddit"))
                 and conn.execute("SELECT to_regclass('mf_native_launch.plans') IS NOT NULL").fetchone()[0]
                 and conn.execute(
                     "SELECT 1 FROM mf_native_launch.plans WHERE run_id=%s "
-                    "AND frozen #> '{identity,schema_version}'='4'::jsonb", (request.run_id,),
+                    "AND frozen #> '{identity,schema_version}' IN ('4'::jsonb,'5'::jsonb)", (request.run_id,),
                 ).fetchone() is not None):
             raise NativeRunDenied()
         return
-    if type(expected) is not RedditCheckpointMode:
+    if type(expected) is RedditCheckpointMode:
+        launch_version, valid_profile = 4, request.platforms == ("reddit",) and request.max_rounds == 1
+    elif type(expected) is PairedCheckpointMode:
+        launch_version = 5
+        valid_profile = request.platforms == ("twitter", "reddit") and request.max_rounds >= 2
+    else:
         raise InvalidNativeRun()
-    version = 1 if expected is RedditCheckpointMode.CAPTURE else 4
-    if (request.schema_version != version or request.platforms != ("reddit",) or request.max_rounds != 1
+    version = 1 if expected.value == "capture" else launch_version
+    if (request.schema_version != version or not valid_profile
             or not conn.execute("SELECT to_regclass('mf_native_launch.plans') IS NOT NULL").fetchone()[0]):
         raise NativeRunDenied()
 
@@ -249,7 +260,7 @@ def _verify_reddit_mode(conn, request, expected):
             raise NativeRunDenied() from None
         raise NativeRunUnavailable() from None
     identity = launch.frozen['identity']
-    if (identity['schema_version'] != 4 or identity['checkpoint']['mode'] != expected.value
+    if (identity['schema_version'] != launch_version or identity['checkpoint']['mode'] != expected.value
             or launch.request != request or not launch.dispatch_claimed or launch.budget_attempt_id is None):
         raise NativeRunDenied()
 
@@ -262,8 +273,8 @@ def _reject_protected_launch_id(conn, request):
     if not has_fork_column:
         return
     protected = conn.execute(
-        "SELECT frozen #> '{identity,schema_version}'='4'::jsonb FROM mf_native_launch.plans WHERE run_id=%s AND "
-        "(intervention IS NOT NULL OR frozen #> '{identity,schema_version}'='4'::jsonb)", (request.run_id,),
+        "SELECT frozen #> '{identity,schema_version}' IN ('4'::jsonb,'5'::jsonb) FROM mf_native_launch.plans WHERE run_id=%s AND "
+        "(intervention IS NOT NULL OR frozen #> '{identity,schema_version}' IN ('4'::jsonb,'5'::jsonb))", (request.run_id,),
     ).fetchone()
     if protected is not None:
         if protected[0]:
@@ -275,6 +286,14 @@ def _reject_protected_launch_id(conn, request):
         ).fetchone()
         if existing is None or _row(existing).request != request:
             raise NativeRunConflict()
+
+
+def _typed_mode(reddit, paired):
+    if (reddit is not None and type(reddit) is not RedditCheckpointMode
+            or paired is not None and type(paired) is not PairedCheckpointMode
+            or reddit is not None and paired is not None):
+        raise InvalidNativeRun()
+    return reddit if reddit is not None else paired
 
 
 class NativeRunStore:
@@ -306,8 +325,10 @@ class NativeRunStore:
             raise NativeRunDenied()
 
     def register(self, request: NativeRunRequest, *,
-                 reddit_mode: RedditCheckpointMode | None = None) -> NativeRunRecord:
+                 reddit_mode: RedditCheckpointMode | None = None,
+                 paired_mode: PairedCheckpointMode | None = None) -> NativeRunRecord:
         request = NativeRunRequest.from_wire(request)
+        mode = _typed_mode(reddit_mode, paired_mode)
         try:
             project = self._projects.get(request.principal, request.project_id,
                                          request.project_revision)
@@ -319,9 +340,9 @@ class NativeRunStore:
                 or project.revision != request.project_revision):
             raise NativeRunDenied()
         with _transaction(self._connect) as conn:
-            _verify_reddit_mode(conn, request, reddit_mode)
+            _verify_typed_checkpoint_mode(conn, request, mode)
             intervention = request.intervention
-            if intervention is not None or reddit_mode is not None:
+            if intervention is not None or mode is not None:
                 row = conn.execute(f"SELECT {_SELECT} FROM mf_native_execution.runs WHERE run_id=%s AND principal=%s",
                                    (request.run_id, request.principal)).fetchone()
                 if row is not None:
@@ -376,13 +397,15 @@ class NativeRunStore:
             return self._owned(principal, run_id, conn=conn)
 
     def claim_start(self, principal: str, run_id: UUID, owner_id: UUID,
-                    lease_seconds: int = 30, *, reddit_mode: RedditCheckpointMode | None = None) -> NativeRunRecord:
+                    lease_seconds: int = 30, *, reddit_mode: RedditCheckpointMode | None = None,
+                 paired_mode: PairedCheckpointMode | None = None) -> NativeRunRecord:
         principal, run_id, owner_id = principal_id(principal), canonical_uuid(run_id), canonical_uuid(owner_id)
         lease_seconds = _lease(lease_seconds)
+        mode = _typed_mode(reddit_mode, paired_mode)
         with _transaction(self._connect) as conn:
             current = self._owned(principal, run_id, conn=conn)
-            _verify_reddit_mode(conn, current.request, reddit_mode)
-            if current.request.intervention is not None or reddit_mode is not None:
+            _verify_typed_checkpoint_mode(conn, current.request, mode)
+            if current.request.intervention is not None or mode is not None:
                 if current.state != RunState.declared or current.cancel_requested:
                     raise NativeRunBusy()
                 _verify_checkpoint_dispatch(conn, current.request)

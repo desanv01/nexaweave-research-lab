@@ -10,6 +10,7 @@ REQUEST_BYTES, RESULT_BYTES, ENVELOPE_OVERHEAD = 4096, 262144, 128
 LOG_BYTES, LINE_BYTES, RECORDS, DEPTH = 8388608, 8192, 10000, 8
 OUTPUT_BYTES, AGGREGATE_BYTES = 67108864, 268435456
 REDDIT_OBSERVATION_VERSION = 4
+PAIRED_OBSERVATION_VERSION = 5
 REDDIT_TRACE_FILE = 'native.sqlite3'
 REDDIT_TRACE_BYTES, REDDIT_TRACE_RECORDS = 4 * 1024 * 1024, 10
 CODES = frozenset(('invalid_request not_found unauthorized origin_denied conflict tombstoned busy '
@@ -28,10 +29,10 @@ def validate_payload(value):
     try:
         if type(value) is not dict or set(value) != {'schema_version', 'launch_id', 'launch_sha256', 'platform', 'offset', 'limit'}:
             raise ValueError
-        version = integer(value['schema_version'], 1, REDDIT_OBSERVATION_VERSION)
+        version = integer(value['schema_version'], 1, PAIRED_OBSERVATION_VERSION)
         uuid_string(value['launch_id']); sha(value['launch_sha256'])
         reddit = version == REDDIT_OBSERVATION_VERSION
-        if (version not in (1, 2, REDDIT_OBSERVATION_VERSION)
+        if (version not in (1, 2, REDDIT_OBSERVATION_VERSION, PAIRED_OBSERVATION_VERSION)
                 or type(value['platform']) is not str or value['platform'] not in {'twitter', 'reddit'}
                 or (version == 2 and value['platform'] != 'twitter') or (reddit and value['platform'] != 'reddit')):
             raise ValueError
@@ -255,8 +256,9 @@ def validate_result(value, graph_id, scope, payload, principal):
             raise ValueError
         if len(encoded(value)) > RESULT_BYTES:
             raise NativeObservationsError('result_too_large')
-        version = integer(value['schema_version'], 1, 2)
-        if version != integer(payload['schema_version'], 1, 2):
+        version = integer(value['schema_version'], 1, PAIRED_OBSERVATION_VERSION)
+        if (version not in (1, 2, PAIRED_OBSERVATION_VERSION)
+                or version != integer(payload['schema_version'], 1, PAIRED_OBSERVATION_VERSION)):
             raise ValueError
         launch = validate_launch(value['launch'], graph_id, scope, launch_reference(payload), 'status')
         if launch['state'] != 'completed' or launch['receipt'] is None or launch['request']['principal'] != principal:
@@ -264,7 +266,8 @@ def validate_result(value, graph_id, scope, payload, principal):
         platforms = launch['request']['platforms']
         restored = version == 2
         if (payload['platform'] not in platforms
-                or (restored and (launch['checkpoint']['mode'] != 'continue' or launch['cancel_requested']))):
+                or (version in (2, PAIRED_OBSERVATION_VERSION)
+                    and (launch['checkpoint']['mode'] != 'continue' or launch['cancel_requested']))):
             raise ValueError
         manifest = value['manifest']
         if type(manifest) is not dict or set(manifest) != {'schema_version', 'files'}:
