@@ -105,6 +105,78 @@ def _safe(path, directory=False):
     return details
 
 
+def _open_owned_file(stack, path, before, *, nonblocking):
+    flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_BINARY', 0)
+    if nonblocking:
+        flags |= getattr(os, 'O_NONBLOCK', 0)
+    descriptor = os.open(path, flags)
+    stack.callback(os.close, descriptor)
+    current = os.fstat(descriptor)
+    path_identity, descriptor_identity = _identity(before), _identity(current)
+    # Windows lstat/fstat timestamps can differ for an unchanged file.
+    # Bind shared identity across APIs and compare timestamps within each API.
+    if (not stat.S_ISREG(current.st_mode) or current.st_nlink != 1
+            or descriptor_identity[:3] != path_identity[:3]):
+        raise NativeObservationsError('evidence_invalid')
+    return descriptor, path_identity, descriptor_identity
+
+
+def _verify_opened_files(opened, ancestors):
+    for path, descriptor, path_identity, descriptor_identity in opened:
+        if (_identity(_safe(path)) != path_identity or _identity(os.fstat(descriptor)) != descriptor_identity):
+            raise NativeObservationsError('evidence_invalid')
+    for path, identity in ancestors.items():
+        # Unrelated siblings may change directory metadata during a read.
+        if _identity(_safe(path, True))[:2] != identity[:2]:
+            raise NativeObservationsError('evidence_invalid')
+
+
+@contextmanager
+def read_owned_blob(root, name, size_limit, evidence_sha256):
+    """Pin one fixed owned output, retaining the descriptor through the caller's checks."""
+    try:
+        root = Path(root)
+        if (not root.is_absolute() or root.resolve(strict=True) != root
+                or name in {'.', '..'} or Path(name).name != name):
+            raise NativeObservationsError('evidence_invalid')
+        ancestors = {path: _identity(_safe(path, True)) for path in (root, *root.parents)}
+        path = root / name
+
+        def exact_directory():
+            with os.scandir(root) as entries:
+                first = next(entries, None)
+                if first is None or first.name != name or next(entries, None) is not None:
+                    raise NativeObservationsError('evidence_invalid')
+
+        exact_directory()
+        before = _safe(path)
+        if before.st_size > size_limit:
+            raise NativeObservationsError('result_too_large')
+        if before.st_size < 1:
+            raise NativeObservationsError('evidence_invalid')
+        with ExitStack() as stack:
+            descriptor, path_identity, descriptor_identity = _open_owned_file(stack, path, before, nonblocking=True)
+            remaining = descriptor_identity[2]
+            chunks = []
+            while remaining:
+                chunk = os.read(descriptor, min(remaining, 65536))
+                if not chunk:
+                    raise NativeObservationsError('evidence_invalid')
+                remaining -= len(chunk)
+                chunks.append(chunk)
+            data = b''.join(chunks)
+            if (os.read(descriptor, 1) or _identity(os.fstat(descriptor)) != descriptor_identity
+                    or hashlib.sha256(data).hexdigest() != evidence_sha256):
+                raise NativeObservationsError('evidence_invalid')
+            yield data
+            _verify_opened_files([(path, descriptor, path_identity, descriptor_identity)], ancestors)
+            exact_directory()
+    except NativeObservationsError:
+        raise
+    except (OSError, ValueError, TypeError, UnicodeError, RecursionError):
+        raise NativeObservationsError('evidence_invalid') from None
+
+
 class NativeObservationReader:
     @contextmanager
     def page(self, root, platforms, platform, offset, limit, evidence_sha256, *, restored=False):
@@ -154,21 +226,12 @@ class NativeObservationReader:
                     total_size += before.st_size
                     if total_size > AGGREGATE_BYTES:
                         raise NativeObservationsError('result_too_large')
-                    flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_BINARY', 0)
-                    if restored:
-                        flags |= getattr(os, 'O_NONBLOCK', 0)
-                    descriptor = os.open(path, flags)
-                    stack.callback(os.close, descriptor)
-                    current = os.fstat(descriptor)
-                    path_identity, descriptor_identity = _identity(before), _identity(current)
-                    # Windows lstat/fstat timestamps can differ for an unchanged file.
-                    # Cross-API binding uses common device/inode/size/link identity;
-                    # timestamp stability remains exact within each API separately.
-                    if (not stat.S_ISREG(current.st_mode) or current.st_nlink != 1
-                            or descriptor_identity[:3] != path_identity[:3]):
-                        raise NativeObservationsError('evidence_invalid')
+                    descriptor, path_identity, descriptor_identity = _open_owned_file(
+                        stack, path, before, nonblocking=restored,
+                    )
+                    size = descriptor_identity[2]
                     opened.append((path, descriptor, path_identity, descriptor_identity))
-                    hasher, chunks, remaining = hashlib.sha256(), [], current.st_size
+                    hasher, chunks, remaining = hashlib.sha256(), [], size
                     while remaining:
                         chunk = os.read(descriptor, min(remaining, 65536))
                         if not chunk:
@@ -178,7 +241,7 @@ class NativeObservationReader:
                             chunks.append(chunk)
                     if os.read(descriptor, 1) or _identity(os.fstat(descriptor)) != descriptor_identity:
                         raise NativeObservationsError('evidence_invalid')
-                    files.append({'name': name, 'sha256': hasher.hexdigest(), 'size': current.st_size})
+                    files.append({'name': name, 'sha256': hasher.hexdigest(), 'size': size})
                     if log_platform is not None:
                         logs[log_platform] = b''.join(chunks)
                 manifest = {'schema_version': 1, 'files': files}
@@ -208,16 +271,7 @@ class NativeObservationReader:
                 else:
                     result = dict(pages[platform], manifest=manifest, platform=platform, offset=offset, limit=limit)
                 yield result
-                for path, descriptor, path_identity, descriptor_identity in opened:
-                    if (_identity(_safe(path)) != path_identity
-                            or _identity(os.fstat(descriptor)) != descriptor_identity):
-                        raise NativeObservationsError('evidence_invalid')
-                for path, identity in ancestors.items():
-                    # Directory size/mtime can change for unrelated siblings; identity and reparse protection
-                    # suffice for directory binding. File timestamps above must remain exact.
-                    now = _identity(_safe(path, True))
-                    if now[:2] != identity[:2]:
-                        raise NativeObservationsError('evidence_invalid')
+                _verify_opened_files(opened, ancestors)
         except NativeObservationsError:
             raise
         except (OSError, ValueError, TypeError, UnicodeError, RecursionError):
