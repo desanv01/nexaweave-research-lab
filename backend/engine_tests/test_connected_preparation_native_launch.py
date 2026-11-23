@@ -305,6 +305,7 @@ async def test_generated_twitter_checkpoint_and_continuation_through_protected_h
     from nexaweave_storage.store import ProjectStore
     from test_durable_native_launch import LIMITS
     from test_native_round_capture import _artifact, _native_rows, _read_bounded
+    from native_twitter_fork_witness import assert_fresh_child_identity, qualify_fork
 
     monkeypatch.chdir(tmp_path)
     migrate_all(factory)
@@ -476,7 +477,7 @@ async def test_generated_twitter_checkpoint_and_continuation_through_protected_h
         assert active.state == RunState.running and active.request == row.request
         assert active.attempt_id is not None and active.child is not None and active.receipt is None
         assert not active.cancel_requested
-        assert active.child.process_id not in {os.getpid(), producer.child.process_id}
+        assert_fresh_child_identity(active.child, producer.child)
         assert token == f'{active.child.process_id}\n'.encode('ascii')
 
         cancelled = await asyncio.wait_for(post('cancel', ref), remaining(10))
@@ -595,7 +596,7 @@ async def test_generated_twitter_checkpoint_and_continuation_through_protected_h
                 restored, continuation, restore_budget = await launch(continue_dto)
             assert type(continuation) is NativeRestoredTwitterFactory
             assert restored.request.source_run_id == producer.request.run_id
-            assert restored.child.process_id not in {os.getpid(), producer_pid}
+            assert_fresh_child_identity(restored.child, producer.child)
             assert restore_budget.attempt_id != capture_budget.attempt_id
             assert continuation.expected_producer_pid == producer_pid
             assert continuation.expected_lineage_sha256 == evidence
@@ -766,7 +767,6 @@ async def test_generated_twitter_checkpoint_and_continuation_through_protected_h
             assert _read_bounded(child_log, _LOG_LIMIT) == child_raw_log
             assert reader_roots == [child_dir, child_dir]
 
-            from native_twitter_fork_witness import qualify_fork
             fork_id = await qualify_fork(
                 post, launch, remaining, host, planned, capture, producer, continuation, restored, dispatched,
             )

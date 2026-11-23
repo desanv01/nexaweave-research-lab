@@ -23,6 +23,15 @@ from nexaweave_execution.native_twitter_checkpoint_binding import NativeRestored
 from nexaweave_execution.native_owned_binding import _manifest
 
 
+def assert_fresh_child_identity(child, *prior_children):
+    """Require a real, non-parent PID and an instance unseen among prior children."""
+    assert type(child.process_id) is int and child.process_id > 0
+    assert child.process_id != os.getpid()
+    assert type(child.instance_id) is UUID
+    # An exited Windows child's PID may be reused; its authenticated instance may not.
+    assert child.instance_id not in {prior.instance_id for prior in prior_children}
+
+
 async def qualify_fork(post, launch, remaining, host, planned, capture, producer, continuation, normal, dispatched):
     """Prove read-only preview, rejected tamper and one real owned fork."""
     checkpoint = Path(capture.checkpoint_dir)
@@ -133,7 +142,7 @@ async def qualify_fork(post, launch, remaining, host, planned, capture, producer
     fork, restoration, reservation = await launch(dto)
     assert type(restoration) is NativeRestoredTwitterFactory
     assert fork.request == planned_row.request and fork.request.source_run_id == producer.request.run_id
-    assert fork.child.process_id not in {os.getpid(), producer.child.process_id, normal.child.process_id}
+    assert_fresh_child_identity(fork.child, producer.child, normal.child)
     assert fork.receipt.attempt_id == fork.attempt_id and fork.receipt.instance_id == fork.child.instance_id
     assert fork.receipt.request_fingerprint == fork.request.fingerprint
     assert reservation.state == ReservationState.settled and reservation.attempt_id != fork.attempt_id
